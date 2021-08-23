@@ -1,0 +1,63 @@
+#!/bin/sh
+#
+# backup.influxdb - Backup InfluxDB
+#
+# (c) 2017 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+    echo "$0 not called from within backup script"
+    exit
+fi
+
+if [ -r /etc/default/backup ]; then
+	. /etc/default/backup
+fi
+
+: ${daily_backup_influxdb_enable="NO"}
+: ${daily_backup_influxdb_compress="YES"}
+: ${daily_backup_influxdb_backup_dir="/var/backups/influxdb"}
+: ${daily_backup_influxdb_keep_days="-14days"}
+
+influx="/usr/bin/influx"
+influxd="/usr/bin/influxd"
+find="/usr/bin/find"
+find_cleanup_options="-type f -not -newermt ${daily_backup_influxdb_keep_days} -delete"
+tar="/bin/tar"
+tar_options="cf"
+xz="/usr/bin/xz"
+xz_options=""
+
+today=`date +%Y%m%d`
+
+rc=0
+case "${daily_backup_influxdb_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup InfluxDB"
+
+		backup_dir="${daily_backup_influxdb_backup_dir}/${today}"
+
+		mkdir ${backup_dir}
+		${influxd} backup ${backup_dir}
+		for db in `${influx} -execute "SHOW DATABASES" -username ${daily_backup_influxdb_username} -password ${daily_backup_influxdb_password}`; do
+			if [ ${databases} ] ; then
+				${influxd} backup -database ${db} ${backup_dir}/${db}
+			fi
+			if [ ${db} = "----" ]; then
+				databases=true
+			fi
+		done
+
+		( cd ${daily_backup_influxdb_backup_dir};
+			${tar} ${tar_options} "${today}.tar" ${today};
+			${xz} ${xz_options} "${today}.tar";
+			rm -rf ${today}
+		)
+		${find} ${daily_backup_influxdb_backup_dir} ${find_cleanup_options}
+		;;
+esac
+
+exit "${rc}"
+

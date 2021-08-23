@@ -1,0 +1,55 @@
+#!/bin/bash
+#
+# gitbackup - Backup git repsoritories using clone
+#
+# (c) 2011-2017 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+	echo "$0 not called from within backup script"
+	exit
+fi
+
+if [ -r /etc/default/backup ]; then
+	. /etc/default/backup
+fi
+
+: ${daily_backup_git_enable="NO"}
+: ${daily_backup_git_compress="YES"}
+: ${daily_backup_git_repository_dir="/var/git"}
+: ${daily_backup_git_backup_dir="/var/backups/git"}
+: ${daily_backup_git_keep_days="-14days"}
+
+git="/usr/bin/git"
+rm_rf="/bin/rm -rf"
+tar="/bin/tar"
+find="/usr/bin/find"
+find_cleanup_options="-type f -not -newermt ${daily_backup_git_keep_days} -delete"
+
+today=`date +%Y%m%d`
+
+rc=0
+case "${daily_backup_git_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup Git repositories"
+		for repos in `find ${daily_backup_git_repository_dir} -type d -name "*.git"`; do
+			[ ! -d "${repos}/refs" ] && continue
+			repo=${repos##${daily_backup_git_repository_dir}/}
+			repo=${repo//\//__}
+			echo $repos $repo
+			${git} clone --bare ${repos} ${daily_backup_git_backup_dir}/${repo}
+			case "${daily_backup_git_compress}" in
+				[Yy][Ee][Ss])
+					( cd ${daily_backup_git_backup_dir} && ${tar} -J -cf ${repo}-${today}.tar.xz ${repo} )
+					${rm_rf} ${daily_backup_git_backup_dir}/${repo}
+					;;
+			esac
+		done
+		${find} ${daily_backup_git_backup_dir} ${find_cleanup_options}
+		;;
+esac
+
+exit "${rc}"
+
