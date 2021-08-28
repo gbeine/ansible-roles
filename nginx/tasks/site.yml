@@ -1,0 +1,54 @@
+---
+# tasks file for roles/nginx
+
+- name: "Has certificate for site {{ site.name }} been aquired?"
+  ansible.builtin.stat:
+    path: "{{ pki__acme_renewal_dir }}/{{ site.name }}.conf"
+  register: acme_realm_stat_result
+  when: nginx__acme_enable
+  tags:
+  - pki
+  - acme
+  - nginx
+
+- name: "Aquire ACME certificate for site {{ site.name }}"
+  ansible.builtin.command:
+    cmd: "certbot certonly {{ pki__acme_global_options }} --nginx --cert-name {{ site.name }} -d {{ site.server_name | join(' -d ') }} --rsa-key-size {{ site.key_size | default(2048) }}"
+  environment: "{{ pki__acme_environment }}"
+  when: nginx__acme_enable and not acme_realm_stat_result.stat.exists
+  tags:
+  - pki
+  - acme
+  - nginx
+
+- name: "Generate configuration file for site {{ site.name }}"
+  ansible.builtin.template:
+    src: etc/nginx/sites-available/site.conf.j2
+    dest: "{{ nginx__sites_available_path }}/{{ site.name }}.conf"
+    owner: root
+    group: root
+    mode: 0644
+  tags:
+  - nginx
+  - configuration
+
+- name: "Ensure root exists for site {{ site.name }}"
+  ansible.builtin.file:
+    dest: "{{ nginx__www_path }}/{{ site.name }}/public"
+    state: directory
+    owner: "{{ nginx__user }}"
+    group: "{{ nginx__group }}"
+    mode: "{{ nginx__site_mode }}"
+  tags:
+  - nginx
+  - configuration
+
+- name: "Enable site  {{ site.name }}"
+  ansible.builtin.file:
+    src: "{{ nginx__sites_available_path }}/{{ site.name }}.conf"
+    dest: "{{ nginx__sites_enabled_path }}/{{ site.name }}.conf"
+    state: link
+  when: site.enabled and not ansible_check_mode
+  tags:
+  - nginx
+  - configuration

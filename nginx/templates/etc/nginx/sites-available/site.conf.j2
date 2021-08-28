@@ -1,0 +1,66 @@
+###
+### {{ ansible_managed }}
+###
+
+server {
+{% for listen in site.listen %}
+        listen {{ listen }};
+{% endfor %}
+
+        server_name
+{{ site.server_name | join('\n') | indent(10, true) }};
+
+{% if site.force_ssl and site.listen_ssl | length > 0 %}
+        location / {
+                return 301 https://$host$request_uri;
+        }
+{% else %}
+        root {{ site.root }};
+
+        index {{ site.index | join(' ') }};
+
+        location / {
+                # First attempt to serve request as file, then
+                # as directory, then fall back to displaying a 404.
+                try_files $uri $uri/ =404;
+        }
+{% endif %}
+
+        access_log {{ nginx__log_path }}/{{ site.name }}_access.log;
+        error_log {{ nginx__log_path }}/{{ site.name }}_error.log;
+}
+
+{% if site.listen_ssl | length > 0 %}
+server {
+        include {{ nginx__snippets_path }}/ssl.conf;
+
+{%   for listen in site.listen_ssl %}
+        listen {{ listen }};
+{%   endfor %}
+
+        server_name
+{{ site.server_name | join('\n') | indent(10, true) }};
+
+        root {{ nginx__www_path }}/{{ site.name }}/public;
+
+        index {{ site.index | default(nginx__index_default) | join(' ') }};
+
+        location / {
+                # First attempt to serve request as file, then
+                # as directory, then fall back to displaying a 404.
+                try_files $uri $uri/ =404;
+        }
+
+{%   if nginx__acme_enable %}
+        ssl_certificate /etc/letsencrypt/live/{{ site.name }}/fullchain.pem; # managed by Certbot
+        ssl_certificate_key /etc/letsencrypt/live/{{ site.name }}/privkey.pem; # managed by Certbot
+        ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+{%   else %}
+        ssl_certificate {{ pki__realms_dir }}/{{ site.name }}/public/{{ site.name }}.fullchain.crt;
+        ssl_certificate_key {{ pki__realms_dir }}/{{ site.name }}/private/{{ site.name }}.key;
+{%   endif %}
+
+        access_log {{ nginx__log_path }}/{{ site.name }}_access.log;
+        error_log {{ nginx__log_path }}/{{ site.name }}_error.log;
+}
+{% endif %}
