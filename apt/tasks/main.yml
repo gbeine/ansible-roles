@@ -1,155 +1,75 @@
 ---
 # tasks file for roles/apt
 
-- name: Ensure required packages are present
-  ansible.builtin.apt:
-    name: "{{ item }}"
-    state: present
-  with_items: "{{ apt__packages }}"
-  tags:
-  - apt
-  - packages
+- name: Bootstrap apt setup
+  block:
 
-- name: Remove default sources.list
-  ansible.builtin.file:
-    dest: /etc/apt/sources.list
-    state: absent
-  tags:
-  - apt
-  - bootstrap
-  - configuration
+  - name: 'Update APT cache'
+    ansible.builtin.apt:
+      update_cache: 'yes'
+    tags:
+    - apt
 
-- name: Remove optional apt sources
-  ansible.builtin.file:
-    path: "/etc/apt/sources.list.d/{{ item }}"
-    state: absent
-    owner: root
-    group: root
-    mode: 0644
-  with_items: "{{ apt__sources_lists_d_files_absent }}"
-  tags:
-  - apt
-  - bootstrap
-  - configuration
+  - name: Install required packages
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      state: present
+    with_items: "{{ apt__packages_combined }}"
+    tags:
+    - apt
+    - packages
 
-- name: Remove optional apt configuration
-  ansible.builtin.file:
-    path: "/etc/apt/apt.conf.d/{{ item }}"
-    state: absent
-    owner: root
-    group: root
-    mode: 0644
-  with_items: "{{ apt__apt_conf_d_files_absent }}"
-  tags:
-  - apt
-  - bootstrap
-  - configuration
+  - name: Remove obsolete configuration files
+    ansible.builtin.file:
+      dest: "{{ item }}"
+      state: absent
+    with_items: "{{ apt__files_absent }}"
+    tags:
+    - apt
+    - bootstrap
+    - configuration
 
-- name: Create APT configuration for languages
-  ansible.builtin.template:
-    src: etc/apt/apt.conf.d/50languages.j2
-    dest: /etc/apt/apt.conf.d/50languages
-    owner: root
-    group: root
-    mode: 0644
-  vars:
-    languages: "{{ apt__conf_languages }}"
-  tags:
-  - apt
-  - configuration
+- name: Configure apt setup
+  block:
 
-- name: Create APT configuration for recommends
-  ansible.builtin.template:
-    src: etc/apt/apt.conf.d/50recommends.j2
-    dest: /etc/apt/apt.conf.d/50recommends
-    owner: root
-    group: root
-    mode: 0644
-  vars:
-    install_recommends: "{{ apt__conf_install_recommends }}"
-  tags:
-  - apt
-  - configuration
+  - name: Create APT configuration files
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: root
+      group: root
+      mode: 0644
+    with_items:
+    - src: etc/apt/apt.conf.d/50languages.j2
+      dest: /etc/apt/apt.conf.d/50languages
+    - src: etc/apt/apt.conf.d/50recommends.j2
+      dest: /etc/apt/apt.conf.d/50recommends
+    - src: etc/apt/apt.conf.d/50suggests.j2
+      dest: /etc/apt/apt.conf.d/50suggests
+    - src: etc/apt/apt.conf.d/50periodic.j2
+      dest: /etc/apt/apt.conf.d/50periodic
+    - src: etc/apt/apt.conf.d/50unattended-upgrades.j2
+      dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    tags:
+    - apt
+    - configuration
 
-- name: Create APT configuration for suggests
-  ansible.builtin.template:
-    src: etc/apt/apt.conf.d/50suggests.j2
-    dest: /etc/apt/apt.conf.d/50suggests
-    owner: root
-    group: root
-    mode: 0644
-  vars:
-    install_suggests: "{{ apt__conf_install_suggests }}"
-  tags:
-  - apt
-  - configuration
+  - name: Create apt sources lists
+    ansible.builtin.template:
+      src: etc/apt/sources.list.d/source.list.j2
+      dest: "/etc/apt/sources.list.d/{{ item.name }}.list"
+      owner: root
+      group: root
+      mode: 0644
+    vars:
+      repos: "{{ item.repos }}"
+    with_items: "{{ apt__sources_combined }}"
+    tags:
+    - apt
+    - configuration
 
-- name: Create APT configuration for periodic tasks
-  ansible.builtin.template:
-    src: etc/apt/apt.conf.d/50periodic.j2
-    dest: /etc/apt/apt.conf.d/50periodic
-    owner: root
-    group: root
-    mode: 0644
-  vars:
-    periodic_enable: "{{ apt__conf_periodic_enable }}"
-    periodic_unattended_upgrade: "{{ apt__conf_periodic_unattended_upgrade }}"
-    periodic_update_package_lists: "{{ apt__conf_periodic_update_package_lists }}"
-    periodic_download_upgradeable_packages: "{{ apt__conf_periodic_download_upgradeable_packages }}"
-    periodic_autoclean_interval: "{{ apt__conf_periodic_autoclean_interval }}"
-    periodic_verbose: "{{ apt__conf_periodic_verbose }}"
-  tags:
-  - apt
-  - configuration
-
-- name: Create APT configuration for unattended upgrades
-  ansible.builtin.template:
-    src: etc/apt/apt.conf.d/50unattended-upgrades.j2
-    dest: /etc/apt/apt.conf.d/50unattended-upgrades
-    owner: root
-    group: root
-    mode: 0644
-  vars:
-    origin_pattern: "{{ apt__unattended_upgrades_origin_pattern_combined }}"
-    auto_fix_interrupted_dpkg: "{{ apt__unattended_upgrades_auto_fix_interrupted_dpkg }}"
-    ignore_apps_require_restart: "{{ apt__unattended_upgrades_ignore_apps_require_restart }}"
-    minimal_steps: "{{ apt__unattended_upgrades_minimal_steps }}"
-    install_on_shutdown: "{{ apt__unattended_upgrades_install_on_shutdown }}"
-    mail: "{{ apt__unattended_upgrades_mail }}"
-    mail_report: "{{ apt__unattended_upgrades_mail_report }}"
-    remove_unused_kernel_packages: "{{ apt__unattended_upgrades_remove_unused_kernel_packages }}"
-    remove_new_unused_dependencies: "{{ apt__unattended_upgrades_remove_new_unused_dependencies }}"
-    remove_unused_dependencies: "{{ apt__unattended_upgrades_remove_unused_dependencies }}"
-    automatic_reboot: "{{ apt__unattended_upgrades_automatic_reboot }}"
-    automatic_reboot_with_users: "{{ apt__unattended_upgrades_automatic_reboot_with_users }}"
-    syslog_enable: "{{ apt__unattended_upgrades_syslog_enable }}"
-    syslog_facility: "{{ apt__unattended_upgrades_syslog_facility }}"
-    only_on_ac_power: "{{ apt__unattended_upgrades_only_on_ac_power }}"
-    skip_updates_on_metered_connections: "{{ apt__unattended_upgrades_skip_updates_on_metered_connections }}"
-    verbose: "{{ apt__unattended_upgrades_verbose }}"
-    debug: "{{ apt__unattended_upgrades_debug }}"
-    allow_downgrade: "{{ apt__unattended_upgrades_allow_downgrade }}"
-    allow_apt_mark_fallback: "{{ apt__unattended_upgrades_allow_apt_mark_fallback }}"
-  tags:
-  - apt
-  - configuration
-
-- name: Create apt sources
-  ansible.builtin.template:
-    src: etc/apt/sources.list.d/source.list.j2
-    dest: "/etc/apt/sources.list.d/{{ item.name }}.list"
-    owner: root
-    group: root
-    mode: 0644
-  vars:
-    repos: "{{ item.repos }}"
-  with_items: "{{ apt__sources_combined }}"
-  tags:
-  - apt
-  - configuration
-
-- name: 'Update APT cache'
-  ansible.builtin.apt:
-    update_cache: 'yes'
-  tags:
-  - apt
+  - name: 'Update APT cache'
+    ansible.builtin.apt:
+      update_cache: 'yes'
+    tags:
+    - apt
