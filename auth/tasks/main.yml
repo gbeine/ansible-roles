@@ -1,13 +1,72 @@
 ---
 # tasks file for roles/auth
 
+
+- name: Install and configure nscd
+  when: auth__enable and auth__nscd_enable
+  block:
+
+  - name: Install nscd packages
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      state: present
+    with_items: "{{ auth__nscd_packages_combined }}"
+    tags:
+    - apt
+    - packages
+
+- name: Configure nsswitch
+  when: auth__enable and auth__nsswitch_enable
+  block:
+
+  - name: Configure nsswitch
+    ansible.builtin.template:
+      src: etc/nsswitch.conf.j2
+      dest: /etc/nsswitch.conf
+      owner: root
+      group: root
+      mode: 0644
+
+  - name: Restart systemd-logind to fix NSS lookups
+    service:
+      name: systemd-logind
+      state: restarted
+
+- name: Install and configure nslcd
+  when: auth__enable and auth__nslcd_enable
+  block:
+
+  - name: Install nslcd packages
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      state: present
+    with_items: "{{ auth__nslcd_packages_combined }}"
+    tags:
+    - apt
+    - packages
+
+  - name: Configure nslcd
+    ansible.builtin.template:
+      src: etc/nslcd.conf.j2
+      dest: /etc/nslcd.conf
+      owner: root
+      group: root
+      mode: 0640
+
+  - name: Restart nslcd to fix NSS lookups
+    service:
+      name: nslcd
+      state: restarted
+
 - name: Configure authorized_keys
-  ansible.posix.authorized_key:
-    user: "{{ item.0.name }}"
-    state: present
-    key: "{{ lookup('file', item.1) }}"
-  loop: "{{ auth__authorized_keys | subelements('keys', skip_missing=true) }}"
-  when: auth__authorized_keys_enable
-  tags:
-  - auth
-  - configuration
+  when: auth__enable and auth__authorized_keys_enable
+  block:
+  - name: Configure authorized_keys
+    ansible.posix.authorized_key:
+      user: "{{ item.0.name }}"
+      state: present
+      key: "{{ lookup('file', item.1) }}"
+    loop: "{{ auth__authorized_keys | subelements('keys', skip_missing=true) }}"
+    tags:
+    - auth
+    - configuration
