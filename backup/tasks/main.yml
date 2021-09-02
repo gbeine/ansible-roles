@@ -1,93 +1,187 @@
 ---
 # tasks file for roles/backup
 
-- include_tasks: nfs.yml
-  when: backup__nfs_client_enable
-  tags:
-  - backup
-  - nfs
-  - configuration
+- name: Install and configure backup
+  tags: [ 'backup' ]
+  when: backup__enable
+  block:
 
-- include_tasks: ssh.yml
-  when: backup__ssh_client_enable
-  tags:
-  - backup
-  - ssh
-  - configuration
+  - name: Create backup scripts directory
+    tags: [ 'bootstrap', 'scripts' ]
+    ansible.builtin.file:
+      dest: "{{ backup__dir }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0755
 
-- include_tasks: mysql.yml
-  when: backup__mysql_enable
-  tags:
-  - backup
-  - mysql
-  - configuration
+  - name: Copy backup scripts
+    tags: [ 'bootstrap', 'scripts' ]
+    ansible.builtin.copy:
+      src: "usr/local/lib/backup/{{ item }}"
+      dest: "{{ backup__dir }}/{{ item }}"
+      mode: 0755
+    with_items:
+    - 900.backup
+    - 910.backup.git
+    - 910.backup.grafana
+    - 910.backup.influxdb
+    - 910.backup.mysql
+    - 910.backup.postgresql
+    - 910.backup.tiddlywiki
+    - 950.backup.borgbackup
 
-- include_tasks: borg.yml
-  when: backup__borg_enable
-  tags:
-  - backup
-  - borg
-  - configuration
+  - name: Create symlink to main script
+    tags: [ 'bootstrap', 'scripts' ]
+    when: not ansible_check_mode
+    ansible.builtin.file:
+      src: "{{ backup__dir }}/900.backup"
+      dest: /etc/cron.daily/backup
+      state: link
 
-- name: Create backup scripts directory
-  ansible.builtin.file:
-    dest: /usr/local/lib/backup
-    state: directory
-    owner: root
-    group: root
-    mode: 0755
-  tags:
-  - backup
-  - bootstrap
-  - scripts
+  - name: Generate configuration file
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: etc/default/backup.j2
+      dest: /etc/default/backup
+      mode: 0640
 
-- name: Copy backup scripts
-  ansible.builtin.copy:
-    src: "usr/local/lib/backup/{{ item }}"
-    dest: "/usr/local/lib/backup/{{ item }}"
-    mode: 0755
-  with_items: "{{ backup__scripts }}"
-  tags:
-  - backup
-  - bootstrap
-  - scripts
+  - name: Create backup target directory
+    tags: [ 'bootstrap' ]
+    ansible.builtin.file:
+      dest: "{{ backup__target_directory }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0750
 
-- name: Create symlink to main script
-  ansible.builtin.file:
-    src: /usr/local/lib/backup/900.backup
-    dest: /etc/cron.daily/backup
-    state: link
-  when: not ansible_check_mode
-  tags:
-  - backup
-  - bootstrap
-  - scripts
+- name: Configure SSH client
+  tags: [ 'backup', 'ssh' ]
+  when: backup__enable and backup__ssh_client_enable
+  block:
 
-- name: Generate configuration file
-  ansible.builtin.template:
-    src: etc/default/backup.j2
-    dest: /etc/default/backup
-    mode: 0640
-  vars:
-    enable: "{{ backup__enable }}"
-    logfile: "{{ backup__logfile }}"
-    error_logfile: "{{ backup__error_logfile }}"
-    borg_enable: "{{ backup__borg_enable }}"
-    borg_backup_dir: "{{ backup__borg_backup_dir }}"
-    borg_cache_dir: "{{ backup__borg_cache_dir }}"
-    borg_rsh: "{{ backup__borg_rsh }}"
-    borg_options: "{{ backup__borg_options }}"
-    borg_include: "{{ backup__borg_include }}"
-    borg_exclude: "{{ backup__borg_exclude }}"
-    mysql_enable: "{{ backup__mysql_enable }}"
-    mysql_compress: "{{ backup__mysql_compress }}"
-    mysql_replication: "{{ backup__mysql_replication }}"
-    mysql_backup_dir: "{{ backup__mysql_backup_dir }}"
-    mysql_host: "{{ backup__mysql_host }}"
-    mysql_user: "{{ backup__mysql_user }}"
-    mysql_password: "{{ backup__mysql_password }}"
-    mysql_ignore_databases: "{{ backup__mysql_ignore_databases }}"
-    mysql_keep_days: "{{ backup__mysql_keep_days }}"
-  tags:
-  - backup
-  - configuration
+  - name: Install packages for SSH
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      state: present
+    with_items: "{{ backup__ssh_client_packages }}"
+
+  - name: Check if backup key exists on host
+    tags: [ 'bootstrap' ]
+    ansible.builtin.stat:
+      path: "~/.ssh/{{ backup__ssh_key_name }}"
+      register: ssh_key_stat_result
+
+  - name: Generate SSH key pair for backup over SSH
+    tags: [ 'bootstrap' ]
+    when: not ssh_key_stat_result.stat.exists
+    community.crypto.openssh_keypair:
+      comment: "{{ backup__ssh_comment }}"
+      path: "{{ backup__ssh_key_path }}"
+      size: "{{ backup__ssh_key_size }}"
+      state: present
+
+  # next two steps follow the documentation taken from Hetzner docs and Stackoverflow
+  # https://docs.hetzner.com/robot/storage-box/backup-space-ssh-keys
+  # https://stackoverflow.com/questions/5386482/how-to-run-the-sftp-command-with-a-password-from-bash-script#5386587
+  - name: Copy public key to authorized key on storagebox
+    tags: [ 'bootstrap' ]
+    when: not ssh_key_stat_result.stat.exists
+    ansible.builtin.shell: |
+      sshpass -e sftp -oBatchMode=no -oStrictHostKeyChecking=no -b - {{ backup__ssh_user }}@{{ backup__ssh_host }} << !
+      mkdir .ssh
+      chmod 700 .ssh
+      put {{ backup__ssh_key_path }}.pub .ssh/authorized_keys
+      chmod 600 .ssh/authorized_keys
+      !
+    environment:
+      SSHPASS: "{{ backup__ssh_password }}"
+
+  - name: Move SSH keys to ~/.ssh directory
+    tags: [ 'bootstrap' ]
+    when: not ssh_key_stat_result.stat.exists
+    ansible.builtin.copy:
+      src: "{{ item }}"
+      dest: ~/.ssh/
+      mode: 0600
+      remote_src: yes
+    with_items:
+    - "{{ backup__ssh_key_path }}"
+    - "{{ backup__ssh_key_path }}.pub"
+
+  - name: Remove temporary SSH keys
+    tags: [ 'bootstrap', 'cleanup' ]
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: absent
+    with_items:
+    - "{{ backup__ssh_key_path }}"
+    - "{{ backup__ssh_key_path }}.pub"
+
+- name: Configure MySQL backup
+  tags: [ 'backup', 'mysql' ]
+  when: backup__enable and backup__mysql_enable
+  block:
+
+  - name: Create mysql backup directory
+    tags: [ 'bootstrap' ]
+    ansible.builtin.file:
+      path: "{{ backup__mysql_backup_dir }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0750
+
+- name: Configure borg backup
+  tags: [ 'backup', 'borg' ]
+  when: backup__enable and backup__borg_enable
+  block:
+
+  - name: Generate password file
+    tags: [ 'configuration' ]
+    when: backup__borg_password is defined
+    ansible.builtin.copy:
+      dest: /root/.borg_passphrase
+      content: "{{ backup__borg_password }}"
+      owner: root
+      group: root
+      mode: 0640
+
+  - name: Install packages for borgbackup
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      state: present
+    with_items: "{{ backup__borg_packages }}"
+
+  - name: Create borg cache directory
+    tags: [ 'bootstrap' ]
+    when: backup__borg_cache_dir | length > 0
+    ansible.builtin.file:
+      path: "{{ backup__borg_cache_dir }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0750
+
+  - name: Test if borg repository exits
+    tags: [ 'bootstrap' ]
+    ansible.builtin.shell: "borg info {{ backup__borg_backup_dir }}"
+    environment:
+      BORG_CACHE_DIR: "{{ backup__borg_cache_dir }}"
+      BORG_PASSPHRASE: "{{ backup__borg_password }}"
+      BORG_RSH: "{{ backup__borg_rsh }}"
+    register: borg_repository_info_result
+    ignore_errors: true
+
+  # TODO: make step idempotent
+  # TODO: respect cache dir configuration
+  - name: Initialize borg repository
+    tags: [ 'bootstrap' ]
+    when: borg_repository_info_result.rc == 2
+    ansible.builtin.shell: "borg init --encryption=repokey {{ backup__borg_backup_dir }}"
+    environment:
+      BORG_CACHE_DIR: "{{ backup__borg_cache_dir }}"
+      BORG_PASSPHRASE: "{{ backup__borg_password }}"
+      BORG_RSH: "{{ backup__borg_rsh }}"
