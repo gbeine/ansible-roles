@@ -1,0 +1,90 @@
+---
+# tasks file for roles/mirror
+
+- name: Install and configure mirror
+  tags: [ 'mirror' ]
+  when: mirror__enable
+  block:
+
+  - name: Create mirror scripts directory
+    tags: [ 'bootstrap', 'scripts' ]
+    ansible.builtin.file:
+      dest: "{{ mirror__install_dir }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0755
+
+  - name: Copy mirror scripts
+    tags: [ 'bootstrap', 'scripts' ]
+    ansible.builtin.copy:
+      dest: "{{ mirror__install_dir }}/{{ item }}"
+      src: "usr/local/lib/mirror/{{ item }}"
+      mode: 0755
+    with_items:
+    - 900.mirror
+    - 910.mirror.apt
+    - 910.mirror.rsync
+    - 910.mirror.wsus
+    - 910.mirror.wsusesr
+    - 910.mirror.yum
+
+  - name: Create symlink to main script
+    tags: [ 'bootstrap', 'scripts' ]
+    ansible.builtin.file:
+      src: "{{ mirror__install_dir }}/900.mirror"
+      dest: /etc/cron.daily/mirror
+      state: link
+
+  - name: Generate configuration file
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: etc/default/mirror.j2
+      dest: /etc/default/mirror
+      mode: 0644
+
+- name: Install and configure apt-mirror
+  tags: [ 'mirror' ]
+  when: mirror__enable and mirror__apt_mirror_enable
+  block:
+
+  - name: Install packages for APT mirroring
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      state: present
+    with_items: "{{ mirror__apt_packages }}"
+
+  - name: Generate configuration file
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: etc/apt/mirror.list.j2
+      dest: /etc/apt/mirror.list
+      mode: 0644
+
+  - name: Create apt mirror directories
+    ansible.builtin.file:
+      path: "{{ mirror__apt_mirror_path }}/{{ item.url | regex_replace('^(http://|https://)') }}"
+      state: directory
+      owner: apt-mirror
+      group: apt-mirror
+      mode: 0755
+    with_items: "{{ mirror__apt_mirrors }}"
+
+  - name: Create webserver mirror directories
+    ansible.builtin.file:
+      path: "{{ mirror__www_root }}/{{ item.local }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0755
+    with_items: "{{ mirror__apt_mirrors }}"
+
+  - name: Mount webserver mirror directories
+    ansible.posix.mount:
+      src: "{{ mirror__apt_mirror_path }}/{{ item.url | regex_replace('^(http://|https://)') }}"
+      path: "{{ mirror__www_root }}/{{ item.local }}"
+      opts: ro,bind
+      state: mounted
+      fstype: none
+    with_items: "{{ mirror__apt_mirrors }}"
