@@ -1,53 +1,61 @@
 ---
 # tasks file for roles/mysql
 
-- name: Install MySQL packages
-  ansible.builtin.apt:
-    name: "{{ item }}"
-    install_recommends: no
-    state: present
-  with_items: "{{ mysql__packages_combined }}"
-  tags:
-  - mysql
-  - packages
+- name: Install and configure MySQL client
+  tags: [ 'mysql' ]
+  when: mysql__client_enable
+  block:
+  
+  - name: Install MySQL client packages
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      install_recommends: no
+      state: present
+    with_items: "{{ mysql__client_packages_combined }}"
 
-- name: Set password for root
-  ansible.builtin.command: "mysql -e 'SET PASSWORD = PASSWORD(\"{{ mysql__password.root }}\"); FLUSH PRIVILEGES;'"
-  when: mysql__password.root is defined
-  tags:
-  - mysql
-  - bootstrap
+- name: Install and configure MySQL server
+  tags: [ 'mysql' ]
+  when: mysql__server_enable
+  block:
+  
+  - name: Install MySQL server packages
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      install_recommends: no
+      state: present
+    with_items: "{{ mysql__server_packages_combined }}"
 
-- name: Removes all anonymous user accounts
-  community.mysql.mysql_user:
-    login_user: root
-    login_password: "{{ mysql__password.root }}"
-    name: ''
-    host_all: yes
-    state: absent
-  tags:
-  - mysql
-  - configuration
+  - name: Set password for root
+    tags: [ 'bootstrap' ]
+    ansible.builtin.command: "mysql -e 'SET PASSWORD = PASSWORD(\"{{ mysql__password.root }}\"); FLUSH PRIVILEGES;'"
+    when: mysql__password.root is defined
 
-- name: Create databases
-  community.mysql.mysql_db:
-    login_user: root
-    login_password: "{{ mysql__password.root }}"
-    name: "{{ mysql__databases }}"
-    state: present
-  tags:
-  - mysql
-  - configuration
+  - name: Removes all anonymous user accounts
+    tags: [ 'bootstrap', 'configuration', 'cleanup' ]
+    community.mysql.mysql_user:
+      login_user: root
+      login_password: "{{ mysql__password.root }}"
+      name: ''
+      host_all: yes
+      state: absent
 
-- name: Create database users with privileges
-  community.mysql.mysql_user:
-    login_user: root
-    login_password: "{{ mysql__password.root }}"
-    name: "{{ item.name }}"
-    password: "{{  mysql__password[item.name] }}"
-    priv: "{{ item.privileges }}"
-    state: present
-  with_items: "{{ mysql__accounts }}"
-  tags:
-  - mysql
-  - configuration
+  - name: Create databases
+    tags: [ 'configuration' ]
+    community.mysql.mysql_db:
+      login_user: root
+      login_password: "{{ mysql__password.root }}"
+      name: "{{ mysql__databases }}"
+      state: present
+
+  - name: Create database users with privileges
+    tags: [ 'configuration' ]
+    community.mysql.mysql_user:
+      login_user: root
+      login_password: "{{ mysql__password.root }}"
+      name: "{{ item.name }}"
+      password: "{{  mysql__password[item.name] }}"
+      priv: "{{ item.privileges }}"
+      state: present
+    with_items: "{{ mysql__accounts }}"
