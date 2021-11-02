@@ -34,6 +34,12 @@ server {
 server {
         include {{ nginx__snippets_path }}/ssl.conf;
 
+{%   if site.snippets | length > 0 %}
+{%     for snippet in site.snippets %}
+        include {{ nginx__snippets_path }}/{{ snippet }}.conf;
+{%     endfor %}
+
+{%   endif %}
 {%   for listen in site.listen_ssl %}
         listen {{ listen }};
 {%   endfor %}
@@ -41,16 +47,37 @@ server {
         server_name
 {{ site.server_name | join('\n') | indent(10, true) }};
 
+{%   if site.root is defined %}
+        root {{ site.root }};
+{%   else %}
         root {{ nginx__www_path }}/{{ site.name }}/public;
+{%   endif %}
 
         index {{ site.index | default(nginx__index_default) | join(' ') }};
 
+{% if site.locations | length > 0 %}
+{%     for name, location in site.locations.items() %}
+        location {{ location.match }} {{ location.target }} {
+{%       for key, value in location.options.items() %}
+{%         if value is iterable and value is not string %}
+{%           for v in value %}
+          {{ key }} {{ v }};
+{%           endfor %}
+{%         else %}
+          {{ key }} {{ value }};
+{%         endif %}
+{%       endfor %}
+        }
+
+{%     endfor %}
+{% else %}
         location / {
                 # First attempt to serve request as file, then
                 # as directory, then fall back to displaying a 404.
                 try_files $uri $uri/ =404;
         }
 
+{% endif %}
 {%   if nginx__acme_enable %}
         ssl_certificate /etc/letsencrypt/live/{{ site.name }}/fullchain.pem; # managed by Certbot
         ssl_certificate_key /etc/letsencrypt/live/{{ site.name }}/privkey.pem; # managed by Certbot
