@@ -39,6 +39,8 @@
       objects: "{{ icinga__zones }}"
     - src: etc/icinga2/features-available/api.conf.j2
       dest: /etc/icinga2/features-available/api.conf
+    notify:
+    - Restart Icinga
 
   - name: Generate configuration files for master and standalone
     tags: [ 'configuration' ]
@@ -90,6 +92,8 @@
       dest: /etc/icinga2/conf.d/downtimes.conf
       objects: "{{ icinga__conf_downtimes }}"
       class: ScheduledDowntime
+    notify:
+    - Restart Icinga
 
   - name: Generate MySQL configuration
     tags: [ 'configuration' ]
@@ -98,6 +102,8 @@
       src: etc/icinga2/features-available/ido-mysql.conf.j2
       dest: /etc/icinga2/features-available/ido-mysql.conf
       mode: 0600
+    notify:
+    - Restart Icinga
 
   - name: Enable features
     tags: [ 'configuration' ]
@@ -107,6 +113,8 @@
       dest: "/etc/icinga2/features-enabled/{{ item }}.conf"
       state: link
     with_items: "{{ icinga__features_combined }}"
+    notify:
+    - Restart Icinga
 
   - name: Add icinga user to group ssl-cert
     tags: [ 'configuration' ]
@@ -159,7 +167,7 @@
 
 - name: Install and configure Icingaweb
   tags: [ 'icinga' ]
-  when: icinga__web_enable
+  when: icingaweb__enable
   block:
   
   - name: Install icingaweb packages
@@ -168,4 +176,42 @@
       name: "{{ item }}"
       install_recommends: no
       state: present
-    with_items: "{{ icinga__web_packages_combined }}"
+    with_items: "{{ icingaweb__packages_combined }}"
+
+  - name: Generate configuration files
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      mode: 0644
+    vars:
+      content: "{{ item.content }}"
+    with_items:
+    - src: etc/icingaweb2/config.ini.j2
+      dest: /etc/icingaweb2/config.ini
+    - src: etc/icingaweb2/authentication.ini.j2
+      dest: /etc/icingaweb2/authentication.ini
+    - src: etc/icingaweb2/groups.ini.j2
+      dest: /etc/icingaweb2/groups.ini
+    - src: etc/icingaweb2/ini.j2
+      dest: /etc/icingaweb2/resources.ini
+      content: "{{ icingaweb__resources }}"
+    - src: etc/icingaweb2/ini.j2
+      dest: /etc/icingaweb2/roles.ini
+      content: "{{ icingaweb__roles }}"
+
+  - name: Create directory for enabled modules
+    tags: [ 'configuration' ]
+    ansible.builtin.file:
+      dest: /etc/icingaweb2/enabledModules
+      owner: www-data
+      group: www-data
+      mode: 0750
+      state: directory
+
+  - name: Configure modules
+    tags: [ 'configuration' ]
+    include: modules.yml
+    loop_control:
+      loop_var: module
+    with_items: "{{ icingaweb__modules_combined }}"
