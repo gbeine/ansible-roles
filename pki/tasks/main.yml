@@ -5,7 +5,7 @@
   tags: [ 'pki' ]
   when: pki__enable
   block:
-  
+
   - name: Install pki packages
     tags: [ 'packages' ]
     ansible.builtin.apt:
@@ -27,86 +27,15 @@
     - "{{ pki__realms_dir }}"
 
 - name: Install and configure ACME
-  tags: [ 'pki', 'acme' ]
+  tags: [ 'pki', 'acme', 'init' ]
   when: pki__enable and pki__acme_enable
-  block:
-  
-  - name: Install pki ACME packages
-    tags: [ 'packages' ]
-    ansible.builtin.apt:
-      name: "{{ item }}"
-      install_recommends: no
-      state: present
-    with_items: "{{ pki__acme_packages_combined }}"
-
-  - name: Register or update ACME account
-    tags: [ 'configuration' ]
-    when: pki__acme_email | length > 0
-    ansible.builtin.shell: |
-      certbot update_account {{ pki__acme_register_options }} || certbot register {{ pki__acme_register_options }}
-    environment: "{{ pki__acme_environment }}"
+  include: acme_init.yml
 
 - name: Install and configure Easy-RSA
-  tags: [ 'pki', 'easyrsa' ]
+  tags: [ 'pki', 'easyrsa', 'init' ]
   when: pki__enable and pki__easyrsa_enable
   run_once: yes
-  block:
-
-  - name: Create secrets directory
-    tags: [ 'local', 'easyrsa']
-    become: false
-    local_action:
-      module: ansible.builtin.file
-      path: "{{ pki__secrets_dir }}"
-      state: directory
-      mode: 0750
-
-  - name: Is Easy-RSA PKI initialized?
-    tags: [ 'local', 'easyrsa']
-    become: false
-    local_action:
-      module: ansible.builtin.stat
-      path: "{{ pki__secrets_dir }}/safessl-easyrsa.cnf"
-    register: easyrsa_pki_stat_result
-
-  - name: Is Easy-RSA CA initialized?
-    tags: [ 'local', 'easyrsa']
-    become: false
-    local_action:
-      module: ansible.builtin.stat
-      path: "{{ pki__secrets_dir }}/ca.crt"
-    register: easyrsa_ca_stat_result
-
-  - name: Init Easy-RSA PKI
-    tags: [ 'local', 'easyrsa' ]
-    when: not easyrsa_pki_stat_result.stat.exists
-    become: false
-    local_action:
-      module: ansible.builtin.command
-      chdir: "{{ pki__secrets_dir }}"
-      cmd: "{{ pki__easyrsa_path }} init-pki"
-    environment: "{{ pki__easyrsa_environment }}"
-
-  - name: Create Easy-RSA CA
-    tags: [ 'local', 'easyrsa']
-    when: not easyrsa_ca_stat_result.stat.exists
-    become: false
-    local_action:
-      module: ansible.builtin.command
-      chdir: "{{ pki__secrets_dir }}"
-      cmd: "{{ pki__easyrsa_path }} build-ca"
-    environment: "{{ pki__easyrsa_environment }}"
-
-  - name: Keep Eays-RSA directories in git
-    tags: [ 'local', 'easyrsa']
-    when: not easyrsa_pki_stat_result.stat.exists
-    become: false
-    local_action:
-      module: ansible.builtin.file
-      dest: "{{ pki__secrets_dir }}/{{ item }}/.gitkeep"
-      state: touch
-    environment: "{{ pki__easyrsa_environment }}"
-    with_items: "{{ pki__easyrsa_directories_gitkeep }}"
+  include: easyrsa_init.yml
 
 - name: Create realms
   tags: [ 'pki' ]
