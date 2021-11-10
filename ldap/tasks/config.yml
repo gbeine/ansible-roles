@@ -1,0 +1,157 @@
+---
+
+#
+# for details see:
+# https://serverfault.com/questions/587721/basic-openldap-setup-using-slapd-d-configuration
+#
+
+- name: Initial configuration
+  tags: [ 'configuration', 'init' ]
+  block:
+
+  - name: Is admin account and password set?
+    ansible.builtin.shell: "grep olcRoot {{ ldap__server_config_database_config_file }} | wc -l"
+    register: admin_account_stat
+
+  - name: Set configuration admin account and password
+    when: not admin_account_stat.stdout | int == 2
+    ansible.builtin.shell: |
+      SLAPPASSWD=`slappasswd -s ${LDAP__PASSWD}`
+      echo "dn: olcDatabase={0}config,cn=config
+      changetype: modify
+      add: olcRootDN
+      olcRootDN: ${LDAP__ROOTDN}
+      -
+      add: olcRootPW
+      olcRootPW: ${SLAPPASSWD}
+      " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+    environment:
+      LDAP__ROOTDN: "{{ ldap__server_config_root_dn }}"
+      LDAP__PASSWD: "{{ ldap__server_config_root_password }}"
+    notify:
+    - Restart slapd
+
+  - name: Install schema
+    tags: [ 'schema' ]
+    ansible.builtin.shell: "test -f {{ ldap__server_config_schema_dir }}/*{{ item }}.ldif || ldapadd -a -Q -Y EXTERNAL -H ldapi:/// -f {{ ldap__schema_dir }}/{{ item }}.ldif"
+    with_items: "{{ ldap__server_schema_combined }}"
+    notify:
+    - Restart slapd
+
+  - name: Activate modules
+    ansible.builtin.shell: |
+      grep {{ item }} {{ ldap__server_config_database_dir }}/cn=module* || \
+      echo "dn: cn=module{0},cn=config
+      changetype: modify
+      add: olcModuleLoad
+      olcModuleLoad: {{ item }}
+      " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+    with_items: "{{ ldap__server_modules }}"
+    notify:
+    - Restart slapd
+
+- name: TLS configuration
+  tags: [ 'configuration', 'tls', 'ssl' ]
+  when: ldap__server_tls_enable
+  block:
+
+  - name: Create directory for SSL certificates
+    ansible.builtin.file:
+      dest: "{{ ldap__cert_dir }}"
+      owner: openldap
+      group: openldap
+      mode: 0700
+      state: directory
+
+#
+# TLS files must be under /etc/ldap, otherwise slapd cannot use them
+#
+  - name: Copy 
+    tags: [ 'configuration' ]
+    ansible.builtin.copy:
+      remote_src: yes
+      src: "{{ item }}"
+      dest: "{{ ldap__cert_dir }}"
+      owner: openldap
+      group: openldap
+    with_items:
+    - "{{ ldap__server_tls_ca }}"
+    - "{{ ldap__server_tls_cert }}"
+    - "{{ ldap__server_tls_key  }}"
+
+#
+# See: https://stackoverflow.com/questions/51745010/ldap-modify-other-e-g-implementation-specific-error-80
+#
+  - name: Set Set TLS configuration
+    ansible.builtin.shell: |
+      echo "dn: cn=config
+      changetype: modify
+      replace: olcTLSCACertificateFile
+      olcTLSCACertificateFile: {{ ldap__cert_dir }}/ca.crt
+      -
+      replace: olcTLSCertificateKeyFile
+      olcTLSCertificateKeyFile: {{ ldap__cert_dir }}/{{ ldap__server_tls_realm }}.key
+      -
+      replace: olcTLSCertificateFile
+      olcTLSCertificateFile: {{ ldap__cert_dir }}/{{ ldap__server_tls_realm }}.crt
+      " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+    notify:
+    - Restart slapd
+
+  - name: Generate configuration files
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: root
+      group: root
+      mode: 0644
+    with_items:
+    - src: etc/default/slapd.j2
+      dest: /etc/default/slapd
+    notify:
+    - Restart slapd
+
+- name: Database configuration
+  tags: [ 'configuration', 'init' ]
+  block:
+
+  - name: Set database admin account and password
+    ansible.builtin.shell: |
+      SLAPPASSWD=`slappasswd -s ${LDAP__PASSWD}`
+      echo "dn: olcDatabase={1}mdb,cn=config
+      changetype: modify
+      replace: olcSuffix
+      olcSuffix: ${LDAP__BASEDN}
+      -
+      replace: olcRootDN
+      olcRootDN: ${LDAP__ROOTDN}
+      -
+      replace: olcRootPW
+      olcRootPW: ${SLAPPASSWD}
+      " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+    environment:
+      LDAP__BASEDN: "{{ ldap__server_base_dn }}"
+      LDAP__ROOTDN: "{{ ldap__server_root_dn }}"
+      LDAP__PASSWD: "{{ ldap__server_root_password }}"
+    notify:
+    - Restart slapd
+
+  - name: Reset access privileges
+    ansible.builtin.shell: |
+      grep -L olcAccess {{ ldap__server_config_database_dir }}/*mdb.ldif || \
+      echo "dn: olcDatabase={1}mdb,cn=config
+      changetype: modify
+      replace: olcAccess
+      " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+
+  - name: Set access privileges
+    ansible.builtin.shell: |
+      echo "dn: olcDatabase={1}mdb,cn=config
+      changetype: modify
+      add: olcAccess
+      olcAccess: to {{ item.to }} by {{ item.by | join(' by ') }}
+      " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+    with_items: "{{ ldap__server_database.access }}"
+    notify:
+    - Restart slapd
+
