@@ -26,17 +26,32 @@
       install_recommends: no
       state: present
     with_items: "{{ mysql__server_packages_combined }}"
+    register: mysql_server_packages_installation_result
 
   - name: Set password for root
     tags: [ 'bootstrap' ]
-    ansible.builtin.shell: "mysql -e 'SET PASSWORD = PASSWORD(\"{{ mysql__password.root }}\"); FLUSH PRIVILEGES;' || mysql --password={{ mysql__password.root }} -e 'SET PASSWORD = PASSWORD(\"{{ mysql__password.root }}\"); FLUSH PRIVILEGES;'"
+    when: mysql__password.root is defined and mysql_server_packages_installation_result.changed and mysql__server_password_reset[mysql__flavor] is defined
+    ansible.builtin.shell: "{{ mysql__server_password_reset[mysql__flavor] }}"
+
+  - name: Create .my.cnf
+    tags: [ 'bootstrap' ]
     when: mysql__password.root is defined
+    ansible.builtin.template:
+      src: my.cnf
+      dest: /root/.my.cnf
+      owner: root
+      group: root
+      mode: 0600
+    vars:
+      user: 'root'
+      password: "{{ mysql__password.root }}"
 
   - name: Removes all anonymous user accounts
     tags: [ 'bootstrap', 'configuration', 'cleanup' ]
     community.mysql.mysql_user:
       login_user: root
       login_password: "{{ mysql__password.root }}"
+      login_unix_socket: '/var/run/mysqld/mysqld.sock'
       name: ''
       host_all: yes
       state: absent
@@ -46,7 +61,10 @@
     community.mysql.mysql_db:
       login_user: root
       login_password: "{{ mysql__password.root }}"
+      login_unix_socket: '/var/run/mysqld/mysqld.sock'
       name: "{{ mysql__databases }}"
+      encoding: utf8
+      collation: utf8_bin
       state: present
 
   - name: Create database users with privileges
@@ -54,6 +72,7 @@
     community.mysql.mysql_user:
       login_user: root
       login_password: "{{ mysql__password.root }}"
+      login_unix_socket: '/var/run/mysqld/mysqld.sock'
       name: "{{ item.name }}"
       password: "{{  mysql__password[item.name] }}"
       priv: "{{ item.privileges }}"
