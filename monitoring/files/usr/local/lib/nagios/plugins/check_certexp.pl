@@ -27,7 +27,7 @@ use Getopt::Long;
 use Net::SSLeay;
 use Date::Manip;
 
-use lib '/usr/local/nagios/libexec';
+use lib '/usr/lib/nagios/plugins';
 use utils qw(%ERRORS $TIMEOUT &print_revision &support);
 use vars qw($PROGNAME $PORT $CRIT $opt_H $opt_V $opt_c $opt_h $opt_i
             $opt_p $opt_t $opt_v $opt_w);
