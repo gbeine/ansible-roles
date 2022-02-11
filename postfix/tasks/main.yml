@@ -1,0 +1,57 @@
+---
+
+- name: Install and configure postfix
+  tags: [ 'postfix' ]
+  when: postfix__enable
+  block:
+
+  - name: Install postfix packages
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      install_recommends: no
+      state: present
+    with_items: "{{ postfix__packages_combined }}"
+
+  - name: Generate configuration files
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: root
+      group: root
+      mode: 0644
+    with_items:
+    - src: etc/postfix/main.cf.j2
+      dest: "{{ postfix__etc_path }}/main.cf"
+    - src: etc/postfix/master.cf.j2
+      dest: "{{ postfix__etc_path }}/master.cf"
+    notify:
+    - Restart postfix
+
+  - name: Generate virtual tables for LDAP lookups
+    tags: [ 'configuration' ]
+    when: postfix__virtual_tables_ldap | length > 0
+    ansible.builtin.template:
+      src: etc/postfix/virtual/table.ldap.j2
+      dest: "{{ postfix__etc_path }}/virtual/{{ item.key }}.ldap"
+      owner: root
+      group: root
+      mode: 0644
+    vars:
+      virtual_table: "{{ item.value }}"
+    loop: "{{ lookup('dict', postfix__virtual_tables_ldap) }}"
+    notify:
+    - Restart postfix
+
+  - name: Install and configure postgrey
+    include_tasks: postgrey.yml
+
+  - name: Install and configure postsrsd
+    include_tasks: postsrsd.yml
+
+  - name: Install and configure policyd_spf
+    include_tasks: policyd_spf.yml
+
+  - name: Install and configure SpamAssassin
+    include_tasks: spamassassin.yml
