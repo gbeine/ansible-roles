@@ -2,6 +2,23 @@
 import jinja2
 
 @jinja2.contextfilter
+def remove_entries(context, thearray, toberemoved):
+    """
+
+    :param context: Jinja2 context.
+    :param thearray: the first array
+    :param toberemoved: the elements to be removed
+    :returns: The array without the elements to be removed
+    """
+    result = []
+    for item in thearray:
+        if not item in toberemoved:
+            result.append(item)
+
+    return result
+
+
+@jinja2.contextfilter
 def merge_by_splittedkey(context, thefirst, thesecond, *thekeys):
     """
 
@@ -65,6 +82,7 @@ class FilterModule(object):
 
     def filters(self):
         return {
+            'remove_entries': remove_entries,
             'merge_by_splittedkey': merge_by_splittedkey,
             'merge_by_key': merge_by_key,
         }
