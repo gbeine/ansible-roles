@@ -1,0 +1,134 @@
+###
+### {{ ansible_managed }}
+###
+
+{{'#' if not conf.default_process_limit is defined }}default_process_limit = {{ conf.default_process_limit | default(100) }}
+{{'#' if not conf.default_client_limit is defined }}default_client_limit = {{ conf.default_client_limit | default(1000) }}
+
+# Default VSZ (virtual memory size) limit for service processes. This is mainly
+# intended to catch and kill processes that leak memory before they eat up
+# everything.
+{{'#' if not conf.default_vsz_limit is defined }}default_vsz_limit = {{ conf.default_vsz_limit | default('256M') }}
+
+# Login user is internally used by login processes. This is the most untrusted
+# user in Dovecot system. It shouldn't have access to anything at all.
+{{'#' if not conf.default_login_user is defined }}default_login_user = {{ conf.default_login_user | default('dovenull') }}
+
+# Internal user is used by unprivileged processes. It should be separate from
+# login user, so that login processes can't disturb other processes.
+{{'#' if not conf.default_internal_user is defined }}default_internal_user = {{ conf.default_internal_user | default('dovecot') }}
+
+service imap-login {
+  inet_listener imap {
+    {{ '#' if conf.imap_login__imap__port is defined }}port = {{ conf.imap_login__imap__port | default(143) }}
+  }
+  inet_listener imaps {
+    {{ '#' if conf.imap_login__imaps__port is defined }}port = {{ conf.imap_login__imaps__port | default(993) }}
+    {{ '#' if conf.imap_login__imaps__ssl is defined }}ssl = {{ conf.imap_login__imaps__ssl | default(true) | ternary('yes', 'no') }}
+  }
+
+  # Number of connections to handle before starting a new process. Typically
+  # the only useful values are 0 (unlimited) or 1. 1 is more secure, but 0
+  # is faster. <doc/wiki/LoginProcess.txt>
+  {{'#' if not conf.imap_login.service_count is defined }}service_count = {{ conf.imap_login.service_count | default(1) }}
+
+  # Number of processes to always keep waiting for more connections.
+  {{'#' if not conf.imap_login.process_min_avail is defined }}process_min_avail = {{ conf.imap_login.process_min_avail | default(0) }}
+
+  # If you set service_count=0, you probably need to grow this.
+  {{'#' if not conf.imap_login.vsz_limit is defined }}vsz_limit = {{ conf.imap_login.vsz_limit | default('$default_vsz_limit') }}
+}
+
+service pop3-login {
+  inet_listener pop3 {
+    {{ '#' if conf.pop3_login__pop3__port is defined }}port = {{ conf.pop3_login__pop3__port | default(110) }}
+  }
+  inet_listener pop3s {
+    {{ '#' if conf.pop3_login__pop3s__port is defined }}port = {{ conf.pop3_login__pop3s__port | default(995) }}
+    {{ '#' if conf.pop3_login__pop3s__ssl is defined }}ssl = {{ conf.pop3_login__pop3s__ssl | default(true) | ternary('yes', 'no') }}
+  }
+}
+
+service submission-login {
+  inet_listener submission {
+    {{'#' if not conf.submission_login__submission__port is defined }}port = {{ conf.submission_login__submission__port | default(587) }}
+  }
+}
+
+service lmtp {
+  unix_listener {{ conf.lmtp__lmtp | default('lmtp') }} {
+    {{'#' if not conf.lmtp__lmtp__mode is defined }}mode = {{ conf.lmtp__lmtp__mode | default('0666') }}
+  }
+
+  # Create inet listener only if you can't use the above UNIX socket
+  #inet_listener lmtp {
+    # Avoid making LMTP visible for the entire internet
+    #address =
+    #port = 
+  #}
+}
+
+service imap {
+  # Most of the memory goes to mmap()ing files. You may need to increase this
+  # limit if you have huge mailboxes.
+  {{'#' if not conf.imap__vsz_limit is defined }}vsz_limit = {{ conf.imap__vsz_limit | default('$default_vsz_limit') }}
+
+  # Max. number of IMAP processes (connections)
+  {{'#' if not conf.imap__process_limit is defined }}process_limit = {{ conf.imap__process_limit | default(1024) }}
+}
+
+service pop3 {
+  # Max. number of POP3 processes (connections)
+  {{'#' if not conf.pop3__process_limit is defined }}process_limit = {{ conf.pop3__process_limit | default(1024) }}
+}
+
+service submission {
+  # Max. number of SMTP Submission processes (connections)
+  {{'#' if not conf.submission__process_limit is defined }}process_limit = {{ conf.submission__process_limit | default(1024) }}
+}
+
+service auth {
+  # auth_socket_path points to this userdb socket by default. It's typically
+  # used by dovecot-lda, doveadm, possibly imap process, etc. Users that have
+  # full permissions to this socket are able to get a list of all usernames and
+  # get the results of everyone's userdb lookups.
+  #
+  # The default 0666 mode allows anyone to connect to the socket, but the
+  # userdb lookups will succeed only if the userdb returns an "uid" field that
+  # matches the caller process's UID. Also if caller's uid or gid matches the
+  # socket's uid or gid the lookup succeeds. Anything else causes a failure.
+  #
+  # To give the caller full permissions to lookup all users, set the mode to
+  # something else than 0666 and Dovecot lets the kernel enforce the
+  # permissions (e.g. 0777 allows everyone full permissions).
+  unix_listener auth-userdb {
+    {{'#' if not conf.auth__auth_userdb__mode is defined }}mode = {{ conf.auth__auth_userdb__mode | default('0666') }}
+    {{'#' if not conf.auth__auth_userdb__user is defined }}user = {{ conf.auth__auth_userdb__user | default('') }}
+    {{'#' if not conf.auth__auth_userdb__group is defined }}group = {{ conf.auth__auth_userdb__group | default('') }}
+  }
+
+  # Postfix smtp-auth
+  {{'#' if not conf.auth__smtp_auth is defined }}unix_listener {{ conf.auth__smtp_auth | default('/var/spool/postfix/private/auth') }} {
+  {{'#' if not conf.auth__smtp_auth is defined }}  mode = 0666
+  {{'#' if not conf.auth__smtp_auth is defined }}}
+
+  # Auth process is run as this user.
+  {{'#' if not conf.auth__user is defined }}user = {{ conf.auth__user | default('$default_internal_user') }}
+}
+
+service auth-worker {
+  # Auth worker process is run as root by default, so that it can access
+  # /etc/shadow. If this isn't necessary, the user should be changed to
+  # $default_internal_user.
+  {{'#' if not conf.auth__auth_worker__user is defined }}user = {{ conf.auth__auth_worker__user | default('root') }}
+}
+
+service dict {
+  # If dict proxy is used, mail processes should have access to its socket.
+  # For example: mode=0660, group=vmail and global mail_access_groups=vmail
+  unix_listener dict {
+    {{'#' if not conf.auth__dict__mode is defined }}mode = {{ conf.auth__dict__mode | default('0600') }}
+    {{'#' if not conf.auth__dict__user is defined }}user = {{ conf.auth__dict__user | default('') }}
+    {{'#' if not conf.auth__dict__group is defined }}group = {{ conf.auth__dict__group | default('') }}
+  }
+}
