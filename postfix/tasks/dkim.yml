@@ -1,0 +1,54 @@
+---
+
+- name: Install and configure DKIM
+  tags: [ 'postfix', 'dkim' ]
+  when: postfix__dkim_enable
+  block:
+
+  - name: Install DKIM packages
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      install_recommends: no
+      state: present
+    with_items: "{{ postfix__dkim_packages }}"
+
+  - name: Create DKIM tables directory
+    ansible.builtin.file:
+      dest: "{{ postfix__dkim_opendkim_etc_path }}"
+      state: directory
+      owner: opendkim
+      group: opendkim
+      mode: 0755
+
+  - name: "Generate DKIM private key"
+    tags: [ 'configuration' ]
+    ansible.builtin.shell: "test -f {{ postfix__dkim_opendkim_keyfile }} || {{ postfix__dkim_opendkim_key_genkey }} --bits={{ postfix__dkim_opendkim_key_bits }} --domain={{ postfix__dkim_opendkim_key_domain }} --selector={{ postfix__dkim_opendkim_key_selector }} --directory={{ postfix__dkim_opendkim_keydir }}"
+
+  - name: Generate configuration files
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: root
+      group: root
+      mode: 0644
+    with_items:
+    - src: etc/default/opendkim.j2
+      dest: /etc/default/opendkim
+    - src: etc/opendkim.conf.j2
+      dest: /etc/opendkim.conf
+    notify:
+    - Restart opendkim
+
+  - name: Generate Internal Hosts
+    tags: [ 'configuration' ]
+    when: postfix__dkim_opendkim_internal_hosts_content | length > 0
+    ansible.builtin.copy:
+      dest: "{{ postfix__dkim_opendkim_internal_hosts }}"
+      owner: opendkim
+      group: opendkim
+      mode: 0644
+      content: "{{ postfix__dkim_opendkim_internal_hosts_content | join('\n') }}"
+    notify:
+    - Restart opendkim
