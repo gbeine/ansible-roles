@@ -1,7 +1,7 @@
 
 import jinja2
 
-@jinja2.contextfilter
+@jinja2.pass_context
 def remove_entries(context, thearray, toberemoved):
     """
 
@@ -18,7 +18,7 @@ def remove_entries(context, thearray, toberemoved):
     return result
 
 
-@jinja2.contextfilter
+@jinja2.pass_context
 def merge_by_splittedkey(context, thefirst, thesecond, *thekeys):
     """
 
@@ -51,7 +51,7 @@ def build_identifier(item, thekeys):
     return result
 
 
-@jinja2.contextfilter
+@jinja2.pass_context
 def merge_by_key(context, thefirst, thesecond, thekey):
     """
 

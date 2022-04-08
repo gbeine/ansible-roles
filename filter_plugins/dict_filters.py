@@ -2,7 +2,24 @@
 import re
 import jinja2
 
-@jinja2.contextfilter
+@jinja2.pass_context
+def dict2string(context, thedict, innerjoin = '=', outerjoin = ' '):
+    """
+
+    :param context: Jinja2 context.
+    :param thedict: The dict
+    :param theprefix: The prefix to prepend on each key
+    :returns: The join result as string
+    """
+    result = ''
+    for key, value in thedict.items():
+        if len(result) > 0:
+            result = result + outerjoin
+        result = result + key + innerjoin + str(value)
+
+    return result
+
+@jinja2.pass_context
 def join_with_prefix(context, thedict, theprefix, innerjoin = '=', outerjoin = ' '):
     """
 
@@ -19,7 +36,7 @@ def join_with_prefix(context, thedict, theprefix, innerjoin = '=', outerjoin = '
 
     return result
 
-@jinja2.contextfilter
+@jinja2.pass_context
 def value_or_ternary(context, thedict, thekey, iftrue, iffalse, thedefault):
     """
 
@@ -37,7 +54,7 @@ def value_or_ternary(context, thedict, thekey, iftrue, iffalse, thedefault):
             result = iffalse
     return result
 
-@jinja2.contextfilter
+@jinja2.pass_context
 def value_or_default(context, thedict, thekey, thedefault):
     """
 
@@ -58,6 +75,7 @@ class FilterModule(object):
 
     def filters(self):
         return {
+            'dict2string': dict2string,
             'join_with_prefix': join_with_prefix,
             'value_or_ternary': value_or_ternary,
             'value_or_default': value_or_default,

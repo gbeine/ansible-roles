@@ -1,7 +1,7 @@
 
 import jinja2
 
-@jinja2.contextfilter
+@jinja2.pass_context
 def fill_up_to(context, thevalue, maxlength, fill_with = ' '):
     """
 
