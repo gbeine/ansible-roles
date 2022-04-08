@@ -1,0 +1,83 @@
+#!/usr/sbin/nft -f
+###
+### {{ ansible_managed }}
+###
+
+flush ruleset
+
+table inet filter {
+
+{% for net, config in nftables__inet.items() %}
+    define if_{{ net }} = {{ config.interface }}
+{% endfor %}
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state invalid counter drop comment "drop invalid packets"
+        ct state {established,related} counter accept
+{% for net, config in nftables__inet.items() %}
+        iif $if_{{ net }} jump input_{{ net }}
+{% endfor %}
+        counter comment "count dropped packets"
+    }
+
+{% for net, config in nftables__inet.items() %}
+    chain input_{{ net }} {
+{%   if config.input.icmp_allowed | default(false) %}
+        ip protocol icmp accept
+{%   endif %}
+{%   for port in config.input.tcp_allowed | default({}) %}
+        tcp dport {{ port }} accept
+{%   endfor %}
+{%   for port in config.input.udp_allowed | default({}) %}
+        udp dport {{ port }} accept
+{%   endfor %}
+{%   for rule in config.input.rules | default({}) %}
+        {{ rule }}
+{%   endfor %}
+    }
+{% endfor %}
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+{% for net, config in nftables__inet.items() %}
+        iif $if_{{ net }} jump forward_{{ net }}
+{% endfor %}
+        counter comment "count dropped packets"
+    }
+
+{% for net, config in nftables__inet.items() %}
+    chain forward_{{ net }} {
+{%   for oif in config.forward.oif_accept_established | default({}) %}
+        oif $if_{{ oif }} ct state {established, related} accept
+{% endfor %}
+{%   for oif in config.forward.oif_accept | default({}) %}
+        oif $if_{{ oif }} accept
+{% endfor %}
+{%   for host in config.forward.host_accept | default({}) %}
+        ip daddr {{ host.address }} oif $if_{{ host.oif }} accept
+{% endfor %}
+    }
+{% endfor %}
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+        counter comment "count accepted packets"
+    }
+}
+
+table ip nat {
+    define if_world = {{ nftables__nat.interface }}
+    define addr_world = {{ nftables__nat.address }}
+
+    chain prerouting {
+        type nat hook prerouting priority 0;
+        counter comment "count accepted packets"
+    }
+    chain postrouting {
+        type nat hook postrouting priority 100;
+{% for net in nftables__nat.masquerading | default({}) %}
+        ip saddr {{ net }} oif $if_world snat $addr_world
+{% endfor %}
+    }
+}
