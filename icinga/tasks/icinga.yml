@@ -1,177 +1,181 @@
 ---
 # tasks file for roles/icinga
 
-- name: Install icinga packages
-  tags: [ 'packages' ]
-  ansible.builtin.apt:
-    name: "{{ item }}"
-    install_recommends: no
-    state: present
-  with_items: "{{ icinga__packages_combined }}"
+- name: Initialize zone
+  tags: [ 'icinga' ]
+  block:
 
-- name: Remove obsolete configuration files
-  tags: [ 'configuration' ]
-  ansible.builtin.file:
-    dest: "/etc/icinga2/{{ item }}"
-    state: absent
-  with_items: "{{ icinga__files_absent }}"
-
-- name: Generate common configuration files
-  tags: [ 'configuration' ]
-  ansible.builtin.template:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    owner: nagios
-    group: nagios
-    mode: 0644
-  vars:
-    objects: "{{ item.objects | default({}) }}"
-  with_items:
-  - src: etc/icinga2/constants.conf.j2
-    dest: /etc/icinga2/constants.conf
-  - src: etc/icinga2/icinga2.conf.j2
-    dest: /etc/icinga2/icinga2.conf
-  - src: etc/icinga2/zones.conf.j2
-    dest: /etc/icinga2/zones.conf
-    objects: "{{ icinga__zones }}"
-  - src: etc/icinga2/features-available/api.conf.j2
-    dest: /etc/icinga2/features-available/api.conf
-  notify:
-  - Restart Icinga
-
-- name: Generate configuration files for master and standalone
-  tags: [ 'configuration' ]
-  when: not icinga__role_agent
-  ansible.builtin.template:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    owner: nagios
-    group: nagios
-    mode: 0640
-  vars:
-    type: "{{ item.class | default('undefined') }}"
-    objects: "{{ item.objects | default({}) }}"
-  with_items:
-  - src: etc/icinga2/conf.d/app.conf.j2
-    dest: /etc/icinga2/conf.d/app.conf
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/api-users.conf
-    objects: "{{ icinga__conf_api_users }}"
-    class: ApiUser
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/commands.conf
-    objects: "{{ icinga__conf_commands }}"
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/groups.conf
-    objects: "{{ icinga__conf_groups }}"
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/hosts.conf
-    objects: "{{ icinga__conf_hosts }}"
-    class: Host
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/templates.conf
-    objects: "{{ icinga__conf_templates }}"
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/timeperiods.conf
-    objects: "{{ icinga__conf_timeperiods }}"
-    class: TimePeriod
-  - src: objects.conf.j2
-    dest: /etc/icinga2/conf.d/users.conf
-    objects: "{{ icinga__conf_users }}"
-    class: User
-  - src: applications.conf.j2
-    dest: /etc/icinga2/conf.d/notifications.conf
-    objects: "{{ icinga__conf_notifications }}"
-    class: Notification
-  - src: applications.conf.j2
-    dest: /etc/icinga2/conf.d/services.conf
-    objects: "{{ icinga__conf_services }}"
-    class: Service
-  - src: applications.conf.j2
-    dest: /etc/icinga2/conf.d/downtimes.conf
-    objects: "{{ icinga__conf_downtimes }}"
-    class: ScheduledDowntime
-  notify:
-  - Restart Icinga
-
-- name: Generate MySQL configuration
-  tags: [ 'configuration' ]
-  when: icinga__mysql_enable
-  ansible.builtin.template:
-    src: etc/icinga2/features-available/ido-mysql.conf.j2
-    dest: /etc/icinga2/features-available/ido-mysql.conf
-    mode: 0600
-  notify:
-  - Restart Icinga
-
-- name: Install monitoring plugins
-  tags: [ 'icinga', 'monitoring' ]
-  when: icinga__enable
-  include_role:
-    name: monitoring
-
-- name: Enable features
-  tags: [ 'configuration' ]
-  when: not ansible_check_mode
-  ansible.builtin.file:
-    src: "/etc/icinga2/features-available/{{ item }}.conf"
-    dest: "/etc/icinga2/features-enabled/{{ item }}.conf"
-    state: link
-  with_items: "{{ icinga__features_combined }}"
-  notify:
-  - Restart Icinga
-
-- name: Add icinga user to group ssl-cert
-  tags: [ 'configuration' ]
-  when: icinga__pki_enable or icinga__role_master or icinga__role_agent
-  ansible.builtin.user:
-    name: nagios
-    groups: ssl-cert
-    append: yes
-  notify:
-  - Restart Icinga
-
-- name: Create directory for SSL certificates
-  tags: [ 'configuration' ]
-  when: icinga__pki_enable or icinga__role_master or icinga__role_agent
-  ansible.builtin.file:
-    dest: /var/lib/icinga2/certs
-    owner: nagios
-    group: nagios
-    mode: 0700
-    state: directory
-  notify:
-  - Restart Icinga
-
-- name: Create links to SSL certificates
-  tags: [ 'configuration' ]
-  when: not ansible_check_mode and (icinga__pki_enable or icinga__role_master or icinga__role_agent)
-  ansible.builtin.file:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    state: link
-  with_items:
-  - src: "/etc/pki/realms/{{ icinga__pki_realm }}/public/ca.crt"
-    dest: /var/lib/icinga2/certs/ca.crt
-  - src: "/etc/pki/realms/{{ icinga__pki_realm }}/public/{{ icinga__pki_realm }}.crt"
-    dest: "/var/lib/icinga2/certs/{{ icinga__pki_realm }}.crt"
-  - src: "/etc/pki/realms/{{ icinga__pki_realm }}/private/{{ icinga__pki_realm }}.key"
-    dest: "/var/lib/icinga2/certs/{{ icinga__pki_realm }}.key"
-  notify:
-  - Restart Icinga
-
-- name: Generate configuration for zones
-  when: icinga__role_master
-  include_tasks: icinga_zones.yml
-  loop_control:
-    loop_var: zone
-  with_items: "{{ icinga__zones | dict2items | rejectattr('key', 'in', ['zones', 'endpoints']) }}"
-
-- name: Check for MySQL database
-  when: icinga__mysql_enable
-  ansible.builtin.shell: "mysql --user={{ icinga__mysql_user }} --password={{ icinga__mysql_password }} -e 'SHOW TABLES;' {{ icinga__mysql_database }} | wc -l"
-  register: icinga__dbstatus
-
-- name: Create MySQL database
-  when: icinga__mysql_enable and icinga__dbstatus.stdout | int < 5
-  ansible.builtin.shell: "mysql --user={{ icinga__mysql_user }} --password={{ icinga__mysql_password }} {{ icinga__mysql_database }} < /usr/share/icinga2-ido-mysql/schema/mysql.sql"
+  - name: Install icinga packages
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      install_recommends: no
+      state: present
+    with_items: "{{ icinga__packages_combined }}"
+  
+  - name: Remove obsolete configuration files
+    tags: [ 'configuration' ]
+    ansible.builtin.file:
+      dest: "/etc/icinga2/{{ item }}"
+      state: absent
+    with_items: "{{ icinga__files_absent }}"
+  
+  - name: Generate common configuration files
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: nagios
+      group: nagios
+      mode: 0644
+    vars:
+      objects: "{{ item.objects | default({}) }}"
+    with_items:
+    - src: etc/icinga2/constants.conf.j2
+      dest: /etc/icinga2/constants.conf
+    - src: etc/icinga2/icinga2.conf.j2
+      dest: /etc/icinga2/icinga2.conf
+    - src: etc/icinga2/zones.conf.j2
+      dest: /etc/icinga2/zones.conf
+      objects: "{{ icinga__zones }}"
+    - src: etc/icinga2/features-available/api.conf.j2
+      dest: /etc/icinga2/features-available/api.conf
+    notify:
+    - Restart Icinga
+  
+  - name: Generate configuration files for master and standalone
+    tags: [ 'configuration' ]
+    when: not icinga__role_agent
+    ansible.builtin.template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: nagios
+      group: nagios
+      mode: 0640
+    vars:
+      type: "{{ item.class | default('undefined') }}"
+      objects: "{{ item.objects | default({}) }}"
+    with_items:
+    - src: etc/icinga2/conf.d/app.conf.j2
+      dest: /etc/icinga2/conf.d/app.conf
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/api-users.conf
+      objects: "{{ icinga__conf_api_users }}"
+      class: ApiUser
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/commands.conf
+      objects: "{{ icinga__conf_commands }}"
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/groups.conf
+      objects: "{{ icinga__conf_groups }}"
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/hosts.conf
+      objects: "{{ icinga__conf_hosts }}"
+      class: Host
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/templates.conf
+      objects: "{{ icinga__conf_templates }}"
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/timeperiods.conf
+      objects: "{{ icinga__conf_timeperiods }}"
+      class: TimePeriod
+    - src: objects.conf.j2
+      dest: /etc/icinga2/conf.d/users.conf
+      objects: "{{ icinga__conf_users }}"
+      class: User
+    - src: applications.conf.j2
+      dest: /etc/icinga2/conf.d/notifications.conf
+      objects: "{{ icinga__conf_notifications }}"
+      class: Notification
+    - src: applications.conf.j2
+      dest: /etc/icinga2/conf.d/services.conf
+      objects: "{{ icinga__conf_services }}"
+      class: Service
+    - src: applications.conf.j2
+      dest: /etc/icinga2/conf.d/downtimes.conf
+      objects: "{{ icinga__conf_downtimes }}"
+      class: ScheduledDowntime
+    notify:
+    - Restart Icinga
+  
+  - name: Generate MySQL configuration
+    tags: [ 'configuration' ]
+    when: icinga__mysql_enable
+    ansible.builtin.template:
+      src: etc/icinga2/features-available/ido-mysql.conf.j2
+      dest: /etc/icinga2/features-available/ido-mysql.conf
+      mode: 0600
+    notify:
+    - Restart Icinga
+  
+  - name: Install monitoring plugins
+    tags: [ 'monitoring' ]
+    when: icinga__enable
+    include_role:
+      name: monitoring
+  
+  - name: Enable features
+    tags: [ 'configuration' ]
+    when: not ansible_check_mode
+    ansible.builtin.file:
+      src: "/etc/icinga2/features-available/{{ item }}.conf"
+      dest: "/etc/icinga2/features-enabled/{{ item }}.conf"
+      state: link
+    with_items: "{{ icinga__features_combined }}"
+    notify:
+    - Restart Icinga
+  
+  - name: Add icinga user to group ssl-cert
+    tags: [ 'configuration' ]
+    when: icinga__pki_enable or icinga__role_master or icinga__role_agent
+    ansible.builtin.user:
+      name: nagios
+      groups: ssl-cert
+      append: yes
+    notify:
+    - Restart Icinga
+  
+  - name: Create directory for SSL certificates
+    tags: [ 'configuration' ]
+    when: icinga__pki_enable or icinga__role_master or icinga__role_agent
+    ansible.builtin.file:
+      dest: /var/lib/icinga2/certs
+      owner: nagios
+      group: nagios
+      mode: 0700
+      state: directory
+    notify:
+    - Restart Icinga
+  
+  - name: Create links to SSL certificates
+    tags: [ 'configuration' ]
+    when: not ansible_check_mode and (icinga__pki_enable or icinga__role_master or icinga__role_agent)
+    ansible.builtin.file:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      state: link
+    with_items:
+    - src: "/etc/pki/realms/{{ icinga__pki_realm }}/public/ca.crt"
+      dest: /var/lib/icinga2/certs/ca.crt
+    - src: "/etc/pki/realms/{{ icinga__pki_realm }}/public/{{ icinga__pki_realm }}.crt"
+      dest: "/var/lib/icinga2/certs/{{ icinga__pki_realm }}.crt"
+    - src: "/etc/pki/realms/{{ icinga__pki_realm }}/private/{{ icinga__pki_realm }}.key"
+      dest: "/var/lib/icinga2/certs/{{ icinga__pki_realm }}.key"
+    notify:
+    - Restart Icinga
+  
+  - name: Generate configuration for zones
+    when: icinga__role_master
+    include_tasks: icinga_zones.yml
+    loop_control:
+      loop_var: zone
+    with_items: "{{ icinga__zones | dict2items | rejectattr('key', 'in', ['zones', 'endpoints']) }}"
+  
+  - name: Check for MySQL database
+    when: icinga__mysql_enable
+    ansible.builtin.shell: "mysql --user={{ icinga__mysql_user }} --password={{ icinga__mysql_password }} -e 'SHOW TABLES;' {{ icinga__mysql_database }} | wc -l"
+    register: icinga__dbstatus
+  
+  - name: Create MySQL database
+    when: icinga__mysql_enable and icinga__dbstatus.stdout | int < 5
+    ansible.builtin.shell: "mysql --user={{ icinga__mysql_user }} --password={{ icinga__mysql_password }} {{ icinga__mysql_database }} < /usr/share/icinga2-ido-mysql/schema/mysql.sql"
