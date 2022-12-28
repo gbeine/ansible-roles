@@ -45,7 +45,8 @@ listen = {{ config.listen }}
 
 ; Set permissions for unix socket, if one is used. In Linux, read/write
 ; permissions must be set in order to allow connections from a web server. Many
-; BSD-derived systems allow connections regardless of permissions.
+; BSD-derived systems allow connections regardless of permissions. The owner
+; and group can be specified either by name or by their numeric IDs.
 ; Default Values: user and group are set as the running user
 ;                 mode is set to 0660
 listen.owner = {{ config.listen_owner }}
@@ -74,7 +75,7 @@ listen.group = {{ config.listen_group }}
 ; process.priority = {{ config.process_priority }}
 
 ; Set the process dumpable flag (PR_SET_DUMPABLE prctl) even if the process user
-; or group is differrent than the master process user. It allows to create process
+; or group is different than the master process user. It allows to create process
 ; core dump and ptrace the process for the pool user.
 ; Default Value: no
 ; process.dumpable = {{ config.process_dumpable | ternary('yes', 'no') }}
@@ -96,6 +97,8 @@ listen.group = {{ config.listen_group }}
 ;                                    state (waiting to process). If the number
 ;                                    of 'idle' processes is greater than this
 ;                                    number then some children will be killed.
+;             pm.max_spawn_rate    - the maximum number of rate to spawn child
+;                                    processes at once.
 ;  ondemand - no children are created at startup. Children will be forked when
 ;             new requests will connect. The following parameter are used:
 ;             pm.max_children           - the maximum number of children that
@@ -131,6 +134,12 @@ pm.min_spare_servers = {{ config.pm_min_spare_servers }}
 ; Note: Mandatory when pm is set to 'dynamic'
 pm.max_spare_servers = {{ config.pm_max_spare_servers }}
 
+; The number of rate to spawn child processes at once.
+; Note: Used only when pm is set to 'dynamic'
+; Note: Mandatory when pm is set to 'dynamic'
+; Default Value: 32
+pm.max_spawn_rate = {{ config.pm_max_spawn_rate }}
+
 ; The number of seconds after which an idle process will be killed.
 ; Note: Used only when pm is set to 'ondemand'
 ; Default Value: 10s
@@ -143,7 +152,7 @@ pm.max_spare_servers = {{ config.pm_max_spare_servers }}
 ;pm.max_requests = {{ config.pm_max_requests }}
 
 ; The URI to view the FPM status page. If this value is not set, no URI will be
-; recognized as a status page. It shows the following informations:
+; recognized as a status page. It shows the following information:
 ;   pool                 - the name of the pool;
 ;   process manager      - static, dynamic or ondemand;
 ;   start time           - the date and time FPM has started;
@@ -233,13 +242,29 @@ pm.max_spare_servers = {{ config.pm_max_spare_servers }}
 ;   last request memory:  0
 ;
 ; Note: There is a real-time FPM status monitoring sample web page available
-;       It's available in: /usr/share/php/7.4/fpm/status.html
+;       It's available in: /usr/share/php/{{ php__version }}/fpm/status.html
 ;
 ; Note: The value must start with a leading slash (/). The value can be
 ;       anything, but it may not be a good idea to use the .php extension or it
 ;       may conflict with a real PHP file.
 ; Default Value: not set
 pm.status_path = {{ config.pm_status_path }}
+
+; The address on which to accept FastCGI status request. This creates a new
+; invisible pool that can handle requests independently. This is useful
+; if the main pool is busy with long running requests because it is still possible
+; to get the status before finishing the long running requests.
+;
+; Valid syntaxes are:
+;   'ip.add.re.ss:port'    - to listen on a TCP socket to a specific IPv4 address on
+;                            a specific port;
+;   '[ip:6:addr:ess]:port' - to listen on a TCP socket to a specific IPv6 address on
+;                            a specific port;
+;   'port'                 - to listen on a TCP socket to all addresses
+;                            (IPv6 and IPv4-mapped) on a specific port;
+;   '/path/to/unix/socket' - to listen on a unix socket.
+; Default Value: value of the listen option
+{{ ';' if config.pm_status_listen | length == 0 }}pm.status_listen = {{ config.pm_status_listen }}
 
 ; The ping URI to call the monitoring page of FPM. If this value is not set, no
 ; URI will be recognized as a ping page. This could be used to test from outside
@@ -273,13 +298,13 @@ ping.response = {{ config.ping_response }}
 ;  %d: time taken to serve the request
 ;      it can accept the following format:
 ;      - %{seconds}d (default)
-;      - %{miliseconds}d
-;      - %{mili}d
+;      - %{milliseconds}d
+;      - %{milli}d
 ;      - %{microseconds}d
 ;      - %{micro}d
 ;  %e: an environment variable (same as $_ENV or $_SERVER)
 ;      it must be associated with embraces to specify the name of the env
-;      variable. Some exemples:
+;      variable. Some examples:
 ;      - server specifics like: %{REQUEST_METHOD}e or %{SERVER_PROTOCOL}e
 ;      - HTTP headers like: %{HTTP_HOST}e or %{HTTP_USER_AGENT}e
 ;  %f: script filename
@@ -309,11 +334,13 @@ ping.response = {{ config.ping_response }}
 ;  %t: server time the request was received
 ;      it can accept a strftime(3) format:
 ;      %d/%b/%Y:%H:%M:%S %z (default)
-;      The strftime(3) format must be encapsuled in a %{<strftime_format>}t tag
+;      The strftime(3) format must be encapsulated in a %{<strftime_format>}t tag
+;      e.g. for a ISO8601 formatted timestring, use: {{ '%{%Y-%m-%dT%H:%M:%S%z}t' }}
 ;  %T: time the log has been written (the request has finished)
 ;      it can accept a strftime(3) format:
 ;      %d/%b/%Y:%H:%M:%S %z (default)
-;      The strftime(3) format must be encapsuled in a %{<strftime_format>}t tag
+;      The strftime(3) format must be encapsulated in a %{<strftime_format>}t tag
+;      e.g. for a ISO8601 formatted timestring, use: {{ '%{%Y-%m-%dT%H:%M:%S%z}t' }}
 ;  %u: remote user
 ;
 ; Default: "%R - %u %t \"%m %r\" %s"
@@ -376,7 +403,7 @@ ping.response = {{ config.ping_response }}
 
 ; Redirect worker stdout and stderr into main error log. If not set, stdout and
 ; stderr will be redirected to /dev/null according to FastCGI specs.
-; Note: on highloaded environement, this can cause some delay in the page
+; Note: on highloaded environment, this can cause some delay in the page
 ; process time (several ms).
 ; Default Value: no
 ;catch_workers_output = {{ config.catch_workers_output | ternary('yes','no') }}
