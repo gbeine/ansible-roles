@@ -77,6 +77,23 @@ def merge_by_key(context, thefirst, thesecond, thekey):
     return result
 
 
+@jinja2.pass_context
+def array2string(context, thearray, join = ',', quote = '"'):
+    """
+
+    :param context: Jinja2 context.
+    :param thethearray: The array
+    :returns: The join result as string
+    """
+    result = ''
+    for value in thearray:
+        if len(result) > 0:
+            result = result + join
+        result = result + quote + str(value) + quote
+
+    return '[' + result + ']'
+
+
 class FilterModule(object):
     """Pragmatic dict filters."""
 
@@ -85,4 +102,5 @@ class FilterModule(object):
             'remove_entries': remove_entries,
             'merge_by_splittedkey': merge_by_splittedkey,
             'merge_by_key': merge_by_key,
+            'array2string': array2string,
         }
