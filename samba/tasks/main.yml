@@ -34,17 +34,42 @@
   - name: Generate configuration files
     tags: [ 'configuration' ]
     ansible.builtin.template:
-      src: "{{ item.src }}"
-      dest: "{{ item.dest }}"
+      src: etc/samba/smb.conf.j2
+      dest: /etc/samba/smb.conf
       owner: root
       group: root
       mode: 0644
-    with_items:
-    - src: etc/samba/smb.conf.j2
-      dest: /etc/samba/smb.conf
+      validate: 'testparm -s %s'
     notify:
     - Restart Samba server
     - Restart winbind
+
+  - name: Create username map file if needed
+    tags: [ 'configuration' ]
+    when: samba__server_username_map | length > 0
+    ansible.builtin.template:
+      src: etc/samba/smbusers.j2
+      dest: /etc/samba/smbusers
+      owner: root
+      group: root
+      mode: 0644
+    notify:
+      - Restart Samba server
+
+  - name: Create Samba users if they don't exist yet
+    tags: [ 'configuration' ]
+    when: samba__users | length > 0
+    ansible.builtin.shell: >
+      set -o nounset -o pipefail -o errexit &&
+      (pdbedit --user={{ item.name }} 2>&1 > /dev/null) \
+      || (echo '{{ item.password }}'; echo '{{ item.password }}') \
+      | smbpasswd -s -a {{ item.name }}
+    args:
+      executable: /bin/bash
+    with_items: "{{ samba__users }}"
+    no_log: true
+    register: create_user_output
+    changed_when: "'Added user' in create_user_output.stdout"
 
   - name: Enable Samba services
     tags: [ 'configuration', 'service' ]

@@ -16,6 +16,29 @@
 
    netbios name = {{ samba__netbios_name }}
 
+   ea support = {{ samba__server_ea_support | ternary('yes', 'no') }}
+
+{{ ';' if samba__server_vfs_objects | length == 0 }}   vfs objects = {{ samba__server_vfs_objects | join(' ') }}
+
+{{ ';' if not samba__server_apple_extensions }}    fruit:aapl = {{ samba__server_apple_extensions | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:nfs_aces = {{ samba__server_apple_nfs_aces | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:copyfile = {{ samba__server_apple_copyfile | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:model = {{ samba__server_apple_model }}
+
+{{ ';' if not samba__server_apple_extensions }}    fruit:resource = {{ samba__server_apple_resource }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:metadata = {{ samba__server_apple_metadata }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:locking = {{ samba__server_apple_locking }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:encoding = {{ samba__server_apple_encoding }}
+
+{{ ';' if not samba__server_apple_extensions }}    fruit:veto_appledouble = {{ samba__server_apple_veto_appledouble | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:posix_rename = {{ samba__server_apple_posix_rename | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    readdir_attr:aapl_rsize = {{ samba__server_apple_aapl_rsize | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    readdir_attr:aapl_finder_info = {{ samba__server_apple_aapl_finder_info | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    readdir_attr:aapl_max_access = {{ samba__server_apple_aapl_max_access | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:wipe_intentionally_left_blank_rfork = {{ samba__server_apple_wipe_intentionally_left_blank_rfork | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:delete_empty_adfiles = {{ samba__server_apple_delete_empty_adfiles | ternary('yes', 'no') }}
+{{ ';' if not samba__server_apple_extensions }}    fruit:zero_file_id = {{ samba__server_apple_zero_file_id | ternary('yes', 'no') }}
+
 
 #### Networking ####
 
@@ -37,6 +60,17 @@
 # the "loopback" interface. For more examples of the syntax see
 # the smb.conf man page
 {{ ';' if samba__server_hosts_allow | length == 0 }}   hosts allow = {{ samba__server_hosts_allow | join(' ') }}
+
+# Default protocol version offered by the server
+   protocol = {{ samba__server_protocol }}
+# Minimum protocol version offered by the server
+   server min protocol = {{ samba__server_min_protocol  }}
+# Maximum protocol version offered by the server
+   server max protocol = {{ samba__server_max_protocol }}
+
+# Fix for CVE-2017-7494 in Samba versions from 3.5.0 and before 4.6.4
+# https://access.redhat.com/security/cve/cve-2017-7494
+   nt pipe support = {{ samba__server_nt_pipe_support | ternary('yes', 'no') }}
 
 
 #### Debugging/Accounting ####
@@ -75,7 +109,7 @@
    server role = {{ samba__server_role }}
 
    security = {{ samba__server_security }}
-   domain logons = {{ samba__server_domain_logons | ternary('yes', 'no') }}
+# deprecated   domain logons = {{ samba__server_domain_logons | ternary('yes', 'no') }}
    os level = {{ samba__server_os_level }}
 
    obey pam restrictions = {{ samba__server_obey_pam_restrictions | ternary('yes', 'no') }}
@@ -113,6 +147,7 @@
 # to anonymous connections
    map to guest = {{ samba__server_map_to_guest }}
 
+{{ ';' if samba__server_username_map | length == 0 }}   username map = /etc/samba/smbusers
 
 ########## LDAP ##############
 
@@ -195,6 +230,18 @@
 # via DNS nslookups. The default is NO.
    dns proxy = {{ samba__server_dns_proxy | ternary('yes', 'no') }}
 
+   local master = {{ samba__server_local_master | ternary('yes', 'no') }}
+   domain master = {{ samba__server_domain_master | ternary('yes', 'no') }}
+   preferred master = {{ samba__server_preferred_master | ternary('yes', 'no') }}
+
+
+########## Printer ###########
+
+   load printers = {{ samba__server_load_printers | ternary('yes', 'no') }}
+   printing = {{ samba__server_printing }}
+   printcap name = {{ samba__server_printcap_name }}
+   disable spoolss = {{ samba__server_disable_spoolss | ternary('yes', 'no') }}
+{{ ';' if samba__server_printing != 'cups' }}   cups server = {{ samba__server_cups_server }}
 
 ############ Misc ############
 
@@ -226,7 +273,7 @@
 
 #======================= Share Definitions =======================
 
-{% for share, config in samba__server_shares.items() %}
+{% for share, config in samba__server_shares_combined.items() %}
 [{{ share }}]
 {% if config.comment is defined %}
    comment = {{ config.comment }}
@@ -243,17 +290,19 @@
 {% if config.guest_ok is defined %}
    guest ok = {{ config.guest_ok | ternary('yes', 'no') }}
 {% endif %}
+{% if config.guest_only is defined %}
+   guest only = {{ config.guest_only | ternary('yes', 'no') }}
+{% endif %}
 {% if config.read_only is defined %}
    read only = {{ config.read_only | ternary('yes', 'no') }}
 {% endif %}
 {% if config.public is defined %}
-   public = {{ config.public | ternary('yes', 'no') }}
+   # 'public' is synonym for 'guest ok'
+   guest ok = {{ config.public | ternary('yes', 'no') }}
 {% endif %}
 {% if config.only_guest is defined %}
-   only guest = {{ config.only_guest | ternary('yes', 'no') }}
-{% endif %}
-{% if config.share_modes is defined %}
-   share modes = {{ config.share_modes | ternary('yes', 'no') }}
+   # 'only guest' is synonym for 'guest only'
+   guest only = {{ config.only_guest | ternary('yes', 'no') }}
 {% endif %}
 {% if config.create_mask is defined %}
    create mask = {{ config.create_mask }}
@@ -262,13 +311,10 @@
    directory mask = {{ config.directory_mask }}
 {% endif %}
 {% if config.valid_users is defined %}
-   valid users = {{ config.valid_users }}
+   valid users = {{ config.valid_users | join(' ')  }}
 {% endif %}
 {% if config.write_list is defined %}
    write list = {{ config.write_list | join(' ') }}
-{% endif %}
-{% if config.profile_acls is defined %}
-   profile acls = {{ config.profile_acls | ternary('yes', 'no') }}
 {% endif %}
 {% if config.csc_policy is defined %}
    csc policy = {{ config.csc_policy }}
