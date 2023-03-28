@@ -10,8 +10,8 @@ def bool(context, thevar):
     :returns: true if var is bool
     """
     result = False
-    result = result or lower(str(thevar)) == 'true'
-    result = result or lower(str(thevar)) == 'false'
+    result = result or str(thevar).lower == 'true'
+    result = result or str(thevar).lower == 'false'
 
     return result
 
