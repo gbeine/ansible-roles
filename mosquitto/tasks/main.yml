@@ -1,0 +1,90 @@
+---
+
+- name: Install and configure mosquitto
+  tags: [ 'mosquitto' ]
+  when: mosquitto__enable
+  block:
+
+  - name: Install mosquitto packages
+    tags: [ 'packages' ]
+    ansible.builtin.apt:
+      name: "{{ item }}"
+      install_recommends: no
+      state: present
+    with_items: "{{ mosquitto__packages }}"
+
+  - name: Create required directories
+    tags: [ 'packages' ]
+    ansible.builtin.file:
+      dest: "{{ item.name }}"
+      state: directory
+      owner: "{{ mosquitto__user }}"
+      group: "{{ mosquitto__user }}"
+      mode: 0750
+    with_items:
+      - name: "{{ mosquitto__security_location }}"
+      - name: "{{ mosquitto__persistence_location }}"
+
+  - name: Configure mosquitto
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: mosquitto.conf.j2
+      dest: "{{ mosquitto__conf_location }}/mosquitto.conf"
+      owner: "{{ mosquitto__user }}"
+      group: "{{ mosquitto__user }}"
+      mode: 0640
+    notify:
+      - Restart mosquitto
+
+  - name: Configure bridges
+    tags: [ 'configuration' ]
+    ansible.builtin.template:
+      src: bridge.conf.j2
+      dest: "{{ mosquitto__include_dir }}/{{ item.connection }}.conf"
+      owner: "{{ mosquitto__user }}"
+      group: "{{ mosquitto__user }}"
+      mode: 0640
+    vars:
+      bridge: "{{ item }}"
+    with_items: "{{ mosquitto__bridges }}"
+    notify:
+      - Restart mosquitto
+
+  - name: Configure acls
+    tags: [ 'configuration' ]
+    when: mosquitto__acl_file | length > 0
+    ansible.builtin.template:
+      src: aclfile.j2
+      dest: "{{ mosquitto__acl_file }}"
+      owner: "{{ mosquitto__user }}"
+      group: "{{ mosquitto__user }}"
+      mode: 0640
+    notify:
+      - Restart mosquitto
+
+  - name: Create password file
+    tags: [ 'configuration' ]
+    when: mosquitto__password_file | length > 0
+    block:
+
+    - name: Check Mosquitto password file existence
+      stat:
+        path: "{{ mosquitto__password_file }}"
+      register: mosquitto___password_file_st
+
+    - name: Create Mosquitto password file
+      file:
+        path: "{{ mosquitto__password_file }}"
+        owner: "{{ mosquitto__user }}"
+        group: "{{ mosquitto__user }}"
+        mode: 0640
+        state: touch
+      when: not mosquitto___password_file_st.stat.exists
+
+    - name: Add Mosquitto user/password entries
+      command:
+        mosquitto_passwd -b "{{ mosquitto__password_file }}" "{{ item }}" "{{ vault__mosquitto_password[item] }}"
+      no_log: true
+      with_items: "{{ mosquitto__acl.user.keys() }}"
+      notify:
+        - Restart mosquitto
