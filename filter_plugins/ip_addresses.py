@@ -21,4 +21,5 @@ class FilterModule(object):
     def filters(self):
         return {
             'netmask2prefixlength': netmask2prefixlength,
+            'netmask2cidr': netmask2prefixlength,
         }
