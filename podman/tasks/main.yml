@@ -1,0 +1,65 @@
+---
+
+- name: Install podman
+  tags: [ 'podman' ]
+  block:
+
+    - name: Install podman packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ podman__packages }}"
+
+    - name: Create podman user directories
+      ansible.builtin.debug:
+        msg: "{{ podman__users }}"
+      when: ansible_check_mode
+
+    - name: Create podman user directories
+      ansible.builtin.file:
+        mode: '750'
+        owner: "{{ item.key }}"
+        group: "{{ item.key }}"
+        path: "{{ item.value.home }}"
+        state: directory
+      with_dict: "{{ podman__users }}"
+      when: not ansible_check_mode
+
+    - name: Create podman networks
+      ansible.builtin.debug:
+        msg: "{{ podman__networks }}"
+      when: ansible_check_mode
+
+    - name: Create podman networks
+      containers.podman.podman_network:
+        name: "{{ item.name }}"
+        disable_dns: "{{ item.disable_dns | default(false) }}"
+        driver: "{{ item.driver | default('bridge') }}"
+        internal: "{{ item.internal | default(false) }}"
+        subnet: "{{ item.address }}/{{ item.netmask }}"
+        gateway: "{{ item.gateway }}"
+      with_items: "{{ podman__networks }}"
+      when: not ansible_check_mode
+
+    - name: Create podman containers
+      ansible.builtin.debug:
+        msg: "{{ podman__containers }}"
+      when: ansible_check_mode
+
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ item.name }}"
+        hostname: "{{ item.hostname }}"
+        image: "{{ item.image }}"
+        ip: "{{ item.ip }}"
+        network: "{{ item.network }}"
+        detach: "{{ item.detach | default(true) }}"
+        env: "{{ podman__container_environment | combine(item.environment | default({})) }}"
+        etc_hosts: "{{ podman__container_etc_hosts | combine(item.hosts | default({}) ) }}"
+        expose: "{{ item.expose | default([]) }}"
+        requires: "{{ item.requires | default([]) }}"
+        restart_policy: "{{ item.restart_policy | default('no') }}"
+        state: "{{ item.state | default('started') }}"
+        timezone: "{{ item.timezone | default(bootstrap_timezone__timezone) }}"
+        volume: "{{ item.volumes | default([]) }}"
+      with_items: "{{ podman__containers }}"
