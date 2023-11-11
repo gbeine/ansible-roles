@@ -1,0 +1,50 @@
+---
+
+- name: Deploy Easy-RSA certificate
+  tags: [ 'pki_easyrsa_deploy'  ]
+  become: yes
+  block:
+
+    - name: Install pki packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ pki_easyrsa_deploy__packages }}"
+
+    - name: Create pki directories
+      ansible.builtin.file:
+        path: "{{ pki_easyrsa_deploy__realms_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+        recurse: yes
+
+    - name: Create ca-certificates directory
+      ansible.builtin.file:
+        path: "{{ pki_easyrsa_deploy__ca_certificates_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+        recurse: yes
+
+    - name: "Copy CA certificate for {{ pki_easyrsa_deploy__ca_cn }} to {{ pki_easyrsa_deploy__ca_certificates_dir }}"
+      ansible.builtin.copy:
+        src: "{{ pki_easyrsa_deploy__pki_dir }}/ca.crt"
+        dest: "{{ pki_easyrsa_deploy__ca_certificates_dir }}/{{ pki_easyrsa_deploy__ca_cn | regex_replace('[^a-zA-Z0-9-_.]', '_') }}.crt"
+        owner: root
+        group: "{{ pki_easyrsa_deploy__public_group }}"
+        mode: "{{ pki_easyrsa_deploy__public_file_mode }}"
+      register: ca_cert_state
+      when: not ansible_check_mode
+
+    - name: Recreate ca-certificates
+      ansible.builtin.shell: "/usr/sbin/update-ca-certificates"
+      when: ca_cert_state.changed
+
+    - name: Deploy certificates for realms
+      include_tasks: realm.yml
+      loop_control:
+        loop_var: realm
+      with_items: "{{ pki_easyrsa_deploy__realms }}"
