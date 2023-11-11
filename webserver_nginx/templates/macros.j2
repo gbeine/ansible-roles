@@ -1,0 +1,139 @@
+{% macro http_server(site, nginx_config) %}
+server {
+        {{ print_list('listen', site.listen) | indent(8) }}
+        {{ acme(site, nginx_config) | indent(8) }}
+{%   if site.force_ssl | default(false) and site.listen_ssl | length > 0 -%}
+        {{ force_ssl(site, nginx_config) | indent(8, True) -}}
+{%   else -%}
+        {{ common(site, nginx_config) | indent(8, True) -}}
+{%   endif -%}
+
+        {{ logs(site, nginx_config) | indent(8, True) -}}
+}
+{%- endmacro %}
+
+{% macro https_server(site, nginx_config) %}
+server {
+        {{ print_list('listen', site.listen_ssl) | indent(8) }}
+        {{ ssl(site, nginx_config) | indent(8) -}}
+        {{ common(site, nginx_config) | indent(8, True) -}}
+        {{ logs(site, nginx_config) | indent(8, True) -}}
+}
+{%- endmacro %}
+
+
+{% set site_config_default = [
+  { 'param': 'index', 'value': [ 'index.html', 'index.htm', 'index.nginx-debian.html' ] },
+  { 'param': 'location', 'target': '/', 'config': [ { 'param': 'try_files', 'value': '$uri $uri/ =404' } ] }
+  ] %}
+
+{% macro common(site, nginx_config) %}
+{{ print_array('server_name', site.server_name) }}
+{{ root(site, nginx_config) if site.root is not false }}
+{%   if site.config is defined %}
+{{ iterate_config(site.config) }}
+{%   else %}
+{{ iterate_config(site_config_default) }}
+{%   endif %}
+{% endmacro %}
+
+{% set location_root_force_ssl = {
+  'target': '/',
+  'config': [
+    { 'param': 'return', 'value': '301 https://$host$request_uri' }
+  ]
+  } %}
+
+{% macro acme(site, nginx_config) %}
+{%   if site.acme_enabled | default(false) %}
+include {{ nginx_config.nginx__snippets_dir }}/acme-challenge.conf;
+{%   endif %}
+{% endmacro %}
+
+{% macro force_ssl(site, nginx_config) %}
+{{ print_array('server_name', site.server_name) -}}
+{{ location(location_root_force_ssl, nginx_config) }}
+{% endmacro %}
+
+{% macro ssl(site, nginx_config) %}
+include {{ nginx_config.nginx__snippets_dir }}/ssl.conf;
+
+{%   if site.acme_enabled | default(false) %}
+ssl_certificate /etc/letsencrypt/live/{{ site.name }}/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/{{ site.name }}/privkey.pem;
+ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+{{ acme(site, nginx_config) -}}
+{%   else %}
+ssl_certificate {{ nginx_config.pki__realms_dir }}/{{ site.name }}/public/{{ site.name }}.fullchain.crt;
+ssl_certificate_key {{ nginx_config.pki__realms_dir }}/{{ site.name }}/private/{{ site.name }}.key;
+{%   endif %}
+
+{% endmacro %}
+
+{% macro location(location, nginx_config) %}
+location {{ location.match + ' ' if location.match is defined }}{{ location.target }} {
+{%   if location.config is defined %}
+{{ iterate_config(location.config) | indent(8, True) -}}
+{%   endif %}
+}
+{% endmacro %}
+
+{% macro if(if, nginx_config) %}
+if ( {{ if.condition }} ) {
+{%   if if.config is defined %}
+{{ iterate_config(if.config) | indent(8, True) -}}
+{%   endif %}
+}
+{% endmacro %}
+
+{% macro iterate_config(config, nginx_config) %}
+{%   for item in config %}
+{%     if item.param is defined %}
+{%       if item.param == 'location' %}
+{{ location(item, nginx_config) -}}
+{%       elif item.param == 'if' %}
+{{ if(item, nginx_config) -}}
+{%       else  %}
+{{ print_item(item) -}}
+{%       endif %}
+{%     endif %}
+{%   endfor %}
+{% endmacro %}
+
+{% macro root(site, nginx_config) %}
+root {{ site.root | default(nginx_config.nginx__www_dir + "/" + site.name + "/public") }};
+{% endmacro %}
+
+{% macro logs(site, nginx_config) %}
+access_log {{ nginx_config.nginx__log_dir }}/{{ site.name }}_access.log;
+error_log {{ nginx_config.nginx__log_dir }}/{{ site.name }}_error.log;
+{% endmacro %}
+
+{% macro print_geo(geo) %}
+geo {{ geo.name }} {
+{%   for item in geo.entries %}
+        {{ item.key }} {{ item.value }};
+{%   endfor %}
+}
+{% endmacro %}
+
+{% macro print_item(item) %}
+{%   if item.value is not defined %}
+{{ item.param }};
+{%   elif item.value is iterable and item.value is not string %}
+{{ item.param }} {{ item.value | join(' ') }};
+{%   else %}
+{{ item.param }} {{ item.value }};
+{%   endif %}
+{% endmacro %}
+
+{% macro print_list(name, list) %}
+{%   for item in list %}
+{{ name }} {{ item }};
+{%   endfor %}
+{% endmacro %}
+
+{% macro print_array(name, array) %}
+{{ name }}
+{{ array | join('\n') | indent(2, True) }};
+{% endmacro %}
