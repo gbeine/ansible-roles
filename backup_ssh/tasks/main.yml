@@ -1,0 +1,47 @@
+---
+
+- name: Configure backup SSH client
+  tags: [ 'backup_ssh'  ]
+  block:
+
+    - name: Check if backup key exists on host
+      ansible.builtin.stat:
+        path: "~/.ssh/{{ backup_ssh__key_name }}"
+      register: ssh_key_stat_result
+
+    - name: Generate SSH key pair for backup over SSH
+      community.crypto.openssh_keypair:
+        comment: "{{ backup_ssh__comment }}"
+        path: "{{ backup_ssh__key_path }}"
+        size: "{{ backup_ssh__key_size }}"
+        state: present
+      when: not ssh_key_stat_result.stat.exists
+
+    - name: Create authorized keys for storagebox
+      ansible.builtin.shell: |
+        ssh-keygen -e -f {{ backup_ssh__key_path }}.pub | grep -v "Comment:" > {{ backup_ssh__key_path }}.rfc
+        cat {{ backup_ssh__key_path }}.pub {{ backup_ssh__key_path }}.rfc > {{ backup_ssh__key_path }}.authorized_keys
+      when: not ssh_key_stat_result.stat.exists
+
+    - name: Move SSH keys to ~/.ssh directory
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: ~/.ssh/
+        mode: 0600
+        remote_src: yes
+      with_items:
+        - "{{ backup_ssh__key_path }}"
+        - "{{ backup_ssh__key_path }}.rfc"
+        - "{{ backup_ssh__key_path }}.pub"
+        - "{{ backup_ssh__key_path }}.authorized_keys"
+      when: not ansible_check_mode and not ssh_key_stat_result.stat.exists
+
+    - name: Remove temporary SSH keys
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - "{{ backup_ssh__key_path }}"
+        - "{{ backup_ssh__key_path }}.rfc"
+        - "{{ backup_ssh__key_path }}.pub"
+        - "{{ backup_ssh__key_path }}.authorized_keys"
