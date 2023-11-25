@@ -1,0 +1,232 @@
+---
+
+- name: Install OpenlDAP server
+  tags: [ 'openldap_server' ]
+  block:
+
+    - name: Install OpenlDAP server packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ openldap_server__packages }}"
+
+    - name: "Is NIS schema active?"
+      ansible.builtin.stat:
+        path: "{{ openldap_server__configdb_schema_dir }}/cn={2}nis.ldif"
+      register: nis_schema_stat_result
+
+    - name: Remove nis schema when using RFC2307bis
+      ansible.builtin.shell: |
+        sed -i.bak '/^include: file:\/\/\/etc\/ldap\/schema\/nis.ldif$/d' /usr/share/slapd/slapd.init.ldif \
+        && sed -i.bak 's/schema\/inetorgperson.ldif$/schema\/inetorgperson.ldif\ninclude: file:\/\/\/etc\/ldap\/schema\/gosa\/rfc2307bis.ldif/' /usr/share/slapd/slapd.init.ldif \
+        && DEBIAN_FRONTEND=noninteractive dpkg-reconfigure slapd
+      notify:
+      - Restart slapd
+      when: openldap_server__rfc2307bis and nis_schema_stat_result.stat.exists
+
+    - name: Create directory for LDAP schema files
+      ansible.builtin.file:
+        dest: "{{ openldap_server__schema_dir }}"
+        owner: openldap
+        group: openldap
+        mode: '755'
+        state: directory
+
+    - name: Install OpenLDAP schema files
+      include_tasks: schema.yml
+      loop_control:
+        loop_var: schema
+      with_items: "{{ openldap_server__schemes }}"
+
+    - name: Initial OpenLDAP configuration
+      # see: https://serverfault.com/questions/587721/basic-openldap-setup-using-slapd-d-configuration
+      block:
+
+        - name: Is admin account and password set?
+          ansible.builtin.shell: |
+            grep olcRoot {{ openldap_server__configdb_database_file }} | wc -l
+          register: admin_account_stat
+
+        - name: Set configuration admin account and password
+          ansible.builtin.shell: |
+            SLAPPASSWD=`slappasswd -s ${LDAP__PASSWD}`
+            echo "dn: olcDatabase={0}config,cn=config
+            changetype: modify
+            replace: olcRootDN
+            olcRootDN: ${LDAP__ROOTDN}
+            -
+            replace: olcRootPW
+            olcRootPW: ${SLAPPASSWD}
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          environment:
+            LDAP__ROOTDN: "{{ openldap_server__configdb_admin_dn }}"
+            LDAP__PASSWD: "{{ openldap_server__configdb_admin_password }}"
+          notify:
+          - Restart slapd
+          when: not admin_account_stat.stdout | int == 2
+
+        - name: Add selected schemes
+          ansible.builtin.shell: |
+            test -f {{ openldap_server__configdb_schema_dir }}/*{{ item | regex_replace('.*/', '') }}.ldif \
+            || ldapadd -a -Q -Y EXTERNAL -H ldapi:/// -f {{ openldap_server__schema_dir }}/{{ item }}.ldif
+          with_items: "{{ openldap_server__schemes }}"
+          notify:
+          - Restart slapd
+
+        - name: Activate modules
+          ansible.builtin.shell: |
+            grep {{ item }} {{ openldap_server__configdb_database_dir }}/cn=module* || \
+            echo "dn: cn=module{0},cn=config
+            changetype: modify
+            add: olcModuleLoad
+            olcModuleLoad: {{ item }}
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          with_items: "{{ openldap_server__modules }}"
+          notify:
+          - Restart slapd
+
+        - name: Add indices
+          ansible.builtin.shell: |
+            grep {{ item.attributes }} {{ openldap_server__configdb_database_dir }}/{{ item.ldif }} || \
+            echo "dn: {{ item.dn }}
+            changetype: modify
+            add: olcDbIndex
+            olcDbIndex: {{ item.attributes }} eq
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          with_items: "{{ openldap_server__database.indices }}"
+          notify:
+          - Restart slapd
+
+        - name: Add overlays
+          ansible.builtin.shell: |
+            grep -r {{ item.overlay }} {{ openldap_server__configdb_database_dir }}/{{ item.ldif }} || \
+            echo "dn: {{ item.dn }}
+            changetype: add
+            {{ item.entries | join('\n') }}
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          with_items: "{{ openldap_server__database.overlays }}"
+          notify:
+          - Restart slapd
+
+    - name: TLS configuration
+      when: openldap_server__tls_enable
+      block:
+
+        - name: Create directory for SSL certificates
+          ansible.builtin.file:
+            dest: "{{ openldap_server__cert_dir }}"
+            owner: openldap
+            group: openldap
+            mode: '700'
+            state: directory
+
+        - name: Copy SSL certificates to OpenLDAP configuration directory
+          ansible.builtin.copy:
+            remote_src: yes
+            src: "{{ item }}"
+            dest: "{{ openldap_server__cert_dir }}"
+            owner: openldap
+            group: openldap
+          with_items:
+            - "{{ openldap_server__tls_ca }}"
+            - "{{ openldap_server__tls_cert }}"
+            - "{{ openldap_server__tls_key  }}"
+
+        - name: Set Set TLS configuration
+          # See: https://stackoverflow.com/questions/51745010/ldap-modify-other-e-g-implementation-specific-error-80
+          ansible.builtin.shell: |
+            echo "dn: cn=config
+            changetype: modify
+            replace: olcTLSCACertificateFile
+            olcTLSCACertificateFile: {{ openldap_server__cert_dir }}/ca.crt
+            -
+            replace: olcTLSCertificateKeyFile
+            olcTLSCertificateKeyFile: {{ openldap_server__cert_dir }}/{{ openldap_server__tls_realm }}.key
+            -
+            replace: olcTLSCertificateFile
+            olcTLSCertificateFile: {{ openldap_server__cert_dir }}/{{ openldap_server__tls_realm }}.crt
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          notify:
+          - Restart slapd
+
+    - name: Generate OpenLDAP server default files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: 0644
+      with_items:
+      - src: slapd.j2
+        dest: /etc/default/slapd
+      notify:
+      - Restart slapd
+
+    - name: OpenLDAP database configuration
+      block:
+
+        - name: Set database admin account and password
+          ansible.builtin.shell: |
+            SLAPPASSWD=`slappasswd -s ${LDAP__PASSWD}`
+            echo "dn: olcDatabase={1}mdb,cn=config
+            changetype: modify
+            replace: olcSuffix
+            olcSuffix: ${LDAP__BASEDN}
+            -
+            replace: olcRootDN
+            olcRootDN: ${LDAP__ROOTDN}
+            -
+            replace: olcRootPW
+            olcRootPW: ${SLAPPASSWD}
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          environment:
+            LDAP__BASEDN: "{{ openldap_server__base_dn }}"
+            LDAP__ROOTDN: "{{ openldap_server__admin_dn }}"
+            LDAP__PASSWD: "{{ openldap_server__admin_password }}"
+          notify:
+          - Restart slapd
+
+        - name: Reset access privileges
+          ansible.builtin.shell: |
+            echo "dn: olcDatabase={1}mdb,cn=config
+            changetype: modify
+            delete: olcAccess
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          ignore_errors: true
+
+        - name: Set access privileges
+          ansible.builtin.shell: |
+            echo "dn: olcDatabase={1}mdb,cn=config
+            changetype: modify
+            add: olcAccess
+            olcAccess: to {{ item.to }} by {{ item.by | join(' by ') }}
+            " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+          with_items: "{{ openldap_server__database.access }}"
+          notify:
+          - Restart slapd
+
+    - name: OpenLDAP database initializiation
+      block:
+
+        - name: Database already initialized?
+          ansible.builtin.shell: "slapcat | wc -l"
+          register: database_initialized_stat
+
+        - name: Create database root entry
+          when: database_initialized_stat.stdout | int == 0
+          ansible.builtin.shell: |
+            systemctl stop slapd
+            echo "dn: ${LDAP__BASEDN}
+            objectClass: top
+            objectClass: dcObject
+            objectClass: organization
+            o: ${LDAP__ORGANIZATION}
+            
+            dn: ${LDAP_ROOTDN}
+            objectclass: organizationalRole
+            " | slapadd
+            systemctl start slapd
+          environment:
+            LDAP__ROOTDN: "{{ openldap_server__admin_dn }}"
+            LDAP__BASEDN: "{{ openldap_server__base_dn }}"
+            LDAP__ORGANIZATION: "{{ openldap_server__organization }}"
