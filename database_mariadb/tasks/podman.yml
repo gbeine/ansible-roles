@@ -1,0 +1,63 @@
+---
+
+- name: Install MariaDB using podman
+  block:
+
+    - name: Install MariaDB container
+      ansible.builtin.debug:
+        msg: "{{ database_mariadb__podman_default }}"
+      when: ansible_check_mode
+
+    - name: Install MariaDB container
+      ansible.builtin.import_role:
+        name: podman
+      vars:
+        pod_containers: "{{ database_mariadb__podman_default }}"
+
+    - name: Generate MariaDB configuration
+      ansible.builtin.template:
+        src: podman-custom.cnf.j2
+        dest: "{{ database_mariadb__podman_home }}/custom.cnf"
+        owner: mariadb
+        group: mariadb
+        mode: 0644
+      notify: Restart MariaDB container
+
+    - name: Install pymysql
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ database_mariadb__podman_packages }}"
+
+    - name: Removes all anonymous user accounts
+      community.mysql.mysql_user:
+        login_user: root
+        login_password: "{{ vault__mariadb_password_list[database_mariadb__podman_hostname]['root'] }}"
+        login_host: "{{ database_mariadb__podman_ip }}"
+        name: ''
+        host_all: yes
+        state: absent
+      notify: Restart MariaDB container
+
+    - name: Create databases
+      community.mysql.mysql_db:
+        login_user: root
+        login_password: "{{ vault__mariadb_password_list[database_mariadb__podman_hostname]['root'] }}"
+        login_host: "{{ database_mariadb__podman_ip }}"
+        name: "{{ database_mariadb__databases }}"
+        encoding: utf8
+        collation: utf8_bin
+        state: present
+      notify: Restart MariaDB container
+
+    - name: Create database users with privileges
+      community.mysql.mysql_user:
+        login_user: root
+        login_password: "{{ vault__mariadb_password_list[database_mariadb__podman_hostname]['root'] }}"
+        login_host: "{{ database_mariadb__podman_ip }}"
+        name: "{{ item.name }}"
+        password: "{{ vault__mariadb_password_list[database_mariadb__podman_hostname][item.name] }}"
+        priv: "{{ item.privileges }}"
+        state: present
+      with_items: "{{ database_mariadb__accounts }}"
+      notify: Restart MariaDB container
