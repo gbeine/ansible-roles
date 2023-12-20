@@ -1,0 +1,46 @@
+---
+
+- name: Configure ACME certificate for site {{ site.name }}
+  when: site.acme_enabled is defined and site.acme_enabled
+  block:
+    - name: "Has certificate for site {{ site.name }} been aquired?"
+      ansible.builtin.stat:
+        path: "{{ pki_acme__renewal_dir }}/{{ site.name }}.conf"
+      register: acme_realm_stat_result
+
+    - name: "Aquire ACME certificate for site {{ site.name }}"
+      when: not acme_realm_stat_result.stat.exists
+      ansible.builtin.command:
+        cmd: "certbot certonly {{ pki_acme__global_options }} --apache --cert-name {{ site.name }} -d {{ site.server_name | join(' -d ') }} --rsa-key-size {{ site.key_size | default(2048) }}"
+      environment: "{{ pki_acme__environment }}"
+
+- name: Configure site {{ site.name }}
+  block:
+
+    - name: "Generate configuration file for site {{ site.name }}"
+      ansible.builtin.template:
+        src: site.conf.j2
+        dest: "{{ webserver_apache__sites_available_dir }}/{{ site.name }}.conf"
+        owner: root
+        group: root
+        mode: '644'
+      notify:
+        - Restart Apache
+
+    - name: "Ensure root exists for site {{ site.name }}"
+      when: site.root is not defined or site.root is not false
+      ansible.builtin.file:
+        dest: "{{ site.root | default(webserver_apache__www_dir + '/' + site.name + '/public') }}"
+        state: directory
+        owner: "{{ site.user | default(webserver_apache__user) }}"
+        group: "{{ site.group | default(webserver_apache__group) }}"
+        mode: "{{  site.mode | default(webserver_apache__site_mode) }}"
+
+    - name: "Enable site {{ site.name }}"
+      ansible.builtin.file:
+        src: "{{ webserver_apache__sites_available_dir }}/{{ site.name }}.conf"
+        dest: "{{ webserver_apache__sites_enabled_dir }}/{{ site.name }}.conf"
+        state: link
+      when: site.enabled and not ansible_check_mode
+      notify:
+       - Restart Apache

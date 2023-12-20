@@ -1,0 +1,51 @@
+---
+
+- name: Install Apache
+  tags: [ 'webserver_apache'  ]
+  block:
+
+    - name: Install Apache packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ webserver_apache__packages }}"
+
+    - name: Generate Apache configuration files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ item.mode | default('root') }}"
+        group: "{{ item.mode | default('root') }}"
+        mode: "{{ item.mode | default('644') }}"
+      with_items:
+        - src: apache-htcacheclean.j2
+          dest: "/etc/default/apache-htcacheclean"
+        - src: envvars.j2
+          dest: "{{ webserver_apache__etc_dir }}/envvars"
+        - src: apache2.conf.j2
+          dest: "{{ webserver_apache__etc_dir }}/apache2.conf"
+        - src: ports.conf.j2
+          dest: "{{ webserver_apache__etc_dir }}/ports.conf"
+        - src: acme-challenge.conf.j2
+          dest: "{{ webserver_apache__conf_dir }}/acme-challenge.conf"
+      notify:
+        - Restart Apache
+
+    - name: "Enable default modules"
+      ansible.builtin.shell: "a2enmod {{ webserver_apache__modules | join(' ') }}"
+
+    - name: Create sites configuration
+      include_tasks: site.yml
+      loop_control:
+        loop_var: site
+      with_items: "{{ webserver_apache__sites }}"
+
+    - name: "Disable default site"
+      ansible.builtin.shell: a2dissite 000-default
+
+    - name: Enable Apache service
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: yes
+      when: not ansible_check_mode
