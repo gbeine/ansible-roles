@@ -1,0 +1,60 @@
+---
+
+- name: Install Diun for podman monitoring
+  tags: [ 'monitoring__diun' ]
+  block:
+
+    - name: Create Diun user & group
+      ansible.builtin.shell: |
+        {{ item }}
+      with_items:
+        - "getent group {{ monitoring_diun__group }} || addgroup --quiet --system {{ monitoring_diun__group }}"
+        - "getent user {{ monitoring_diun__user }} || adduser --quiet --system --home {{ monitoring_diun__lib_dir }} --shell /bin/false --ingroup {{ monitoring_diun__group }} --disabled-password --disabled-login --gecos 'Diun podman monitoring account' {{ monitoring_diun__user }}"
+
+    - name: Create Diun user directories
+      ansible.builtin.file:
+        mode: '750'
+        owner: "{{ monitoring_diun__user }}"
+        group: "{{ monitoring_diun__group }}"
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - "{{ monitoring_diun__etc_dir }}"
+        - "{{ monitoring_diun__lib_dir }}"
+
+    - name: Download Diun package
+      ansible.builtin.get_url:
+        url: "{{ monitoring_diun__url }}"
+        dest: "{{ monitoring_diun__lib_dir }}/{{ monitoring_diun__package }}"
+        owner: "{{ monitoring_diun__user }}"
+        group: "{{ monitoring_diun__group }}"
+        mode: '440'
+        checksum: "sha256:{{ monitoring_diun__checksum_url }}"
+      when: not ansible_check_mode
+
+    - name: Extract Diun package
+      ansible.builtin.unarchive:
+        remote_src: true
+        src: "{{ monitoring_diun__lib_dir }}/{{ monitoring_diun__package }}"
+        dest: "{{ monitoring_diun__lib_dir }}"
+      when: not ansible_check_mode
+
+    - name: Move Diun binary to installation folder
+      ansible.builtin.copy:
+        remote_src: true
+        src: "{{ monitoring_diun__lib_dir }}/diun"
+        dest: "{{ monitoring_diun__bin_dir }}/diun"
+        owner: root
+        group: root
+        mode: '755'
+      when: not ansible_check_mode
+
+    - name: Generate configuration files
+      ansible.builtin.template:
+        src: diun.yml.j2
+        dest: "{{ monitoring_diun__etc_dir }}/diun.yml"
+        owner: diun
+        group: diun
+        mode: '640'
+#      notify:
+#        - Restart Diun
