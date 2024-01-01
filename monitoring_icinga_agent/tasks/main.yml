@@ -1,0 +1,76 @@
+---
+
+- name: Install and configure Icinga 2 agent
+  tags: [ 'monitoring_icinga_agent' ]
+  block:
+
+    - name: Install Icinga 2 packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ monitoring_icinga_agent__packages }}"
+
+    - name: Generate configuration files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('644') }}"
+      with_items:
+        - src: app.conf.j2
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/conf.d/app.conf"
+        - src: api.conf.j2
+          dest: "{{ monitoring_icinga_common__features_available_dir }}/api.conf"
+        - src: checker.conf.j2
+          dest: "{{ monitoring_icinga_common__features_available_dir }}/checker.conf"
+        - src: debuglog.conf.j2
+          dest: "{{ monitoring_icinga_common__features_available_dir }}/debuglog.conf"
+        - src: mainlog.conf.j2
+          dest: "{{ monitoring_icinga_common__features_available_dir }}/mainlog.conf"
+        - src: notification.conf.j2
+          dest: "{{ monitoring_icinga_common__features_available_dir }}/notification.conf"
+        - src: constants.conf.j2
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/constants.conf"
+        - src: icinga2.conf.j2
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/icinga2.conf"
+        - src: zones.conf.j2
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/zones.conf"
+      notify:
+        - Restart Icinga
+
+    - name: Remove obsolete configuration files
+      ansible.builtin.file:
+        dest: "{{ item }}"
+        state: absent
+      with_items: "{{ monitoring_icinga_agent__configuration_files_absent }}"
+      notify:
+        - Restart Icinga
+
+    - name: Enable features for Icinga agent
+      ansible.builtin.file:
+        src: "{{ monitoring_icinga_common__features_available_dir }}/{{ item }}.conf"
+        dest: "{{ monitoring_icinga_common__features_enabled_dir }}/{{ item }}.conf"
+        state: link
+      with_items: "{{ monitoring_icinga_agent__features_enabled }}"
+      notify:
+        - Restart Icinga
+
+    - name: Create directory for SSL certificates
+      ansible.builtin.file:
+        dest: "{{ monitoring_icinga_agent__crt_dir }}"
+        owner: "{{ monitoring_icinga_agent__user }}"
+        group: "{{ monitoring_icinga_agent__group }}"
+        mode: 0700
+        state: directory
+      notify:
+        - Restart Icinga
+
+    - name: Copy SSL certificates to Icinga certificate directory
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ monitoring_icinga_agent__crt_dir }}"
+        owner: "{{ monitoring_icinga_agent__user }}"
+        group: "{{ monitoring_icinga_agent__group }}"
+        remote_src: yes
+      with_items: "{{ monitoring_icinga_agent__certificate_files }}"
