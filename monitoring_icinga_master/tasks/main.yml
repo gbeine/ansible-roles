@@ -1,0 +1,103 @@
+---
+
+- name: Install and configure Icinga 2 master
+  tags: [ 'monitoring_icinga_master' ]
+  block:
+
+    - name: Install Icinga 2 packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ monitoring_icinga_master__packages }}"
+
+    - name: Generate configuration files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner | default(monitoring_icinga_master__user) }}"
+        group: "{{ item.group | default(monitoring_icinga_master__group) }}"
+        mode: "{{ item.mode | default('644') }}"
+      with_items: "{{ monitoring_icinga_master__configuration_files }}"
+      notify:
+        - Restart Icinga
+
+    - name: Create directories for zones
+      ansible.builtin.file:
+        dest: "{{ monitoring_icinga_master__zones_dir }}/{{ item.key }}"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        mode: '755'
+        state: directory
+      with_dict: "{{ monitoring_icinga_master__zone_hosts }}"
+
+    - name: Generate host configuration files for zones
+      ansible.builtin.template:
+        src: hosts.conf.j2
+        dest: "{{ monitoring_icinga_master__zones_dir }}/{{ item.key }}/hosts.conf"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        mode: '644'
+      with_dict: "{{ monitoring_icinga_master__zone_hosts }}"
+      vars:
+        monitoring_icinga_master__hosts: "{{ item.value }}"
+      notify:
+        - Restart Icinga
+
+    - name: Generate service configuration files for zones
+      ansible.builtin.template:
+        src: services.conf.j2
+        dest: "{{ monitoring_icinga_master__zones_dir }}/{{ item.key }}/services.conf"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        mode: '644'
+      with_dict: "{{ monitoring_icinga_master__zone_services }}"
+      vars:
+        monitoring_icinga_master__services: "{{ item.value }}"
+      notify:
+        - Restart Icinga
+
+    - name: Remove obsolete configuration files
+      ansible.builtin.file:
+        dest: "{{ item }}"
+        state: absent
+      with_items: "{{ monitoring_icinga_master__configuration_files_absent }}"
+      notify:
+        - Restart Icinga
+
+    - name: Enable features for Icinga master
+      ansible.builtin.file:
+        src: "{{ monitoring_icinga_common__features_available_dir }}/{{ item }}.conf"
+        dest: "{{ monitoring_icinga_common__features_enabled_dir }}/{{ item }}.conf"
+        state: link
+      with_items: "{{ monitoring_icinga_master__features_enabled }}"
+      notify:
+        - Restart Icinga
+
+    - name: Create directory for SSL certificates
+      ansible.builtin.file:
+        dest: "{{ monitoring_icinga_master__crt_dir }}"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        mode: 0700
+        state: directory
+      notify:
+        - Restart Icinga
+
+    - name: Copy SSL certificates to Icinga certificate directory
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ monitoring_icinga_master__crt_dir }}"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        remote_src: yes
+      with_items: "{{ monitoring_icinga_master__certificate_files }}"
+      when: not ansible_check_mode
+
+    - name: Check for MySQL database
+      ansible.builtin.shell: "mysql --user={{ monitoring_icinga_master__mysql_user }} --password={{ monitoring_icinga_master__mysql_password }} -e 'SHOW TABLES;' {{ monitoring_icinga_master__mysql_database }} | wc -l"
+      register: monitoring_icinga_master__dbstatus
+      when: monitoring_icinga_master__mysql_enabled
+
+    - name: Create MySQL database if not existings
+      ansible.builtin.shell: "mysql --user={{ monitoring_icinga_master__mysql_user }} --password={{ monitoring_icinga_master__mysql_password }} {{ monitoring_icinga_master__mysql_database }} < /usr/share/icinga2-ido-mysql/schema/mysql.sql"
+      when: monitoring_icinga_master__mysql_enabled and monitoring_icinga_master__dbstatus.stdout | int < 5
