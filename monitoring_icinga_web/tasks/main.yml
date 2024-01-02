@@ -1,0 +1,77 @@
+---
+
+- name: Install and configure Icinga Web 2
+  tags: [ 'monitoring_icinga_web' ]
+  block:
+
+    - name: Install PHP
+      ansible.builtin.import_role:
+        name: webserver_php
+      vars:
+        php_modules: "{{ monitoring_icinga_web__php_modules }}"
+
+    - name: Install Icinga Web 2 packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ monitoring_icinga_web__packages }}"
+
+    - name: Install Icinga Web 2 module packages
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ monitoring_icinga_web__modules_packages }}"
+
+    - name: Create configuration directories
+      ansible.builtin.file:
+        dest: "{{ item }}"
+        owner: "{{ monitoring_icinga_web__user }}"
+        group: "{{ monitoring_icinga_web__group }}"
+        mode: '770'
+        state: directory
+      with_items:
+        - "{{ monitoring_icinga_web__etc_dir }}"
+        - "{{ monitoring_icinga_web__modules_etc_dir }}"
+        - "{{ monitoring_icinga_web__modules_enabled_dir }}"
+        - "{{ monitoring_icinga_web__modules_dir }}/monitoring"
+
+    - name: Generate configuration files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ monitoring_icinga_web__user }}"
+        group: "{{ monitoring_icinga_web__group }}"
+        mode: '660'
+      with_items:
+        - src: authentication.ini.j2
+          dest: "{{ monitoring_icinga_web__etc_dir }}/authentication.ini"
+        - src: config.ini.j2
+          dest: "{{ monitoring_icinga_web__etc_dir }}/config.ini"
+        - src: groups.ini.j2
+          dest: "{{ monitoring_icinga_web__etc_dir }}/groups.ini"
+        - src: resources.ini.j2
+          dest: "{{ monitoring_icinga_web__etc_dir }}/resources.ini"
+        - src: roles.ini.j2
+          dest: "{{ monitoring_icinga_web__etc_dir }}/roles.ini"
+        - src: monitoring_backends.ini.j2
+          dest: "{{ monitoring_icinga_web__modules_etc_dir }}/monitoring/backends.ini"
+        - src: monitoring_commandtransports.ini.j2
+          dest: "{{ monitoring_icinga_web__modules_etc_dir }}/monitoring/commandtransports.ini"
+        - src: monitoring_config.ini.j2
+          dest: "{{ monitoring_icinga_web__modules_etc_dir }}/monitoring/config.ini"
+
+    - name: Enable features for Icinga Web 2
+      ansible.builtin.file:
+        src: "{{ monitoring_icinga_web__modules_dir }}/{{ item }}"
+        dest: "{{ monitoring_icinga_web__modules_enabled_dir }}/{{ item }}"
+        state: link
+      with_items: "{{ monitoring_icinga_web__modules_enabled }}"
+
+    - name: Check for MySQL database
+      ansible.builtin.shell: "mysql --user={{ monitoring_icinga_web__db_user }} --password={{ monitoring_icinga_web__db_password }} -e 'SHOW TABLES;' {{ monitoring_icinga_web__db_name }} | wc -l"
+      register: monitoring_icinga_web__dbstatus
+      when: monitoring_icinga_web__mysql_enabled
+
+    - name: Create MySQL database if not existings
+      ansible.builtin.shell: "mysql --user={{ monitoring_icinga_web__db_user }} --password={{ monitoring_icinga_web__db_password }} {{ monitoring_icinga_web__db_name }} < /usr/share/icingaweb2/schema/mysql.schema.sql"
+      when: monitoring_icinga_web__mysql_enabled and monitoring_icinga_web__dbstatus.stdout | int < 5
