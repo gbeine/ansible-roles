@@ -1,0 +1,49 @@
+---
+
+- name: Install MongoDB using podman
+  block:
+
+    - name: Create MongoDB directories
+      ansible.builtin.file:
+        dest: "{{ item }}"
+        state: directory
+      with_items:
+        - "{{ database_mongodb__etc_dir }}"
+        - "{{ database_mongodb__data_dir }}"
+
+    - name: Install MongoDB container
+      ansible.builtin.debug:
+        msg: "{{ database_mongodb__podman_container }}"
+      when: ansible_check_mode
+
+    - name: Install MongoDB container
+      ansible.builtin.import_role:
+        name: podman
+      vars:
+        pod_containers:
+          - "{{ database_mongodb__podman_container }}"
+
+    - name: Install pymongo
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ database_mongodb__podman_packages }}"
+
+# !!!
+# This is a very bad thing, but as long as python3-pymongo is orphaned, this is the way to deal with it
+# See: https://tracker.debian.org/pkg/pymongo
+# !!!
+    - name: HACK - Override Debian pymongo package
+      ansible.builtin.shell: PYTHONPATH=/usr/local/lib/python3.11/dist-packages pip install --break-system-packages pymongo
+
+    - name: Create databases and users
+      community.mongodb.mongodb_user:
+        database: "{{ item.database }}"
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+        login_user: "{{ item.login_user | default(database_mongodb__username) }}"
+        login_password: "{{ item.login_password | default(database_mongodb__password) }}"
+        login_host: "{{ item.login_host | default('localhost') }}"
+        roles: "{{ item.roles | default({}) }}"
+        state: present
+      with_items: "{{ database_mongodb__accounts }}"
