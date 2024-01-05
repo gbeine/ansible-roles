@@ -1,0 +1,79 @@
+#!/bin/bash
+#
+# backup.mongodb - Backup MongoDB databases from Docker/podman containers
+#
+# (c) 2011-2023 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+	echo "$0 not called from within backup script"
+	exit
+fi
+
+if [ -r /etc/backup/mongodb ]; then
+	. /etc/backup/mongodb
+fi
+
+: ${daily_backup_mongodb_enable="NO"}
+: ${daily_backup_mongodb_compress="YES"}
+: ${daily_backup_mongodb_user="_backup_"}
+: ${daily_backup_mongodb_password="_backup_"}
+: ${daily_backup_mongodb_authentication_database="admin"}
+: ${daily_backup_mongodb_ignore_databases="admin config"}
+: ${daily_backup_mongodb_container="NO"}
+: ${daily_backup_mongodb_container_name="mongodb"}
+: ${daily_backup_mongodb_backup_dir="/var/backups/mongodb"}
+: ${daily_backup_mongodb_keep_days="-14days"}
+: ${daily_backup_mongodb_dump_options=""}
+
+mongodb_auth_options="-u ${daily_backup_mongodb_user} -p ${daily_backup_mongodb_password} --authenticationDatabase=${daily_backup_mongodb_authentication_database}"
+mongodb_show="/usr/bin/mongosh"
+mongodb_show_options="${mongodb_auth_options} --quiet"
+mongodb_dump="/usr/bin/mongodump"
+mongodb_dump_options="${mongodb_auth_options} --archive"
+mongodb_podman="/usr/bin/podman exec"
+mongodb_docker="/usr/bin/docker exec"
+
+find="/usr/bin/find"
+find_cleanup_options="-type f -not -newermt ${daily_backup_mongodb_keep_days} -delete"
+xz="/usr/bin/xz"
+xz_options=""
+
+today=`date +%Y%m%d`
+
+case "${daily_backup_mongodb_container}" in
+  [Pp][Oo][Dd][Mm][Aa][Nn])
+    echo "Running MongoDB backup from podman"
+    mongodb_show="${mongodb_podman} ${daily_backup_mongodb_container_name} ${mongodb_show}"
+    mongodb_dump="${mongodb_podman} ${daily_backup_mongodb_container_name} ${mongodb_dump}"
+    ;;
+  [Do][Oo][Cc][Kk][Ee][Rr])
+    echo "Running MongoDB backup from Docker"
+    mongodb_show="${mongodb_docker} ${daily_backup_mongodb_container_name} ${mongodb_show}"
+    mongodb_dump="${mongodb_docker} ${daily_backup_mongodb_container_name} ${mongodb_dump}"
+    ;;
+esac
+
+rc=0
+case "${daily_backup_mongodb_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup MongoDB databases"
+
+		mkdir -p ${daily_backup_mongodb_backup_dir} || true
+
+		for db in `${mongodb_show} ${mongodb_show_options} --eval "show databases" | cut -d' ' -f1`; do
+			if [[ " ${daily_backup_mongodb_ignore_databases[@]} " =~ " ${db} " ]]; then
+				continue
+			fi
+			${mongodb_dump} ${mongodb_dump_options} --db ${db} > ${daily_backup_mongodb_backup_dir}/${db}-${today}.dump
+			${xz} ${xz_options} ${daily_backup_mongodb_backup_dir}/${db}-${today}.dump
+		done
+
+		${find} ${daily_backup_mongodb_backup_dir} ${find_cleanup_options}
+
+		;;
+esac
+
+exit "${rc}"
