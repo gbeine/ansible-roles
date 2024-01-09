@@ -11,6 +11,25 @@
         - "{{ database_mongodb__etc_dir }}"
         - "{{ database_mongodb__data_dir }}"
 
+    - name: Change owner for MongoDB data dir
+      ansible.builtin.shell: "chown {{ database_mongodb__podman_uid }} {{ database_mongodb__data_dir }}"
+
+    - name: Create MongoDB configuration
+      ansible.builtin.template:
+        src: mongod.conf.j2
+        dest: "{{ database_mongodb__etc_dir }}/mongod.conf"
+
+    - name: Create MongoDB keyfile
+      ansible.builtin.copy:
+        content: "{{ database_mongodb__key }}"
+        dest: "{{ database_mongodb__etc_dir }}/mongod.keyfile"
+        mode: '600'
+      when: database_mongodb__use_keyfile
+
+    - name: Change owner for MongoDB keyfile
+      ansible.builtin.shell: "chown {{ database_mongodb__podman_uid }} {{ database_mongodb__etc_dir }}/mongod.keyfile"
+      when: database_mongodb__use_keyfile
+
     - name: Install MongoDB container
       ansible.builtin.debug:
         msg: "{{ database_mongodb__podman_container }}"
@@ -22,6 +41,13 @@
       vars:
         pod_containers:
           - "{{ database_mongodb__podman_container }}"
+
+#
+# TODO: Test status before doing this and remove '|| true'
+#
+    - name: Initialize replicationSet
+      ansible.builtin.shell: "podman exec -it {{ database_mongodb__podman_container_name }} mongosh --eval \"rs.initiate()\" || true"
+      when: database_mongodb__use_replication_set
 
     - name: Install pymongo
       ansible.builtin.apt:
@@ -36,9 +62,12 @@
     - name: HACK - Override Debian pymongo package
       ansible.builtin.shell: PYTHONPATH=/usr/local/lib/python3.11/dist-packages pip install --break-system-packages pymongo
 
+    - name: Create root user
+      ansible.builtin.shell: "podman exec -it {{ database_mongodb__podman_container_name }} mongosh --eval \"db.createUser({ user: '{{ database_mongodb__username }}', pwd: '{{ database_mongodb__password }}', roles: [ { role: 'root', db: '{{ database_mongodb__authdb }}' } ] })\" {{ database_mongodb__authdb }}"
+
     - name: Create databases and users
       community.mongodb.mongodb_user:
-        database: "{{ item.database }}"
+        database: "{{ item.database | default(database_mongodb__authdb) }}"
         name: "{{ item.name }}"
         password: "{{ item.password }}"
         login_user: "{{ item.login_user | default(database_mongodb__username) }}"
