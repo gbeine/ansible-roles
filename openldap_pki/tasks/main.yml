@@ -1,0 +1,45 @@
+---
+
+- name: Install OpenlDAP PKI
+  tags: [ 'openldap_pki' ]
+  block:
+
+    - name: Create directory for SSL certificates
+      ansible.builtin.file:
+        dest: "{{ openldap_pki__cert_dir }}"
+        owner: "{{ openldap_pki__user }}"
+        group: "{{ openldap_pki__group }}"
+        mode: '700'
+        state: directory
+
+    - name: Copy SSL certificates to OpenLDAP configuration directory
+      ansible.builtin.copy:
+        remote_src: yes
+        src: "{{ item }}"
+        dest: "{{ openldap_pki__cert_dir }}"
+        owner: "{{ openldap_pki__user }}"
+        group: "{{ openldap_pki__group }}"
+        mode: '700'
+      with_items:
+        - "{{ openldap_pki__tls_ca }}"
+        - "{{ openldap_pki__tls_cert }}"
+        - "{{ openldap_pki__tls_key  }}"
+      notify:
+        - Restart slapd
+
+    - name: Set Set TLS configuration
+      # See: https://stackoverflow.com/questions/51745010/ldap-modify-other-e-g-implementation-specific-error-80
+      ansible.builtin.shell: |
+        echo "dn: cn=config
+        changetype: modify
+        replace: olcTLSCACertificateFile
+        olcTLSCACertificateFile: {{ openldap_pki__cert_dir }}/ca.crt
+        -
+        replace: olcTLSCertificateKeyFile
+        olcTLSCertificateKeyFile: {{ openldap_pki__cert_dir }}/{{ openldap_pki__tls_realm }}.key
+        -
+        replace: olcTLSCertificateFile
+        olcTLSCertificateFile: {{ openldap_pki__cert_dir }}/{{ openldap_pki__tls_realm }}.crt
+        " | ldapmodify -a -Q -Y EXTERNAL -H ldapi:///
+      notify:
+        - Restart slapd
