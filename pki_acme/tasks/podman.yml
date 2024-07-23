@@ -1,0 +1,76 @@
+---
+
+- name: Install ACME pki support
+  block:
+
+    - name: Create letsencrypt directories
+      ansible.builtin.file:
+        mode: '755'
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - "{{ pki_acme__podman_etc }}"
+        - "{{ pki_acme__podman_lib }}"
+
+    - name: Create configuration files
+      ansible.builtin.template:
+        src: dns-hetzner.j2
+        dest: "{{ pki_acme__podman_etc }}/dns-hetzner"
+        mode: '640'
+      when: pki_acme__podman_provider == 'dns-hetzner'
+
+    - name: Install certbot container
+      ansible.builtin.debug:
+        msg: "{{ pki_acme__podman_container }}"
+      when: ansible_check_mode
+
+    - name: Install certbot container
+      containers.podman.podman_container:
+        name: "{{ pki_acme__podman_container.name }}"
+        hostname: "{{ pki_acme__podman_container.hostname }}"
+        image: "{{ pki_acme__podman_container.image }}"
+        ip: "{{ pki_acme__podman_container.ip }}"
+        network: "{{ pki_acme__podman_container.network }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        rm: true
+        timezone: "{{ pki_acme__podman_container.timezone | default(bootstrap_timezone__timezone) }}"
+        volume: "{{ pki_acme__podman_container.volumes }}"
+      when: not ansible_check_mode
+
+    - name: Wait for stopping certbot container
+      ansible.builtin.wait_for:
+        timeout: 2
+
+    - name: Register or update ACME account
+      when: pki_acme__email | length > 0
+      ansible.builtin.shell: |
+        {{ pki_acme__podman_run}} update_account {{ pki_acme__register_options }} \
+        || \
+        {{ pki_acme__podman_run}} register {{ pki_acme__register_options }}
+      environment: "{{ pki_acme__environment }}"
+
+    - name: Wait for stopping certbot container
+      ansible.builtin.wait_for:
+        timeout: 2
+
+    - name: Create certificate for domains
+      when: pki_acme__realms | length > 0
+      ansible.builtin.shell: |
+        {{ pki_acme__podman_run}} certonly {{ pki_acme__podman_certbot_options }} --cert-name {{ item.realm }} -d {{ item.domains | join (' -d ') }}
+      with_items: "{{ pki_acme__realms }}"
+      environment: "{{ pki_acme__environment }}"
+
+    - name: Create systemd service and timer
+      block:
+
+        - name: Create systemd service
+          ansible.builtin.import_role:
+            name: systemd_services
+          vars:
+            systemd_services: "{{ pki_acme__podman_systemd_services }}"
+
+        - name: Create systemd timer
+          ansible.builtin.import_role:
+            name: systemd_timers
+          vars:
+            systemd_timers: "{{ pki_acme__podman_systemd_timers }}"

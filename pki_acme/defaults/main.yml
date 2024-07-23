@@ -4,6 +4,20 @@ pki_acme__pki_dir: "{{ pki_acme_pki_dir | default(pki_acme__pki_dir_default) }}"
 pki_acme__email: "{{ pki_acme_email | default('') }}"
 pki_acme__provider: "{{ pki_acme_provider | default('acme-staging-v02') }}"
 
+pki_acme__realms: "{{ pki_acme_realms | default([])}}"
+
+pki_acme__use_podman: "{{ pki_acme_use_podman | default(false) }}"
+
+pki_acme__podman_provider: "{{ pki_acme_pod_provider | default('dns-hetzner') }}"
+pki_acme__podman_hostname: "{{ pki_acme_pod_hostname | default('certbot.' + dns_hostname) }}"
+pki_acme__podman_ip: "{{ pki_acme_pod_ip | mandatory }}"
+pki_acme__podman_network: "{{ pki_acme_pod_net | mandatory }}"
+pki_acme__podman_home: "{{ pki_acme_pod_home | mandatory }}"
+pki_acme__podman_etc: "{{ pki_acme_pod_etc | default(pki_acme__podman_home + '/etc') }}"
+pki_acme__podman_lib: "{{ pki_acme_pod_lib | default(pki_acme__podman_home + '/lib') }}"
+
+pki_acme__dns_hetzner_api_token: "{{ pki_acme_dns_hetzner_api_token | mandatory }}"
+
 #
 # Do not change from here
 #
@@ -26,6 +40,30 @@ pki_acme__provider_server:
   acme-v02: https://acme-v02.api.letsencrypt.org/directory
   acme-staging-v02: https://acme-staging-v02.api.letsencrypt.org/directory
 
+pki_acme__podman_run: "podman run -it --rm --name {{ pki_acme__podman_container.name }} -v {{ pki_acme__podman_container.volumes | join(' -v ') }} {{ pki_acme__podman_container.image }}"
+pki_acme__podman_certbot_options: "{{ pki_acme__global_options }} {{ pki_acme__podman_certbot_options_default[pki_acme__podman_provider] }}"
+
+pki_acme__podman_container: "{{ pki_acme__podman_container_default }}"
+
+pki_acme__podman_container_default:
+  name: certbot
+  hostname: "{{ pki_acme__podman_hostname }}"
+  image: "{{ pki_acme__podman_images_default[pki_acme__podman_provider] }}"
+  ip: "{{ pki_acme__podman_ip }}"
+  network: "{{ pki_acme__podman_network }}"
+  rm: true
+  volumes:
+    - "{{ pki_acme__podman_etc }}:/etc/letsencrypt"
+    - "{{ pki_acme__podman_lib }}:/var/lib/letsencrypt"
+
+pki_acme__podman_images_default:
+  certbot: 'docker.io/certbot/certbot:latest'
+  dns-hetzner: 'docker.io/gbeine/dns-hetzner:latest'
+
+pki_acme__podman_certbot_options_default:
+  certbot: ''
+  dns-hetzner: '--authenticator dns-hetzner --dns-hetzner-credentials /etc/letsencrypt/dns-hetzner'
+
 pki_acme__packages_default:
   Debian:
     - certbot
@@ -33,3 +71,23 @@ pki_acme__packages_default:
   Raspbian:
     - certbot
     - python3-icu
+
+pki_acme__podman_systemd_services:
+  - name: certbot-podman-renew
+    description: certbot renew
+    wants:
+      - certbot-podman-renew.timer
+    type: simple
+    user: root
+    exec_start: "{{ pki_acme__podman_run }} renew"
+    environment:
+      PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+pki_acme__podman_systemd_timers:
+  - name: certbot-podman-renew
+    description: certbot renew Timer
+    on_calendar: 'daily'
+    persistent: true
+    wanted_by:
+      - timers.target
+    enabled: true
