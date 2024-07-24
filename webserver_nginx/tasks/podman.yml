@@ -1,0 +1,72 @@
+---
+
+- name: Install nginx podman container
+  block:
+
+    - name: Create nginx directories
+      ansible.builtin.file:
+        mode: '755'
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - "{{ webserver_nginx__podman_etc_dir }}"
+        - "{{ webserver_nginx__podman_log_dir }}"
+        - "{{ webserver_nginx__podman_www_dir }}"
+        - "{{ webserver_nginx__podman_conf_dir }}"
+        - "{{ webserver_nginx__podman_snippets_dir }}"
+        - "{{ webserver_nginx__podman_sites_available_dir }}"
+        - "{{ webserver_nginx__podman_sites_enabled_dir }}"
+
+    - name: Generate nginx configuration files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ item.mode | default('root') }}"
+        group: "{{ item.mode | default('root') }}"
+        mode: "{{ item.mode | default('644') }}"
+      with_items:
+        - src: nginx.conf.j2
+          dest: "{{ webserver_nginx__podman_etc_dir }}/nginx.conf"
+        - src: fastcgi-php.conf.j2
+          dest: "{{ webserver_nginx__podman_etc_dir }}/fastcgi-php.conf"
+        - src: http-upgrade.conf.j2
+          dest: "{{ webserver_nginx__podman_conf_dir }}/http-upgrade.conf"
+        - src: snippets/fastcgi-php.conf.j2
+          dest: "{{ webserver_nginx__podman_snippets_dir }}/fastcgi-php.conf"
+        - src: snippets/locations.conf.j2
+          dest: "{{ webserver_nginx__podman_snippets_dir }}/locations.conf"
+        - src: snippets/ssl.conf.j2
+          dest: "{{ webserver_nginx__podman_snippets_dir }}/ssl.conf"
+        - src: snippets/status.conf.j2
+          dest: "{{ webserver_nginx__podman_snippets_dir }}/status.conf"
+      notify:
+        - Restart nginx
+
+    - name: "Disable default site"
+      ansible.builtin.file:
+        dest: "{{ webserver_nginx__sites_enabled_dir }}/default"
+        state: absent
+
+    - name: Create sites configuration
+      include_tasks: site.yml
+      loop_control:
+        loop_var: site
+      with_items: "{{ webserver_nginx__sites }}"
+
+    - name: Install nginx container
+      ansible.builtin.debug:
+        msg: "{{ webserver_nginx__podman_container }}"
+      when: ansible_check_mode
+
+    - name: Install nginx container
+      containers.podman.podman_container:
+        name: "{{ webserver_nginx__podman_container.name }}"
+        hostname: "{{ webserver_nginx__podman_container.hostname }}"
+        image: "{{ webserver_nginx__podman_container.image }}"
+        ip: "{{ webserver_nginx__podman_container.ip }}"
+        network: "{{ webserver_nginx__podman_container.network }}"
+        publish: "{{ webserver_nginx__podman_container.publish }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        timezone: "{{ webserver_nginx__podman_container.timezone | default(bootstrap_timezone__timezone) }}"
+        volume: "{{ webserver_nginx__podman_container.volumes }}"
+      when: not ansible_check_mode

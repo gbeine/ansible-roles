@@ -1,11 +1,24 @@
 ---
 
+webserver_nginx__use_podman: "{{ nginx_use_podman | default(false) }}"
+
+webserver_nginx__podman_hostname: "{{ nginx_pod_hostname | default('nginx.' + dns_hostname) }}"
+webserver_nginx__podman_ip: "{{ nginx_pod_ip | mandatory }}"
+webserver_nginx__podman_network: "{{ nginx_pod_net | mandatory }}"
+webserver_nginx__podman_home: "{{ nginx_pod_home | mandatory }}"
+webserver_nginx__podman_etc_dir: "{{ nginx_pod_etc | default(webserver_nginx__podman_home + '/etc') }}"
+webserver_nginx__podman_log_dir: "{{ nginx_pod_log | default(webserver_nginx__podman_home + '/log') }}"
+webserver_nginx__podman_www_dir: "{{ nginx_pod_www | default(webserver_nginx__podman_home + '/www') }}"
+webserver_nginx__podman_http_port: "{{ nginx_pod_http | default(80) }}"
+webserver_nginx__podman_https_port: "{{ nginx_pod_https | default(443) }}"
+webserver_nginx__podman_volumes: "{{ nginx_pod_volumes | default([]) }}"
+
 #
 # Substitutes - do not change
 #
 
 webserver_nginx__worker_priority: "{{ nginx_worker_priority | default(0) }}"
-webserver_nginx__worker_processes: "{{ nginx_worker_processes | default(ansible_processor_vcpus) }}"
+webserver_nginx__worker_processes: "{{ nginx_worker_processes | default( 'auto' if webserver_nginx__use_podman else ansible_processor_vcpus ) }}"
 webserver_nginx__worker_rlimit_nofile: "{{ nginx_worker_rlimit_nofile | default(4096) }}"
 webserver_nginx__worker_connections: "{{ nginx_worker_connections | default(1024) }}"
 webserver_nginx__multi_accept: "{{ nginx_multi_accept | default('off') }}"
@@ -48,8 +61,8 @@ webserver_nginx__snippets_dir: "{{ webserver_nginx__etc_dir }}/snippets"
 webserver_nginx__sites_available_dir: "{{ webserver_nginx__etc_dir }}/sites-available"
 webserver_nginx__sites_enabled_dir: "{{ webserver_nginx__etc_dir }}/sites-enabled"
 
-webserver_nginx__user: www-data
-webserver_nginx__group: www-data
+webserver_nginx__user: "{{ 'nginx' if webserver_nginx__use_podman else 'www-data' }}"
+webserver_nginx__group: "{{ 'nginx' if webserver_nginx__use_podman else 'www-data' }}"
 
 webserver_nginx__site_mode: "750"
 
@@ -131,6 +144,34 @@ webserver_nginx__locations_default:
       deny: all
       log_not_found: 'off'
       access_log: 'off'
+
+webserver_nginx__podman_container: "{{ webserver_nginx__podman_container_default }}"
+
+webserver_nginx__podman_container_default:
+  name: nginx
+  hostname: "{{ webserver_nginx__podman_hostname }}"
+  image: "docker.io/nginx:latest"
+  ip: "{{ webserver_nginx__podman_ip }}"
+  network: "{{ webserver_nginx__podman_network }}"
+  publish:
+    - "{{ webserver_nginx__podman_http_port }}:80"
+    - "{{ webserver_nginx__podman_https_port }}:443"
+  volumes: "{{ webserver_nginx__podman_volumes_default + webserver_nginx__podman_volumes }}"
+
+webserver_nginx__podman_conf_dir: "{{ webserver_nginx__podman_etc_dir }}/conf.d"
+webserver_nginx__podman_snippets_dir: "{{ webserver_nginx__podman_etc_dir }}/snippets"
+webserver_nginx__podman_sites_available_dir: "{{ webserver_nginx__podman_etc_dir }}/sites-available"
+webserver_nginx__podman_sites_enabled_dir: "{{ webserver_nginx__podman_etc_dir }}/sites-enabled"
+
+webserver_nginx__podman_volumes_default:
+  - "{{ webserver_nginx__podman_etc_dir }}/nginx.conf:{{ webserver_nginx__etc_dir }}/nginx.conf:ro"
+  - "{{ webserver_nginx__podman_etc_dir }}/fastcgi-php.conf:{{ webserver_nginx__etc_dir }}/fastcgi-php.conf:ro"
+  - "{{ webserver_nginx__podman_conf_dir }}:{{ webserver_nginx__conf_dir }}:ro"
+  - "{{ webserver_nginx__podman_snippets_dir }}:{{ webserver_nginx__snippets_dir }}:ro"
+  - "{{ webserver_nginx__podman_sites_available_dir }}:{{ webserver_nginx__sites_available_dir }}:ro"
+  - "{{ webserver_nginx__podman_sites_enabled_dir }}:{{ webserver_nginx__sites_enabled_dir }}:ro"
+  - "{{ webserver_nginx__podman_log_dir }}:{{ webserver_nginx__log_dir }}"
+  - "{{ webserver_nginx__podman_www_dir }}:{{ webserver_nginx__www_dir }}"
 
 webserver_nginx__packages: "{{ webserver_nginx__packages_default[bootstrap_ansible__distribution] | default([]) }}"
 
