@@ -14,7 +14,8 @@
         - "{{ app_gitlab_ce__data_dir }}"
         - "{{ app_gitlab_ce__logs_dir }}"
         - "{{ app_gitlab_ce__config_dir }}"
-        - "{{ app_gitlab_ce__config_dir }}/trusted-certs"
+        - "{{ app_gitlab_ce__ssl_dir }}"
+        - "{{ app_gitlab_ce__trusted_certs_dir }}"
 
     - name: Create GitLab CE configuration
       ansible.builtin.template:
@@ -24,15 +25,43 @@
         group: root
         mode: '640'
 
+    - name: SSL for registry
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: yes
+      with_items:
+        - src: "{{ pki_easyrsa_common__realms_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}/private/{{ app_gitlab_ce__registry_ssl_realm }}.key"
+          dest: "{{ app_gitlab_ce__ssl_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}.key"
+        - src: "{{ pki_easyrsa_common__realms_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}/public/{{ app_gitlab_ce__registry_ssl_realm }}.fullchain.crt"
+          dest: "{{ app_gitlab_ce__ssl_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}.crt"
+      when: app_gitlab_ce__registry_enable
+
     - name: Copy SSL CA into containers
       ansible.builtin.copy:
         src: "{{ pki_easyrsa_deploy__ca_certificates_file }}"
         dest: "{{ app_gitlab_ce__config_dir }}/trusted-certs/{{ pki_easyrsa_deploy__ca_name }}.crt"
         remote_src: yes
 
-    - name: Deploy GitLab CE container via podman
-      ansible.builtin.import_role:
-        name: podman
-      vars:
-        pod_containers:
-          - "{{ app_gitlab_ce__container }}"
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ app_gitlab_ce__container_default.name }}"
+        hostname: "{{ app_gitlab_ce__container_default.hostname }}"
+        image: "{{ app_gitlab_ce__container_default.image }}"
+        ip: "{{ app_gitlab_ce__container_default.ip }}"
+        network: "{{ app_gitlab_ce__container_default.network }}"
+        expose: "{{ app_gitlab_ce__container_default.expose }}"
+        publish: "{{ app_gitlab_ce__container_default.publish }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_gitlab_ce__container_default.restart_policy }}"
+        etc_hosts: "{{ app_gitlab_ce__container_default.hosts }}"
+        shm_size: "{{ app_gitlab_ce__container_default.shm_size }}"
+        env:
+          'TZ': 'Europe/Berlin'
+        timezone: "{{ app_gitlab_ce__container_default.timezone | default(bootstrap_timezone__timezone) }}"
+        volume: "{{ [
+          app_gitlab_ce__config_dir + ':/etc/gitlab',
+          app_gitlab_ce__data_dir + ':/var/opt/gitlab',
+          app_gitlab_ce__logs_dir + ':/var/log/gitlab'
+        ] }}"
+#      when: not ansible_check_mode
