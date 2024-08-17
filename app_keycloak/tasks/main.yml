@@ -1,0 +1,81 @@
+---
+
+- name: Deploy Keycloak container
+  tags: [ 'app_keycloak' ]
+  block:
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ app_keycloak__container.name }}"
+        hostname: "{{ app_keycloak__container.hostname }}"
+        image: "{{ app_keycloak__container.image }}"
+        ip: "{{ app_keycloak__container.ip }}"
+        network: "{{ app_keycloak__container.network }}"
+        expose: "{{ app_keycloak__container.expose | default([]) }}"
+        publish: "{{ app_keycloak__container.publish | default([]) }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_keycloak__container.restart_policy }}"
+        etc_hosts: "{{ app_keycloak__container.hosts }}"
+        shm_size: "{{ app_keycloak__container.shm_size }}"
+        env: "{{ app_keycloak__container.environment }}"
+        timezone: "{{ app_keycloak__container.timezone }}"
+        volume: "{{ app_keycloak__container.volumes | default([]) }}"
+        command: "{{ app_keycloak__container.command }}"
+      when: app_keycloak__ipv6 | length == 0
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ app_keycloak__container.name }}"
+        hostname: "{{ app_keycloak__container.hostname }}"
+        image: "{{ app_keycloak__container.image }}"
+        ip: "{{ app_keycloak__container.ip }}"
+        ip6: "{{ app_keycloak__container.ipv6 }}"
+        network: "{{ app_keycloak__container.network }}"
+        expose: "{{ app_keycloak__container.expose }}"
+        publish: "{{ app_keycloak__container.publish }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_keycloak__container.restart_policy }}"
+        etc_hosts: "{{ app_keycloak__container.hosts }}"
+        shm_size: "{{ app_keycloak__container.shm_size }}"
+        env: "{{ app_keycloak__container.environment }}"
+        timezone: "{{ app_keycloak__container.timezone }}"
+        volume: "{{ app_keycloak__container.volumes | default([]) }}"
+        command: "{{ app_keycloak__container.command }}"
+      when: app_keycloak__ipv6 | length > 0
+
+    - name: Wait starting up keycloak containers
+      ansible.builtin.wait_for:
+        timeout: "{{ app_keycloak__container_bootstrap_timeout }}"
+
+# See: https://docs.ansible.com/ansible/latest/collections/community/general/keycloak_realm_module.html
+    - name: Create or update Keycloak realms
+      tags: [ 'app_keycloak_config' ]
+      community.general.keycloak_realm:
+        auth_client_id: admin-cli
+        auth_keycloak_url: "{{ app_keycloak__auth_url }}"
+        auth_realm: "{{ app_keycloak__auth_realm }}"
+        auth_username: "{{ app_keycloak__auth_username }}"
+        auth_password: "{{ app_keycloak__auth_password }}"
+        id: "{{ item.id }}"
+        realm: "{{ item.realm }}"
+        display_name: "{{ item.display_name | default(app_keycloak__realm_default.display_name) }}"
+        login_with_email_allowed: "{{ item.login_with_email | default(app_keycloak__realm_default.login_with_email) }}"
+        enabled: "{{ item.enabled | default(true) }}"
+        state: 'present'
+      with_items: "{{ app_keycloak__realms }}"
+
+    - name: Create or update Keycloak user federation
+      tags: [ 'app_keycloak_config' ]
+      include_tasks: user_federation.yml
+      loop_control:
+        loop_var: realm
+      with_items: "{{ app_keycloak__realms }}"
+
+    - name: Create or update Keycloak client
+      tags: [ 'app_keycloak_config' ]
+      include_tasks: client.yml
+      loop_control:
+        loop_var: realm
+      with_items: "{{ app_keycloak__realms }}"
