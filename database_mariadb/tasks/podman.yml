@@ -6,51 +6,43 @@
     - name: Create MariaDB directory
       ansible.builtin.file:
         mode: '750'
-        owner: "{{ database_mariadb__podman_uid }}"
-        group: "{{ database_mariadb__podman_gid }}"
-        path: "{{ database_mariadb__podman_home }}"
+        owner: "{{ database_mariadb__uid }}"
+        group: "{{ database_mariadb__gid }}"
+        path: "{{ database_mariadb__home }}"
         state: directory
-      when: not ansible_check_mode
-
-    - name: Install MariaDB container
-      ansible.builtin.debug:
-        msg: "{{ database_mariadb__podman_container }}"
-      when: ansible_check_mode
-
-    - name: Install MariaDB container
-      containers.podman.podman_container:
-        name: "{{ database_mariadb__podman_container.name }}"
-        hostname: "{{ database_mariadb__podman_container.hostname }}"
-        image: "{{ database_mariadb__podman_container.image }}"
-        ip: "{{ database_mariadb__podman_container.ip }}"
-        network: "{{ database_mariadb__podman_container.network }}"
-        env: "{{ podman__container_environment | combine(database_mariadb__podman_container.environment | default({})) }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ database_mariadb__podman_container.restart_policy | default('on-failure') }}"
-        timezone: "{{ database_mariadb__podman_container.timezone | default(bootstrap_timezone__timezone) }}"
-        volume: "{{ database_mariadb__podman_container.volumes | default([]) }}"
       when: not ansible_check_mode
 
     - name: Generate MariaDB configuration
       ansible.builtin.template:
         src: podman-custom.cnf.j2
-        dest: "{{ database_mariadb__podman_home }}/custom.cnf"
-        owner: "{{ database_mariadb__podman_uid }}"
-        group: "{{ database_mariadb__podman_gid }}"
+        dest: "{{ database_mariadb__home }}/custom.cnf"
+        owner: "{{ database_mariadb__uid }}"
+        group: "{{ database_mariadb__gid }}"
         mode: '640'
       notify: Restart MariaDB container
 
-    - name: Install pymysql
-      ansible.builtin.apt:
-        update_cache: yes
-        install_recommends: no
-        pkg: "{{ database_mariadb__podman_packages }}"
+    - name: Install MariaDB container
+      containers.podman.podman_container:
+        name: "{{ database_mariadb__container.name }}"
+        hostname: "{{ database_mariadb__container.hostname }}"
+        image: "{{ database_mariadb__container.image }}"
+        ip: "{{ database_mariadb__container.ip }}"
+        network: "{{ database_mariadb__container.network }}"
+        expose: "{{ database_mariadb__container.expose | default([]) }}"
+        publish: "{{ database_mariadb__container.publish | default([]) }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ database_mariadb__container.restart_policy }}"
+        etc_hosts: "{{ database_mariadb__container.hosts }}"
+        env: "{{ database_mariadb__container.environment }}"
+        timezone: "{{ database_mariadb__container.timezone }}"
+        volume: "{{ database_mariadb__container.volumes }}"
+      when: database_mariadb__ipv6 | length == 0
 
     - name: Removes all anonymous user accounts
       community.mysql.mysql_user:
         login_user: root
-        login_password: "{{ database_mariadb__podman_root_pass }}"
-        login_host: "{{ database_mariadb__podman_ip }}"
+        login_password: "{{ database_mariadb__root_pass }}"
+        login_host: "{{ database_mariadb__ip }}"
         name: "{{ item }}"
         host_all: yes
         state: absent
@@ -58,21 +50,23 @@
         - ''
         - 'PUBLIC'
       notify: Restart MariaDB container
+      when: not ansible_check_mode
 
     - name: Create databases
       community.mysql.mysql_db:
         login_user: root
-        login_password: "{{ database_mariadb__podman_root_pass }}"
-        login_host: "{{ database_mariadb__podman_ip }}"
+        login_password: "{{ database_mariadb__root_pass }}"
+        login_host: "{{ database_mariadb__ip }}"
         name: "{{ database_mariadb__databases }}"
         state: present
       notify: Restart MariaDB container
+      when: not ansible_check_mode
 
     - name: Create database users with privileges
       community.mysql.mysql_user:
         login_user: root
-        login_password: "{{ database_mariadb__podman_root_pass }}"
-        login_host: "{{ database_mariadb__podman_ip }}"
+        login_password: "{{ database_mariadb__root_pass }}"
+        login_host: "{{ database_mariadb__ip }}"
         name: "{{ item.name }}"
         host: "{{ item.host | default('localhost') }}"
         password: "{{ vault__mariadb_password_list[database_mariadb__podman_hostname][item.name] }}"
@@ -80,6 +74,7 @@
         state: present
       with_items: "{{ database_mariadb__accounts }}"
       notify: Restart MariaDB container
+      when: not ansible_check_mode
 
     - name: Generate root login configuration
       ansible.builtin.template:
@@ -90,4 +85,4 @@
         mode: '600'
       vars:
         database_mariadb__password:
-          root: "{{ database_mariadb__podman_root_pass }}"
+          root: "{{ database_mariadb__root_pass }}"
