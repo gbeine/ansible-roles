@@ -15,6 +15,19 @@ def shortname(context, fqdn):
 
 
 @jinja2.pass_context
+def reverse(context, fqdn):
+    """
+
+    :param context: Jinja2 context.
+    :param fqdn: The full qualified domain name
+    :returns: The FQDN in reverse order
+    """
+    splitted = fqdn.split('.')
+
+    return '.'.join(reversed(splitted))
+
+
+@jinja2.pass_context
 def addresslist(context, nametable, reverse=True):
     """
 
@@ -40,5 +53,6 @@ class FilterModule(object):
     def filters(self):
         return {
             'bootstrap_hosts__shortname': shortname,
-            'bootstrap_hosts__addresslist': addresslist
+            'bootstrap_hosts__addresslist': addresslist,
+            'bootstrap_hosts__reverse': reverse
         }
