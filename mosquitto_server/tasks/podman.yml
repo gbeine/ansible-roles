@@ -1,0 +1,51 @@
+---
+
+- name: Install mosquitto support
+  block:
+
+    - name: Create mosquitto directories
+      ansible.builtin.file:
+        mode: '755'
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - "{{ mosquitto_server__config_dir }}"
+        - "{{ mosquitto_server__data_dir }}"
+        - "{{ mosquitto_server__log_dir }}"
+
+    - name: Generate mosquitto configuration files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode | default('644') }}"
+      with_items:
+        - src: mosquitto.conf.j2
+          dest: "{{ mosquitto_server__config_dir }}/mosquitto.conf"
+        - src: aclfile.j2
+          dest: "{{ mosquitto_server__config_dir }}/aclfile"
+        - src: pwfile.j2
+          dest: "{{ mosquitto_server__config_dir }}/pwfile"
+          mode: 600
+      notify:
+        - Restart mosquitto container
+
+    - name: Install mosquitto container
+      containers.podman.podman_container:
+        name: "{{ mosquitto_server__container.name }}"
+        hostname: "{{ mosquitto_server__container.hostname }}"
+        image: "{{ mosquitto_server__container.image }}"
+        ip: "{{ mosquitto_server__container.ip }}"
+        network: "{{ mosquitto_server__container.network }}"
+        expose: "{{ mosquitto_server__container.expose }}"
+        publish: "{{ mosquitto_server__container.publish }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ mosquitto_server__container.restart_policy }}"
+        etc_hosts: "{{ mosquitto_server__container.hosts }}"
+        timezone: "{{ mosquitto_server__container.timezone }}"
+        volume: "{{ mosquitto_server__container.volumes }}"
+      when: mosquitto_server__ipv6 | length == 0
+
+    - name: Encrypt passwords
+      ansible.builtin.shell: "podman exec -it {{ mosquitto_server__container.name }} mosquitto_passwd -U '/mosquitto/config/pwfile' || true"
+      notify:
+        - Restart mosquitto container
