@@ -4,14 +4,44 @@
   tags: [ 'app_bookstack' ]
   block:
 
-    - name: Deploy container via podman
-      ansible.builtin.import_role:
-        name: podman
-      vars:
-        pod_containers:
-          - "{{ app_bookstack__container }}"
-        pod_users:
-          - "{{ app_bookstack__account }}"
+    - name: Ensure group "bookstack" exists with correct gid
+      ansible.builtin.group:
+        name: "{{ app_bookstack__user }}"
+        state: 'present'
+        gid: "{{ app_bookstack__gid }}"
+
+    - name: Ensure user "bookstack" exists with correct uid
+      ansible.builtin.user:
+        name: "{{ app_bookstack__user }}"
+        state: 'present'
+        uid: "{{ app_bookstack__uid }}"
+        group: "{{ app_bookstack__user }}"
+
+    - name: Create BookStack directory
+      ansible.builtin.file:
+        mode: '750'
+        path: "{{ app_bookstack__home }}"
+        state: 'directory'
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ app_bookstack__container.name }}"
+        hostname: "{{ app_bookstack__container.hostname }}"
+        image: "{{ app_bookstack__container.image }}"
+        ip: "{{ app_bookstack__container.ip }}"
+        network: "{{ app_bookstack__container.network }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_bookstack__container.restart_policy }}"
+        etc_hosts: "{{ app_bookstack__container.hosts }}"
+        env: "{{ app_bookstack__container.environment }}"
+        timezone: "{{ app_bookstack__container.timezone }}"
+        volume: "{{ app_bookstack__container.volumes | default([]) }}"
+      when: app_bookstack__ipv6 | length == 0
+
+    - name: Copy SSL CA into containers
+      ansible.builtin.shell: "podman cp {{ app_bookstack__ca_file }} {{ app_bookstack__container.name }}:{{ pki_easyrsa_deploy__ca_certificates_dir }} && podman exec -it {{ app_bookstack__container.name }} update-ca-certificates"
+      when: app_bookstack__ca_file | length > 0
 
     - name: Generate BookStack .env file
       ansible.builtin.template:
