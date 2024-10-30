@@ -1,0 +1,58 @@
+---
+
+- name: Deploy Forgejo container
+  tags: [ 'app_forgejo' ]
+  block:
+
+    - name: Ensure group "forgejo" exists with correct gid
+      ansible.builtin.group:
+        name: "{{ app_forgejo__user }}"
+        state: 'present'
+        gid: "{{ app_forgejo__gid }}"
+
+    - name: Ensure user "forgejo" exists with correct uid
+      ansible.builtin.user:
+        name: "{{ app_forgejo__user }}"
+        state: 'present'
+        create_home: false
+        comment: 'BookStack container user'
+        uid: "{{ app_forgejo__uid }}"
+        group: "{{ app_forgejo__user }}"
+        home: "{{ app_forgejo__home }}"
+        shell: '/usr/bin/false'
+        system: true
+
+    - name: Create Forgejo directory
+      ansible.builtin.file:
+        mode: '750'
+        path: "{{ app_forgejo__home }}"
+        state: 'directory'
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ app_forgejo__container.name }}"
+        hostname: "{{ app_forgejo__container.hostname }}"
+        image: "{{ app_forgejo__container.image }}"
+        ip: "{{ app_forgejo__container.ip }}"
+        network: "{{ app_forgejo__container.network }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_forgejo__container.restart_policy }}"
+        etc_hosts: "{{ app_forgejo__container.hosts }}"
+        env: "{{ app_forgejo__container.environment }}"
+        timezone: "{{ app_forgejo__container.timezone }}"
+        volume: "{{ app_forgejo__container.volumes | default([]) }}"
+        publish: "{{ app_forgejo__container_default.publish }}"
+      when: app_forgejo__ipv6 | length == 0
+
+    - name: Copy SSL CA into containers
+      ansible.builtin.shell: "podman cp {{ app_forgejo__ca_file }} {{ app_forgejo__container.name }}:{{ pki_easyrsa_deploy__ca_certificates_dir }} && podman exec -it {{ app_forgejo__container.name }} update-ca-certificates"
+      when: app_forgejo__ca_file | length > 0
+
+#    - name: Generate FreshRSS config file
+#      ansible.builtin.template:
+#        src: env.j2
+#        dest: "{{ app_forgejo__config_dir }}/.env"
+#        owner: "{{ app_forgejo__user }}"
+#        group: "{{ app_forgejo__user }}"
+#        mode: '600'
