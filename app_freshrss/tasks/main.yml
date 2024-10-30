@@ -1,0 +1,49 @@
+---
+
+- name: Deploy FreshRSS container
+  tags: [ 'app_freshrss' ]
+  block:
+
+    - name: Ensure group "freshrss" exists with correct gid
+      ansible.builtin.group:
+        name: "{{ app_freshrss__user }}"
+        state: 'present'
+        gid: "{{ app_freshrss__gid }}"
+
+    - name: Ensure user "freshrss" exists with correct uid
+      ansible.builtin.user:
+        name: "{{ app_freshrss__user }}"
+        state: 'present'
+        create_home: false
+        comment: 'BookStack container user'
+        uid: "{{ app_freshrss__uid }}"
+        group: "{{ app_freshrss__user }}"
+        home: "{{ app_freshrss__home }}"
+        shell: '/usr/bin/false'
+        system: true
+
+    - name: Create FreshRSS directory
+      ansible.builtin.file:
+        mode: '750'
+        path: "{{ app_freshrss__home }}"
+        state: 'directory'
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ app_freshrss__container.name }}"
+        hostname: "{{ app_freshrss__container.hostname }}"
+        image: "{{ app_freshrss__container.image }}"
+        ip: "{{ app_freshrss__container.ip }}"
+        network: "{{ app_freshrss__container.network }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_freshrss__container.restart_policy }}"
+        etc_hosts: "{{ app_freshrss__container.hosts }}"
+        env: "{{ app_freshrss__container.environment }}"
+        timezone: "{{ app_freshrss__container.timezone }}"
+        volume: "{{ app_freshrss__container.volumes | default([]) }}"
+      when: app_freshrss__ipv6 | length == 0
+
+    - name: Copy SSL CA into containers
+      ansible.builtin.shell: "podman cp {{ app_freshrss__ca_file }} {{ app_freshrss__container.name }}:{{ pki_easyrsa_deploy__ca_certificates_dir }} && podman exec -it {{ app_freshrss__container.name }} update-ca-certificates"
+      when: app_freshrss__ca_file | length > 0
