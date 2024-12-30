@@ -1,0 +1,91 @@
+---
+
+- name: Install and configure Icinga 2 master
+  block:
+
+    - name: Create directories for Icinga 2 master
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        state: 'directory'
+      with_items:
+        - "{{ monitoring_icinga_master__dir }}"
+        - "{{ monitoring_icinga_master__scripts_dir }}"
+        - "{{ monitoring_icinga_master__cert_dir }}"
+
+    - name: Copy SSL certificates
+      ansible.builtin.copy:
+        src: "{{ item.name }}"
+        mode: "{{ item.mode | default('644') }}"
+        dest: "{{ monitoring_icinga_master__cert_dir }}"
+        owner: "{{ monitoring_icinga_master__user }}"
+        group: "{{ monitoring_icinga_master__group }}"
+        remote_src: yes
+      with_items:
+        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_icinga_master__certificate_realm }}/public/ca.crt"
+        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_icinga_master__certificate_realm }}/public/{{ monitoring_icinga_master__certificate_realm }}.crt"
+        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_icinga_master__certificate_realm }}/private/{{ monitoring_icinga_master__certificate_realm }}.key"
+          mode: '600'
+
+    - name: Copy scripts
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ monitoring_icinga_master__scripts_dir }}"
+        mode: '755'
+      with_items:
+        - 'pushover.sh'
+
+    - name: Create Icinga 2 master configuration
+      ansible.builtin.include_role:
+        name: 'monitoring_icinga_config'
+      vars:
+        icinga_etc_dir: "{{ monitoring_icinga_master__etc_dir }}"
+        icinga_user: "{{ monitoring_icinga_master__user }}"
+        icinga_configuration_files: "{{ monitoring_icinga_master__configuration_files }}"
+        icinga_configuration_files_absent: "{{ monitoring_icinga_master__configuration_files_absent }}"
+        icinga_features_enabled: "{{ monitoring_icinga_master__features_enabled }}"
+        icinga_commands: "{{ monitoring_icinga_master__commands }}"
+
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_master__container.name }}"
+        hostname: "{{ monitoring_icinga_master__container.hostname }}"
+        image: "{{ monitoring_icinga_master__container.image }}"
+        ip: "{{ monitoring_icinga_master__container.ip }}"
+        network: "{{ monitoring_icinga_master__container.network }}"
+        expose: "{{ monitoring_icinga_master__container.expose }}"
+        publish: "{{ monitoring_icinga_master__container.publish }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ monitoring_icinga_master__container.restart_policy }}"
+        etc_hosts: "{{ monitoring_icinga_master__container.hosts }}"
+        env: "{{ monitoring_icinga_master__container.environment }}"
+        timezone: "{{ monitoring_icinga_master__container.timezone }}"
+        volume: "{{ [
+          monitoring_icinga_master__data_dir + ':/data',
+        ] }}"
+        cap_add:
+          - 'cap_net_raw'
+      when: monitoring_icinga_master__ipv6 | length == 0
+
+    - name: Create podman containers
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_master__container.name }}"
+        hostname: "{{ monitoring_icinga_master__container.hostname }}"
+        image: "{{ monitoring_icinga_master__container.image }}"
+        ip: "{{ monitoring_icinga_master__container.ip }}"
+        ip6: "{{ monitoring_icinga_master__container.ipv6 }}"
+        network: "{{ monitoring_icinga_master__container.network }}"
+        expose: "{{ monitoring_icinga_master__container.expose }}"
+        publish: "{{ monitoring_icinga_master__container.publish }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ monitoring_icinga_master__container.restart_policy }}"
+        etc_hosts: "{{ monitoring_icinga_master__container.hosts }}"
+        env: "{{ monitoring_icinga_master__container.environment }}"
+        timezone: "{{ monitoring_icinga_master__container.timezone }}"
+        volume: "{{ [
+          monitoring_icinga_master__data_dir + ':/data',
+        ] }}"
+        cap_add:
+          - 'cap_net_raw'
+      when: monitoring_icinga_master__ipv6 | length > 0
