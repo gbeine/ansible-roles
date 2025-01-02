@@ -4,16 +4,30 @@
 # Substitutes - do not change
 #
 
-monitoring_icinga_web__mysql_enabled: "{{ icinga_mysql | default(false) }}"
-monitoring_icinga_web__pgsql_enabled: "{{ icinga_pgsql | default(false) }}"
+monitoring_icinga_web__use_podman: "{{ icinga_web_use_podman | default(false) }}"
 
+monitoring_icinga_web__hostname: "{{ icinga_web_hostname | default('icingaweb.' + dns_hostname) }}"
+monitoring_icinga_web__ip: "{{ icinga_web_ip | mandatory }}"
+monitoring_icinga_web__ipv6: "{{ icinga_web_ipv6 | default('') }}"
+monitoring_icinga_web__network: "{{ icinga_web_network | mandatory }}"
+monitoring_icinga_web__home: "{{ icinga_web_home | mandatory }}"
+monitoring_icinga_web__version: "{{ icinga_web_version | default('latest') }}"
+
+monitoring_icinga_web__etc_hosts: "{{ icinga_web_etc_hosts | default({}) }}"
+monitoring_icinga_web__environment: "{{ icinga_web_environment | default(monitoring_icinga_web__environment_default) }}"
+
+monitoring_icinga_web__container: "{{ monitoring_icinga_web__container_default | combine(icinga_container | default({})) }}"
+
+monitoring_icinga_web__mysql_enabled: "{{ icinga_web_mysql | default(false) }}"
+monitoring_icinga_web__pgsql_enabled: "{{ icinga_web_pgsql | default(false) }}"
+
+monitoring_icinga_web__authentication_backend: "{{ icinga_web_auth_backend | default('db') }}"
+monitoring_icinga_web__authentication_resource: "{{ icinga_web_user_resource | default('icingaweb_' + monitoring_icinga_web__authentication_backend) }}"
 monitoring_icinga_web__authentication_user_class: "{{ icinga_web_user_class | default('inetOrgPerson') }}"
 monitoring_icinga_web__authentication_filter: "{{ icinga_web_user_filter | default('') }}"
 monitoring_icinga_web__authentication_user_name_attribute: "{{ icinga_web_user_attribute | default('uid') }}"
-monitoring_icinga_web__authentication_backend: "{{ icinga_web_auth_backend | default('ldap') }}"
 monitoring_icinga_web__authentication_user_base_dn: "{{ icinga_web_user_base | default('') }}"
 monitoring_icinga_web__authentication_domain: "{{ icinga_web_user_domain | default('') }}"
-monitoring_icinga_web__authentication_resource: "{{ icinga_web_user_resource | default('icingaweb_ldap') }}"
 monitoring_icinga_web__authentication_group_class: "{{ icinga_web_group_class | default('groupOfNames') }}"
 monitoring_icinga_web__authentication_group_name_attribute: "{{ icinga_web_group_attribute | default('gid') }}"
 monitoring_icinga_web__authentication_group_member_attribute: "{{ icinga_web_member_attribute | default('member') }}"
@@ -23,8 +37,10 @@ monitoring_icinga_web__show_stacktraces: "{{ icinga_web_show_stacktraces | defau
 monitoring_icinga_web__show_state_messages: "{{ icinga_web_show_state_messages | default(true) }}"
 monitoring_icinga_web__config_resource: "{{ icinga_web_config_resource | default('icingaweb_db') }}"
 
-monitoring_icinga_web__log: "{{ icinga_web_log | default('syslog') }}"
-monitoring_icinga_web__log_level: "{{ icinga_web_log_level | default('ERROR') }}"
+monitoring_icinga_web__use_strict_csp: "{{ icinga_web_use_strict_csp | default(false) }}"
+
+monitoring_icinga_web__log: "{{ icinga_web_log | default('php') }}"
+monitoring_icinga_web__log_level: "{{ icinga_web_log_level | default('WARNING') }}"
 monitoring_icinga_web__log_application: "{{ icinga_web_log_application | default('icingaweb2') }}"
 monitoring_icinga_web__log_facility: "{{ icinga_web_log_facility | default('user') }}"
 
@@ -38,44 +54,58 @@ monitoring_icinga_web__db_password: "{{ icinga_web_db_password | mandatory }}"
 monitoring_icinga_web__db_host: "{{ icinga_web_db_host | default('localhost') }}"
 
 monitoring_icinga_web__monitoring_backends: "{{ icinga_web_monitoring_backends | default(monitoring_icinga_web__monitoring_backends_default) }}"
-monitoring_icinga_web__monitoring_commandtransports: "{{ icinga_web_monitoring_commandtransports | default([]) }}"
+#monitoring_icinga_web__monitoring_commandtransports: "{{ icinga_web_monitoring_commandtransports | default([]) }}"
 
 #
 # Defaults - do not change
 #
 
-monitoring_icinga_web__user: www-data
-monitoring_icinga_web__group: icingaweb2
+monitoring_icinga_web__data_dir: "{{ monitoring_icinga_web__home }}/data"
+monitoring_icinga_web__etc_dir: "{{ monitoring_icinga_web__data_dir + '/etc' if monitoring_icinga_web__use_podman else '/etc' }}"
 
-monitoring_icinga_web__etc_dir: /etc/icingaweb2
-monitoring_icinga_web__modules_etc_dir: "{{ monitoring_icinga_web__etc_dir }}/modules"
-monitoring_icinga_web__modules_enabled_dir: "{{ monitoring_icinga_web__etc_dir }}/enabledModules"
-monitoring_icinga_web__modules_dir: /usr/share/icingaweb2/modules
+monitoring_icinga_web__dir: "{{ icinga_web_config_dir | default(monitoring_icinga_web__etc_dir + '/icingaweb2') }}"
+monitoring_icinga_web__modules_etc_dir: "{{ monitoring_icinga_web__dir }}/modules"
+monitoring_icinga_web__modules_enabled_dir: "{{ monitoring_icinga_web__dir }}/enabledModules"
+monitoring_icinga_web__modules_dir: '/usr/share/icingaweb2/modules'
+
+monitoring_icinga_web__var_dir: "{{ monitoring_icinga_web__data_dir }}/var/lib/icingaweb2"
+
+monitoring_icinga_web__user: 'www-data'
+monitoring_icinga_web__group: 'www-data'
+
+monitoring_icinga_web__container_default:
+  name: 'icingaweb'
+  hostname: "{{ monitoring_icinga_web__hostname }}"
+  image: "docker.io/icinga/icingaweb2:{{ monitoring_icinga_web__version }}"
+  ip: "{{ monitoring_icinga_web__ip }}"
+  ipv6: "{{ monitoring_icinga_web__ipv6 }}"
+  network: "{{ monitoring_icinga_web__network }}"
+  restart_policy: 'always'
+  hosts: "{{ monitoring_icinga_web__etc_hosts }}"
+  environment: "{{ monitoring_icinga_web__environment }}"
+  timezone: "{{ bootstrap_timezone__timezone }}"
+
+monitoring_icinga_web__environment_default: {}
 
 monitoring_icinga_web__modules_enabled_default:
-  - monitoring
+  - 'monitoring'
+
+monitoring_icinga_web__monitoring_backends_default:
+  - name: 'icinga'
+    type: 'ido'
+    resource: 'icinga_ido'
 
 monitoring_icinga_web__modules_packages: "{{ monitoring_icinga_web__modules_enabled | default([]) | map('regex_replace', '^', 'icingaweb2-module-') }}"
 
-monitoring_icinga_web__monitoring_protected_customvars:
-  - '*pw*'
-  - '*pass*'
-  - community
-
-monitoring_icinga_web__monitoring_backends_default:
-  - name: icinga
-    type: ido
-    resource: icinga_ido
-
-monitoring_icinga_web__php_modules_mysql: "{{ [ 
+monitoring_icinga_web__php_modules_mysql: "{{ [
     'php-mysql'
 ] if monitoring_icinga_web__mysql_enabled else [] }}"
 
-monitoring_icinga_web__php_modules_pgsql: "{{ [ 
+monitoring_icinga_web__php_modules_pgsql: "{{ [
     'php-pgsql'
 ] if monitoring_icinga_web__pgsql_enabled else [] }}"
 
-monitoring_icinga_web__php_modules: "{{ [ 
+monitoring_icinga_web__php_modules: "{{ [
   'php-curl',
   'php-intl',
   'php-soap',
@@ -93,10 +123,10 @@ monitoring_icinga_web__packages: "{{ monitoring_icinga_web__packages_default[boo
 
 monitoring_icinga_web__packages_default:
   Debian:
-    - icingaweb2
-    - icingaweb2-common
-    - icingaweb2-module-monitoring
-    - icinga-php-library
-    - icinga-php-thirdparty
-    - icingacli
-    - php-icinga
+    - 'icingaweb2'
+    - 'icingaweb2-common'
+    - 'icingaweb2-module-monitoring'
+    - 'icinga-php-library'
+    - 'icinga-php-thirdparty'
+    - 'icingacli'
+    - 'php-icinga'
