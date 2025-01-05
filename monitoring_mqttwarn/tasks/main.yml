@@ -1,0 +1,75 @@
+---
+
+- name: 'Install and configure mqttwarn container'
+  tags: [ 'monitoring_mqttwarn' ]
+  block:
+
+    - name: 'Create directories for mqttwarn'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        state: 'directory'
+        mode: '755'
+      with_items:
+        - "{{ monitoring_mqttwarn__etc_dir }}"
+
+    - name: 'Generate mqttwarn configuration'
+      ansible.builtin.template:
+        src: 'mqttwarn.ini.j2'
+        dest: "{{ monitoring_mqttwarn__etc_dir }}/mqttwarn.ini"
+        mode: '644'
+      notify:
+        - 'Restart mqttwarn'
+
+    - name: 'Copy files to mqttwarn host'
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ monitoring_mqttwarn__etc_dir }}"
+      with_items: "{{ monitoring_mqttwarn__files }}"
+      when: 'monitoring_mqttwarn__files | length > 0'
+
+    - name: 'Copy SSL certificates'
+      ansible.builtin.copy:
+        src: "{{ item.name }}"
+        mode: "{{ item.mode | default('644') }}"
+        dest: "{{ monitoring_mqttwarn__etc_dir }}"
+        remote_src: 'yes'
+      with_items:
+        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ mqttwarn_mqtt_hostname }}/public/ca.crt"
+      when: 'monitoring_mqttwarn__mqtt_tls'
+
+    - name: 'Create podman containers'
+      containers.podman.podman_container:
+        name: "{{ monitoring_mqttwarn__container.name }}"
+        hostname: "{{ monitoring_mqttwarn__container.hostname }}"
+        image: "{{ monitoring_mqttwarn__container.image }}"
+        ip: "{{ monitoring_mqttwarn__container.ip }}"
+        network: "{{ monitoring_mqttwarn__container.network }}"
+        pull: 'always'
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ monitoring_mqttwarn__container.restart_policy }}"
+        etc_hosts: "{{ monitoring_mqttwarn__container.hosts }}"
+        timezone: "{{ monitoring_mqttwarn__container.timezone }}"
+        volume: "{{ [
+          monitoring_mqttwarn__etc_dir + ':/etc/mqttwarn',
+        ] }}"
+      when: 'monitoring_mqttwarn__ipv6 | length == 0'
+
+    - name: 'Create podman containers'
+      containers.podman.podman_container:
+        name: "{{ monitoring_mqttwarn__container.name }}"
+        hostname: "{{ monitoring_mqttwarn__container.hostname }}"
+        image: "{{ monitoring_mqttwarn__container.image }}"
+        ip: "{{ monitoring_mqttwarn__container.ip }}"
+        ip6: "{{ monitoring_mqttwarn__container.ipv6 }}"
+        network: "{{ monitoring_mqttwarn__container.network }}"
+        pull: 'always'
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ monitoring_mqttwarn__container.restart_policy }}"
+        etc_hosts: "{{ monitoring_mqttwarn__container.hosts }}"
+        timezone: "{{ monitoring_mqttwarn__container.timezone }}"
+        volume: "{{ [
+          monitoring_mqttwarn__etc_dir + ':/etc/mqttwarn',
+        ] }}"
+      when: 'monitoring_mqttwarn__ipv6 | length > 0'
