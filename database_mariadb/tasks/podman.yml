@@ -3,7 +3,7 @@
 - name: Install MariaDB using podman
   block:
 
-    - name: Create MariaDB directory
+    - name: 'Create MariaDB directory'
       ansible.builtin.file:
         mode: '750'
         owner: "{{ database_mariadb__uid }}"
@@ -12,16 +12,17 @@
         state: 'directory'
       when: not ansible_check_mode
 
-    - name: Generate MariaDB configuration
+    - name: 'Generate MariaDB configuration'
       ansible.builtin.template:
         src: 'podman-custom.cnf.j2'
         dest: "{{ database_mariadb__home }}/custom.cnf"
         owner: "{{ database_mariadb__uid }}"
         group: "{{ database_mariadb__gid }}"
         mode: '640'
-      notify: Restart MariaDB container
+      notify:
+        - 'Restart MariaDB container'
 
-    - name: Generate root login configuration
+    - name: 'Generate root login configuration'
       ansible.builtin.template:
         src: 'my.cnf.j2'
         dest: '/root/.my.cnf'
@@ -32,7 +33,7 @@
         database_mariadb__password:
           root: "{{ database_mariadb__root_pass }}"
 
-    - name: Install MariaDB container
+    - name: 'Install MariaDB container'
       containers.podman.podman_container:
         name: "{{ database_mariadb__container.name }}"
         hostname: "{{ database_mariadb__container.hostname }}"
@@ -47,17 +48,15 @@
         env: "{{ database_mariadb__container.environment }}"
         timezone: "{{ database_mariadb__container.timezone }}"
         volume: "{{ database_mariadb__container.volumes }}"
-      notify: Restart MariaDB container
       when: database_mariadb__ipv6 | length == 0
 
-    - name: Flush handlers
-      meta: flush_handlers
-
-    - name: Wait starting up MariaDB containers
+    - name: 'Wait for MariaDB port to be opened'
       ansible.builtin.wait_for:
-        timeout: "{{ database_mariadb__container_bootstrap_timeout }}"
+        host: "{{ database_mariadb__container.ip }}"
+        port: "{{ database_mariadb__port }}"
+        delay: 30
 
-    - name: Removes all anonymous user accounts
+    - name: 'Removes all anonymous user accounts'
       community.mysql.mysql_user:
         login_user: 'root'
         login_password: "{{ database_mariadb__root_pass }}"
@@ -68,20 +67,22 @@
       with_items:
         - ''
         - 'PUBLIC'
-      notify: Restart MariaDB container
+      notify:
+        - 'Restart MariaDB container'
       when: not ansible_check_mode
 
-    - name: Create databases
+    - name: 'Create databases'
       community.mysql.mysql_db:
         login_user: 'root'
         login_password: "{{ database_mariadb__root_pass }}"
         login_host: "{{ database_mariadb__ip }}"
         name: "{{ database_mariadb__databases }}"
         state: 'present'
-      notify: Restart MariaDB container
+      notify:
+        - 'Restart MariaDB container'
       when: not ansible_check_mode
 
-    - name: Create database users with privileges
+    - name: 'Create database users with privileges'
       community.mysql.mysql_user:
         login_user: 'root'
         login_password: "{{ database_mariadb__root_pass }}"
@@ -92,5 +93,6 @@
         priv: "{{ item.privileges }}"
         state: 'present'
       with_items: "{{ database_mariadb__accounts }}"
-      notify: Restart MariaDB container
+      notify:
+        - 'Restart MariaDB container'
       when: not ansible_check_mode
