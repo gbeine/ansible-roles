@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+# backup.influxdb - Backup InfluxDB databases
+#
+# (c) 2011-2025 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+	echo "$0 not called from within backup script"
+	exit
+fi
+
+if [ -r /etc/backup/influxdb ]; then
+	. /etc/backup/influxdb
+fi
+
+: ${daily_backup_influxdb_enable="NO"}
+: ${daily_backup_influxdb_backup_dir="/backup"}
+: ${daily_backup_influxdb_token="_backup_"}
+: ${daily_backup_influxdb_keep_days="-14days"}
+: ${daily_backup_influxdb_podman_container="influxdb"}
+: ${daily_backup_influxdb_podman_backup_dir="/var/backups/influxdb"}
+
+influxdb_backup="podman exec -it ${daily_backup_influxdb_podman_container} influx backup"
+influxdb_backup_options="-t '${daily_backup_influxdb_token}'"
+find="/usr/bin/find"
+find_cleanup_options="-type f -not -newermt ${daily_backup_influxdb_keep_days} -delete"
+xz="/usr/bin/xz"
+xz_options=""
+
+today=`date +%Y%m%d`
+
+rc=0
+case "${daily_backup_influxdb_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup InfluxDB databases"
+
+		mkdir -p ${daily_backup_influxdb_backup_dir} || true
+
+		${influxdb_backup} ${daily_backup_influxdb_backup_dir}/backup-${today} ${influxdb_backup_options}
+		${find} ${daily_backup_influxdb_podman_backup_dir} ${find_cleanup_options}
+		${find} ${daily_backup_influxdb_podman_backup_dir} -type d -empty -delete
+		;;
+esac
+
+exit "${rc}"
