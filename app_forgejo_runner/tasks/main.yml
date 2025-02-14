@@ -1,0 +1,76 @@
+---
+
+- name: 'Deploy Forgejo runner container'
+  tags: [ 'app_forgejo_runner' ]
+  block:
+
+    - name: 'Ensure group exists with correct gid'
+      ansible.builtin.group:
+        name: "{{ app_forgejo_runner__user }}"
+        state: 'present'
+        gid: "{{ app_forgejo_runner__gid }}"
+
+    - name: 'Ensure user exists with correct uid'
+      ansible.builtin.user:
+        name: "{{ app_forgejo_runner__user }}"
+        state: 'present'
+        create_home: false
+        comment: 'Forgejo container user'
+        uid: "{{ app_forgejo_runner__uid }}"
+        group: "{{ app_forgejo_runner__user }}"
+        home: "{{ app_forgejo_runner__home }}"
+        shell: '/usr/bin/false'
+        system: true
+
+    - name: 'Create Forgejo runner cache directory'
+      ansible.builtin.file:
+        mode: 'ug=rwx,g+s'
+        path: "{{ app_forgejo_runner__home }}/.cache"
+        state: 'directory'
+        owner: "{{ app_forgejo_runner__uid }}"
+        group: "{{ app_forgejo_runner__gid }}"
+
+    - name: 'Create Forgejo runner registration file'
+      ansible.builtin.file:
+        mode: 'ug=rw,g+s'
+        path: "{{ app_forgejo_runner__home }}/.runner"
+        state: 'touch'
+        owner: "{{ app_forgejo_runner__uid }}"
+        group: "{{ app_forgejo_runner__gid }}"
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: 'Create docker-in-docker container'
+      when: app_forgejo_runner__dind
+      containers.podman.podman_container:
+        name: "{{ app_forgejo_runner__dind_container.name }}"
+        hostname: "{{ app_forgejo_runner__dind_container.hostname }}"
+        image: "{{ app_forgejo_runner__dind_container.image }}"
+        ip: "{{ app_forgejo_runner__dind_container.ip }}"
+        network: "{{ app_forgejo_runner__dind_container.network }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_forgejo_runner__dind_container.restart_policy }}"
+        timezone: "{{ app_forgejo_runner__dind_container.timezone }}"
+        volume: "{{ app_forgejo_runner__dind_container.volumes | default([]) }}"
+        privileged: "{{ app_forgejo_runner__dind_container.privileged | default(true) }}"
+        command: "{{ app_forgejo_runner__dind_container.command | default([]) }}"
+
+# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
+    - name: 'Create podman container'
+      containers.podman.podman_container:
+        name: "{{ app_forgejo_runner__container.name }}"
+        hostname: "{{ app_forgejo_runner__container.hostname }}"
+        image: "{{ app_forgejo_runner__container.image }}"
+        ip: "{{ app_forgejo_runner__container.ip }}"
+        network: "{{ app_forgejo_runner__container.network }}"
+        recreate: "{{ podman___update_mode | default(false) }}"
+        restart_policy: "{{ app_forgejo_runner__container.restart_policy }}"
+        etc_hosts: "{{ app_forgejo_runner__container.hosts }}"
+        env: "{{ app_forgejo_runner__container.environment }}"
+        timezone: "{{ app_forgejo_runner__container.timezone }}"
+        volume: "{{ app_forgejo_runner__container.volumes | default([]) }}"
+        user: "{{ app_forgejo_runner__container.user }}"
+        command: "{{ app_forgejo_runner__container.command | mandatory }}"
+      when: app_forgejo_runner__ipv6 | length == 0
+
+    - ansible.builtin.debug:
+        msg: "{{ app_forgejo_runner__container }}"
