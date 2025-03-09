@@ -1,0 +1,54 @@
+---
+
+- name: 'Deploy Synapse container'
+  tags: [ 'matrix_synapse' ]
+  block:
+
+    - name: 'Create Synapse directories'
+      ansible.builtin.file:
+        dest: "{{ item }}"
+        state: 'directory'
+        owner: "{{ matrix_synapse__uid }}"
+        group: "{{ matrix_synapse__gid }}"
+      with_items:
+        - "{{ matrix_synapse__data_dir }}"
+
+    - name: "Has configuration been generate?"
+      ansible.builtin.stat:
+        path: "{{ matrix_synapse__data_dir }}/homeserver.yaml"
+      register: 'matrix_synapse_configuration_stat_result'
+
+    - name: 'Generate synapse configuration'
+      containers.podman.podman_container:
+        name: "{{ matrix_synapse__container.name }}-generate"
+        hostname: "{{ matrix_synapse__container.hostname }}"
+        image: "{{ matrix_synapse__container.image }}"
+        ip: "{{ matrix_synapse__container.ip }}"
+        network: "{{ matrix_synapse__container.network }}"
+        etc_hosts: "{{ matrix_synapse__container.hosts }}"
+        env: "{{ matrix_synapse__container.environment }}"
+        timezone: "{{ matrix_synapse__container.timezone }}"
+        volume: "{{ matrix_synapse__container.volumes }}"
+        command: 'generate'
+        rm: true
+      when: matrix_synapse__ipv6 | length == 0 and not matrix_synapse_configuration_stat_result.stat.exists
+
+    - name: 'Create podman container'
+      containers.podman.podman_container:
+        name: "{{ matrix_synapse__container.name }}"
+        hostname: "{{ matrix_synapse__container.hostname }}"
+        image: "{{ matrix_synapse__container.image }}"
+        ip: "{{ matrix_synapse__container.ip }}"
+        network: "{{ matrix_synapse__container.network }}"
+        restart_policy: "{{ matrix_synapse__container.restart_policy }}"
+        etc_hosts: "{{ matrix_synapse__container.hosts }}"
+        dns_servers: "{{ matrix_synapse__container.dns_servers }}"
+        env: "{{ matrix_synapse__container.environment }}"
+        timezone: "{{ matrix_synapse__container.timezone }}"
+        volume: "{{ matrix_synapse__container.volumes }}"
+        pull: 'always'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: |
+        matrix_synapse__ipv6 | length == 0
+        and matrix_synapse_configuration_stat_result.stat.exists
+        and not matrix_synapse__setup
