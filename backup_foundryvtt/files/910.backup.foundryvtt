@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# foundry backup - Run FoundryVTT backup
+#
+# (c) 2025 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+	echo "$0 not called from within backup script"
+#	exit
+fi
+
+if [ -r /etc/backup/foundryvtt ]; then
+	. /etc/backup/foundryvtt
+fi
+
+: ${daily_backup_foundryvtt_enable="NO"}
+: ${daily_backup_foundryvtt_base_dir=""}
+: ${daily_backup_foundryvtt_repo=""}
+: ${daily_backup_foundryvtt_podman_ls_filter="foundry-.*"}
+: ${daily_backup_foundryvtt_exclude=""}
+: ${daily_backup_foundryvtt_keep_days="14"}
+
+podman="/usr/bin/podman"
+podman_ps_options="--filter name=${daily_backup_foundryvtt_podman_ls_filter} --format {{.Names}}"
+
+borg="/usr/bin/borg"
+borg_create_options="--compression none --stats --list"
+borg_prune_options="--stats -v --list --keep-within=${daily_backup_foundryvtt_keep_days}d"
+
+today=`date +%Y-%m-%d`
+
+rc=0
+case "${daily_backup_foundryvtt_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Running FoundryVTT backup"
+		for pod in `${podman} ps ${podman_ps_options}`; do
+			echo "Running backup for $pod"
+			backup_target="${pod}-${today}"
+			backup_source="${daily_backup_foundryvtt_base_dir}/${pod}"
+			echo "Stopping $pod"
+			${podman} stop "${pod}"
+			echo "Create archive ${backup_target}"
+			${borg} create  ${daily_backup_foundryvtt_exclude} ${borg_create_options} "${daily_backup_foundryvtt_repo}::${backup_target}" "${backup_source}" ${daily_backup_foundryvtt_exclude}
+			echo "Starting $pod"
+			${podman} start "${pod}"
+		done;
+		echo "Clean up archives"
+		${borg} prune ${borg_prune_options} ${daily_backup_foundryvtt_repo}
+		echo "Done with FoundryVTT backup"
+esac
+
+exit "${rc}"
