@@ -1,90 +1,102 @@
 ---
 
-- name: Install ACME pki support
-  block:
+- name: 'Create directories'
+  ansible.builtin.file:
+    mode: '755'
+    path: "{{ item }}"
+    state: 'directory'
+  with_items:
+    - "{{ pki_certbot__podman_etc_dir }}"
+    - "{{ pki_certbot__podman_lib_dir }}"
+    - "{{ pki_certbot__podman_log_dir }}"
 
-    - name: Create letsencrypt directories
-      ansible.builtin.file:
-        mode: '755'
-        path: "{{ item }}"
-        state: 'directory'
-      with_items:
-        - "{{ pki_certbot__podman_etc }}"
-        - "{{ pki_certbot__podman_lib }}"
-        - "{{ pki_certbot__podman_log }}"
+- name: 'Create configuration files for plugins'
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ pki_certbot__podman_etc_dir }}/{{ item }}"
+    mode: '400'
+  with_items: "{{ pki_certbot__plugins }}"
 
-    - name: Create configuration files
-      ansible.builtin.template:
-        src: dns-hetzner.j2
-        dest: "{{ pki_certbot__podman_etc }}/dns-hetzner"
-        mode: '640'
-      when: pki_certbot__podman_provider == 'dns-hetzner'
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ pki_certbot__container.name }}"
+    hostname: "{{ pki_certbot__container.hostname }}"
+    image: "{{ pki_certbot__container.image }}"
+    ip: "{{ pki_certbot__container.ip }}"
+    network: "{{ pki_certbot__container.network }}"
+    timezone: "{{ pki_certbot__container.timezone }}"
+    volume: "{{ pki_certbot__container.volumes }}"
+    quadlet_options: |
 
-    - name: Install certbot container
-      ansible.builtin.debug:
-        msg: "{{ pki_certbot__podman_container }}"
-      when: ansible_check_mode
+      [Install]
+      WantedBy=default.target
 
-    - name: Install certbot container
-      containers.podman.podman_container:
-        name: "{{ pki_certbot__podman_container.name }}"
-        hostname: "{{ pki_certbot__podman_container.hostname }}"
-        image: "{{ pki_certbot__podman_container.image }}"
-        ip: "{{ pki_certbot__podman_container.ip }}"
-        network: "{{ pki_certbot__podman_container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        rm: true
-        timezone: "{{ pki_certbot__podman_container.timezone | default(bootstrap_timezone__timezone) }}"
-        volume: "{{ pki_certbot__podman_container.volumes }}"
-        pull: 'always'
-      when: not ansible_check_mode
+      [Service]
+      RestartSec=5
+      Restart=on-failure
+    command: "{{ pki_certbot__podman_command }}"
+    pull: 'always'
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'pki_certbot__ipv6 | length == 0'
 
-    - name: Wait for stopping certbot container
-      ansible.builtin.wait_for:
-        timeout: 2
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ pki_certbot__container.name }}"
+    hostname: "{{ pki_certbot__container.hostname }}"
+    image: "{{ pki_certbot__container.image }}"
+    ip: "{{ pki_certbot__container.ip }}"
+    ip6: "{{ pki_certbot__container.ipv6 }}"
+    network: "{{ pki_certbot__container.network }}"
+    timezone: "{{ pki_certbot__container.timezone }}"
+    volume: "{{ pki_certbot__container.volumes }}"
+    quadlet_options: |
 
-    - name: Register or update ACME account
-      when: pki_certbot__email | length > 0
-      ansible.builtin.shell: |
-        {{ pki_certbot__podman_run}} update_account {{ pki_certbot__register_options }} \
-        || \
-        {{ pki_certbot__podman_run}} register {{ pki_certbot__register_options }}
-      environment: "{{ pki_certbot__environment }}"
+      [Install]
+      WantedBy=default.target
 
-    - name: Wait for stopping certbot container
-      ansible.builtin.wait_for:
-        timeout: 2
+      [Service]
+      RestartSec=5
+      Restart=on-failure
+    entrypoint: "{{ pki_certbot__podman_command }}"
+    pull: 'always'
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'pki_certbot__ipv6 | length > 0'
 
-    - name: Create certificate for domains
-      when: pki_certbot__realms | length > 0
-      ansible.builtin.shell: |
-        [ -f '{{ pki_certbot__podman_etc }}/renewal/{{ item.realm }}.conf' ] || \
-        {{ pki_certbot__podman_run}} certonly \
-        {{ pki_certbot__podman_certbot_options }} \
-        --key-type {{ item.key_type | default('ecdsa') }} \
-        {{ '--elliptic-curve ' + item.elliptic_curve if item.elliptic_curve is defined and ( item.key_type is not defined or item.key_type == 'ecdsa') }} \
-        {{ '--rsa-key-size ' + item.key_size | default('2048') if item.key_type is defined and item.key_type == 'rsa' }} \
-        --cert-name {{ item.realm }} -d {{ item.domains | join (' -d ') }}
-      with_items: "{{ pki_certbot__realms }}"
-      environment: "{{ pki_certbot__environment }}"
+- name: 'Start and enable container'
+  ansible.builtin.systemd:
+    name: "{{ pki_certbot__container.name }}"
+    daemon_reload: true
+    state: 'started'
+    enabled: true
 
-    - name: Create DH Parameters
-      community.crypto.openssl_dhparam:
-        path: "{{ pki_certbot__podman_etc }}/dhparams.pem"
-        size: "{{ pki_certbot__dhparams_size }}"
-      when: not ansible_check_mode
+- name: 'Create systemd renew service'
+  ansible.builtin.import_role:
+    name: 'systemd_services'
+  vars:
+    systemd_services:
+      - name: 'certbot-podman-renew'
+        description: 'podman container: Certbot renew'
+        wants:
+          - 'certbot-podman-renew.timer'
+        type: 'simple'
+        user: 'root'
+        exec_start: "{{ pki_certbot__command }} renew"
+        environment:
+          PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
-    - name: Create systemd service and timer
-      block:
-
-        - name: Create systemd service
-          ansible.builtin.import_role:
-            name: 'systemd_services'
-          vars:
-            systemd_services: "{{ pki_certbot__podman_systemd_services }}"
-
-        - name: Create systemd timer
-          ansible.builtin.import_role:
-            name: 'systemd_timers'
-          vars:
-            systemd_timers: "{{ pki_certbot__podman_systemd_timers }}"
+- name: 'Create systemd renew timer'
+  ansible.builtin.import_role:
+    name: 'systemd_timers'
+  vars:
+    systemd_timers:
+      - name: 'certbot-podman-renew'
+        description: 'podman container: Certbot renew timer'
+        on_calendar: 'daily'
+        persistent: 'true'
+        wanted_by:
+          - 'timers.target'
+        enabled: true
