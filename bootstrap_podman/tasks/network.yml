@@ -1,0 +1,52 @@
+---
+
+- name: 'Create podman networks (IPv4 only)'
+  containers.podman.podman_network:
+    name: "{{ item.name }}"
+    disable_dns: "{{ item.disable_dns | default(false) }}"
+    driver: "{{ item.driver | default('bridge') }}"
+    internal: "{{ item.internal | default(false) }}"
+    quadlet_options: |
+      # InterfaceName={{ item.name }}
+      Gateway={{ item.gateway }}
+      Subnet={{ item.address }}/{{ item.netmask }}
+      IPv6=false
+      # NetworkDeleteOnStop=false
+      PodmanArgs=--interface-name={{ item.name }}
+      
+      [Unit]
+      Description={{ item.name }} Network: {{ item.address }}/{{ item.netmask }}
+    state: 'quadlet'
+  when: 'item.ipv6 | default(false) == false and not podman___update_mode'
+  with_items: "{{ bootstrap_podman__networks }}"
+
+- name: 'Create podman networks (IPv4+IPv6 dual stack)'
+  containers.podman.podman_network:
+    name: "{{ item.name }}"
+    disable_dns: "{{ item.disable_dns | default(false) }}"
+    driver: "{{ item.driver | default('bridge') }}"
+    internal: "{{ item.internal | default(false) }}"
+    quadlet_options: |
+      # InterfaceName={{ item.name }}
+      Gateway={{ item.gateway }}
+      Subnet={{ item.address }}/{{ item.netmask }}
+      Gateway={{ item.ipv6_gateway }}
+      Subnet={{ item.ipv6_gateway }}/{{ item.ipv6_prefixlength }}
+      IPv6=true
+      # NetworkDeleteOnStop=false
+      PodmanArgs=--interface-name {{ item.name }}
+      
+      [Unit]
+      Description={{ item.name }} Network: {{ item.address }}/{{ item.netmask }} + {{ item.ipv6_gateway }}/{{ item.ipv6_prefixlength }}
+    state: 'quadlet'
+  when: 'item.ipv6 | default(false) == true and not podman___update_mode'
+  with_items: "{{ bootstrap_podman__networks }}"
+
+- name: 'Start and enable networks'
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+    enabled: true
+    state: 'started'
+    name: '{{ item.name }}-network'
+  with_items: "{{ bootstrap_podman__networks }}"
+  when: 'not ansible_check_mode'
