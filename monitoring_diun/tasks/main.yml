@@ -1,15 +1,50 @@
 ---
 
-- name: 'Install Diun for podman monitoring'
-  tags: [ 'monitoring', 'monitoring_diun' ]
+- name: 'Install Diun'
+  tags: [ 'monitoring_diun' ]
   block:
 
-    - name: 'Install Diun using native binaries'
-      ansible.builtin.include_tasks:
-        file: 'local.yml'
-      when: not monitoring_diun__use_podman
+    - name: 'Create Diun user directories'
+      ansible.builtin.file:
+        mode: '750'
+        path: "{{ item }}"
+        state: 'directory'
+      with_items:
+        - "{{ monitoring_diun__podman_etc_dir }}"
+        - "{{ monitoring_diun__podman_data_dir }}"
 
-    - name: 'Install Diun using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: monitoring_diun__use_podman
+    - name: 'Generate configuration files'
+      ansible.builtin.template:
+        src: 'diun.yml.j2'
+        dest: "{{ monitoring_diun__podman_etc_dir }}/diun.yml"
+        mode: '640'
+
+    - name: 'Install Diun container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_diun__container.name }}"
+        hostname: "{{ monitoring_diun__container.hostname }}"
+        image: "{{ monitoring_diun__container.image }}"
+        ip: "{{ monitoring_diun__container.ip }}"
+        network: "{{ monitoring_diun__container.network }}"
+        timezone: "{{ monitoring_diun__container.timezone }}"
+        volume: "{{ monitoring_diun__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'not ansible_check_mode'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ monitoring_diun__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
