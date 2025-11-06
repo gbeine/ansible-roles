@@ -10,12 +10,34 @@
     - "{{ pki_certbot__podman_lib_dir }}"
     - "{{ pki_certbot__podman_log_dir }}"
 
+- name: 'Copy CA certificates bundle'
+  ansible.builtin.copy:
+    src: '/etc/ssl/certs/ca-certificates.crt'
+    dest: "{{ pki_certbot__podman_etc_dir }}/ca-bundle.pem"
+    remote_src: true
+
 - name: 'Create configuration files for plugins'
   ansible.builtin.template:
     src: "{{ item }}.j2"
     dest: "{{ pki_certbot__podman_etc_dir }}/{{ item }}"
     mode: '400'
   with_items: "{{ pki_certbot__plugins }}"
+
+- name: 'Gathering facts about services...'
+  ansible.builtin.service_facts:
+
+- name: 'Stop container when it is running'
+  ansible.builtin.systemd:
+    name: "{{ pki_certbot__container.name }}.service"
+    state: 'stopped'
+  when: 'ansible_facts.services[pki_certbot__container.name + ".service"] is defined'
+
+- name: 'Pull image'
+  containers.podman.podman_image:
+    name: "{{ pki_certbot__podman_image }}"
+    tag: "{{ pki_certbot__podman_tag }}"
+    force: true
+  when: 'podman___update_mode | default(false) | bool'
 
 - name: 'Install container'
   containers.podman.podman_container:
@@ -35,7 +57,6 @@
       RestartSec=5
       Restart=on-failure
     command: "{{ pki_certbot__podman_command }}"
-    pull: 'always'
     restart_policy: 'no'
     state: 'quadlet'
     recreate: "{{ podman___update_mode | default(false) }}"
@@ -60,7 +81,6 @@
       RestartSec=5
       Restart=on-failure
     entrypoint: "{{ pki_certbot__podman_command }}"
-    pull: 'always'
     restart_policy: 'no'
     state: 'quadlet'
     recreate: "{{ podman___update_mode | default(false) }}"
@@ -72,6 +92,7 @@
     daemon_reload: true
     state: 'started'
     enabled: true
+  when: 'not ansible_check_mode'
 
 - name: 'Create systemd renew service'
   ansible.builtin.import_role:
