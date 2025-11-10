@@ -1,40 +1,88 @@
 ---
 
-- name: Install and configure Icinga 2 agent
+- name: 'Install and configure Icinga 2 agent'
   tags: [ 'monitoring_icinga_agent' ]
   block:
 
-    - name: Install Icinga 2 packages
+    - name: 'Include OS-specific variables'
+      ansible.builtin.include_vars: "{{ item }}"
+      with_first_found:
+        - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yml"
+        - "{{ ansible_distribution }}.yml"
+
+    - name: 'Install packages'
       ansible.builtin.apt:
         update_cache: yes
         install_recommends: no
         pkg: "{{ monitoring_icinga_agent__packages }}"
 
-    - name: Create directories for Icinga 2 agent
+    - name: 'Create directories'
       ansible.builtin.file:
-        path: "{{ item }}"
+        dest: "{{ item }}"
         owner: "{{ monitoring_icinga_agent__user }}"
         group: "{{ monitoring_icinga_agent__group }}"
+        mode: '0750'
         state: 'directory'
       with_items:
+        - "{{ monitoring_icinga_agent__local_etc_dir }}"
+        - "{{ monitoring_icinga_agent__local_plugins_dir }}"
         - "{{ monitoring_icinga_agent__cert_dir }}"
 
-    - name: Copy SSL certificates
-      ansible.builtin.copy:
-        src: "{{ item.name }}"
-        mode: "{{ item.mode | default('644') }}"
-        dest: "{{ monitoring_icinga_agent__cert_dir }}"
+    - name: 'Configuration'
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
         owner: "{{ monitoring_icinga_agent__user }}"
         group: "{{ monitoring_icinga_agent__group }}"
-        remote_src: yes
+        mode: '0400'
       with_items:
-        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_icinga_agent__certificate_realm }}/public/ca.crt"
-        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_icinga_agent__certificate_realm }}/public/{{ monitoring_icinga_agent__certificate_realm }}.crt"
-        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_icinga_agent__certificate_realm }}/private/{{ monitoring_icinga_agent__certificate_realm }}.key"
-          mode: '600'
-      when: not ansible_check_mode
+        - src: 'constants.conf.j2'
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/constants.conf"
+        - src: 'icinga2.conf.j2'
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/icinga2.conf"
+        - src: 'zones.conf.j2'
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/zones.conf"
+        - src: 'features-api.conf.j2'
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/features-available/api.conf"
+        - src: 'features-checker.conf.j2'
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/features-available/checker.conf"
+        - src: 'features-mainlog.conf.j2'
+          dest: "{{ monitoring_icinga_agent__etc_dir }}/features-available/mainlog.conf"
+      notify:
+        - 'Restart Icinga'
 
-    - name: Create Icinga 2 agent configuration
-      ansible.builtin.include_role:
-        name: 'monitoring_icinga_config'
+    - name: 'Disable features'
+      ansible.builtin.file:
+        path: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled/{{ item }}"
+        state: 'absent'
+      with_items:
+        - 'command.conf'
+        - 'compatlog.conf'
+        - 'debuglog.conf'
+        - 'elasticsearch.conf'
+        - 'gelf.conf'
+        - 'graphite.conf'
+        - 'icingadb.conf'
+        - 'influxdb.conf'
+        - 'influxdb2.conf'
+        - 'journald.conf'
+        - 'livestatus.conf'
+        - 'notification.conf'
+        - 'opentsdb.conf'
+        - 'perfdata.conf'
+        - 'syslog.conf'
+      notify:
+        - 'Restart Icinga'
+
+    - name: 'Enable features'
+      ansible.builtin.file:
+        path: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled/{{ item }}"
+        src: "../features-available/{{ item }}"
+        state: 'link'
+      with_items:
+        - 'api.conf'
+        - 'checker.conf'
+        - 'mainlog.conf'
+      notify:
+        - 'Restart Icinga'
 
