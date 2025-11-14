@@ -1,0 +1,87 @@
+---
+
+- name: 'Deploy phpMyAdmin container'
+  tags: [ 'database_phpmyadmin' ]
+  block:
+
+    - name: 'Create secrets'
+      containers.podman.podman_secret:
+        state: 'present'
+        name: 'pma_controluser_password'
+        data: "{{ database_phpmyadmin__db_pass }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ database_phpmyadmin__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[database_phpmyadmin__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ database_phpmyadmin__podman_image }}"
+        tag: "{{ database_phpmyadmin__podman_tag }}"
+      when: 'podman___update_mode | default(false)'
+
+    - name: 'Install phpMyAdmin container'
+      containers.podman.podman_container:
+        name: "{{ database_phpmyadmin__container.name }}"
+        hostname: "{{ database_phpmyadmin__container.hostname }}"
+        image: "{{ database_phpmyadmin__container.image }}"
+        ip: "{{ database_phpmyadmin__container.ip }}"
+        network: "{{ database_phpmyadmin__container.network }}"
+        timezone: "{{ database_phpmyadmin__container.timezone }}"
+        env: "{{ database_phpmyadmin__container.environment }}"
+        secrets: "{{ database_phpmyadmin__container.secrets }}"
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if database_phpmyadmin__container.requires is defined %}
+          Requires={{ database_phpmyadmin__container.requires | join(',') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_phpmyadmin__ipv6 | length == 0'
+
+    - name: 'Install phpMyAdmin container'
+      containers.podman.podman_container:
+        name: "{{ database_phpmyadmin__container.name }}"
+        hostname: "{{ database_phpmyadmin__container.hostname }}"
+        image: "{{ database_phpmyadmin__container.image }}"
+        ip: "{{ database_phpmyadmin__container.ip }}"
+        ip6: "{{ database_phpmyadmin__container.ipv6 }}"
+        network: "{{ database_phpmyadmin__container.network }}"
+        timezone: "{{ database_phpmyadmin__container.timezone }}"
+        env: "{{ database_phpmyadmin__container.environment }}"
+        label: "{{ database_phpmyadmin__container.labels }}"
+        secrets: "{{ database_phpmyadmin__container.secrets }}"
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if database_phpmyadmin__container.requires is defined %}
+          Requires={{ database_phpmyadmin__container.requires | join(',') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_phpmyadmin__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_phpmyadmin__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
