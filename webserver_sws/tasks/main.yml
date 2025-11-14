@@ -9,7 +9,7 @@
         dest: "{{ item }}"
         state: 'directory'
       with_items:
-        - "{{ webserver_sws__podman_data_dir }}"
+        - "{{ webserver_sws__podman_home }}"
         - "{{ webserver_sws__podman_root_dir }}"
         - "{{ webserver_sws__podman_vhost_dir }}"
 
@@ -19,6 +19,21 @@
         dest: "{{ webserver_sws__podman_config_file }}"
       notify: 'Restart SWS container'
 
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ webserver_sws__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[webserver_sws__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ webserver_sws__container.image }}"
+        force: true
+      when: 'podman___update_mode'
+
     - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ webserver_sws__container.name }}"
@@ -26,11 +41,20 @@
         image: "{{ webserver_sws__container.image }}"
         ip: "{{ webserver_sws__container.ip }}"
         network: "{{ webserver_sws__container.network }}"
-        restart_policy: "{{ webserver_sws__container.restart_policy }}"
         timezone: "{{ webserver_sws__container.timezone }}"
         env: "{{ webserver_sws__container.environment }}"
+        label: "{{ webserver_sws__container.labels }}"
         volume: "{{ webserver_sws__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
       when: 'webserver_sws__ipv6 | length == 0'
 
@@ -40,12 +64,29 @@
         hostname: "{{ webserver_sws__container.hostname }}"
         image: "{{ webserver_sws__container.image }}"
         ip: "{{ webserver_sws__container.ip }}"
-        ipv6: "{{ webserver_sws__container.ipv6 }}"
+        ip6: "{{ webserver_sws__container.ipv6 }}"
         network: "{{ webserver_sws__container.network }}"
-        restart_policy: "{{ webserver_sws__container.restart_policy }}"
         timezone: "{{ webserver_sws__container.timezone }}"
         env: "{{ webserver_sws__container.environment }}"
+        label: "{{ webserver_sws__container.labels }}"
         volume: "{{ webserver_sws__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
       when: 'webserver_sws__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ webserver_sws__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
