@@ -1,6 +1,6 @@
 ---
 
-- name: Install MariaDB using podman
+- name: 'Install MariaDB using podman'
   block:
 
     - name: 'Create MariaDB directory'
@@ -10,7 +10,6 @@
         group: "{{ database_mariadb__gid }}"
         path: "{{ database_mariadb__home }}"
         state: 'directory'
-      when: not ansible_check_mode
 
     - name: 'Generate MariaDB configuration'
       ansible.builtin.template:
@@ -20,18 +19,29 @@
         group: "{{ database_mariadb__gid }}"
         mode: '640'
       notify:
-        - 'Restart MariaDB container'
+        - 'Restart MariaDB'
+      when: 'not podman___update_mode'
 
-    - name: 'Generate root login configuration'
-      ansible.builtin.template:
-        src: 'my.cnf.j2'
-        dest: '/root/.my.cnf'
-        owner: 'root'
-        group: 'root'
-        mode: '600'
-      vars:
-        database_mariadb__password:
-          root: "{{ database_mariadb__root_pass }}"
+    - name: 'Create secrets'
+      containers.podman.podman_secret:
+        state: 'present'
+        name: 'mariadb_password'
+        data: "{{ database_mariadb__root_password }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ database_mariadb__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[database_mariadb__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ database_mariadb__podman_image }}"
+        tag: "{{ database_mariadb__podman_tag }}"
+      when: 'podman___update_mode | default(false)'
 
     - name: 'Install MariaDB container'
       containers.podman.podman_container:
@@ -42,52 +52,65 @@
         network: "{{ database_mariadb__container.network }}"
         expose: "{{ database_mariadb__container.expose | default([]) }}"
         publish: "{{ database_mariadb__container.publish | default([]) }}"
-        restart_policy: "{{ database_mariadb__container.restart_policy }}"
-        etc_hosts: "{{ database_mariadb__container.hosts }}"
-        env: "{{ database_mariadb__container.environment }}"
         timezone: "{{ database_mariadb__container.timezone }}"
+        env: "{{ database_mariadb__container.environment }}"
+        secrets: "{{ database_mariadb__container.secrets }}"
         volume: "{{ database_mariadb__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if database_mariadb__container.requires is defined %}
+          Requires={{ database_mariadb__container.requires | join(',') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
-      when: database_mariadb__ipv6 | length == 0
+      when: 'database_mariadb__ipv6 | length == 0'
+
+    - name: 'Install MariaDB container'
+      containers.podman.podman_container:
+        name: "{{ database_mariadb__container.name }}"
+        hostname: "{{ database_mariadb__container.hostname }}"
+        image: "{{ database_mariadb__container.image }}"
+        ip: "{{ database_mariadb__container.ip }}"
+        ip6: "{{ database_mariadb__container.ipv6 }}"
+        network: "{{ database_mariadb__container.network }}"
+        expose: "{{ database_mariadb__container.expose | default([]) }}"
+        publish: "{{ database_mariadb__container.publish | default([]) }}"
+        timezone: "{{ database_mariadb__container.timezone }}"
+        env: "{{ database_mariadb__container.environment }}"
+        secrets: "{{ database_mariadb__container.secrets }}"
+        volume: "{{ database_mariadb__container.volumes }}"
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if database_mariadb__container.requires is defined %}
+          Requires={{ database_mariadb__container.requires | join(',') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_mariadb__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_mariadb__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
 
     - name: 'Wait for MariaDB port to be opened'
       ansible.builtin.wait_for:
         host: "{{ database_mariadb__container.ip }}"
         port: "{{ database_mariadb__port }}"
         delay: 10
-
-    - name: 'Removes all anonymous user accounts'
-      community.mysql.mysql_user:
-        login_user: 'root'
-        login_password: "{{ database_mariadb__root_pass }}"
-        login_host: "{{ database_mariadb__ip }}"
-        name: "{{ item }}"
-        host_all: 'yes'
-        state: 'absent'
-      with_items:
-        - ''
-        - 'PUBLIC'
-      when: not ansible_check_mode and not podman___update_mode
-
-    - name: 'Create databases'
-      community.mysql.mysql_db:
-        login_user: 'root'
-        login_password: "{{ database_mariadb__root_pass }}"
-        login_host: "{{ database_mariadb__ip }}"
-        name: "{{ database_mariadb__databases }}"
-        state: 'present'
-      when: not ansible_check_mode and not podman___update_mode
-
-    - name: 'Create database users with privileges'
-      community.mysql.mysql_user:
-        login_user: 'root'
-        login_password: "{{ database_mariadb__root_pass }}"
-        login_host: "{{ database_mariadb__ip }}"
-        name: "{{ item.name }}"
-        host: "{{ item.host | default('localhost') }}"
-        password: "{{ database_mariadb__password[item.name] }}"
-        priv: "{{ item.privileges }}"
-        state: 'present'
-      with_items: "{{ database_mariadb__accounts }}"
-      when: not ansible_check_mode and not podman___update_mode
