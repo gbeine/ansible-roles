@@ -1,73 +1,117 @@
 ---
 
-- name: Deploy FileRise container
+- name: 'Deploy FileRise container'
   tags: [ 'app_filerise' ]
   block:
 
-    - name: Create directories
+    - name: 'Create directories'
       block:
         - ansible.builtin.file:
-            path: "{{ item.uploads_dir }}"
+            path: "{{ item.uploads_dir | mandatory }}"
             state: 'directory'
             mode: '0755'
             recurse: true
-            owner: 99
-            group: 100
+            owner: "{{ item.uid | default(app_filerise__uid) }}"
+            group: "{{ item.gid | default(app_filerise__gid) }}"
           with_items: "{{ app_filerise__containers }}"
         - ansible.builtin.file:
-            path: "{{ item.users_dir }}"
+            path: "{{ item.users_dir | mandatory }}"
             state: 'directory'
             mode: '0755'
             recurse: true
-            owner: 99
-            group: 100
+            owner: "{{ item.uid | default(app_filerise__uid) }}"
+            group: "{{ item.gid | default(app_filerise__gid) }}"
           with_items: "{{ app_filerise__containers }}"
         - ansible.builtin.file:
-            path: "{{ item.metadata_dir }}"
+            path: "{{ item.metadata_dir | mandatory }}"
             state: 'directory'
             mode: '0755'
             recurse: true
-            owner: 99
-            group: 100
+            owner: "{{ item.uid | default(app_filerise__uid) }}"
+            group: "{{ item.gid | default(app_filerise__gid) }}"
           with_items: "{{ app_filerise__containers }}"
 
-# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
-    - name: Create podman containers
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ item.name | mandatory }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[item.name | mandatory + ".service"] is defined'
+      with_items: "{{ app_filerise__containers }}"
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ item.image | default(app_foundryvtt__container_default.image) }}"
+        force: true
+      when: 'podman___update_mode | bool'
+      with_items: "{{ app_filerise__containers }}"
+
+    - name: 'Create containers'
       containers.podman.podman_container:
         name: "{{ item.name | mandatory }}"
         hostname: "{{ item.hostname | mandatory }}"
         image: "{{ item.image | default(app_filerise__container_default.image) }}"
         ip: "{{ item.ip | mandatory }}"
         network: "{{ item.network | default(app_filerise__container_default.network) }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ item.restart_policy | default(app_filerise__container_default.restart_policy) }}"
-        env: "{{ item.environment | default(app_filerise__container_default.environment) }}"
         timezone: "{{ item.timezone | default(app_filerise__container_default.timezone) }}"
+        env: "{{ app_filerise__container_default.environment | combine(item.environment) }}"
+        label: "{{ item.labels | default({}) }}"
         volume: "{{ [
           item.uploads_dir + ':/var/www/uploads',
           item.users_dir + ':/var/www/users',
           item.metadata_dir + ':/var/www/metadata'          
         ] }}"
-      when: item.ipv6 | default('') | length == 0
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'item.ipv6 | default("") | length == 0'
       with_items: "{{ app_filerise__containers }}"
 
-# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
-    - name: Create podman containers
+    - name: 'Create podman containers'
       containers.podman.podman_container:
         name: "{{ item.name | mandatory }}"
         hostname: "{{ item.hostname | mandatory }}"
         image: "{{ item.image | default(app_filerise__container_default.image) }}"
         ip: "{{ item.ip | mandatory }}"
-        ipv6: "{{ item.ipv6 | mandatory }}"
+        ip6: "{{ item.ipv6 | mandatory }}"
         network: "{{ item.network | default(app_filerise__container_default.network) }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ item.restart_policy | default(app_filerise__container_default.restart_policy) }}"
-        env: "{{ item.environment | default(app_filerise__container_default.environment) }}"
         timezone: "{{ item.timezone | default(app_filerise__container_default.timezone) }}"
+        env: "{{ app_filerise__container_default.environment | combine(item.environment | default({})) }}"
+        label: "{{ item.labels | default({}) }}"
         volume: "{{ [
           item.uploads_dir + ':/var/www/uploads',
           item.users_dir + ':/var/www/users',
           item.metadata_dir + ':/var/www/metadata'          
         ] }}"
-      when: item.ipv6 | default('') | length > 0
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'item.ipv6 | default("") | length > 0'
       with_items: "{{ app_filerise__containers }}"
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ item.name | mandatory }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      with_items: "{{ app_filerise__containers }}"
+      when: 'not ansible_check_mode'
