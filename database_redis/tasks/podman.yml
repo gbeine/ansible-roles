@@ -1,35 +1,112 @@
 ---
 
-- name: Install Redis using podman
+- name: 'Install Redis using podman'
   block:
 
-    - name: Create Redis directory
+    - name: 'Create Redis directory'
       ansible.builtin.file:
         mode: '750'
-        path: "{{ database_redis__home }}/data"
+        path: "{{ database_redis__podman_home }}/data"
         state: 'directory'
-      when: not ansible_check_mode
 
-    - name: Generate Redis configuration
+    - name: 'Generate Redis configuration'
       ansible.builtin.template:
         src: 'redis.conf.j2'
-        dest: "{{ database_redis__home }}/redis.conf"
+        dest: "{{ database_redis__podman_home }}/redis.conf"
         mode: '640'
-      notify: Restart Redis container
-      when: not podman___update_mode
+      notify:
+        - 'Restart Redis'
 
-    - name: Install Redis container
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ database_redis__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[database_redis__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ database_redis__podman_image }}"
+        tag: "{{ database_redis__podman_tag }}"
+      when: 'podman___update_mode | default(false)'
+
+    - name: 'Install Redis container'
       containers.podman.podman_container:
         name: "{{ database_redis__container.name }}"
         hostname: "{{ database_redis__container.hostname }}"
         image: "{{ database_redis__container.image }}"
         ip: "{{ database_redis__container.ip }}"
         network: "{{ database_redis__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ database_redis__container.restart_policy }}"
-        etc_hosts: "{{ database_redis__container.hosts }}"
-        env: "{{ database_redis__container.environment }}"
+        expose: "{{ database_redis__container.expose | default([]) }}"
+        publish: "{{ database_redis__container.publish | default([]) }}"
         timezone: "{{ database_redis__container.timezone }}"
+        secrets: "{{ database_redis__container.secrets | default([]) }}"
         volume: "{{ database_redis__container.volumes }}"
-      notify: Restart Redis container
-      when: database_redis__ipv6 | length == 0
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if database_redis__container.requires is defined %}
+          Requires={{ database_redis__container.requires | join(',') }}
+          {% endif %}
+          {% if database_redis__container.exec_start_pre is defined %}
+          {% for command in database_redis__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_redis__ipv6 | length == 0'
+
+    - name: 'Install Redis container'
+      containers.podman.podman_container:
+        name: "{{ database_redis__container.name }}"
+        hostname: "{{ database_redis__container.hostname }}"
+        image: "{{ database_redis__container.image }}"
+        ip: "{{ database_redis__container.ip }}"
+        ip6: "{{ database_redis__container.ipv6 }}"
+        network: "{{ database_redis__container.network }}"
+        expose: "{{ database_redis__container.expose | default([]) }}"
+        publish: "{{ database_redis__container.publish | default([]) }}"
+        timezone: "{{ database_redis__container.timezone }}"
+        secrets: "{{ database_redis__container.secrets | default([]) }}"
+        volume: "{{ database_redis__container.volumes }}"
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if database_redis__container.requires is defined %}
+          Requires={{ database_redis__container.requires | join(',') }}
+          {% endif %}
+          {% if database_redis__container.exec_start_pre is defined %}
+          {% for command in database_redis__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_redis__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_redis__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+
+    - name: 'Wait for Redis port to be opened'
+      ansible.builtin.wait_for:
+        host: "{{ database_redis__container.ip }}"
+        port: "{{ database_redis__port }}"
