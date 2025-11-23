@@ -4,7 +4,251 @@
   tags: [ 'monitoring_icinga_master' ]
   block:
 
-    - name: 'Install Icinga 2 master using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'monitoring_icinga_master__use_podman'
+    - name: 'Create Icinga directory'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__gid }}"
+        mode: '750'
+        state: 'directory'
+      with_items:
+        - "{{ monitoring_icinga_master__data_dir }}"
+        - "{{ monitoring_icinga_master__cert_dir }}"
+        - "{{ monitoring_icinga_master__etc_dir }}"
+        - "{{ monitoring_icinga_master__plugins_dir }}"
+
+    - name: 'Generate Icinga configuration'
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__uid }}"
+        mode: '0400'
+      with_items:
+        - src: 'constants.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/constants.conf"
+        - src: 'endpoints.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/endpoints.conf"
+        - src: 'icinga2.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/icinga2.conf"
+        - src: 'zones.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/zones.conf"
+        - src: 'features-api.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/api.conf"
+        - src: 'features-checker.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/checker.conf"
+        - src: 'features-debuglog.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/debuglog.conf"
+        - src: 'features-icingadb.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/icingadb.conf"
+        - src: 'features-influxdb2.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/influxdb2.conf"
+        - src: 'features-mainlog.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/mainlog.conf"
+        - src: 'features-notification.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/notification.conf"
+        - src: 'features-perfdata.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/perfdata.conf"
+        - src: 'conf-api-users.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/api-users.conf"
+        - src: 'conf-app.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/app.conf"
+        - src: 'conf-commands.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands.conf"
+        - src: 'conf-host_dependencies.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/host_dependencies.conf"
+        - src: 'conf-host_groups.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/host_groups.conf"
+        - src: 'conf-hosts.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/hosts.conf"
+        - src: 'conf-notifications.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/notifications.conf"
+        - src: 'conf-service_dependencies.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/service_dependencies.conf"
+        - src: 'conf-service_groups.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/service_groups.conf"
+        - src: 'conf-services.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/services.conf"
+        - src: 'conf-templates.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/templates.conf"
+        - src: 'conf-timeperiods.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/timeperiods.conf"
+        - src: 'conf-user_groups.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/user_groups.conf"
+        - src: 'conf-users.conf.j2'
+          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/users.conf"
+      notify:
+        - 'Restart Icinga'
+
+    - name: 'Create directories for zones'
+      ansible.builtin.file:
+        dest: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item.key }}"
+        owner: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__uid }}"
+        mode: '755'
+        state: 'directory'
+      with_dict: "{{ monitoring_icinga_master__zone_hosts }}"
+
+    - name: 'Create host configuration for zones'
+      ansible.builtin.template:
+        src: 'conf-hosts.conf.j2'
+        dest: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item.key }}/hosts.conf"
+        owner: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__uid }}"
+        mode: '400'
+      with_dict: "{{ monitoring_icinga_master__zone_hosts }}"
+      vars:
+        monitoring_icinga_master__hosts: "{{ item.value }}"
+      notify:
+        - 'Restart Icinga'
+
+    - name: 'Create service configuration for zones'
+      ansible.builtin.template:
+        src: 'conf-services.conf.j2'
+        dest: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item.key }}/services.conf"
+        owner: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__uid }}"
+        mode: '400'
+      with_dict: "{{ monitoring_icinga_master__zone_services }}"
+      vars:
+        monitoring_icinga_master__services: "{{ item.value }}"
+      notify:
+        - 'Restart Icinga'
+
+    - name: 'Copy plugins to host'
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ monitoring_icinga_master__plugins_dir }}/{{ item }}"
+        mode: '755'
+      with_items:
+        - 'pushover.sh'
+
+    - name: 'Disable features'
+      ansible.builtin.file:
+        path: "{{ monitoring_icinga_master__etc_dir }}/features-enabled/{{ item }}"
+        state: 'absent'
+      with_items:
+        - 'command.conf'
+        - 'compatlog.conf'
+        - 'debuglog.conf'
+        - 'elasticsearch.conf'
+        - 'gelf.conf'
+        - 'graphite.conf'
+        - 'icingadb.conf'
+        - 'ido-mysql.conf'
+        - 'ido-pgsql.conf'
+        - 'influxdb.conf'
+        - 'influxdb2.conf'
+        - 'journald.conf'
+        - 'livestatus.conf'
+        - 'opentsdb.conf'
+        - 'perfdata.conf'
+        - 'syslog.conf'
+      notify:
+        - 'Restart Icinga'
+
+    - name: 'Enable features'
+      ansible.builtin.file:
+        path: "{{ monitoring_icinga_master__etc_dir }}/features-enabled/{{ item }}"
+        src: "../features-available/{{ item }}"
+        state: 'link'
+      with_items:
+        - 'api.conf'
+        - 'checker.conf'
+        - 'mainlog.conf'
+        - 'notification.conf'
+      notify:
+        - 'Restart Icinga'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ monitoring_icinga_master__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[monitoring_icinga_master__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ monitoring_icinga_master__podman_image }}"
+        tag: "{{ monitoring_icinga_master__podman_tag }}"
+      when: 'podman___update_mode | default(false)'
+
+    - name: 'Install Icinga container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_master__container.name }}"
+        hostname: "{{ monitoring_icinga_master__container.hostname }}"
+        image: "{{ monitoring_icinga_master__container.image }}"
+        ip: "{{ monitoring_icinga_master__container.ip }}"
+        network: "{{ monitoring_icinga_master__container.network }}"
+        expose: "{{ monitoring_icinga_master__container.expose | default([]) }}"
+        publish: "{{ monitoring_icinga_master__container.publish | default([]) }}"
+        timezone: "{{ monitoring_icinga_master__container.timezone }}"
+        cap_add: "{{ monitoring_icinga_master__container.cap_add }}"
+        env: "{{ monitoring_icinga_master__container.env }}"
+        secrets: "{{ monitoring_icinga_master__container.secrets | default([]) }}"
+        volume: "{{ monitoring_icinga_master__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% if monitoring_icinga_master__container.requires is defined %}
+          Requires={{ monitoring_icinga_master__container.requires | join(',') }}
+          {% endif %}
+          {% if monitoring_icinga_master__container.exec_start_pre is defined %}
+          {% for command in monitoring_icinga_master__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'monitoring_icinga_master__ipv6 | length == 0'
+
+    - name: 'Install Icinga container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_master__container.name }}"
+        hostname: "{{ monitoring_icinga_master__container.hostname }}"
+        image: "{{ monitoring_icinga_master__container.image }}"
+        ip: "{{ monitoring_icinga_master__container.ip }}"
+        ip6: "{{ monitoring_icinga_master__container.ipv6 }}"
+        network: "{{ monitoring_icinga_master__container.network }}"
+        expose: "{{ monitoring_icinga_master__container.expose | default([]) }}"
+        publish: "{{ monitoring_icinga_master__container.publish | default([]) }}"
+        timezone: "{{ monitoring_icinga_master__container.timezone }}"
+        cap_add: "{{ monitoring_icinga_master__container.cap_add }}"
+        env: "{{ monitoring_icinga_master__container.env }}"
+        secrets: "{{ monitoring_icinga_master__container.secrets | default([]) }}"
+        volume: "{{ monitoring_icinga_master__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% if monitoring_icinga_master__container.requires is defined %}
+          Requires={{ monitoring_icinga_master__container.requires | join(',') }}
+          {% endif %}
+          {% if monitoring_icinga_master__container.exec_start_pre is defined %}
+          {% for command in monitoring_icinga_master__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'monitoring_icinga_master__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_icinga_master__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
