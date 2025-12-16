@@ -11,7 +11,7 @@
         group: "{{ item.group | default('root') }}"
         state: 'directory'
       with_items:
-        - dest: "{{ dns_poweradmin__podman_data_dir }}"
+        - dest: "{{ dns_poweradmin__podman_home }}"
         - dest: "{{ dns_poweradmin__podman_db_dir }}"
           owner: '82'
           group: '82'
@@ -30,12 +30,23 @@
         image: "{{ dns_poweradmin__container.image }}"
         ip: "{{ dns_poweradmin__container.ip }}"
         network: "{{ dns_poweradmin__container.network }}"
-        restart_policy: "{{ dns_poweradmin__container.restart_policy }}"
         timezone: "{{ dns_poweradmin__container.timezone }}"
         env: "{{ dns_poweradmin__container.environment }}"
         label: "{{ dns_poweradmin__container.labels }}"
         volume: "{{ dns_poweradmin__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if dns_poweradmin__container.requires is defined %}
+          Requires={{ dns_poweradmin__container.requires | join(',') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
       when: 'dns_poweradmin__ipv6 | length == 0'
 
@@ -47,26 +58,30 @@
         ip: "{{ dns_poweradmin__container.ip }}"
         ip6: "{{ dns_poweradmin__container.ipv6 }}"
         network: "{{ dns_poweradmin__container.network }}"
-        restart_policy: "{{ dns_poweradmin__container.restart_policy }}"
         timezone: "{{ dns_poweradmin__container.timezone }}"
         env: "{{ dns_poweradmin__container.environment }}"
         label: "{{ dns_poweradmin__container.labels }}"
         volume: "{{ dns_poweradmin__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+          
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if dns_poweradmin__container.requires is defined %}
+          Requires={{ dns_poweradmin__container.requires | join(',') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
       when: 'dns_poweradmin__ipv6 | length > 0'
 
-    - name: 'Generate systemd unit file'
-      containers.podman.podman_generate_systemd:
-        name: "{{ dns_poweradmin__container.name }}"
-        restart_policy: "{{ dns_poweradmin__container.restart_policy }}"
-        force: true
-        requires: "{{ dns_poweradmin__container.requires | default([]) }}"
-        dest: '/etc/systemd/system'
-
-    - name: 'Started and enable container on systemd'
+    - name: 'Started and enable container'
       ansible.builtin.systemd:
-        name: "container-{{ dns_poweradmin__container.name }}"
+        name: "{{ dns_poweradmin__container.name }}"
         daemon_reload: true
-        state: 'started'
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
         enabled: true
+      when: 'not ansible_check_mode'
