@@ -1,131 +1,129 @@
 ---
 
-- name: 'Install PostgreSQL using podman'
-  block:
+- name: 'Create PostgreSQL directories'
+  ansible.builtin.file:
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+    state: 'directory'
+  with_items:
+    - dest: "{{ database_postgresql__podman_data_dir }}"
+      owner: '70'
+      mode: '0700'
+    - dest: "{{ database_postgresql__podman_backup_dir }}"
 
-    - name: 'Create PostgreSQL directories'
-      ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: "{{ item.owner | default('root') }}"
-        group: "{{ item.group | default('root') }}"
-        mode: "{{ item.mode | default('0755') }}"
-        state: 'directory'
-      with_items:
-        - dest: "{{ database_postgresql__podman_data_dir }}"
-          owner: '70'
-          mode: '0700'
-        - dest: "{{ database_postgresql__podman_backup_dir }}"
+- name: 'Create secrets'
+  containers.podman.podman_secret:
+    state: 'present'
+    name: 'postgres_password'
+    data: "{{ database_postgresql__password }}"
 
-    - name: 'Create secrets'
-      containers.podman.podman_secret:
-        state: 'present'
-        name: 'postgres_password'
-        data: "{{ database_postgresql__password }}"
+- name: 'Gathering facts about services...'
+  ansible.builtin.service_facts:
 
-    - name: 'Gathering facts about services...'
-      ansible.builtin.service_facts:
+- name: 'Stop container when it is running'
+  ansible.builtin.systemd:
+    name: "{{ database_postgresql__container.name }}.service"
+    state: 'stopped'
+  when: 'ansible_facts.services[database_postgresql__container.name + ".service"] is defined'
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ database_postgresql__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[database_postgresql__container.name + ".service"] is defined'
+- name: 'Pull image'
+  containers.podman.podman_image:
+    name: "{{ database_postgresql__podman_image }}"
+    tag: "{{ database_postgresql__podman_tag }}"
+    force: true
+  when: 'podman___update_mode | default(false)'
 
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ database_postgresql__podman_image }}"
-        tag: "{{ database_postgresql__podman_tag }}"
-      when: 'podman___update_mode | default(false)'
+- name: 'Install PostgreSQL container'
+  containers.podman.podman_container:
+    name: "{{ database_postgresql__container.name }}"
+    hostname: "{{ database_postgresql__container.hostname }}"
+    image: "{{ database_postgresql__container.image }}"
+    ip: "{{ database_postgresql__container.ip }}"
+    network: "{{ database_postgresql__container.network }}"
+    expose: "{{ database_postgresql__container.expose | default([]) }}"
+    publish: "{{ database_postgresql__container.publish | default([]) }}"
+    timezone: "{{ database_postgresql__container.timezone }}"
+    secrets: "{{ database_postgresql__container.secrets }}"
+    volume: "{{ database_postgresql__container.volumes }}"
+    quadlet_options: |
+      
+      [Install]
+      WantedBy=default.target
+      
+      [Service]
+      {% if database_postgresql__container.requires is defined %}
+      Requires={{ database_postgresql__container.requires | join(',') }}
+      {% endif %}
+      {% if database_postgresql__container.exec_start_pre is defined %}
+      {% for command in database_postgresql__container.exec_start_pre %}
+      ExecStartPre={{ command }}
+      {% endfor %}
+      {% endif %}
+      RestartSec=5
+      Restart=always
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'database_postgresql__ipv6 | length == 0'
 
-    - name: 'Install PostgreSQL container'
-      containers.podman.podman_container:
-        name: "{{ database_postgresql__container.name }}"
-        hostname: "{{ database_postgresql__container.hostname }}"
-        image: "{{ database_postgresql__container.image }}"
-        ip: "{{ database_postgresql__container.ip }}"
-        network: "{{ database_postgresql__container.network }}"
-        expose: "{{ database_postgresql__container.expose | default([]) }}"
-        publish: "{{ database_postgresql__container.publish | default([]) }}"
-        timezone: "{{ database_postgresql__container.timezone }}"
-        secrets: "{{ database_postgresql__container.secrets }}"
-        volume: "{{ database_postgresql__container.volumes }}"
-        quadlet_options: |
-          
-          [Install]
-          WantedBy=default.target
-          
-          [Service]
-          {% if database_postgresql__container.requires is defined %}
-          Requires={{ database_postgresql__container.requires | join(',') }}
-          {% endif %}
-          {% if database_postgresql__container.exec_start_pre is defined %}
-          {% for command in database_postgresql__container.exec_start_pre %}
-          ExecStartPre={{ command }}
-          {% endfor %}
-          {% endif %}
-          RestartSec=5
-          Restart=always
-        restart_policy: 'no'
-        state: 'quadlet'
-        recreate: "{{ podman___update_mode | default(false) }}"
-      when: 'database_postgresql__ipv6 | length == 0'
+- name: 'Install PostgreSQL container'
+  containers.podman.podman_container:
+    name: "{{ database_postgresql__container.name }}"
+    hostname: "{{ database_postgresql__container.hostname }}"
+    image: "{{ database_postgresql__container.image }}"
+    ip: "{{ database_postgresql__container.ip }}"
+    ip6: "{{ database_postgresql__container.ipv6 }}"
+    network: "{{ database_postgresql__container.network }}"
+    expose: "{{ database_postgresql__container.expose | default([]) }}"
+    publish: "{{ database_postgresql__container.publish | default([]) }}"
+    timezone: "{{ database_postgresql__container.timezone }}"
+    secrets: "{{ database_postgresql__container.secrets }}"
+    volume: "{{ database_postgresql__container.volumes }}"
+    quadlet_options: |
 
-    - name: 'Install PostgreSQL container'
-      containers.podman.podman_container:
-        name: "{{ database_postgresql__container.name }}"
-        hostname: "{{ database_postgresql__container.hostname }}"
-        image: "{{ database_postgresql__container.image }}"
-        ip: "{{ database_postgresql__container.ip }}"
-        ip6: "{{ database_postgresql__container.ipv6 }}"
-        network: "{{ database_postgresql__container.network }}"
-        expose: "{{ database_postgresql__container.expose | default([]) }}"
-        publish: "{{ database_postgresql__container.publish | default([]) }}"
-        timezone: "{{ database_postgresql__container.timezone }}"
-        secrets: "{{ database_postgresql__container.secrets }}"
-        volume: "{{ database_postgresql__container.volumes }}"
-        quadlet_options: |
+      [Install]
+      WantedBy=default.target
 
-          [Install]
-          WantedBy=default.target
+      [Service]
+      {% if database_postgresql__container.requires is defined %}
+      Requires={{ database_postgresql__container.requires | join(',') }}
+      {% endif %}
+      {% if database_postgresql__container.exec_start_pre is defined %}
+      {% for command in database_postgresql__container.exec_start_pre %}
+      ExecStartPre={{ command }}
+      {% endfor %}
+      {% endif %}
+      RestartSec=5
+      Restart=always
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'database_postgresql__ipv6 | length > 0'
 
-          [Service]
-          {% if database_postgresql__container.requires is defined %}
-          Requires={{ database_postgresql__container.requires | join(',') }}
-          {% endif %}
-          {% if database_postgresql__container.exec_start_pre is defined %}
-          {% for command in database_postgresql__container.exec_start_pre %}
-          ExecStartPre={{ command }}
-          {% endfor %}
-          {% endif %}
-          RestartSec=5
-          Restart=always
-        restart_policy: 'no'
-        state: 'quadlet'
-        recreate: "{{ podman___update_mode | default(false) }}"
-      when: 'database_postgresql__ipv6 | length > 0'
+- name: 'Generate PostgreSQL configuration'
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+  with_items:
+    - src: 'pg_hba.conf.j2'
+      dest: "{{ database_postgresql__podman_data_dir }}/pg_hba.conf"
+    - src: 'pg_ident.conf.j2'
+      dest: "{{ database_postgresql__podman_data_dir }}/pg_ident.conf"
+    - src: 'postgresql.conf.j2'
+      dest: "{{ database_postgresql__podman_data_dir }}/postgresql.conf"
+  when: 'not database_postgresql__configure_from_primary'
+  notify: 'Restart PostgreSQL container'
 
-    - name: 'Generate PostgreSQL configuration'
-      ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-      with_items:
-        - src: 'pg_hba.conf.j2'
-          dest: "{{ database_postgresql__podman_data_dir }}/pg_hba.conf"
-        - src: 'pg_ident.conf.j2'
-          dest: "{{ database_postgresql__podman_data_dir }}/pg_ident.conf"
-        - src: 'postgresql.conf.j2'
-          dest: "{{ database_postgresql__podman_data_dir }}/postgresql.conf"
-      when: 'not database_postgresql__configure_from_primary'
-      notify: 'Restart PostgreSQL container'
+- name: 'Start and enable container'
+  ansible.builtin.systemd_service:
+    name: "{{ database_postgresql__container.name }}"
+    daemon_reload: true
+    state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+    enabled: true
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_postgresql__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
-        enabled: true
-
-    - name: 'Wait for PostgreSQL port to be opened'
-      ansible.builtin.wait_for:
-        host: "{{ database_postgresql__container.ip }}"
-        port: "{{ database_postgresql__port }}"
+- name: 'Wait for PostgreSQL port to be opened'
+  ansible.builtin.wait_for:
+    host: "{{ database_postgresql__container.ip }}"
+    port: "{{ database_postgresql__port }}"
