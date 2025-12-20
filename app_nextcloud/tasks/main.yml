@@ -6,31 +6,98 @@
 
     - name: 'Create nextcloud directories'
       ansible.builtin.file:
-        mode: '750'
         path: "{{ item }}"
         owner: "{{ app_nextcloud__uid }}"
         group: "{{ app_nextcloud__gid }}"
+        mode: "{{ item.mode | default('0750') }}"
         state: 'directory'
       with_items:
-        - "{{ app_nextcloud__config_dir }}"
-        - "{{ app_nextcloud__config_dir }}/www/nextcloud/config"
-        - "{{ app_nextcloud__data_dir }}"
+        - "{{ app_nextcloud__podman_config_dir }}"
+        - "{{ app_nextcloud__podman_config_dir }}/www/nextcloud/config"
+        - "{{ app_nextcloud__podman_data_dir }}"
 
-    - name: 'Create podman containers'
+    - name: 'Write nextcloud config file'
+      no_log: true
+      ansible.builtin.copy:
+        dest: "{{ app_nextcloud__podman_config_dir }}/www/nextcloud/config/config.php"
+        owner: "{{ app_nextcloud__uid }}"
+        group: "{{ app_nextcloud__gid }}"
+        mode: '600'
+        content: |
+          {{ app_nextcloud__config }}
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_nextcloud__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_nextcloud__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_nextcloud__podman_image }}"
+        tag: "{{ app_nextcloud__podman_tag }}"
+      when: 'podman___update_mode | default(false)'
+
+    - name:  'Install container'
       containers.podman.podman_container:
         name: "{{ app_nextcloud__container.name }}"
         hostname: "{{ app_nextcloud__container.hostname }}"
         image: "{{ app_nextcloud__container.image }}"
         ip: "{{ app_nextcloud__container.ip }}"
         network: "{{ app_nextcloud__container.network }}"
-        restart_policy: "{{ app_nextcloud__container.restart_policy }}"
-        env: "{{ app_nextcloud__container.environment }}"
-        volume: "{{ app_nextcloud__container.volumes }}"
-        etc_hosts: "{{ app_nextcloud__container.hosts }}"
         timezone: "{{ app_nextcloud__container.timezone }}"
-        pull: 'always'
+        env: "{{ app_nextcloud__container.environment }}"
+        label: "{{ app_nextcloud__container.labels }}"
+        volume: "{{ app_nextcloud__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if app_nextcloud__container.requires is defined %}
+          Requires={{ app_nextcloud__container.requires | join(' ') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
       when: app_nextcloud__ipv6 | length == 0
 
-    - name: 'Update CA certificates'
-      ansible.builtin.shell: "podman exec -it {{ app_nextcloud__container.name }} update-ca-certificates"
+    - name:  'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_nextcloud__container.name }}"
+        hostname: "{{ app_nextcloud__container.hostname }}"
+        image: "{{ app_nextcloud__container.image }}"
+        ip: "{{ app_nextcloud__container.ip }}"
+        ip6: "{{ app_nextcloud__container.ipv6 }}"
+        network: "{{ app_nextcloud__container.network }}"
+        timezone: "{{ app_nextcloud__container.timezone }}"
+        env: "{{ app_nextcloud__container.environment }}"
+        label: "{{ app_nextcloud__container.labels }}"
+        volume: "{{ app_nextcloud__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if app_nextcloud__container.requires is defined %}
+          Requires={{ app_nextcloud__container.requires | join(' ') }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: app_nextcloud__ipv6 | length > 0
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_nextcloud__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
