@@ -4,18 +4,84 @@
   tags: [ 'matrix_admin' ]
   block:
 
-    - name: 'Create podman container'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_wallabag__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[matrix_admin__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ matrix_admin__podman_image }}"
+        tag: "{{ matrix_admin__podman_tag }}"
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ matrix_admin__container.name }}"
         hostname: "{{ matrix_admin__container.hostname }}"
         image: "{{ matrix_admin__container.image }}"
         ip: "{{ matrix_admin__container.ip }}"
         network: "{{ matrix_admin__container.network }}"
-        restart_policy: "{{ matrix_admin__container.restart_policy }}"
-        etc_hosts: "{{ matrix_admin__container.hosts }}"
-        env: "{{ matrix_admin__container.environment }}"
         timezone: "{{ matrix_admin__container.timezone }}"
+        env: "{{ matrix_admin__container.environment }}"
+        label: "{{ matrix_admin__container.labels }}"
         volume: "{{ matrix_admin__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if matrix_admin__container.requires is defined %}
+          Requires={{ matrix_admin__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+
         recreate: "{{ podman___update_mode | default(false) }}"
-      when: matrix_admin__ipv6 | length == 0
+      when: 'matrix_admin__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ matrix_admin__container.name }}"
+        hostname: "{{ matrix_admin__container.hostname }}"
+        image: "{{ matrix_admin__container.image }}"
+        ip: "{{ matrix_admin__container.ip }}"
+        ip6: "{{ matrix_admin__container.ipv6 }}"
+        network: "{{ matrix_admin__container.network }}"
+        timezone: "{{ matrix_admin__container.timezone }}"
+        env: "{{ matrix_admin__container.environment }}"
+        label: "{{ matrix_admin__container.labels }}"
+        volume: "{{ matrix_admin__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if matrix_admin__container.requires is defined %}
+          Requires={{ matrix_admin__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'matrix_admin__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ matrix_admin__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
