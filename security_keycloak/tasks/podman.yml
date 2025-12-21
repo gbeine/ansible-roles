@@ -1,0 +1,115 @@
+---
+
+- name: 'Create secrets'
+  no_log: true
+  containers.podman.podman_secret:
+    state: 'present'
+    name: "{{ item.name }}"
+    data: "{{ item.data }}"
+  with_items:
+    - name: 'keycloak_database_passwd'
+      data: "{{ security_keycloak__db_pass }}"
+    - name: 'keycloak_admin_passwd'
+      data: "{{ security_keycloak__password }}"
+  when: 'item.data | length > 0'
+
+- name: 'Gathering facts about services...'
+  ansible.builtin.service_facts:
+
+- name: 'Stop container when it is running'
+  ansible.builtin.systemd:
+    name: "{{ security_keycloak__container.name }}.service"
+    state: 'stopped'
+  when: 'ansible_facts.services[security_keycloak__container.name + ".service"] is defined'
+
+- name: 'Pull image'
+  containers.podman.podman_image:
+    name: "{{ security_keycloak__podman_image }}"
+    tag: "{{ security_keycloak__podman_tag }}"
+  when: 'podman___update_mode | default(false)'
+
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ security_keycloak__container.name }}"
+    hostname: "{{ security_keycloak__container.hostname }}"
+    image: "{{ security_keycloak__container.image }}"
+    ip: "{{ security_keycloak__container.ip }}"
+    network: "{{ security_keycloak__container.network }}"
+    timezone: "{{ security_keycloak__container.timezone }}"
+    env: "{{ security_keycloak__container.environment }}"
+    label: "{{ security_keycloak__container.labels }}"
+    secrets: "{{ security_keycloak__container.secrets }}"
+    volume: "{{ security_keycloak__container.volumes }}"
+    shm_size: "{{ security_keycloak__container.shm_size }}"
+    command: "{{ security_keycloak__container.command }}"
+    quadlet_options: |
+      [Install]
+      WantedBy=default.target
+      
+      [Service]
+      {% if security_keycloak__container.exec_start_pre is defined %}
+      {% for command in security_keycloak__container.exec_start_pre %}
+      ExecStartPre={{ command }}
+      {% endfor %}
+      {% endif %}
+      RestartSec=5
+      Restart=always
+
+      [Unit]
+      {% if security_keycloak__container.requires is defined %}
+      Requires={{ security_keycloak__container.requires | join(' ') }}
+      {% endif %}
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'security_keycloak__ipv6 | length == 0'
+
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ security_keycloak__container.name }}"
+    hostname: "{{ security_keycloak__container.hostname }}"
+    image: "{{ security_keycloak__container.image }}"
+    ip: "{{ security_keycloak__container.ip }}"
+    ip6: "{{ security_keycloak__container.ipv6 }}"
+    network: "{{ security_keycloak__container.network }}"
+    timezone: "{{ security_keycloak__container.timezone }}"
+    env: "{{ security_keycloak__container.environment }}"
+    label: "{{ security_keycloak__container.labels }}"
+    secrets: "{{ security_keycloak__container.secrets }}"
+    volume: "{{ security_keycloak__container.volumes }}"
+    shm_size: "{{ security_keycloak__container.shm_size }}"
+    command: "{{ security_keycloak__container.command }}"
+    quadlet_options: |
+      [Install]
+      WantedBy=default.target
+      
+      [Unit]
+      {% if security_keycloak__container.requires is defined %}
+      Requires={{ security_keycloak__container.requires | join(' ') }}
+      {% endif %}
+
+      [Service]
+      {% if security_keycloak__container.exec_start_pre is defined %}
+      {% for command in security_keycloak__container.exec_start_pre %}
+      ExecStartPre={{ command }}
+      {% endfor %}
+      {% endif %}
+      RestartSec=5
+      Restart=always
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'security_keycloak__ipv6 | length > 0'
+
+- name: 'Start and enable container'
+  ansible.builtin.systemd:
+    name: "{{ security_keycloak__container.name }}"
+    daemon_reload: true
+    state: 'started'
+    enabled: true
+  when: 'not ansible_check_mode'
+
+- name: 'Wait starting up keycloak containers'
+  ansible.builtin.wait_for:
+    host: "{{ security_keycloak__container.ip }}"
+    port: "{{ security_keycloak__http_port if security_keycloak__http_enabled else security_keycloak__https_port }}"
