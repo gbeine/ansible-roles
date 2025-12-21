@@ -6,49 +6,151 @@
 
     - name: 'Create Synapse directories'
       ansible.builtin.file:
-        dest: "{{ item }}"
-        state: 'directory'
+        dest: "{{ item.dest }}"
         owner: "{{ matrix_synapse__uid }}"
         group: "{{ matrix_synapse__gid }}"
+        mode: "{{ item.mode | default('0755') }}"
+        state: 'directory'
       with_items:
-        - "{{ matrix_synapse__data_dir }}"
+        - dest: "{{ matrix_synapse__podman_data_dir }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items:
+        - name: 'matrix_synapse_postgres_password'
+          data: "{{ matrix_synapse__db_pass }}"
+      when: 'item.data | length > 0'
 
     - name: "Has configuration been generate?"
       ansible.builtin.stat:
-        path: "{{ matrix_synapse__data_dir }}/homeserver.yaml"
+        path: "{{ matrix_synapse__podman_data_dir }}/homeserver.yaml"
       register: 'matrix_synapse_configuration_stat_result'
 
     - name: 'Generate synapse configuration'
-      containers.podman.podman_container:
-        name: "{{ matrix_synapse__container.name }}-generate"
-        hostname: "{{ matrix_synapse__container.hostname }}"
-        image: "{{ matrix_synapse__container.image }}"
-        ip: "{{ matrix_synapse__container.ip }}"
-        network: "{{ matrix_synapse__container.network }}"
-        etc_hosts: "{{ matrix_synapse__container.hosts }}"
-        env: "{{ matrix_synapse__container.environment }}"
-        timezone: "{{ matrix_synapse__container.timezone }}"
-        volume: "{{ matrix_synapse__container.volumes }}"
-        command: 'generate'
-        rm: true
-      when: matrix_synapse__ipv6 | length == 0 and not matrix_synapse_configuration_stat_result.stat.exists
+      when: 'not matrix_synapse_configuration_stat_result.stat.exists'
+      block:
+        - name: 'Create synapse configuration file'
+          containers.podman.podman_container:
+            name: "{{ matrix_synapse__container.name }}-generate"
+            hostname: "{{ matrix_synapse__container.hostname }}"
+            image: "{{ matrix_synapse__container.image }}"
+            ip: "{{ matrix_synapse__container.ip }}"
+            network: "{{ matrix_synapse__container.network }}"
+            env: "{{ matrix_synapse__container.environment }}"
+            timezone: "{{ matrix_synapse__container.timezone }}"
+            volume: "{{ matrix_synapse__container.volumes }}"
+            command: 'generate'
+            rm: true
+          when: 'matrix_synapse__ipv6 | length == 0'
 
-    - name: 'Create podman container'
+        - name: 'Create synapse configuration file'
+          containers.podman.podman_container:
+            name: "{{ matrix_synapse__container.name }}-generate"
+            hostname: "{{ matrix_synapse__container.hostname }}"
+            image: "{{ matrix_synapse__container.image }}"
+            ip: "{{ matrix_synapse__container.ip }}"
+            ip6: "{{ matrix_synapse__container.ipv6 }}"
+            network: "{{ matrix_synapse__container.network }}"
+            env: "{{ matrix_synapse__container.environment }}"
+            timezone: "{{ matrix_synapse__container.timezone }}"
+            volume: "{{ matrix_synapse__container.volumes }}"
+            command: 'generate'
+            rm: true
+          when: 'matrix_synapse__ipv6 | length > 0'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ matrix_synapse__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[matrix_synapse__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ matrix_synapse__podman_image }}"
+        tag: "{{ matrix_synapse__podman_tag }}"
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ matrix_synapse__container.name }}"
         hostname: "{{ matrix_synapse__container.hostname }}"
         image: "{{ matrix_synapse__container.image }}"
         ip: "{{ matrix_synapse__container.ip }}"
         network: "{{ matrix_synapse__container.network }}"
-        restart_policy: "{{ matrix_synapse__container.restart_policy }}"
-        etc_hosts: "{{ matrix_synapse__container.hosts }}"
+        timezone: "{{ matrix_synapse__container.timezone }}"
         dns_servers: "{{ matrix_synapse__container.dns_servers }}"
         env: "{{ matrix_synapse__container.environment }}"
-        timezone: "{{ matrix_synapse__container.timezone }}"
+        label: "{{ matrix_synapse__container.labels }}"
+        secrets: "{{ matrix_synapse__container.secrets }}"
         volume: "{{ matrix_synapse__container.volumes }}"
-        pull: 'always'
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if matrix_synapse__container.requires is defined %}
+          Requires={{ matrix_synapse__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
       when: |
         matrix_synapse__ipv6 | length == 0
+        and matrix_synapse_configuration_stat_result.stat.exists
+        and not matrix_synapse__setup
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ matrix_synapse__container.name }}"
+        hostname: "{{ matrix_synapse__container.hostname }}"
+        image: "{{ matrix_synapse__container.image }}"
+        ip: "{{ matrix_synapse__container.ip }}"
+        ip6: "{{ matrix_synapse__container.ipv6 }}"
+        network: "{{ matrix_synapse__container.network }}"
+        timezone: "{{ matrix_synapse__container.timezone }}"
+        dns_servers: "{{ matrix_synapse__container.dns_servers }}"
+        env: "{{ matrix_synapse__container.environment }}"
+        label: "{{ matrix_synapse__container.labels }}"
+        secrets: "{{ matrix_synapse__container.secrets }}"
+        volume: "{{ matrix_synapse__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if matrix_synapse__container.requires is defined %}
+          Requires={{ matrix_synapse__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: |
+        matrix_synapse__ipv6 | length > 0
+        and matrix_synapse_configuration_stat_result.stat.exists
+        and not matrix_synapse__setup
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ matrix_synapse__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: |
+        not ansible_check_mode
         and matrix_synapse_configuration_stat_result.stat.exists
         and not matrix_synapse__setup
