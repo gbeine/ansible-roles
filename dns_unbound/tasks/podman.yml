@@ -1,49 +1,64 @@
 ---
 
-- name: Install unbound using podman
-  block:
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ dns_unbound__container.name }}"
+    hostname: "{{ dns_unbound__container.hostname }}"
+    image: "{{ dns_unbound__container.image }}"
+    ip: "{{ dns_unbound__container.ip }}"
+    network: "{{ dns_unbound__container.network }}"
+    timezone: "{{ dns_unbound__container.timezone }}"
+    publish: "{{ dns_unbound__container.publish }}"
+    volume: "{{ dns_unbound__container.volumes }}"
+    quadlet_options: |
+      [Install]
+      WantedBy=default.target
 
-    - name: Create unbound directory
-      ansible.builtin.file:
-        mode: '750'
-        path: "{{ dns_unbound__home }}"
-        state: 'directory'
-        owner: "{{ dns_unbound__uid }}"
-        group: "{{ dns_unbound__uid }}"
-      when: not ansible_check_mode
+      [Service]
+      RestartSec=5
+      Restart=always
+      
+      [Unit]
+      {% if dns_unbound__container.requires is defined %}
+      Requires={{ dns_unbound__container.requires | join(' ') }}
+      {% endif %}
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'dns_unbound__ipv6 | length == 0'
 
-    - name: Generate unbound configuration
-      ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        mode: '640'
-        owner: "{{ dns_unbound__uid }}"
-        group: "{{ dns_unbound__uid }}"
-      with_items:
-        - src: 'unbound.conf.j2'
-          dest: "{{ dns_unbound__home }}/unbound.conf"
-        - src: 'forward-records.conf.j2'
-          dest: "{{ dns_unbound__home }}/forward-records.conf"
-        - src: 'a-records.conf.j2'
-          dest: "{{ dns_unbound__home }}/a-records.conf"
-        - src: 'srv-records.conf.j2'
-          dest: "{{ dns_unbound__home }}/srv-records.conf"
-      notify: Restart unbound container
-      when: not podman___update_mode
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ dns_unbound__container.name }}"
+    hostname: "{{ dns_unbound__container.hostname }}"
+    image: "{{ dns_unbound__container.image }}"
+    ip: "{{ dns_unbound__container.ip }}"
+    ip6: "{{ dns_unbound__container.ipv6 }}"
+    network: "{{ dns_unbound__container.network }}"
+    timezone: "{{ dns_unbound__container.timezone }}"
+    publish: "{{ dns_unbound__container.publish }}"
+    volume: "{{ dns_unbound__container.volumes }}"
+    quadlet_options: |
+      [Install]
+      WantedBy=default.target
 
-    - name: Install unbound container
-      containers.podman.podman_container:
-        name: "{{ dns_unbound__container.name }}"
-        hostname: "{{ dns_unbound__container.hostname }}"
-        image: "{{ dns_unbound__container.image }}"
-        ip: "{{ dns_unbound__container.ip }}"
-        network: "{{ dns_unbound__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ dns_unbound__container.restart_policy }}"
-        etc_hosts: "{{ dns_unbound__container.hosts }}"
-        timezone: "{{ dns_unbound__container.timezone }}"
-        volume: "{{ dns_unbound__container.volumes }}"
-        publish: "{{ dns_unbound__container.publish }}"
-        pull: 'always'
-      notify: Restart unbound container
-      when: dns_unbound__ipv6 | length == 0
+      [Service]
+      RestartSec=5
+      Restart=always
+      
+      [Unit]
+      {% if dns_unbound__container.requires is defined %}
+      Requires={{ dns_unbound__container.requires | join(' ') }}
+      {% endif %}
+    restart_policy: 'no'
+    state: 'quadlet'
+    recreate: "{{ podman___update_mode | default(false) }}"
+  when: 'dns_unbound__ipv6 | length > 0'
+
+- name: 'Start and enable container'
+  ansible.builtin.systemd_service:
+    name: "{{ dns_unbound__container.name }}"
+    daemon_reload: true
+    state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+    enabled: true
+  when: 'not ansible_check_mode'
