@@ -1,35 +1,96 @@
 ---
 
-- name: 'Deploy Pi-hole container'
+- name: 'Install Pi-hole'
   tags: [ 'dns_pihole' ]
   block:
 
-    - name: 'Create Pi-hole directories'
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: 'webserver_api_password'
+        data: "{{ dns_pihole__password }}"
+
+    - name: 'Create directories'
       ansible.builtin.file:
         dest: "{{ item }}"
-        state: 'directory'
         mode: '750'
+        state: 'directory'
       with_items:
-        - "{{ dns_pihole__etc_dir }}"
-        - "{{ dns_pihole__dnsmasq_dir }}"
+        - "{{ dns_pihole__podman_etc_dir }}"
+        - "{{ dns_pihole__podman_dnsmasq_dir }}"
+        - "{{ dns_pihole__podman_log_dir }}"
 
-    - name: 'Create podman container'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ dns_pihole__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[dns_pihole__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ dns_pihole__podman_image }}"
+        tag: "{{ dns_pihole__podman_tag }}"
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ dns_pihole__container.name }}"
         hostname: "{{ dns_pihole__container.hostname }}"
         image: "{{ dns_pihole__container.image }}"
         ip: "{{ dns_pihole__container.ip }}"
         network: "{{ dns_pihole__container.network }}"
-        restart_policy: "{{ dns_pihole__container.restart_policy }}"
-        etc_hosts: "{{ dns_pihole__container.hosts }}"
-        env: "{{ dns_pihole__container.environment }}"
         timezone: "{{ dns_pihole__container.timezone }}"
+        env: "{{ dns_pihole__container.environment }}"
+        label: "{{ dns_pihole__container.labels }}"
         publish: "{{ dns_pihole__container.publish }}"
         volume: "{{ dns_pihole__container.volumes }}"
-        pull: 'always'
-        cap_add:
-          - 'cap_chown'
-          - 'cap_net_bind_service'
-          - 'cap_sys_nice'
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
         recreate: "{{ podman___update_mode | default(false) }}"
-      when: dns_pihole__ipv6 | length == 0
+      when: 'dns_pihole__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ dns_pihole__container.name }}"
+        hostname: "{{ dns_pihole__container.hostname }}"
+        image: "{{ dns_pihole__container.image }}"
+        ip: "{{ dns_pihole__container.ip }}"
+        ip6: "{{ dns_pihole__container.ipv6 }}"
+        network: "{{ dns_pihole__container.network }}"
+        timezone: "{{ dns_pihole__container.timezone }}"
+        env: "{{ dns_pihole__container.environment }}"
+        label: "{{ dns_pihole__container.labels }}"
+        publish: "{{ dns_pihole__container.publish }}"
+        volume: "{{ dns_pihole__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'dns_pihole__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ dns_pihole__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
