@@ -1,57 +1,112 @@
 ---
 
-- name: Deploy BookStack container
+- name: 'Deploy BookStack container'
   tags: [ 'app_bookstack' ]
   block:
 
-    - name: Ensure group "bookstack" exists with correct gid
-      ansible.builtin.group:
-        name: "{{ app_bookstack__user }}"
-        state: 'present'
-        gid: "{{ app_bookstack__gid }}"
-
-    - name: Ensure user "bookstack" exists with correct uid
-      ansible.builtin.user:
-        name: "{{ app_bookstack__user }}"
-        state: 'present'
-        create_home: false
-        comment: 'BookStack container user'
-        uid: "{{ app_bookstack__uid }}"
-        group: "{{ app_bookstack__user }}"
-        home: "{{ app_bookstack__home }}"
-        shell: '/usr/bin/false'
-        system: true
-
-    - name: Create BookStack directory
+    - name: 'Create directories'
       ansible.builtin.file:
-        mode: '750'
-        path: "{{ app_bookstack__home }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ app_bookstack__uid }}"
+        group: "{{ app_bookstack__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
         state: 'directory'
+      with_items:
+        - dest: "{{ app_bookstack__podman_config_dir }}"
 
-# See: https://docs.ansible.com/ansible/latest/collections/containers/podman/podman_container_module.html
-    - name: Create podman containers
+    - name: 'Generate BookStack .env file'
+      ansible.builtin.template:
+        src: 'env.j2'
+        dest: "{{ app_bookstack__podman_config_dir }}/.env"
+        owner: "{{ app_bookstack__uid }}"
+        group: "{{ app_bookstack__gid }}"
+        mode: '600'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: 'bookstack_database_pass'
+        data: "{{ app_bookstack__db_pass }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_bookstack__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_bookstack__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_bookstack__podman_image }}"
+        tag: "{{ app_bookstack__podman_tag }}"
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_bookstack__container.name }}"
         hostname: "{{ app_bookstack__container.hostname }}"
         image: "{{ app_bookstack__container.image }}"
         ip: "{{ app_bookstack__container.ip }}"
         network: "{{ app_bookstack__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ app_bookstack__container.restart_policy }}"
-        etc_hosts: "{{ app_bookstack__container.hosts }}"
-        env: "{{ app_bookstack__container.environment }}"
         timezone: "{{ app_bookstack__container.timezone }}"
-        volume: "{{ app_bookstack__container.volumes | default([]) }}"
-      when: app_bookstack__ipv6 | length == 0
+        env: "{{ app_bookstack__container.environment }}"
+        label: "{{ app_bookstack__container.labels }}"
+        secrets: "{{ app_bookstack__container.secrets }}"
+        volume: "{{ app_bookstack__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_bookstack__container.requires is defined %}
+          Requires={{ app_bookstack__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'app_bookstack__ipv6 | length == 0'
 
-    - name: Copy SSL CA into containers
-      ansible.builtin.shell: "podman cp {{ app_bookstack__ca_file }} {{ app_bookstack__container.name }}:{{ pki_easyrsa_deploy__ca_certificates_dir }} && podman exec -it {{ app_bookstack__container.name }} update-ca-certificates"
-      when: app_bookstack__ca_file | length > 0
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_bookstack__container.name }}"
+        hostname: "{{ app_bookstack__container.hostname }}"
+        image: "{{ app_bookstack__container.image }}"
+        ip: "{{ app_bookstack__container.ip }}"
+        ip6: "{{ app_bookstack__container.ipv6 }}"
+        network: "{{ app_bookstack__container.network }}"
+        timezone: "{{ app_bookstack__container.timezone }}"
+        env: "{{ app_bookstack__container.environment }}"
+        label: "{{ app_bookstack__container.labels }}"
+        secrets: "{{ app_bookstack__container.secrets }}"
+        volume: "{{ app_bookstack__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_bookstack__container.requires is defined %}
+          Requires={{ app_bookstack__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'app_bookstack__ipv6 | length > 0'
 
-    - name: Generate BookStack .env file
-      ansible.builtin.template:
-        src: env.j2
-        dest: "{{ app_bookstack__config_dir }}/.env"
-        owner: "{{ app_bookstack__user }}"
-        group: "{{ app_bookstack__user }}"
-        mode: '600'
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_bookstack__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
