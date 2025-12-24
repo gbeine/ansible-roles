@@ -1,0 +1,92 @@
+---
+
+- name: 'Install InfluxDB'
+  tags: [ 'database_influxdb_core'  ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ database_influxdb_core__uid }}"
+        group: "{{ database_influxdb_core__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ database_influxdb_core__podman_data_dir }}"
+        - dest: "{{ database_influxdb_core__podman_plugins_dir }}"
+        - dest: "{{ database_influxdb_core__podman_backup_dir }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ database_influxdb_core__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[database_influxdb_core__container.name + ".service"] is defined'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ database_influxdb_core__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+      
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_influxdb_core__container.name }}"
+        hostname: "{{ database_influxdb_core__container.hostname }}"
+        image: "{{ database_influxdb_core__container.image }}"
+        ip: "{{ database_influxdb_core__container.ip }}"
+        network: "{{ database_influxdb_core__container.network }}"
+        timezone: "{{ database_influxdb_core__container.timezone }}"
+        label: "{{ database_influxdb_core__container.labels }}"
+        volume: "{{ database_influxdb_core__container.volumes }}"
+        command: "{{ database_influxdb_core__container.command }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_influxdb_core__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_influxdb_core__container.name }}"
+        hostname: "{{ database_influxdb_core__container.hostname }}"
+        image: "{{ database_influxdb_core__container.image }}"
+        ip: "{{ database_influxdb_core__container.ip }}"
+        ip6: "{{ database_influxdb_core__container.ipv6 }}"
+        network: "{{ database_influxdb_core__container.network }}"
+        timezone: "{{ database_influxdb_core__container.timezone }}"
+        label: "{{ database_influxdb_core__container.labels }}"
+        volume: "{{ database_influxdb_core__container.volumes }}"
+        command: "{{ database_influxdb_core__container.command }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | default(false) }}"
+      when: 'database_influxdb_core__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ database_influxdb_core__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Wait for InfluxDB port to be opened'
+      ansible.builtin.wait_for:
+        host: "{{ database_influxdb_core__container.ip }}"
+        port: "{{ database_influxdb_core__port }}"
