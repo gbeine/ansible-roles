@@ -1,10 +1,113 @@
 ---
 
-- name: 'Install and configure Icinga 2 web'
+- name: 'Deploy IcingaDB container'
   tags: [ 'monitoring_icinga_web' ]
   block:
 
-    - name: 'Install Icinga 2 web using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'monitoring_icinga_web__use_podman'
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ monitoring_icinga_web__uid }}"
+        group: "{{ monitoring_icinga_web__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ monitoring_icinga_web__podman_data_dir }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items:
+        - name: 'icingaweb_admin_password'
+          data: "{{ monitoring_icinga_web__admin_password }}"
+        - name: 'icingaweb_icinga_password'
+          data: "{{ monitoring_icinga_web__icinga_password }}"
+        - name: 'icingaweb_db_password'
+          data: "{{ monitoring_icinga_web__db_password }}"
+        - name: 'icingaweb_icingadb_password'
+          data: "{{ monitoring_icinga_web__icingadb_password }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ monitoring_icinga_web__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[monitoring_icinga_web__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ monitoring_icinga_web__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_web__container.name }}"
+        hostname: "{{ monitoring_icinga_web__container.hostname }}"
+        image: "{{ monitoring_icinga_web__container.image }}"
+        ip: "{{ monitoring_icinga_web__container.ip }}"
+        network: "{{ monitoring_icinga_web__container.network }}"
+        timezone: "{{ monitoring_icinga_web__container.timezone }}"
+        env: "{{ monitoring_icinga_web__container.environment }}"
+        label: "{{ monitoring_icinga_web__container.labels }}"
+        secrets: "{{ monitoring_icinga_web__container.secrets }}"
+        volume: "{{ monitoring_icinga_web__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if monitoring_icinga_web__container.requires is defined %}
+          Requires={{ monitoring_icinga_web__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'monitoring_icinga_web__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_web__container.name }}"
+        hostname: "{{ monitoring_icinga_web__container.hostname }}"
+        image: "{{ monitoring_icinga_web__container.image }}"
+        ip: "{{ monitoring_icinga_web__container.ip }}"
+        ip6: "{{ monitoring_icinga_web__container.ipv6 }}"
+        network: "{{ monitoring_icinga_web__container.network }}"
+        timezone: "{{ monitoring_icinga_web__container.timezone }}"
+        env: "{{ monitoring_icinga_web__container.environment }}"
+        label: "{{ monitoring_icinga_web__container.labels }}"
+        secrets: "{{ monitoring_icinga_web__container.secrets }}"
+        volume: "{{ monitoring_icinga_web__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if monitoring_icinga_web__container.requires is defined %}
+          Requires={{ monitoring_icinga_web__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'monitoring_icinga_web__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ monitoring_icinga_web__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
