@@ -1,0 +1,45 @@
+---
+
+- name: 'Include OS-specific variables'
+  ansible.builtin.include_vars: "{{ item }}"
+  with_first_found:
+    - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_distribution }}.yml"
+    - "{{ ansible_os_family }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_os_family }}.yml"
+
+- name: 'Fetch InfluxData repository signing key'
+  ansible.builtin.get_url:
+    url: "{{ monitoring_telegraf__signing_key_url }}"
+    dest: "{{ monitoring_telegraf__signing_key_file }}"
+
+- name: 'Add InfluxData repository to sources list'
+  ansible.builtin.apt_repository:
+    filename: 'influxdata'
+    repo: "deb [arch=amd64 signed-by={{ monitoring_telegraf__signing_key_file }}] {{ monitoring_telegraf__repository_url }}  stable main"
+    update_cache: true
+    state: 'present'
+
+- name: 'Install Telegraf packages'
+  ansible.builtin.apt:
+    update_cache: 'yes'
+    install_recommends: 'no'
+    pkg: "{{ monitoring_telegraf__packages }}"
+
+- name: 'Create Telegraf configuration'
+  ansible.builtin.template:
+    src: 'telegraf.conf.j2'
+    dest: "{{ monitoring_telegraf__etc_dir }}/telegraf.conf"
+    owner: "{{ monitoring_telegraf__uid }}"
+    group: "{{ monitoring_telegraf__gid }}"
+    mode: '400'
+  notify:
+    - 'Restart Telegraf service'
+
+- name: 'Start and enable service'
+  ansible.builtin.systemd:
+    name: 'telegraf'
+    daemon_reload: true
+    state: 'started'
+    enabled: true
+  when: 'not ansible_check_mode'
