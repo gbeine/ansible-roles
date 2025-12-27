@@ -12,22 +12,76 @@
         group: "{{ app_jellyfin__gid }}"
         mode: '750'
       with_items:
-        - "{{ app_jellyfin__data_dir }}"
+        - "{{ app_jellyfin__podman_home }}"
 
-    - name: 'Create podman containers'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_jellyfin__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_jellyfin__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_jellyfin__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_jellyfin__container.name }}"
         hostname: "{{ app_jellyfin__container.hostname }}"
         image: "{{ app_jellyfin__container.image }}"
         ip: "{{ app_jellyfin__container.ip }}"
         network: "{{ app_jellyfin__container.network }}"
-        etc_hosts: "{{ app_jellyfin__container.hosts }}"
-        restart_policy: "{{ app_jellyfin__container.restart_policy }}"
         timezone: "{{ app_jellyfin__container.timezone }}"
-        publish: "{{ app_jellyfin__container.publish }}"
         env: "{{ app_jellyfin__container.environment }}"
-        device: "{{ app_jellyfin__container.devices }}"
+        label: "{{ app_jellyfin__container.labels }}"
+        publish: "{{ app_jellyfin__container.publish }}"
         volume: "{{ app_jellyfin__container.volumes }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        pull: 'always'
-      when: app_jellyfin__ipv6 | length == 0
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_jellyfin__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_jellyfin__container.name }}"
+        hostname: "{{ app_jellyfin__container.hostname }}"
+        image: "{{ app_jellyfin__container.image }}"
+        ip: "{{ app_jellyfin__container.ip }}"
+        ip6: "{{ app_jellyfin__container.ipv6 }}"
+        network: "{{ app_jellyfin__container.network }}"
+        timezone: "{{ app_jellyfin__container.timezone }}"
+        env: "{{ app_jellyfin__container.environment }}"
+        label: "{{ app_jellyfin__container.labels }}"
+        publish: "{{ app_jellyfin__container.publish }}"
+        volume: "{{ app_jellyfin__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_jellyfin__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_jellyfin__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
