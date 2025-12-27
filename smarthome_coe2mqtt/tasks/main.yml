@@ -10,18 +10,30 @@
         path: "{{ item }}"
         state: 'directory'
       with_items:
-        - "{{ smarthome_coe2mqtt__home }}"
+        - "{{ smarthome_coe2mqtt__podman_home }}"
 
-    - name: 'Generate coe2mqtt configuration files'
-      ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        mode: "{{ item.mode | default('644') }}"
-      with_items:
-        - src: 'coe2mqtt.conf.j2'
-          dest: "{{ smarthome_coe2mqtt__config_file }}"
+    - name: 'Generate configuration'
+      ansible.builtin.copy:
+        content: "{{ smarthome_coe2mqtt__config | to_nice_json(indent=4) }}"
+        dest: "{{ smarthome_coe2mqtt__podman_home }}/coe2mqtt.conf"
+        mode: '400'
       notify:
         - 'Restart coe2mqtt container'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_coe2mqtt__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[smarthome_coe2mqtt__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ smarthome_coe2mqtt__container.image }}"
+        force: true
+      when: 'podman___update_mode'
 
     - name: 'Install coe2mqtt container'
       containers.podman.podman_container:
@@ -30,11 +42,50 @@
         image: "{{ smarthome_coe2mqtt__container.image }}"
         ip: "{{ smarthome_coe2mqtt__container.ip }}"
         network: "{{ smarthome_coe2mqtt__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ smarthome_coe2mqtt__container.restart_policy }}"
-        etc_hosts: "{{ smarthome_coe2mqtt__container.hosts }}"
         timezone: "{{ smarthome_coe2mqtt__container.timezone }}"
+        publish: "{{ smarthome_coe2mqtt__container.publish }}"
         volume: "{{ smarthome_coe2mqtt__container.volumes }}"
-        publish: "{{ smarthome_coe2mqtt__container.publish | default([]) }}"
-        pull: 'always'
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
       when: 'smarthome_coe2mqtt__ipv6 | length == 0'
+
+    - name: 'Install coe2mqtt container'
+      containers.podman.podman_container:
+        name: "{{ smarthome_coe2mqtt__container.name }}"
+        hostname: "{{ smarthome_coe2mqtt__container.hostname }}"
+        image: "{{ smarthome_coe2mqtt__container.image }}"
+        ip: "{{ smarthome_coe2mqtt__container.ip }}"
+        ip6: "{{ smarthome_coe2mqtt__container.ipv6 }}"
+        network: "{{ smarthome_coe2mqtt__container.network }}"
+        timezone: "{{ smarthome_coe2mqtt__container.timezone }}"
+        publish: "{{ smarthome_coe2mqtt__container.publish }}"
+        volume: "{{ smarthome_coe2mqtt__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_coe2mqtt__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_coe2mqtt__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
