@@ -1,39 +1,88 @@
 ---
 
-- name: Install knx2mqtt
+- name: 'Install knx2mqtt'
   tags: [ 'smarthome_knx2mqtt' ]
   block:
 
-    - name: Create knx2mqtt directories
+    - name: 'Create knx2mqtt directories'
       ansible.builtin.file:
-        mode: '755'
         path: "{{ item }}"
-        state: directory
+        state: 'directory'
       with_items:
-        - "{{ smarthome_knx2mqtt__home }}"
+        - "{{ smarthome_knx2mqtt__podman_home }}"
 
-    - name: Generate knx2mqtt configuration files
-      ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        mode: "{{ item.mode | default('644') }}"
-      with_items:
-        - src: knx2mqtt.conf.j2
-          dest: "{{ smarthome_knx2mqtt__config_file }}"
+    - name: 'Generate configuration'
+      ansible.builtin.copy:
+        content: "{{ smarthome_knx2mqtt__config | to_nice_json(indent=4) }}"
+        dest: "{{ smarthome_knx2mqtt__podman_home }}/knx2mqtt.conf"
+        mode: '400'
       notify:
-        - Restart knx2mqtt container
+        - 'Restart knx2mqtt container'
 
-    - name: Install knx2mqtt container
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_knx2mqtt__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[smarthome_knx2mqtt__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ smarthome_knx2mqtt__container.image }}"
+        force: true
+      when: 'podman___update_mode'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ smarthome_knx2mqtt__container.name }}"
         hostname: "{{ smarthome_knx2mqtt__container.hostname }}"
         image: "{{ smarthome_knx2mqtt__container.image }}"
         ip: "{{ smarthome_knx2mqtt__container.ip }}"
         network: "{{ smarthome_knx2mqtt__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ smarthome_knx2mqtt__container.restart_policy }}"
-        etc_hosts: "{{ smarthome_knx2mqtt__container.hosts }}"
         timezone: "{{ smarthome_knx2mqtt__container.timezone }}"
         volume: "{{ smarthome_knx2mqtt__container.volumes }}"
-        pull: 'always'
-      when: smarthome_knx2mqtt__ipv6 | length == 0
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_knx2mqtt__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ smarthome_knx2mqtt__container.name }}"
+        hostname: "{{ smarthome_knx2mqtt__container.hostname }}"
+        image: "{{ smarthome_knx2mqtt__container.image }}"
+        ip: "{{ smarthome_knx2mqtt__container.ip }}"
+        ip6: "{{ smarthome_knx2mqtt__container.ipv6 }}"
+        network: "{{ smarthome_knx2mqtt__container.network }}"
+        timezone: "{{ smarthome_knx2mqtt__container.timezone }}"
+        volume: "{{ smarthome_knx2mqtt__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_knx2mqtt__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_knx2mqtt__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
