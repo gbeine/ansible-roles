@@ -1,103 +1,162 @@
 ---
 
-- name: Install openHAB
+- name: 'Install openHAB'
   tags: [ 'smarthome_openhab' ]
   block:
 
-    - name: Create openHAB directories
+    - name: 'Create openHAB directories'
       ansible.builtin.file:
-        mode: '755'
         path: "{{ item }}"
+        owner: "{{ smarthome_openhab__uid }}"
+        group: "{{ smarthome_openhab__gid }}"
         state: 'directory'
       with_items:
-        - "{{ smarthome_openhab__addons_dir }}"
-        - "{{ smarthome_openhab__config_dir }}/automation/js"
-        - "{{ smarthome_openhab__config_dir }}/items"
-        - "{{ smarthome_openhab__config_dir }}/services"
-        - "{{ smarthome_openhab__config_dir }}/sitemaps"
-        - "{{ smarthome_openhab__config_dir }}/things"
-        - "{{ smarthome_openhab__config_dir }}/transform"
-        - "{{ smarthome_openhab__userdata_dir }}"
+        - "{{ smarthome_openhab__podman_addons_dir }}"
+        - "{{ smarthome_openhab__podman_config_dir }}/automation/js"
+        - "{{ smarthome_openhab__podman_config_dir }}/items"
+        - "{{ smarthome_openhab__podman_config_dir }}/services"
+        - "{{ smarthome_openhab__podman_config_dir }}/sitemaps"
+        - "{{ smarthome_openhab__podman_config_dir }}/things"
+        - "{{ smarthome_openhab__podman_config_dir }}/transform"
+        - "{{ smarthome_openhab__podman_userdata_dir }}"
 
-    - name: Generate openHAB configuration files
-      ansible.builtin.template:
-        mode: '644'
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-      with_items:
-        - src: 'addons.cfg.j2'
-          dest: "{{ smarthome_openhab__config_dir }}/services/addons.cfg"
-        - src: 'basicui.cfg.j2'
-          dest: "{{ smarthome_openhab__config_dir }}/services/basicui.cfg"
-        - src: 'runtime.cfg.j2'
-          dest: "{{ smarthome_openhab__config_dir }}/services/runtime.cfg"
-      notify:
-        - Restart openHAB container
-      when: not podman___update_mode
+    - name: 'Generate configuration'
+      block:
+        - ansible.builtin.template:
+            mode: '644'
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            owner: "{{ smarthome_openhab__uid }}"
+            group: "{{ smarthome_openhab__gid }}"
+          with_items:
+            - src: 'addons.cfg.j2'
+              dest: "{{ smarthome_openhab__podman_config_dir }}/services/addons.cfg"
+            - src: 'basicui.cfg.j2'
+              dest: "{{ smarthome_openhab__podman_config_dir }}/services/basicui.cfg"
+            - src: 'runtime.cfg.j2'
+              dest: "{{ smarthome_openhab__podman_config_dir }}/services/runtime.cfg"
+          notify:
+            - 'Restart openHAB container'
+        - ansible.builtin.template:
+            mode: '644'
+            src: 'items.j2'
+            dest: "{{ smarthome_openhab__podman_config_dir }}/items/{{ item.key }}.items"
+            owner: "{{ smarthome_openhab__uid }}"
+            group: "{{ smarthome_openhab__gid }}"
+          with_dict: "{{ smarthome_openhab__items }}"
+          vars:
+            name: "{{ item.key }}"
+            items: "{{ item.value }}"
+          notify:
+            - 'Restart openHAB container'
+        - ansible.builtin.template:
+            mode: '644'
+            src: 'sitemaps.j2'
+            dest: "{{ smarthome_openhab__podman_config_dir }}/sitemaps/{{ item.key }}.sitemap"
+            owner: "{{ smarthome_openhab__uid }}"
+            group: "{{ smarthome_openhab__gid }}"
+          with_dict: "{{ smarthome_openhab__sitemaps }}"
+          vars:
+            name: "{{ item.key }}"
+            sitemap: "{{ item.value }}"
+          notify:
+            - 'Restart openHAB container'
+        - ansible.builtin.template:
+            mode: '644'
+            src: 'things.j2'
+            dest: "{{ smarthome_openhab__podman_config_dir }}/things/{{ item.key }}.things"
+            owner: "{{ smarthome_openhab__uid }}"
+            group: "{{ smarthome_openhab__gid }}"
+          with_dict: "{{ smarthome_openhab__things }}"
+          vars:
+            name: "{{ item.key }}"
+            things: "{{ item.value }}"
+          notify:
+            - 'Restart openHAB container'
+      when: 'not podman___update_mode'
 
-    - name: Generate items files
-      ansible.builtin.template:
-        mode: '644'
-        src: 'items.j2'
-        dest: "{{ smarthome_openhab__config_dir }}/items/{{ item.key }}.items"
-      with_dict: "{{ smarthome_openhab__items }}"
-      vars:
-        name: "{{ item.key }}"
-        items: "{{ item.value }}"
-      notify:
-        - Restart openHAB container
-      when: not podman___update_mode
-
-    - name: Generate sitemap files
-      ansible.builtin.template:
-        mode: '644'
-        src: 'sitemaps.j2'
-        dest: "{{ smarthome_openhab__config_dir }}/sitemaps/{{ item.key }}.sitemap"
-      with_dict: "{{ smarthome_openhab__sitemaps }}"
-      vars:
-        name: "{{ item.key }}"
-        sitemap: "{{ item.value }}"
-      notify:
-        - Restart openHAB container
-      when: not podman___update_mode
-
-    - name: Generate things files
-      ansible.builtin.template:
-        mode: '644'
-        src: 'things.j2'
-        dest: "{{ smarthome_openhab__config_dir }}/things/{{ item.key }}.things"
-      with_dict: "{{ smarthome_openhab__things }}"
-      vars:
-        name: "{{ item.key }}"
-        things: "{{ item.value }}"
-      notify:
-        - Restart openHAB container
-      when: not podman___update_mode
-
-    - name: Copy source files
+    - name: 'Copy source files'
       ansible.builtin.template:
         mode: '644'
         src: "files/{{ item.source }}"
-        dest: "{{ smarthome_openhab__config_dir }}/{{ item.dest }}"
+        dest: "{{ smarthome_openhab__podman_config_dir }}/{{ item.dest }}"
+        owner: "{{ smarthome_openhab__uid }}"
+        group: "{{ smarthome_openhab__gid }}"
       with_items: "{{ smarthome_openhab__source_files }}"
       notify:
-        - Restart openHAB container
-      when: not podman___update_mode
+        - 'Restart openHAB container'
+      when: 'not podman___update_mode'
 
-    - name: Install openHAB container
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_openhab__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[smarthome_openhab__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ smarthome_openhab__container.image }}"
+        force: true
+      when: 'podman___update_mode'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ smarthome_openhab__container.name }}"
         hostname: "{{ smarthome_openhab__container.hostname }}"
         image: "{{ smarthome_openhab__container.image }}"
         ip: "{{ smarthome_openhab__container.ip }}"
         network: "{{ smarthome_openhab__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ smarthome_openhab__container.restart_policy }}"
-        etc_hosts: "{{ smarthome_openhab__container.hosts }}"
-        expose: "{{ smarthome_openhab__container.expose }}"
-        publish: "{{ smarthome_openhab__container.publish }}"
-        env: "{{ smarthome_openhab__container.environment }}"
         timezone: "{{ smarthome_openhab__container.timezone }}"
+        env: "{{ smarthome_openhab__container.environment }}"
+        label: "{{ smarthome_openhab__container.labels }}"
+        publish: "{{ smarthome_openhab__container.publish }}"
         volume: "{{ smarthome_openhab__container.volumes }}"
-        pull: 'always'
-      when: smarthome_openhab__ipv6 | length == 0
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_openhab__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ smarthome_openhab__container.name }}"
+        hostname: "{{ smarthome_openhab__container.hostname }}"
+        image: "{{ smarthome_openhab__container.image }}"
+        ip: "{{ smarthome_openhab__container.ip }}"
+        ip6: "{{ smarthome_openhab__container.ipv6 }}"
+        network: "{{ smarthome_openhab__container.network }}"
+        timezone: "{{ smarthome_openhab__container.timezone }}"
+        env: "{{ smarthome_openhab__container.environment }}"
+        label: "{{ smarthome_openhab__container.labels }}"
+        publish: "{{ smarthome_openhab__container.publish }}"
+        volume: "{{ smarthome_openhab__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_openhab__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_openhab__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
