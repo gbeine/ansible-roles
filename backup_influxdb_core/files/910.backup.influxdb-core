@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# backup.influxdb-core - Backup InfluxDB Core databases
+#
+# (c) 2025 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+	echo "$0 not called from within backup script"
+	exit
+fi
+
+if [ -r /etc/backup/influxdb-core ]; then
+	. /etc/backup/influxdb-core
+fi
+
+: ${daily_backup_influxdb_core_enable="NO"}
+: ${daily_backup_influxdb_core_backup_repo="/var/backups/influxdb-core"}
+: ${daily_backup_influxdb_core_data_dir="/var/lib/influxdb-core"}
+: ${daily_backup_influxdb_core_keep_days="14"}
+: ${daily_backup_influxdb_core_podman_container="influxdb-core"}
+
+
+borg="/usr/bin/borg"
+borg_create_options="--compression none --stats"
+borg_prune_options="--stats --keep-within=${daily_backup_influxdb_core_keep_days}d"
+
+today=`date +%Y%m%d`
+
+rc=0
+case "${daily_backup_influxdb_core_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup InfluxDB Core databases"
+		backup_target="${today}"
+
+		echo "Stop InfluxDB Core container"
+		systemctl stop ${daily_backup_influxdb_core_podman_container}
+
+		echo "Create archive ${backup_target}"
+		${borg} create ${borg_create_options} "${daily_backup_influxdb_core_backup_repo}::${backup_target}" ${daily_backup_influxdb_core_data_dir}
+
+		echo "Start InfluxDB Core container"
+		systemctl start ${daily_backup_influxdb_core_podman_container}
+
+		${borg} prune ${borg_prune_options} ${daily_backup_influxdb_core_backup_repo}
+esac
+
+exit "${rc}"
