@@ -7,55 +7,68 @@
     - name: 'Create directories for mqttwarn'
       ansible.builtin.file:
         path: "{{ item }}"
-        owner: 'root'
-        group: 'root'
+        owner: "{{ monitoring_mqttwarn__uid }}"
+        group: "{{ monitoring_mqttwarn__gid }}"
         state: 'directory'
-        mode: '755'
+        mode: '750'
       with_items:
-        - "{{ monitoring_mqttwarn__etc_dir }}"
+        - "{{ monitoring_mqttwarn__podman_etc_dir }}"
 
     - name: 'Generate mqttwarn configuration'
       ansible.builtin.template:
         src: 'mqttwarn.ini.j2'
-        dest: "{{ monitoring_mqttwarn__etc_dir }}/mqttwarn.ini"
-        mode: '644'
+        dest: "{{ monitoring_mqttwarn__podman_etc_dir }}/mqttwarn.ini"
+        owner: "{{ monitoring_mqttwarn__uid }}"
+        group: "{{ monitoring_mqttwarn__gid }}"
+        mode: '640'
       notify:
         - 'Restart mqttwarn'
+      when: 'not podman___update_mode | bool'
 
     - name: 'Copy files to mqttwarn host'
       ansible.builtin.copy:
         src: "{{ item }}"
-        dest: "{{ monitoring_mqttwarn__etc_dir }}"
+        dest: "{{ monitoring_mqttwarn__podman_etc_dir }}"
       with_items: "{{ monitoring_mqttwarn__files }}"
-      when: 'monitoring_mqttwarn__files | length > 0'
+      when: 'monitoring_mqttwarn__files | length > 0 and not podman___update_mode | bool'
 
-    - name: 'Copy SSL certificates'
-      ansible.builtin.copy:
-        src: "{{ item.name }}"
-        mode: "{{ item.mode | default('644') }}"
-        dest: "{{ monitoring_mqttwarn__etc_dir }}"
-        remote_src: 'yes'
-      with_items:
-        - name: "{{ pki_easyrsa_deploy__realms_dir }}/{{ monitoring_mqttwarn__mqtt_realm }}/public/ca.crt"
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
-    - name: 'Create podman containers'
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ monitoring_mqttwarn__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[monitoring_mqttwarn__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ monitoring_mqttwarn__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ monitoring_mqttwarn__container.name }}"
         hostname: "{{ monitoring_mqttwarn__container.hostname }}"
         image: "{{ monitoring_mqttwarn__container.image }}"
         ip: "{{ monitoring_mqttwarn__container.ip }}"
         network: "{{ monitoring_mqttwarn__container.network }}"
-        pull: 'always'
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ monitoring_mqttwarn__container.restart_policy }}"
-        etc_hosts: "{{ monitoring_mqttwarn__container.hosts }}"
         timezone: "{{ monitoring_mqttwarn__container.timezone }}"
-        volume: "{{ [
-          monitoring_mqttwarn__etc_dir + ':/etc/mqttwarn',
-        ] }}"
+        volume: "{{ monitoring_mqttwarn__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
       when: 'monitoring_mqttwarn__ipv6 | length == 0'
 
-    - name: 'Create podman containers'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ monitoring_mqttwarn__container.name }}"
         hostname: "{{ monitoring_mqttwarn__container.hostname }}"
@@ -63,12 +76,24 @@
         ip: "{{ monitoring_mqttwarn__container.ip }}"
         ip6: "{{ monitoring_mqttwarn__container.ipv6 }}"
         network: "{{ monitoring_mqttwarn__container.network }}"
-        pull: 'always'
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ monitoring_mqttwarn__container.restart_policy }}"
-        etc_hosts: "{{ monitoring_mqttwarn__container.hosts }}"
         timezone: "{{ monitoring_mqttwarn__container.timezone }}"
-        volume: "{{ [
-          monitoring_mqttwarn__etc_dir + ':/etc/mqttwarn',
-        ] }}"
+        volume: "{{ monitoring_mqttwarn__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
       when: 'monitoring_mqttwarn__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ monitoring_mqttwarn__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
