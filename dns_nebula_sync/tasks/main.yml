@@ -1,0 +1,75 @@
+---
+
+- name: Install nebula-sync
+  tags: [ 'dns_nebula_sync' ]
+  block:
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ dns_nebula_sync__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[dns_nebula_sync__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ dns_nebula_sync__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container (IPv4 only)'
+      containers.podman.podman_container:
+        name: "{{ dns_nebula_sync__container.name }}"
+        hostname: "{{ dns_nebula_sync__container.hostname }}"
+        image: "{{ dns_nebula_sync__container.image }}"
+        ip: "{{ dns_nebula_sync__container.ip }}"
+        network: "{{ dns_nebula_sync__container.network }}"
+        timezone: "{{ dns_nebula_sync__container.timezone }}"
+        env: "{{ dns_nebula_sync__container.environment }}"
+        volume: "{{ dns_nebula_sync__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'dns_nebula_sync__ipv6 | length == 0'
+
+    - name: 'Install container (IPv4 + IPv6)'
+      containers.podman.podman_container:
+        name: "{{ dns_nebula_sync__container.name }}"
+        hostname: "{{ dns_nebula_sync__container.hostname }}"
+        image: "{{ dns_nebula_sync__container.image }}"
+        ip: "{{ dns_nebula_sync__container.ip }}"
+        ip6: "{{ dns_nebula_sync__container.ipv6 }}"
+        network: "{{ dns_nebula_sync__container.network }}"
+        timezone: "{{ dns_nebula_sync__container.timezone }}"
+        env: "{{ dns_nebula_sync__container.environment }}"
+        volume: "{{ dns_nebula_sync__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'dns_nebula_sync__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ dns_nebula_sync__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
