@@ -1,0 +1,105 @@
+---
+
+- name: 'Deploy HedgeDoc container'
+  tags: [ 'app_hedgedoc' ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ app_hedgedoc__uid }}"
+        group: "{{ app_hedgedoc__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ app_hedgedoc__podman_uploads_dir }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.key }}"
+        data: "{{ item.value }}"
+      with_dict: "{{ app_hedgedoc__secrets }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_hedgedoc__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_hedgedoc__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_hedgedoc__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_hedgedoc__container.name }}"
+        hostname: "{{ app_hedgedoc__container.hostname }}"
+        image: "{{ app_hedgedoc__container.image }}"
+        ip: "{{ app_hedgedoc__container.ip }}"
+        network: "{{ app_hedgedoc__container.network }}"
+        timezone: "{{ app_hedgedoc__container.timezone }}"
+        env: "{{ app_hedgedoc__container.environment }}"
+        label: "{{ app_hedgedoc__container.labels }}"
+        secrets: "{{ app_hedgedoc__container.secrets }}"
+        volume: "{{ app_hedgedoc__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_hedgedoc__container.requires is defined %}
+          Requires={{ app_hedgedoc__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_hedgedoc__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_hedgedoc__container.name }}"
+        hostname: "{{ app_hedgedoc__container.hostname }}"
+        image: "{{ app_hedgedoc__container.image }}"
+        ip: "{{ app_hedgedoc__container.ip }}"
+        ip6: "{{ app_hedgedoc__container.ipv6 }}"
+        network: "{{ app_hedgedoc__container.network }}"
+        timezone: "{{ app_hedgedoc__container.timezone }}"
+        env: "{{ app_hedgedoc__container.environment }}"
+        label: "{{ app_hedgedoc__container.labels }}"
+        secrets: "{{ app_hedgedoc__container.secrets }}"
+        volume: "{{ app_hedgedoc__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_hedgedoc__container.requires is defined %}
+          Requires={{ app_hedgedoc__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_hedgedoc__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_hedgedoc__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
