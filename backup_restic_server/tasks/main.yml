@@ -1,0 +1,93 @@
+---
+
+- name: 'Deploy Restic REST container'
+  tags: [ 'backup_restic_server' ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        mode: '0700'
+        state: 'directory'
+      with_items:
+        - dest: "{{ backup_restic_server__podman_home }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ backup_restic_server__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[backup_restic_server__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ backup_restic_server__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ backup_restic_server__container.name }}"
+        hostname: "{{ backup_restic_server__container.hostname }}"
+        image: "{{ backup_restic_server__container.image }}"
+        ip: "{{ backup_restic_server__container.ip }}"
+        network: "{{ backup_restic_server__container.network }}"
+        timezone: "{{ backup_restic_server__container.timezone }}"
+        env: "{{ backup_restic_server__container.environment }}"
+        label: "{{ backup_restic_server__container.labels }}"
+        volume: "{{ backup_restic_server__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if backup_restic_server__container.requires is defined %}
+          Requires={{ backup_restic_server__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'backup_restic_server__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ backup_restic_server__container.name }}"
+        hostname: "{{ backup_restic_server__container.hostname }}"
+        image: "{{ backup_restic_server__container.image }}"
+        ip: "{{ backup_restic_server__container.ip }}"
+        ip6: "{{ backup_restic_server__container.ipv6 }}"
+        network: "{{ backup_restic_server__container.network }}"
+        timezone: "{{ backup_restic_server__container.timezone }}"
+        env: "{{ backup_restic_server__container.environment }}"
+        label: "{{ backup_restic_server__container.labels }}"
+        volume: "{{ backup_restic_server__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if backup_restic_server__container.requires is defined %}
+          Requires={{ backup_restic_server__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'backup_restic_server__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ backup_restic_server__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
