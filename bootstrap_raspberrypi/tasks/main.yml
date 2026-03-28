@@ -4,6 +4,9 @@
   tags: [ 'bootstrap', 'bootstrap_raspberrypi'  ]
   block:
 
+    - name: 'Gather service facts for conditional service management'
+      ansible.builtin.service_facts:
+
     - name: 'Install Raspberry Pi packages'
       ansible.builtin.apt:
         update_cache: 'yes'
@@ -18,7 +21,7 @@
         group: 'root'
         mode: '644'
       register: 'raspi_firmware_state'
-      when: 'bootstrap_ansible__distribution == "Debian"'
+      when: 'ansible_distribution == "Debian"'
 
     - name: 'Generate /etc/default/raspi-firmware-custom'
       ansible.builtin.template:
@@ -28,13 +31,13 @@
         group: 'root'
         mode: '644'
       register: 'raspi_firmware_custom_state'
-      when: 'bootstrap_ansible__distribution == "Debian"'
+      when: 'ansible_distribution == "Debian"'
 
     - name: 'Generate /etc/default/raspi-extra-cmdline'
       ansible.builtin.copy:
         dest: '/etc/default/raspi-extra-cmdline'
         content: "{{ bootstrap_raspberrypi__raspi_extra_cmdline }}"
-      when: 'bootstrap_ansible__distribution == "Debian" and bootstrap_raspberrypi__raspi_extra_cmdline | length > 0'
+      when: 'ansible_distribution == "Debian" and bootstrap_raspberrypi__raspi_extra_cmdline | length > 0'
       register: 'raspi_extra_cmdline_state'
 
     - name: 'Generate /boot/firmware/config.txt'
@@ -45,22 +48,35 @@
         group: 'root'
         mode: '644'
       register: 'raspi_firmware_config_state'
-      when: 'bootstrap_ansible__distribution == "Raspbian"'
+      when: >
+        ansible_distribution == "Raspbian" or
+        (ansible_distribution == "Debian" and
+         ansible_machine is match("aarch64|armv.*"))
 
     - name: 'Update Raspberry Pi config'
       ansible.builtin.shell: "update-initramfs -u -k all"
-      when: 'raspi_firmware_state.changed or raspi_firmware_custom_state.changed or raspi_extra_cmdline_state.changed'
+      when: >
+        (raspi_firmware_state.changed | default(false)) or
+        (raspi_firmware_custom_state.changed | default(false)) or
+        (raspi_extra_cmdline_state.changed | default(false)) or
+        (raspi_firmware_config_state.changed | default(false))
 
-    - name: 'Disable sysconf file'
+    - name: 'Disable rpi-set-sysconf service (if present)'
       ansible.builtin.service:
         name: 'rpi-set-sysconf'
         state: 'stopped'
         enabled: 'no'
-      when: 'not ansible_check_mode and bootstrap_ansible__distribution == "Debian"'
+      when:
+        - 'not ansible_check_mode'
+        - 'ansible_distribution == "Debian"'
+        - 'ansible_facts.services["rpi-set-sysconf.service"] is defined'
 
-    - name: 'Disable swap file'
+    - name: 'Disable dphys-swapfile service (if present)'
       ansible.builtin.service:
         name: 'dphys-swapfile'
         state: 'stopped'
         enabled: 'no'
-      when: 'not ansible_check_mode and bootstrap_ansible__distribution == "Raspbian"'
+      when:
+        - 'not ansible_check_mode'
+        - 'ansible_distribution == "Raspbian"'
+        - 'ansible_facts.services["dphys-swapfile.service"] is defined'
