@@ -1,0 +1,94 @@
+---
+
+- name: 'Install Gladys'
+  tags: [ 'smarthome_gladys' ]
+  block:
+
+    - name: 'Create Gladys directory'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'directory'
+      with_items:
+        - "{{ smarthome_gladys__podman_home }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_gladys__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[smarthome_gladys__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ smarthome_gladys__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ smarthome_gladys__container.name }}"
+        hostname: "{{ smarthome_gladys__container.hostname }}"
+        image: "{{ smarthome_gladys__container.image }}"
+        ip: "{{ smarthome_gladys__container.ip }}"
+        network: "{{ smarthome_gladys__container.network }}"
+        timezone: "{{ smarthome_gladys__container.timezone }}"
+        env: "{{ smarthome_gladys__container.environment }}"
+        label: "{{ smarthome_gladys__container.labels }}"
+        volume: "{{ smarthome_gladys__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if smarthome_gladys__container.exec_start_pre is defined %}
+          {% for command in smarthome_gladys__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_gladys__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ smarthome_gladys__container.name }}"
+        hostname: "{{ smarthome_gladys__container.hostname }}"
+        image: "{{ smarthome_gladys__container.image }}"
+        ip: "{{ smarthome_gladys__container.ip }}"
+        ip6: "{{ smarthome_gladys__container.ipv6 }}"
+        network: "{{ smarthome_gladys__container.network }}"
+        timezone: "{{ smarthome_gladys__container.timezone }}"
+        env: "{{ smarthome_gladys__container.environment }}"
+        label: "{{ smarthome_gladys__container.labels }}"
+        volume: "{{ smarthome_gladys__container.volumes }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          {% if smarthome_gladys__container.exec_start_pre is defined %}
+          {% for command in smarthome_gladys__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'smarthome_gladys__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ smarthome_gladys__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
