@@ -1,0 +1,93 @@
+---
+
+- name: 'Deploy Keeper container'
+  tags: [ 'app_keeper' ]
+  block:
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items:
+        - name: 'keeper_database_url'
+          data: "{{ app_keeper__db_url }}"
+        - name: 'keeper_encryption_key'
+          data: "{{ app_keeper__encryption_key }}"
+        - name: 'keeper_better_auth_secret'
+          data: "{{ app_keeper__better_auth_secret }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_keeper__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_keeper__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_keeper__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_keeper__container.name }}"
+        hostname: "{{ app_keeper__container.hostname }}"
+        image: "{{ app_keeper__container.image }}"
+        ip: "{{ app_keeper__container.ip }}"
+        network: "{{ app_keeper__container.network }}"
+        timezone: "{{ app_keeper__container.timezone }}"
+        env: "{{ app_keeper__container.environment }}"
+        label: "{{ app_keeper__container.labels }}"
+        secrets: "{{ app_keeper__container.secrets }}"
+        volume: "{{ app_keeper__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Unit]
+          {% if app_keeper__container.requires is defined %}
+          Requires={{ app_keeper__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_keeper__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_keeper__container.name }}"
+        hostname: "{{ app_keeper__container.hostname }}"
+        image: "{{ app_keeper__container.image }}"
+        ip: "{{ app_keeper__container.ip }}"
+        ip6: "{{ app_keeper__container.ipv6 }}"
+        network: "{{ app_keeper__container.network }}"
+        timezone: "{{ app_keeper__container.timezone }}"
+        env: "{{ app_keeper__container.environment }}"
+        label: "{{ app_keeper__container.labels }}"
+        secrets: "{{ app_keeper__container.secrets }}"
+        volume: "{{ app_keeper__container.volumes }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Unit]
+          {% if app_keeper__container.requires is defined %}
+          Requires={{ app_keeper__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_keeper__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_keeper__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
