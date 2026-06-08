@@ -1,0 +1,109 @@
+---
+
+- name: 'Deploy member console container'
+  tags: [ 'app_member_console' ]
+  block:
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items:
+        - name: 'member_console_ldap_bind_dn'
+          data: "{{ app_member_console__ldap_bind_dn }}"
+        - name: 'member_console_ldap_bind_password'
+          data: "{{ app_member_console__ldap_bind_password }}"
+        - name: 'member_console_password_reset_token_salt'
+          data: "{{ app_member_console__password_reset_token_salt }}"
+        - name: 'member_console_email_username'
+          data: "{{ app_member_console__email_username }}"
+        - name: 'member_console_email_password'
+          data: "{{ app_member_console__email_password }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_member_console__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_member_console__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_member_console__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_member_console__container.name }}"
+        hostname: "{{ app_member_console__container.hostname }}"
+        image: "{{ app_member_console__container.image }}"
+        ip: "{{ app_member_console__container.ip }}"
+        network: "{{ app_member_console__container.network }}"
+        timezone: "{{ app_member_console__container.timezone }}"
+        env: "{{ app_member_console__container.environment }}"
+        label: "{{ app_member_console__container.labels }}"
+        secrets: "{{ app_member_console__container.secrets }}"
+        volume: "{{ app_member_console__container.volumes }}"
+        quadlet_options: |
+          PodmanArgs=--authfile /etc/containers/auth.json
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_member_console__container.requires is defined %}
+          Requires={{ app_member_console__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_member_console__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_member_console__container.name }}"
+        hostname: "{{ app_member_console__container.hostname }}"
+        image: "{{ app_member_console__container.image }}"
+        ip: "{{ app_member_console__container.ip }}"
+        ip6: "{{ app_member_console__container.ipv6 }}"
+        network: "{{ app_member_console__container.network }}"
+        timezone: "{{ app_member_console__container.timezone }}"
+        env: "{{ app_member_console__container.environment }}"
+        label: "{{ app_member_console__container.labels }}"
+        secrets: "{{ app_member_console__container.secrets }}"
+        volume: "{{ app_member_console__container.volumes }}"
+        quadlet_options: |
+          PodmanArgs=--authfile /etc/containers/auth.json
+
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_member_console__container.requires is defined %}
+          Requires={{ app_member_console__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_member_console__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_member_console__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
