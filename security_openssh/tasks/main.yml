@@ -85,3 +85,48 @@
         state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
         enabled: true
       when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'security_openssh__autoupdate_enabled'
+      block:
+        - name: 'Create autoupdate systemd service'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ security_openssh__container.name }} container
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/podman pull {{ security_openssh__container.image }}
+              ExecStartPost=/usr/bin/systemctl restart {{ security_openssh__container.name }}
+            dest: "/etc/systemd/system/container-{{ security_openssh__container.name }}-update.service"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Create autoupdate systemd timer'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ security_openssh__container.name }} timer
+
+              [Timer]
+              OnCalendar=*-*-* 08:00:00
+              RandomizedDelaySec=30m
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+            dest: "/etc/systemd/system/container-{{ security_openssh__container.name }}-update.timer"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Start and enable autoupdate timer'
+          ansible.builtin.systemd:
+            name: "container-{{ security_openssh__container.name }}-update.timer"
+            daemon_reload: true
+            state: 'started'
+            enabled: true
+          when: 'not ansible_check_mode'
+
