@@ -18,7 +18,6 @@
         src: 'diun.yml.j2'
         dest: "{{ monitoring_diun__podman_etc_dir }}/diun.yml"
         mode: '640'
-#      when: 'not podman___update_mode | bool'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -87,3 +86,47 @@
         state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
         enabled: true
       when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_diun__autoupdate_enabled'
+      block:
+        - name: 'Create autoupdate systemd service'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ monitoring_diun__container.name }} container
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/podman pull {{ monitoring_diun__container.image }}
+              ExecStartPost=/usr/bin/systemctl restart {{ monitoring_diun__container.name }}
+            dest: "/etc/systemd/system/container-{{ monitoring_diun__container.name }}-update.service"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Create autoupdate systemd timer'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ monitoring_diun__container.name }} timer
+
+              [Timer]
+              OnCalendar=*-*-* 04:00:00
+              RandomizedDelaySec=30m
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+            dest: "/etc/systemd/system/container-{{ monitoring_diun__container.name }}-update.timer"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Start and enable autoupdate timer'
+          ansible.builtin.systemd:
+            name: "container-{{ monitoring_diun__container.name }}-update.timer"
+            daemon_reload: true
+            state: 'started'
+            enabled: true
+          when: 'not ansible_check_mode'
