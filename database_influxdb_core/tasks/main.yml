@@ -30,7 +30,7 @@
         name: "{{ database_influxdb_core__container.image }}"
         force: true
       when: 'podman___update_mode | bool'
-      
+
     - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ database_influxdb_core__container.name }}"
@@ -92,3 +92,47 @@
       ansible.builtin.wait_for:
         host: "{{ database_influxdb_core__container.ip }}"
         port: "{{ database_influxdb_core__port }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_influxdb_core__autoupdate_enabled'
+      block:
+        - name: 'Create autoupdate systemd service'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ database_influxdb_core__container.name }} container
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/podman pull {{ database_influxdb_core__container.image }}
+              ExecStartPost=/usr/bin/systemctl restart {{ database_influxdb_core__container.name }}
+            dest: "/etc/systemd/system/container-{{ database_influxdb_core__container.name }}-update.service"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Create autoupdate systemd timer'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ database_influxdb_core__container.name }} timer
+
+              [Timer]
+              OnCalendar=*-*-* 03:00:00
+              RandomizedDelaySec=30m
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+            dest: "/etc/systemd/system/container-{{ database_influxdb_core__container.name }}-update.timer"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Start and enable autoupdate timer'
+          ansible.builtin.systemd:
+            name: "container-{{ database_influxdb_core__container.name }}-update.timer"
+            daemon_reload: true
+            state: 'started'
+            enabled: true
+          when: 'not ansible_check_mode'
