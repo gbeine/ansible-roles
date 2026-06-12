@@ -99,3 +99,48 @@
         state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
         enabled: true
       when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_forgejo_runner__autoupdate_enabled'
+      block:
+        - name: 'Create autoupdate systemd service'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ app_forgejo_runner__container.name }} container
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/podman pull {{ app_forgejo_runner__container.image }}
+              ExecStartPost=/usr/bin/systemctl restart {{ app_forgejo_runner__container.name }}
+            dest: "/etc/systemd/system/container-{{ app_forgejo_runner__container.name }}-update.service"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Create autoupdate systemd timer'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ app_forgejo_runner__container.name }} timer
+
+              [Timer]
+              OnCalendar=*-*-* 00/3:00:00
+              RandomizedDelaySec=30m
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+            dest: "/etc/systemd/system/container-{{ app_forgejo_runner__container.name }}-update.timer"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Start and enable autoupdate timer'
+          ansible.builtin.systemd:
+            name: "container-{{ app_forgejo_runner__container.name }}-update.timer"
+            daemon_reload: true
+            state: 'started'
+            enabled: true
+          when: 'not ansible_check_mode'
+
