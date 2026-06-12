@@ -12,13 +12,6 @@
         - "{{ webserver_traefik__podman_home }}"
         - "{{ webserver_traefik__podman_config_dir }}"
 
-    - name: 'Generate simple configuration'
-      ansible.builtin.template:
-        src: 'traefik.yml.j2'
-        dest: "{{ webserver_traefik__podman_config_file }}"
-      when: 'not podman___update_mode | bool and webserver_traefik__config | length == 0'
-      notify: 'Restart traefik container'
-
     - name: 'Generate configuration'
       ansible.builtin.copy:
         content: "{{ webserver_traefik__config | to_nice_yaml(indent=2) }}"
@@ -124,3 +117,48 @@
         state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
         enabled: true
       when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'webserver_traefik__autoupdate_enabled'
+      block:
+        - name: 'Create autoupdate systemd service'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ webserver_traefik__container.name }} container
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/podman pull {{ webserver_traefik__container.image }}
+              ExecStartPost=/usr/bin/systemctl restart {{ webserver_traefik__container.name }}
+            dest: "/etc/systemd/system/container-{{ webserver_traefik__container.name }}-update.service"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Create autoupdate systemd timer'
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Auto-update {{ webserver_traefik__container.name }} timer
+
+              [Timer]
+              OnCalendar=*-*-* 00/3:00:00
+              RandomizedDelaySec=30m
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+            dest: "/etc/systemd/system/container-{{ webserver_traefik__container.name }}-update.timer"
+            mode: '0644'
+            owner: root
+            group: root
+
+        - name: 'Start and enable autoupdate timer'
+          ansible.builtin.systemd:
+            name: "container-{{ webserver_traefik__container.name }}-update.timer"
+            daemon_reload: true
+            state: 'started'
+            enabled: true
+          when: 'not ansible_check_mode'
+
