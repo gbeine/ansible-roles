@@ -1,0 +1,24 @@
+###
+### {{ ansible_managed }}
+###
+
+[Unit]
+Description=Auto-update {{ container_update__container_name }} container
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/sh -c '\
+  LOCAL=$(skopeo inspect containers-storage:{{ container_update__container_image }} --format {{ '{{' }}.Digest{{ '}}' }} 2>/dev/null); \
+  [ -z "$LOCAL" ] && exit 0; \
+  ARCH=$(podman info --format {{ '{{' }}.Host.Arch{{ '}}' }}); \
+  REMOTE=$(skopeo inspect docker://{{ container_update__container_image }} --raw | jq -r " \
+    .manifests[] \
+    | select( \
+      .platform.architecture==\\"$ARCH\\" and \
+      .platform.os==\\"linux\\" and \
+      (.annotations[\\"vnd.docker.reference.type\\"] | not) \
+    ) \
+    | .digest"); \
+  [ "$LOCAL" != "$REMOTE" ]'
+ExecStart=/usr/bin/podman pull {{ container_update__container_image }}
+ExecStartPost=/usr/bin/systemctl restart {{ container_update__container_name }}
