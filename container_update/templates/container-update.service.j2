@@ -3,15 +3,17 @@
 ###
 
 [Unit]
-Description=Auto-update {{ container_update__container_name }} container
+Description=Auto-update container %i
+OnFailure=container-update-notify-failure@%i.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=/etc/systemd/container-update.env
 ExecCondition=/usr/bin/sh -c '\
-  LOCAL=$(skopeo inspect containers-storage:{{ container_update__container_image }} --format {{ '{{' }}.Digest{{ '}}' }} 2>/dev/null); \
+  LOCAL=$(skopeo inspect containers-storage:$CONTAINER_IMAGE --format {{ '{{' }}.Digest{{ '}}' }} 2>/dev/null); \
   [ -z "$LOCAL" ] && exit 0; \
   ARCH=$(podman info --format {{ '{{' }}.Host.Arch{{ '}}' }}); \
-  REMOTE=$(skopeo inspect docker://{{ container_update__container_image }} --raw | jq -r " \
+  REMOTE=$(skopeo inspect docker://$CONTAINER_IMAGE --raw | jq -r " \
     .manifests[] \
     | select( \
       .platform.architecture==\\"$ARCH\\" and \
@@ -20,13 +22,12 @@ ExecCondition=/usr/bin/sh -c '\
     ) \
     | .digest"); \
   [ "$LOCAL" != "$REMOTE" ]'
-ExecStart=/usr/bin/podman pull {{ container_update__container_image }}
-ExecStartPost=/usr/bin/systemctl restart {{ container_update__container_name }}
+ExecStart=/usr/bin/podman pull $CONTAINER_IMAGE
+ExecStart=/usr/bin/systemctl restart $CONTAINER_NAME
 {% if container_update__pushover_key | length > 0 and container_update__pushover_token | length > 0 %}
-EnvironmentFile=/etc/systemd/container-update.env
 ExecStartPost=/bin/bash -c '/usr/bin/curl -s \
   --form-string "token=$PUSHOVER_APP_TOKEN" \
   --form-string "user=$PUSHOVER_USER_KEY" \
-  --form-string "message={{ container_update__container_name }} was updated and restarted" \
+  --form-string "message=%i was updated and restarted" \
   https://api.pushover.net/1/messages.json'
 {% endif %}
