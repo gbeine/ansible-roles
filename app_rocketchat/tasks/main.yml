@@ -1,38 +1,111 @@
 ---
 
-- name: Deploy Rocket.Chat container
+- name: "Deploy Rocket.Chat container"
   tags: [ 'app_rocketchat' ]
   block:
 
-    - name: Create podman containers
-      containers.podman.podman_container:
-        name: "{{ app_rocketchat__container_default.name }}"
-        hostname: "{{ app_rocketchat__container_default.hostname }}"
-        image: "{{ app_rocketchat__container_default.image }}"
-        ip: "{{ app_rocketchat__container_default.ip }}"
-        network: "{{ app_rocketchat__container_default.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ app_rocketchat__container_default.restart_policy }}"
-        etc_hosts: "{{ app_rocketchat__container_default.hosts }}"
-        shm_size: "{{ app_rocketchat__container_default.shm_size }}"
-        env: "{{ app_rocketchat__container_default.environment }}"
-        timezone: "{{ app_rocketchat__container_default.timezone | mandatory }}"
-        volume: "{{ app_rocketchat__container_default.volumes }}"
-      when: app_rocketchat__ipv6 | length == 0
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items:
+        - name: 'rocketchat_mongo_url'
+          data: "{{ app_rocketchat__mongodb_url }}"
+        - name: 'rocketchat_mongo_oplog_url'
+          data: "{{ app_rocketchat__mongodb_oplog_url }}"
 
-    - name: Create podman containers
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_rocketchat__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_rocketchat__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_rocketchat__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
       containers.podman.podman_container:
-        name: "{{ app_rocketchat__container_default.name }}"
-        hostname: "{{ app_rocketchat__container_default.hostname }}"
-        image: "{{ app_rocketchat__container_default.image }}"
-        ip: "{{ app_rocketchat__container_default.ip }}"
-        ip6: "{{ app_rocketchat__container_default.ipv6 }}"
-        network: "{{ app_rocketchat__container_default.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ app_rocketchat__container_default.restart_policy }}"
-        etc_hosts: "{{ app_rocketchat__container_default.hosts }}"
-        shm_size: "{{ app_rocketchat__container_default.shm_size }}"
-        env: "{{ app_rocketchat__container_default.environment }}"
-        timezone: "{{ app_rocketchat__container_default.timezone | mandatory }}"
-        volume: "{{ app_rocketchat__container_default.volumes }}"
-      when: app_rocketchat__ipv6 | length > 0
+        name: "{{ app_rocketchat__container.name }}"
+        hostname: "{{ app_rocketchat__container.hostname }}"
+        image: "{{ app_rocketchat__container.image }}"
+        ip: "{{ app_rocketchat__container.ip }}"
+        network: "{{ app_rocketchat__container.network }}"
+        timezone: "{{ app_rocketchat__container.timezone }}"
+        secrets: "{{ app_rocketchat__container.secrets }}"
+        volume: "{{ app_rocketchat__container.volumes }}"
+        env: "{{ app_rocketchat__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_rocketchat__container.hosts | default(omit) }}"
+        label: "{{ app_rocketchat__container.labels | default(omit) }}"
+        shm_size: "{{ app_rocketchat__container.shm_size | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_rocketchat__container.requires is defined %}
+          Requires={{ app_rocketchat__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_rocketchat__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_rocketchat__container.name }}"
+        hostname: "{{ app_rocketchat__container.hostname }}"
+        image: "{{ app_rocketchat__container.image }}"
+        ip: "{{ app_rocketchat__container.ip }}"
+        ip6: "{{ app_rocketchat__container.ipv6 }}"
+        network: "{{ app_rocketchat__container.network }}"
+        timezone: "{{ app_rocketchat__container.timezone }}"
+        secrets: "{{ app_rocketchat__container.secrets }}"
+        volume: "{{ app_rocketchat__container.volumes }}"
+        env: "{{ app_rocketchat__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_rocketchat__container.hosts | default(omit) }}"
+        label: "{{ app_rocketchat__container.labels | default(omit) }}"
+        shm_size: "{{ app_rocketchat__container.shm_size | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+          
+          [Unit]
+          {% if app_rocketchat__container.requires is defined %}
+          Requires={{ app_rocketchat__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'app_rocketchat__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_rocketchat__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_rocketchat__autoupdate_enabled'
+      include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_rocketchat__container.name }}"
+        container_image: "{{ app_rocketchat__container.image }}"
