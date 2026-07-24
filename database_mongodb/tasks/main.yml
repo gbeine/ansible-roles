@@ -1,10 +1,147 @@
 ---
 
-- name: Install MongoDB
+- name: 'Install MongoDB'
   tags: [ 'database_mongodb'  ]
   block:
 
-    - name: Install MongoDB using podman
-      ansible.builtin.include_tasks:
-        file: podman.yml
-      when: database_mongodb__use_podman
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ database_mongodb__uid }}"
+        group: "{{ database_mongodb__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ database_mongodb__podman_etc_dir }}"
+        - dest: "{{ database_mongodb__podman_db_dir }}"
+        - dest: "{{ database_mongodb__podman_configdb_dir }}"
+
+    - name: 'Create keyfile'
+      ansible.builtin.copy:
+        content: "{{ database_mongodb__keyfile }}"
+        owner: "{{ database_mongodb__uid }}"
+        group: "{{ database_mongodb__gid }}"
+        dest: "{{ database_mongodb__podman_etc_dir }}/mongo-keyfile"
+        mode: '400'
+      when: 'database_mongodb__keyfile | length > 0'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.key }}"
+        data: "{{ item.value }}"
+      with_dict:
+        mongodb_init_root_username: "{{ database_mongodb__init_root_username }}"
+        mongodb_init_root_password: "{{ database_mongodb__init_root_password }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ database_mongodb__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[database_mongodb__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ database_mongodb__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_mongodb__container.name }}"
+        hostname: "{{ database_mongodb__container.hostname }}"
+        image: "{{ database_mongodb__container.image }}"
+        ip: "{{ database_mongodb__container.ip }}"
+        network: "{{ database_mongodb__container.network }}"
+        timezone: "{{ database_mongodb__container.timezone }}"
+        etc_hosts: "{{ database_mongodb__container.hosts | default(omit) }}"
+        label: "{{ database_mongodb__container.labels | default(omit) }}"
+        publish: "{{ database_mongodb__container.publish | default(omit) }}"
+        secrets: "{{ database_mongodb__container.secrets }}"
+        volume: "{{ database_mongodb__container.volumes }}"
+        command: "{{ database_mongodb__container.command | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'database_mongodb__ipv6 | length == 0'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_mongodb__container.name }}"
+        hostname: "{{ database_mongodb__container.hostname }}"
+        image: "{{ database_mongodb__container.image }}"
+        ip: "{{ database_mongodb__container.ip }}"
+        ip6: "{{ database_mongodb__container.ipv6 }}"
+        network: "{{ database_mongodb__container.network }}"
+        timezone: "{{ database_mongodb__container.timezone }}"
+        etc_hosts: "{{ database_mongodb__container.hosts | default(omit) }}"
+        label: "{{ database_mongodb__container.labels | default(omit) }}"
+        publish: "{{ database_mongodb__container.publish | default(omit) }}"
+        secrets: "{{ database_mongodb__container.secrets }}"
+        volume: "{{ database_mongodb__container.volumes }}"
+        command: "{{ database_mongodb__container.command | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+      when: 'database_mongodb__ipv6 | length > 0'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ database_mongodb__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Wait for MongoDB port to be opened'
+      ansible.builtin.wait_for:
+        host: "{{ database_mongodb__container.ip }}"
+        port: "{{ database_mongodb__port }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_mongodb__autoupdate_enabled'
+      include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_mongodb__container.name }}"
+        container_image: "{{ database_mongodb__container.image }}"
+
+    - name: 'Wait for user to press enter'
+      ansible.builtin.pause:
+        prompt: 'Please make sure to enable replication in MongoDB if you are using a replica set!'
+
+    - name: 'Install MongoDB packages'
+      ansible.builtin.apt:
+        update_cache: yes
+        install_recommends: no
+        pkg: "{{ database_mongodb__packages }}"
+
+    - name: 'Create databases and users'
+      community.mongodb.mongodb_user:
+        login_user: "{{ database_mongodb__init_root_username }}"
+        login_password: "{{ database_mongodb__init_root_password }}"
+        login_host: "{{ database_mongodb__ip }}"
+        database: "{{ item.database | default('admin') }}"
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+        roles: "{{ item.roles | default({}) }}"
+        state: 'present'
+      with_items: "{{ database_mongodb__accounts }}"
