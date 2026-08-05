@@ -1,0 +1,70 @@
+---
+
+- name: 'Deploy OpenWRT SDK container'
+  tags: [ 'app_openwrt_sdk' ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ app_openwrt_sdk__uid }}"
+        group: "{{ app_openwrt_sdk__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ app_openwrt_sdk__podman_home }}"
+        - dest: "{{ app_openwrt_sdk__openwrt_dir }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_openwrt_sdk__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_openwrt_sdk__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_openwrt_sdk__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_openwrt_sdk__container.name }}"
+        hostname: "{{ app_openwrt_sdk__container.hostname }}"
+        image: "{{ app_openwrt_sdk__container.image }}"
+        ip: "{{ app_openwrt_sdk__container.ip }}"
+        ip6: "{{ app_openwrt_sdk__container.ipv6 | default(omit) }}"
+        network: "{{ app_openwrt_sdk__container.network }}"
+        timezone: "{{ app_openwrt_sdk__container.timezone }}"
+        volume: "{{ app_openwrt_sdk__container.volumes }}"
+        entrypoint: "{{ app_openwrt_sdk__container.entrypoint | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+          
+          [Unit]
+          {% if app_openwrt_sdk__container.requires is defined %}
+          Requires={{ app_openwrt_sdk__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_openwrt_sdk__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_openwrt_sdk__autoupdate_enabled'
+      include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_openwrt_sdk__container.name }}"
+        container_image: "{{ app_openwrt_sdk__container.image }}"
