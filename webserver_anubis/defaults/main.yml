@@ -12,11 +12,10 @@ webserver_anubis__network: "{{ anubis_network | mandatory }}"
 webserver_anubis__hostname: "{{ anubis_hostname | mandatory }}"
 webserver_anubis__timezone: "{{ anubis_timezone | mandatory }}"
 webserver_anubis__labels: "{{ anubis_labels | default({}) }}"
-webserver_anubis__publish: "{{ anubis_publish | default([]) }}"
 
 webserver_anubis__autoupdate_enabled: "{{ anubis_autoupdate_enabled | default(false) }}"
 
-webserver_anubis__config: "{{ anubis_config | default({}) }}"
+webserver_anubis__config: "{{ anubis_config | default(webserver_anubis__config_default) }}"
 
 webserver_anubis__port: "{{ anubis_port | default(8923) }}"
 webserver_anubis__bind: "{{ anubis_bind | default(':' + webserver_anubis__port | string) }}"
@@ -30,7 +29,6 @@ webserver_anubis__strip_base_prefix: "{{ anubis_strip_base_prefix | default(fals
 webserver_anubis__target: "{{ anubis_target | mandatory }}"
 webserver_anubis__xff_strip_private: "{{ anubis_xff_strip_private | default(true) }}"
 
-webserver_anubis__environment: "{{ anubis_environment | default(webserver_anubis__environment_default) }}"
 webserver_anubis__container: "{{ anubis_container | default(webserver_anubis__container_default) }}"
 
 #
@@ -63,10 +61,126 @@ webserver_anubis__container_default:
   ipv6: "{{ webserver_anubis__ipv6 }}"
   network: "{{ webserver_anubis__network }}"
   timezone: "{{ webserver_anubis__timezone }}"
-  environment: "{{ webserver_anubis__environment }}"
+  environment: "{{ webserver_anubis__environment_default }}"
   labels: "{{ webserver_anubis__labels }}"
-  publish: "{{ webserver_anubis__publish }}"
   volumes:
     - '/etc/localtime:/etc/localtime:ro'
     - '/etc/timezone:/etc/timezone:ro'
     - "{{ webserver_anubis__podman_home }}/botPolicies.yaml:/data/cfg/botPolicies.yaml:ro"
+
+webserver_anubis__config_default:
+  bots:
+    # Pathological bots to deny
+    - import: (data)/bots/_deny-pathological.yaml
+    - import: (data)/bots/aggressive-brazilian-scrapers.yaml
+
+    # Aggressively block AI/LLM related bots/agents by default
+    - import: (data)/meta/ai-block-aggressive.yaml
+
+    # x.ai has a scraper known to hammer git-hosting instances (Forgejo/Gitea/GitLab)
+    - import: (data)/crawlers/xai.yaml
+
+    - name: trusted-internal-network
+      remote_addresses: "{{ trusted_hosts }}"
+      action: ALLOW
+
+    - name: known-scraper-ranges
+      action: DENY
+      remote_addresses:
+        - "57.141.0.0/16" # Meta
+        - "57.142.0.0/15" # Meta
+        - "57.144.0.0/15" # Meta
+        - "57.146.0.0/15" # Meta
+        - "57.148.0.0/15" # Meta
+
+    # Search engine crawlers to allow, defaults to:
+    #   - Google (so they don't try to bypass Anubis)
+    #   - Apple
+    #   - Bing
+    #   - DuckDuckGo
+    #   - Qwant
+    #   - The Internet Archive
+    #   - Kagi
+    #   - Marginalia
+    #   - Mojeek
+    - import: (data)/crawlers/_allow-good.yaml
+
+    # Challenge Firefox AI previews
+    - import: (data)/clients/x-firefox-ai.yaml
+
+    # Allow common "keeping the internet working" routes (well-known, favicon, robots.txt)
+    - import: (data)/common/keep-internet-working.yaml
+
+    # Without this rule, weight stays at 0 for every client not explicitly matched,
+    # and the thresholds below never trigger. This base value of 10 is what makes
+    # the entire weight/threshold system below effective.
+    - name: generic-browser
+      user_agent_regex: >-
+        Mozilla|Opera
+      action: WEIGH
+      weight:
+        adjust: 10
+
+  dnsbl: true
+
+  status_codes:
+    CHALLENGE: 200
+    DENY: 200
+
+  store:
+    backend: memory
+    parameters: { }
+
+  thresholds:
+    - name: minimal-suspicion # This client is likely fine, its soul is lighter than a feather
+      expression: weight <= 0 # a feather weighs zero units
+      action: ALLOW # Allow the traffic through
+    - name: mild-suspicion
+      expression:
+        all:
+          - weight > 0
+          - weight < 10
+      action: CHALLENGE
+      challenge:
+        # https://anubis.techaro.lol/docs/admin/configuration/challenges/metarefresh
+        algorithm: metarefresh
+        difficulty: 1
+        report_as: 1
+    - name: moderate-suspicion
+      expression:
+        all:
+          - weight >= 10
+          - weight < 20
+      action: CHALLENGE
+      challenge:
+        # https://anubis.techaro.lol/docs/admin/configuration/challenges/proof-of-work
+        algorithm: fast
+        difficulty: 2 # two leading zeros, very fast for most clients
+        report_as: 2
+    - name: mild-proof-of-work
+      expression:
+        all:
+          - weight >= 20
+          - weight < 30
+      action: CHALLENGE
+      challenge:
+        algorithm: fast
+        difficulty: 4
+        report_as: 4
+    - name: extreme-suspicion
+      expression:
+        all:
+          - weight >= 30
+          - weight < 40
+      action: CHALLENGE
+      challenge:
+        algorithm: slow
+        difficulty: 8
+        report_as: 4
+    - name: nuclear-suspicion
+      expression: weight >= 40
+      action: CHALLENGE
+      challenge:
+        algorithm: slow
+        difficulty: 12
+        report_as: 4
