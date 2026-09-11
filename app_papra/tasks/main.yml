@@ -1,0 +1,87 @@
+---
+
+- name: 'Deploy papra container'
+  tags: [ 'app_papra' ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ app_papra__uid }}"
+        group: "{{ app_papra__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ app_papra__podman_home }}/db"
+        - dest: "{{ app_papra__podman_home }}/documents"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items: "{{ app_papra__secrets }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ app_papra__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[app_papra__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ app_papra__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name:  'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_papra__container.name }}"
+        hostname: "{{ app_papra__container.hostname }}"
+        image: "{{ app_papra__container.image }}"
+        ip: "{{ app_papra__container.ip }}"
+        ip6: "{{ app_papra__container.ipv6 | default(omit) }}"
+        network: "{{ app_papra__container.network }}"
+        timezone: "{{ app_papra__container.timezone }}"
+        env: "{{ app_papra__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_papra__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_papra__container.expose | default(omit) }}"
+        label: "{{ app_papra__container.labels | default(omit) }}"
+        publish: "{{ app_papra__container.publish | default(omit) }}"
+        secrets: "{{ app_papra__container.secrets | default(omit) }}"
+        volume: "{{ app_papra__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_papra__container.requires is defined %}
+          Requires={{ app_papra__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ app_papra__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_papra__autoupdate_enabled'
+      include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_papra__container.name }}"
+        container_image: "{{ app_papra__container.image }}"
