@@ -1,0 +1,147 @@
+---
+
+- name: 'Deploy Docspell container'
+  tags: [ 'app_docspell' ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: 'root'
+        group: 'root'
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ app_docspell__podman_home }}/files"
+
+    - name: 'Generate configuration'
+      ansible.builtin.copy:
+        content: "{{ app_docspell__config | to_hocon }}"
+        dest: "{{ app_docspell__podman_config_file }}"
+      when: 'not podman___update_mode | bool and app_docspell__config | length > 0'
+      notify: 'Restart docspell container'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'REST Server container'
+      block:
+
+        - name: 'Stop container when it is running'
+          ansible.builtin.systemd:
+            name: "{{ app_docspell__rest_container.name }}.service"
+            state: 'stopped'
+          when: 'ansible_facts.services[app_docspell__rest_container.name + ".service"] is defined and podman___update_mode | bool'
+
+        - name: 'Pull image'
+          containers.podman.podman_image:
+            name: "{{ app_docspell__rest_container.image }}"
+            force: true
+          when: 'podman___update_mode | bool'
+
+        - name:  'Install container'
+          containers.podman.podman_container:
+            name: "{{ app_docspell__rest_container.name }}"
+            hostname: "{{ app_docspell__rest_container.hostname }}"
+            image: "{{ app_docspell__rest_container.image }}"
+            ip: "{{ app_docspell__rest_container.ip }}"
+            ip6: "{{ app_docspell__rest_container.ipv6 | default(omit) }}"
+            network: "{{ app_docspell__rest_container.network }}"
+            timezone: "{{ app_docspell__rest_container.timezone }}"
+            env: "{{ app_docspell__rest_container.environment | default(omit) }}"
+            etc_hosts: "{{ app_docspell__rest_container.etc_hosts | default(omit) }}"
+            expose: "{{ app_docspell__rest_container.expose | default(omit) }}"
+            label: "{{ app_docspell__rest_container.labels | default(omit) }}"
+            publish: "{{ app_docspell__rest_container.publish | default(omit) }}"
+            secrets: "{{ app_docspell__rest_container.secrets | default(omit) }}"
+            volume: "{{ app_docspell__rest_container.volumes | default(omit) }}"
+            command: "{{ app_docspell__rest_container.command | default(omit) }}"
+            quadlet_options: |
+              [Install]
+              WantedBy=default.target
+
+              [Service]
+              RestartSec=5
+              Restart=always
+
+              [Unit]
+            restart_policy: 'no'
+            state: 'quadlet'
+            recreate: "{{ podman___update_mode | bool }}"
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd:
+            name: "{{ app_docspell__rest_container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+            enabled: true
+          when: 'not ansible_check_mode'
+
+        - name: 'Enable autoupdate on container'
+          when: 'app_docspell__autoupdate_enabled'
+          include_role:
+            name: 'container_update'
+          vars:
+            container_name: "{{ app_docspell__rest_container.name }}"
+            container_image: "{{ app_docspell__rest_container.image }}"
+
+    - name: 'Job Executor container'
+      block:
+
+        - name: 'Stop container when it is running'
+          ansible.builtin.systemd:
+            name: "{{ app_docspell__joex_container.name }}.service"
+            state: 'stopped'
+          when: 'ansible_facts.services[app_docspell__joex_container.name + ".service"] is defined and podman___update_mode | bool'
+
+        - name: 'Pull image'
+          containers.podman.podman_image:
+            name: "{{ app_docspell__joex_container.image }}"
+            force: true
+          when: 'podman___update_mode | bool'
+
+        - name:  'Install container'
+          containers.podman.podman_container:
+            name: "{{ app_docspell__joex_container.name }}"
+            hostname: "{{ app_docspell__joex_container.hostname }}"
+            image: "{{ app_docspell__joex_container.image }}"
+            ip: "{{ app_docspell__joex_container.ip }}"
+            ip6: "{{ app_docspell__joex_container.ipv6 | default(omit) }}"
+            network: "{{ app_docspell__joex_container.network }}"
+            timezone: "{{ app_docspell__joex_container.timezone }}"
+            env: "{{ app_docspell__joex_container.environment | default(omit) }}"
+            etc_hosts: "{{ app_docspell__joex_container.etc_hosts | default(omit) }}"
+            expose: "{{ app_docspell__joex_container.expose | default(omit) }}"
+            label: "{{ app_docspell__joex_container.labels | default(omit) }}"
+            publish: "{{ app_docspell__joex_container.publish | default(omit) }}"
+            secrets: "{{ app_docspell__joex_container.secrets | default(omit) }}"
+            volume: "{{ app_docspell__joex_container.volumes | default(omit) }}"
+            command: "{{ app_docspell__joex_container.command | default(omit) }}"
+            quadlet_options: |
+              [Install]
+              WantedBy=default.target
+
+              [Service]
+              RestartSec=5
+              Restart=always
+
+              [Unit]
+            restart_policy: 'no'
+            state: 'quadlet'
+            recreate: "{{ podman___update_mode | bool }}"
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd:
+            name: "{{ app_docspell__joex_container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+            enabled: true
+          when: 'not ansible_check_mode'
+
+        - name: 'Enable autoupdate on container'
+          when: 'app_docspell__autoupdate_enabled'
+          include_role:
+            name: 'container_update'
+          vars:
+            container_name: "{{ app_docspell__joex_container.name }}"
+            container_image: "{{ app_docspell__joex_container.image }}"
