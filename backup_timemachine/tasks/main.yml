@@ -1,0 +1,119 @@
+---
+
+- name: 'Deploy Restic REST container'
+  tags: [ 'backup_timemachine' ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner | default(backup_timemachine__uid) }}"
+        group: "{{ item.group | default(backup_timemachine__gid) }}"
+        mode: '0700'
+        state: 'directory'
+      with_items:
+        - dest: "{{ backup_timemachine__podman_home }}/opt"
+        - dest: "{{ backup_timemachine__podman_home }}/external"
+          owner: 'root'
+          group: 'root'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      with_items: "{{ backup_timemachine__secrets }}"
+
+    - name: 'Create avahi configuration'
+      ansible.builtin.copy:
+        content: |
+          [server]
+          allow-interfaces={{ backup_timemachine__interfaces | join(',') }}
+        dest: "{{ backup_timemachine__podman_home }}/avahi-daemon.conf"
+      when: 'not podman___update_mode | bool and backup_timemachine__interfaces | length > 0'
+
+    - name: 'Create user configuration'
+      ansible.builtin.copy:
+        content: |
+          {% for key, value in item.items() %}
+          {{ key }}={{ value }}
+          {% endfor %}
+        dest: "{{ backup_timemachine__podman_home }}/external/{{ item.TM_USERNAME }}.conf"
+        mode: '0400'
+      with_items: "{{ backup_timemachine__users }}"
+      when: 'not podman___update_mode | bool'
+
+    - name: 'Create user passwords'
+      no_log: true
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: "{{ backup_timemachine__podman_home }}/external/{{ item.key }}.pw"
+        mode: '0400'
+      with_dict: "{{ backup_timemachine__passwords }}"
+      when: 'not podman___update_mode | bool'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ backup_timemachine__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[backup_timemachine__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ backup_timemachine__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ backup_timemachine__container.name }}"
+        hostname: "{{ backup_timemachine__container.hostname }}"
+        image: "{{ backup_timemachine__container.image }}"
+        ip: "{{ backup_timemachine__container.ip }}"
+        ip6: "{{ backup_timemachine__container.ipv6 | default(omit) }}"
+        network: "{{ backup_timemachine__container.network }}"
+        timezone: "{{ backup_timemachine__container.timezone }}"
+        env: "{{ backup_timemachine__container.environment | default(omit) }}"
+        etc_hosts: "{{ backup_timemachine__container.etc_hosts | default(omit) }}"
+        label: "{{ backup_timemachine__container.labels | default(omit) }}"
+        publish: "{{ backup_timemachine__container.publish | default(omit) }}"
+        expose: "{{ backup_timemachine__container.expose | default(omit) }}"
+        secrets: "{{ backup_timemachine__container.secrets | default(omit) }}"
+        volume: "{{ backup_timemachine__container.volumes | default(omit) }}"
+        tmpfs: "{{ backup_timemachine__container.tmpfs | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if backup_timemachine__container.requires is defined %}
+          Requires={{ backup_timemachine__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ backup_timemachine__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'backup_timemachine__autoupdate_enabled'
+      include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ backup_timemachine__container.name }}"
+        container_image: "{{ backup_timemachine__container.image }}"
+        container_schedule: "{{ backup_timemachine__autoupdate_schedule }}"
