@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+#
+# (c) 2026, André Deuerling
+#
+"""Icinga check: can this host's borg repository be opened, and how old is its
+newest archive?
+
+The daily backup runs its scripts without looking at their exit status, so a
+borg run that fails every night leaves nothing behind but lines in the error
+log. Asking the repository itself also catches a broken passphrase, SSH key or
+remote login.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+
+OK, WARNING, CRITICAL, UNKNOWN = 0, 1, 2, 3
+
+
+def read_config(path):
+    """KEY="value" lines of the shell config the backup_borg role renders."""
+    config = {}
+    with open(path) as handle:
+        for line in handle:
+            match = re.match(r'^(\w+)="(.*)"\s*$', line)
+            if match:
+                config[match.group(1)] = match.group(2)
+    return config
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('-f', '--config', default='/etc/backup/borg',
+                        help='borg config written by the backup_borg role')
+    parser.add_argument('-w', '--warning', type=float, default=36,
+                        help='WARNING when the newest archive is older (hours)')
+    parser.add_argument('-c', '--critical', type=float, default=72,
+                        help='CRITICAL when the newest archive is older (hours)')
+    parser.add_argument('-t', '--timeout', type=int, default=120,
+                        help='seconds to wait for the repository')
+    args = parser.parse_args()
+
+    try:
+        config = read_config(args.config)
+    except OSError as exc:
+        print('UNKNOWN - cannot read %s: %s' % (args.config, exc))
+        return UNKNOWN
+
+    repository = config.get('daily_backup_borg_repository')
+    if not repository:
+        print('UNKNOWN - no daily_backup_borg_repository in %s' % args.config)
+        return UNKNOWN
+
+    # sudo resets HOME; borg's known-repository records and the SSH key named in
+    # daily_backup_borg_rsh live under root's.
+    env = dict(os.environ, HOME='/root', LANG='C.UTF-8',
+               BORG_RELOCATED_REPO_ACCESS_IS_OK='no',
+               BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK='no')
+
+    # daily_backup_borg_pass is the key older backup_borg versions wrote.
+    password_command = (config.get('daily_backup_borg_password_command')
+                        or config.get('daily_backup_borg_pass'))
+    if password_command:
+        env['BORG_PASSCOMMAND'] = password_command
+    else:
+        # A repository may legitimately be unencrypted, which ignores the
+        # passphrase. An encrypted one without a configured passphrase is a
+        # broken backup; the dummy value makes borg fail with a clear error
+        # instead of prompting on the terminal, which a check cannot answer.
+        env['BORG_PASSPHRASE'] = ''
+    for key, var in (('daily_backup_borg_rsh', 'BORG_RSH'),
+                     ('daily_backup_borg_cache_dir', 'BORG_CACHE_DIR')):
+        if config.get(key):
+            env[var] = config[key]
+
+    # --bypass-lock: listing only reads, and a lock would make every check
+    # during the nightly run fail or wait.
+    command = ['borg', 'list', '--bypass-lock', '--json', '--last', '1', repository]
+    try:
+        result = subprocess.run(command, env=env, capture_output=True, text=True,
+                                timeout=args.timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        print('UNKNOWN - borg list timed out after %ds' % args.timeout)
+        return UNKNOWN
+    except OSError as exc:
+        print('UNKNOWN - cannot run borg: %s' % exc)
+        return UNKNOWN
+
+    if result.returncode != 0:
+        error = (result.stderr.strip().splitlines() or ['no output'])[-1]
+        print('CRITICAL - cannot list the borg repository: %s' % error)
+        return CRITICAL
+
+    try:
+        archives = json.loads(result.stdout)['archives']
+    except (ValueError, KeyError) as exc:
+        print('UNKNOWN - unexpected borg output: %s' % exc)
+        return UNKNOWN
+    if not archives:
+        print('CRITICAL - the borg repository holds no archives')
+        return CRITICAL
+
+    newest = archives[-1]
+    started = datetime.datetime.fromisoformat(newest['start'])
+    hours = (datetime.datetime.now() - started).total_seconds() / 3600
+    perf = 'age=%.1fh;%g;%g' % (hours, args.warning, args.critical)
+    summary = 'newest archive %s is %.1f hours old | %s' % (newest['name'], hours, perf)
+
+    if hours >= args.critical:
+        print('CRITICAL - ' + summary)
+        return CRITICAL
+    if hours >= args.warning:
+        print('WARNING - ' + summary)
+        return WARNING
+    print('OK - ' + summary)
+    return OK
+
+
+if __name__ == '__main__':
+    sys.exit(main())
