@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+# backup.questdb - Backup QuestDB databases
+#
+# (c) 2026 Gerrit Beine
+#
+umask 022
+
+if [ -z ${daily_backup_running} ]; then
+	echo "$0 not called from within backup script"
+	exit
+fi
+
+if [ -r /etc/backup/questdb ]; then
+	. /etc/backup/questdb
+fi
+
+: ${daily_backup_questdb_enable="NO"}
+: ${daily_backup_questdb_backup_repo="/var/backups/questdb"}
+: ${daily_backup_questdb_data_dir="/var/lib/questdb"}
+: ${daily_backup_questdb_keep_days="14"}
+: ${daily_backup_questdb_podman_container="questdb"}
+
+
+borg="/usr/bin/borg"
+borg_create_options="--compression none --stats"
+borg_prune_options="--stats --keep-within=${daily_backup_questdb_keep_days}d"
+borg_compact_options="--cleanup-commits"
+
+podman="/usr/bin/podman"
+podman_create_snapshot="${podman} exec ${daily_backup_questdb_podman_container} curl -fsS -G http://localhost:9000/exec --data-urlencode 'query=CHECKPOINT CREATE'"
+podman_release_snapshot="${podman} exec ${daily_backup_questdb_podman_container} curl -fsS -G http://localhost:9000/exec --data-urlencode 'query=CHECKPOINT CREATE'"
+
+today=`date +%Y%m%d`
+
+rc=0
+case "${daily_backup_questdb_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup QuestDB databases"
+		backup_target="${today}"
+
+		echo "Create QuestDB checkpoint"
+		if ${podman_create_snapshot} > /dev/null; then
+			echo "Create archive ${backup_target}"
+			${borg} create ${borg_create_options} "${daily_backup_questdb_backup_repo}::${backup_target}" ${daily_backup_questdb_data_dir}
+			rc=$?
+
+			echo "Release QuestDB checkpoint"
+			${podman_release_snapshot} || rc=1
+
+			${borg} prune ${borg_prune_options} ${daily_backup_questdb_backup_repo}
+			${borg} compact ${borg_compact_options} ${daily_backup_questdb_backup_repo}
+		else
+			echo "Creating QuestDB checkpoint failed, skipping backup"
+			rc=1
+		fi
+esac
+
+exit "${rc}"

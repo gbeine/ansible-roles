@@ -1,0 +1,74 @@
+---
+
+- name: 'Install QuestDB'
+  tags: [ 'database_questdb'  ]
+  block:
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ database_questdb__uid }}"
+        group: "{{ database_questdb__gid }}"
+        mode: "{{ item.mode | default('0700') }}"
+        state: 'directory'
+      with_items:
+        - dest: "{{ database_questdb__podman_home }}"
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Stop container when it is running'
+      ansible.builtin.systemd:
+        name: "{{ database_questdb__container.name }}.service"
+        state: 'stopped'
+      when: 'ansible_facts.services[database_questdb__container.name + ".service"] is defined and podman___update_mode | bool'
+
+    - name: 'Pull image'
+      containers.podman.podman_image:
+        name: "{{ database_questdb__container.image }}"
+        force: true
+      when: 'podman___update_mode | bool'
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_questdb__container.name }}"
+        hostname: "{{ database_questdb__container.hostname }}"
+        image: "{{ database_questdb__container.image }}"
+        ip: "{{ database_questdb__container.ip }}"
+        ip6: "{{ database_questdb__container.ipv6 | default(omit) }}"
+        network: "{{ database_questdb__container.network }}"
+        timezone: "{{ database_questdb__container.timezone }}"
+        env: "{{ database_questdb__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_questdb__container.etc_hosts | default(omit) }}"
+        label: "{{ database_questdb__container.labels | default(omit) }}"
+        publish: "{{ database_questdb__container.publish | default(omit) }}"
+        expose: "{{ database_questdb__container.expose | default(omit) }}"
+        secrets: "{{ database_questdb__container.secrets | default(omit) }}"
+        volume: "{{ database_questdb__container.volumes | default(omit) }}"
+        command: "{{ database_questdb__container.command | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+        restart_policy: 'no'
+        state: 'quadlet'
+        recreate: "{{ podman___update_mode | bool }}"
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd:
+        name: "{{ database_questdb__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_questdb__autoupdate_enabled'
+      include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_questdb__container.name }}"
+        container_image: "{{ database_questdb__container.image }}"
