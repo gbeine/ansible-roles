@@ -42,6 +42,53 @@
   # statefile = ""
   # skip_processors_after_aggregators = false
 
+{# ------------------------------------------------------------------ #}
+{# Wert rendern: Skalare, Listen, Inline-Tables (rekursiv)             #}
+{# ------------------------------------------------------------------ #}
+{% macro toml_value(v) -%}
+{%- if v is string -%}
+"{{ v }}"
+{%- elif v is boolean -%}
+{{ 'true' if v else 'false' }}
+{%- elif v is number -%}
+{{ v }}
+{%- elif v is mapping -%}
+{ {% for k, x in v.items() %}{{ k }} = {{ toml_value(x) }}{{ ', ' if not loop.last else '' }}{% endfor %} }
+{%- elif v is iterable -%}
+[ {% for x in v %}{{ toml_value(x) }}{{ ', ' if not loop.last else '' }}{% endfor %} ]
+{%- endif -%}
+{%- endmacro %}
+
+{# ------------------------------------------------------------------ #}
+{# Tabelleninhalt rendern (rekursiv)                                   #}
+{#   path : voller TOML-Pfad, z. B. inputs.snmp                        #}
+{#   skip : Keys, die auf dieser Ebene ignoriert werden                #}
+{# ------------------------------------------------------------------ #}
+{% macro toml_table(path, data, depth=0, skip=[]) %}
+{% set pad = '  ' * (depth + 1) %}
+{# 1) Skalare und Skalar-Listen zuerst (TOML-Regel: vor allen Untertabellen) #}
+{% for k, v in data.items() if k not in skip
+     and v is not none
+     and v is not mapping
+     and not (v is iterable and v is not string and v | length > 0 and v[0] is mapping) %}
+{{ pad }}{{ k }} = {{ toml_value(v) }}
+{% endfor %}
+{# 2) Mappings -> [path.key] #}
+{% for k, v in data.items() if k not in skip and v is mapping %}
+{{ pad }}[{{ path }}.{{ k }}]
+{{ toml_table(path ~ '.' ~ k, v, depth + 1) }}
+{% endfor %}
+{# 3) Listen von Mappings -> [[path.key]], je Element ein Block #}
+{% for k, v in data.items() if k not in skip
+     and v is iterable and v is not string and v is not mapping
+     and v | length > 0 and v[0] is mapping %}
+{% for item in v %}
+{{ pad }}[[{{ path }}.{{ k }}]]
+{{ toml_table(path ~ '.' ~ k, item, depth + 1) }}
+{% endfor %}
+{% endfor %}
+{% endmacro %}
+
 ###############################################################################
 #                            SECRETSTORE PLUGINS                              #
 ###############################################################################
@@ -52,33 +99,7 @@
 
 {% for output in monitoring_telegraf__outputs %}
 [[outputs.{{ output.plugin }}]]
-{%   for key, value in output.items() %}
-{%     if key != 'plugin' %}
-{%       if value is string %}
-  {{ key }} = "{{ value }}"
-{%       elif value is boolean %}
-  {{ key }} = {{ value | ternary('true', 'false') }}
-{%       elif  value is integer %}
-  {{ key }} = {{ value }}
-{%       elif value is mapping %}
-  [outputs.{{ output.plugin }}.{{ key }}]
-{%         for k, v in value.items() %}
-{%           if v is string %}
-    {{ k }} = "{{ v }}"
-{%           elif v is boolean %}
-    {{ k }} = {{ v | ternary('true', 'false') }}
-{%           elif  v is integer %}
-    {{ k }} = {{ v }}
-{%           elif v is iterable %}
-    {{ k }} = [ "{{ v | join('", "') }}" ]
-{%           endif %}
-{%         endfor %}
-{%       elif value is iterable %}
-  {{ key }} = [ "{{ value | join('", "') }}" ]
-{%       endif %}
-{%     endif %}
-{%   endfor %}
-
+{{ toml_table('outputs.' ~ output.plugin, output, 0, ['plugin']) }}
 {% endfor %}
 
 ###############################################################################
@@ -87,33 +108,7 @@
 
 {% for input in monitoring_telegraf__inputs %}
 [[inputs.{{ input.plugin }}]]
-{%   for key, value in input.items() %}
-{%     if key != 'plugin' %}
-{%       if  value is string %}
-  {{ key }} = "{{ value }}"
-{%       elif  value is boolean %}
-  {{ key }} = {{ value | ternary('true', 'false') }}
-{%       elif  value is integer %}
-  {{ key }} = {{ value }}
-{%       elif value is mapping %}
-  [inputs.{{ input.plugin }}.{{ key }}]
-{%         for k, v in value.items() %}
-{%           if v is string %}
-    {{ k }} = "{{ v }}"
-{%           elif v is boolean %}
-    {{ k }} = {{ v | ternary('true', 'false') }}
-{%           elif  v is integer %}
-    {{ k }} = {{ v }}
-{%           elif v is iterable %}
-    {{ k }} = [ "{{ v | join('", "') }}" ]
-{%           endif %}
-{%         endfor %}
-{%       elif  value is iterable %}
-  {{ key }} = [ "{{ value | join('", "') }}" ]
-{%       endif %}
-{%     endif %}
-{%   endfor %}
-
+{{ toml_table('inputs.' ~ input.plugin, input, 0, ['plugin']) }}
 {% endfor %}
 
 ###############################################################################
@@ -122,33 +117,7 @@
 
 {% for processor in monitoring_telegraf__processors %}
 [[processors.{{ processor.type }}]]
-{%   for key, value in processor.items() %}
-{%     if key != 'type' %}
-{%       if value is string %}
-  {{ key }} = "{{ value }}"
-{%       elif value is boolean %}
-  {{ key }} = {{ value | ternary('true', 'false') }}
-{%       elif  value is integer %}
-  {{ key }} = {{ value }}
-{%       elif value is mapping %}
-  [[processors.{{ processor.type }}.{{ key }}]]
-{%         for k, v in value.items() %}
-{%           if v is string %}
-    {{ k }} = "{{ v }}"
-{%           elif v is boolean %}
-    {{ k }} = {{ v | ternary('true', 'false') }}
-{%           elif  v is integer %}
-    {{ k }} = {{ v }}
-{%           elif v is iterable %}
-    {{ k }} = [ "{{ v | join('", "') }}" ]
-{%           endif %}
-{%         endfor %}
-{%       elif value is iterable %}
-  {{ key }} = [ "{{ value | join('", "') }}" ]
-{%       endif %}
-{%     endif %}
-{%   endfor %}
-
+{{ toml_table('processors.' ~ processor.type, processor, 0, ['type']) }}
 {% endfor %}
 
 ###############################################################################
@@ -157,18 +126,5 @@
 
 {% for aggregator in monitoring_telegraf__aggregators %}
 [[aggregators.{{ aggregator.type }}]]
-{%   for key, value in aggregator.items() %}
-{%     if key != 'type' %}
-{%       if value is string %}
-  {{ key }} = "{{ value }}"
-{%       elif value is boolean %}
-  {{ key }} = {{ value | ternary('true', 'false') }}
-{%       elif  value is integer %}
-  {{ key }} = {{ value }}
-{%       elif value is iterable %}
-  {{ key }} = [ "{{ value | join('", "') }}" ]
-{%       endif %}
-{%     endif %}
-{%   endfor %}
-
+{{ toml_table('aggregators.' ~ aggregator.type, aggregator, 0, ['type']) }}
 {% endfor %}
