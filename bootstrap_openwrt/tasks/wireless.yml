@@ -1,0 +1,113 @@
+---
+
+- name: Validate openwrt_wireless entries
+  ansible.builtin.assert:
+    that:
+      - item.type is defined
+      - item.find is defined
+      - item.options is defined
+    fail_msg: "Eintrag braucht type, find und options: {{ item.name | default(item.type | default('?')) }}"
+    quiet: true
+  loop: "{{ bootstrap_openwrt__wireless }}"
+  loop_control:
+    label: "{{ item.name | default(item.find | default(item.type | default('?'))) }}"
+
+- name: Create backup directory on the controller
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  check_mode: false
+
+- name: Read current wireless configuration
+  community.openwrt.slurp:
+    src: /etc/config/wireless
+  register: bootstrap_openwrt__wireless_current
+  no_log: true
+  check_mode: false
+
+- name: Store backup on the controller (secrets redacted)
+  ansible.builtin.copy:
+    content: >-
+      {{ bootstrap_openwrt__wireless_current.content | b64decode
+         | regex_replace('(?mi)^(\s*option\s+\S*(?:key|pass|secret|psk)\S*\s+).*$', "\g<1>'REDACTED'") }}
+    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/wireless"
+    mode: '0600'
+  delegate_to: localhost
+  no_log: true
+  check_mode: false
+
+- name: Set declared sections
+  community.openwrt.uci:
+    command: section
+    config: wireless
+    type: "{{ item.type }}"
+    name: "{{ item.name | default(omit) }}"
+    find: "{{ item.find }}"
+    value: "{{ item.options }}"
+    replace: true
+    redact_keys: [key]
+  loop: "{{ bootstrap_openwrt__wireless }}"
+  loop_control:
+    label: "{{ item.name | default(item.find) }}"
+
+- name: Look up IDs of unnamed sections
+  community.openwrt.uci:
+    command: find
+    config: wireless
+    type: "{{ item.type }}"
+    find: "{{ item.find }}"
+  loop: "{{ bootstrap_openwrt__wireless | rejectattr('name', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.find }}"
+  register: bootstrap_openwrt__wireless_found
+  check_mode: false
+  failed_when:
+    - bootstrap_openwrt__wireless_found.failed | default(false)
+    - not ansible_check_mode
+
+- name: Read existing sections
+  community.openwrt.uci:
+    command: show
+    config: wireless
+  register: bootstrap_openwrt__wireless_show
+  no_log: true
+  check_mode: false
+
+- name: Determine sections to delete
+  ansible.builtin.set_fact:
+    bootstrap_openwrt__wireless_delete: >-
+      {{ bootstrap_openwrt__wireless_show.result
+         | regex_findall('(?m)^wireless\.([^.=\n]+)=([\w-]+)$')
+         | reverse
+         | map(attribute='0')
+         | reject('in',
+             (bootstrap_openwrt__wireless | selectattr('name', 'defined') | map(attribute='name') | list)
+             + (bootstrap_openwrt__wireless_found.results | map(attribute='result') | list))
+         | list }}
+
+- name: Show sections to delete
+  ansible.builtin.debug:
+    var: bootstrap_openwrt__wireless_delete
+
+- name: Delete undeclared sections
+  community.openwrt.uci:
+    command: delete
+    key: "wireless.{{ item }}"
+  loop: "{{ bootstrap_openwrt__wireless_delete }}"
+  when: bootstrap_openwrt__wireless_prune | bool
+
+- name: Read pending changes
+  community.openwrt.uci:
+    command: changes
+    config: wireless
+  register: bootstrap_openwrt__wireless_pending
+  check_mode: false
+
+- name: Commit changes
+  community.openwrt.uci:
+    command: commit
+    config: wireless
+  when: bootstrap_openwrt__wireless_pending.changes | default({}) | length > 0
+  notify: Reload wifi

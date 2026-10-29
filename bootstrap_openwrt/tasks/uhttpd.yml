@@ -1,0 +1,139 @@
+---
+
+- name: Validate openwrt_uhttpd is not empty
+  ansible.builtin.assert:
+    that:
+      - bootstrap_openwrt__uhttpd | length > 0
+    fail_msg: "bootstrap_openwrt__uhttpd_enable ist gesetzt, aber openwrt_uhttpd ist leer. Das würde die komplette uhttpd-Konfiguration löschen."
+    quiet: true
+
+- name: Validate openwrt_uhttpd entries
+  ansible.builtin.assert:
+    that:
+      - item.type is defined
+      - item.find is defined
+      - item.options is defined
+    fail_msg: "Eintrag braucht type, find und options: {{ item.name | default(item.type | default('?')) }}"
+    quiet: true
+  loop: "{{ bootstrap_openwrt__uhttpd }}"
+  loop_control:
+    label: "{{ item.name | default(item.type | default('?')) }}"
+
+- name: Check uhttpd certificate and key files
+  community.openwrt.stat:
+    path: "{{ item }}"
+  loop: >-
+    {{ bootstrap_openwrt__uhttpd
+       | selectattr('type', 'equalto', 'uhttpd')
+       | map(attribute='options')
+       | map('dict2items')
+       | flatten
+       | selectattr('key', 'in', ['cert', 'key'])
+       | map(attribute='value')
+       | list }}
+  register: bootstrap_openwrt__uhttpd_files
+  check_mode: false
+
+- name: Fail on missing uhttpd files
+  ansible.builtin.fail:
+    msg: "uhttpd soll auf {{ item.item }} zeigen, die Datei existiert nicht. ACME muss zuerst laufen."
+  loop: "{{ bootstrap_openwrt__uhttpd_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - not item.stat.exists
+    - not ansible_check_mode
+
+- name: Create backup directory on the controller
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  check_mode: false
+
+- name: Read current uhttpd configuration
+  community.openwrt.slurp:
+    src: /etc/config/uhttpd
+  register: bootstrap_openwrt__uhttpd_current
+  check_mode: false
+
+- name: Store backup on the controller
+  ansible.builtin.copy:
+    content: "{{ bootstrap_openwrt__uhttpd_current.content | b64decode }}"
+    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/uhttpd"
+    mode: '0600'
+  delegate_to: localhost
+  check_mode: false
+
+- name: Set declared sections
+  community.openwrt.uci:
+    command: section
+    config: uhttpd
+    type: "{{ item.type }}"
+    name: "{{ item.name | default(omit) }}"
+    find: "{{ item.find }}"
+    value: "{{ item.options }}"
+    replace: true
+  loop: "{{ bootstrap_openwrt__uhttpd }}"
+  loop_control:
+    label: "{{ item.name | default(item.type) }}"
+
+- name: Look up IDs of unnamed sections
+  community.openwrt.uci:
+    command: find
+    config: uhttpd
+    type: "{{ item.type }}"
+    find: "{{ item.find }}"
+  loop: "{{ bootstrap_openwrt__uhttpd | rejectattr('name', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.type }}"
+  register: bootstrap_openwrt__uhttpd_found
+  check_mode: false
+  failed_when:
+    - bootstrap_openwrt__uhttpd_found.failed | default(false)
+    - not ansible_check_mode
+
+- name: Read existing sections
+  community.openwrt.uci:
+    command: show
+    config: uhttpd
+  register: bootstrap_openwrt__uhttpd_show
+  check_mode: false
+
+- name: Determine sections to delete
+  ansible.builtin.set_fact:
+    bootstrap_openwrt__uhttpd_delete: >-
+      {{ bootstrap_openwrt__uhttpd_show.result
+         | regex_findall('(?m)^uhttpd\.([^.=\n]+)=([\w-]+)$')
+         | reverse
+         | map(attribute='0')
+         | reject('in',
+             (bootstrap_openwrt__uhttpd | selectattr('name', 'defined') | map(attribute='name') | list)
+             + (bootstrap_openwrt__uhttpd_found.results | map(attribute='result') | list))
+         | list }}
+
+- name: Show sections to delete
+  ansible.builtin.debug:
+    var: bootstrap_openwrt__uhttpd_delete
+
+- name: Delete undeclared sections
+  community.openwrt.uci:
+    command: delete
+    key: "uhttpd.{{ item }}"
+  loop: "{{ bootstrap_openwrt__uhttpd_delete }}"
+  when: bootstrap_openwrt__uhttpd_prune | bool
+
+- name: Read pending changes
+  community.openwrt.uci:
+    command: changes
+    config: uhttpd
+  register: bootstrap_openwrt__uhttpd_pending
+  check_mode: false
+
+- name: Commit changes
+  community.openwrt.uci:
+    command: commit
+    config: uhttpd
+  when: bootstrap_openwrt__uhttpd_pending.changes | default({}) | length > 0
+  notify: Reload uhttpd
