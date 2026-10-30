@@ -1,5 +1,5 @@
 ---
-title: PostgreSQL
+title: 'Backup: PostgreSQL'
 permalink: /roles/backup-postgresql/
 ---
 

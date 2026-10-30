@@ -1,5 +1,5 @@
 ---
-title: BorgBackup
+title: 'Backup: Borg'
 permalink: /roles/backup-borg/
 project_link: https://www.borgbackup.org/
 project_repository: https://github.com/borgbackup/borg

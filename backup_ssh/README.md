@@ -1,5 +1,5 @@
 ---
-title: Backup SSH
+title: 'Backup: SSH'
 permalink: /roles/backup-ssh/
 ---
 

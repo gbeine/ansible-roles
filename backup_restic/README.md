@@ -1,5 +1,5 @@
 ---
-title: restic
+title: 'Backup: restic'
 permalink: /roles/backup-restic/
 project_link: https://restic.net/
 project_repository: https://github.com/restic/restic

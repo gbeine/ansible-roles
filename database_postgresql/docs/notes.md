@@ -1,0 +1,15 @@
+- The role currently supports only installation with podman containers.
+- The backup directory is created as volume under `{postgresql_home}/backup`.
+- `postgresql_accounts` support the following options, see [Ansible postgresql_user module documentation](https://docs.ansible.com/ansible/latest/collections/community/postgresql/postgresql_user_module.html) for details:
+  - `name` - the name of the user account
+  - optional: `comment` - a comment used to describe the user account
+- `postgresql_databases` support the following options, see [Ansible postgresql_db module documentation](https://docs.ansible.com/ansible/latest/collections/community/postgresql/postgresql_user_module.html) for details:
+  - `name` - the name of the database
+  - `owner` - the name of the database owner (see `postgresql_accounts`)
+  - optional: `comment` - a comment used to describe the database
+  - optional: `encoding` - the encoding schema to use within the database
+- `postgresql_privileges` support the following options, see [Ansible postgresql_privs module documentation](https://docs.ansible.com/ansible/latest/collections/community/postgresql/postgresql_privs_module.html) for details:
+  - `type` - the privilege type, e.g. `database`
+  - `db` - the name of the database to set the privileges on
+  - `privs` - the privileges to grant
+  - `roles` - the account names to grant the privileges to

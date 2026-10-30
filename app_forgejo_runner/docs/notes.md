@@ -1,0 +1,2 @@
+- `forgejo_runner_home` is used as `/data` within the Forgejo runner container
+- See [forgejo.org](https://code.forgejo.org/forgejo/-/packages/container/runner/versions) for possible values of `forgejo_runner_version`

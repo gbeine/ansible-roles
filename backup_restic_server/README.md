@@ -1,5 +1,5 @@
 ---
-title: Restic REST Server
+title: 'Backup: Restic REST Server'
 permalink: /roles/backup-restic-server/
 project_repository: https://github.com/restic/rest-server
 container_link: https://hub.docker.com/r/restic/rest-server

@@ -1,0 +1,12 @@
+- Possible variants for `backup_restic_repository` are:
+  - local directories like: `/mnt/backup`
+  - remote repositories via SSH/SFTP like: `sftp:backup:resticrepository` (`sftp` is to define the protocol, `backup` is defined by this role and cannot be changed, `resticrepository` is the relative name of the directory where to place the backup files)
+  - for other examples see the Restic Documentation on [Preparing a new repository](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html)
+- To define `backup_restic_options` see the Restic Documentation for the [Manual](https://restic.readthedocs.io/en/stable/manual_rest.html).
+- The default list for `backup_restic_include` is:
+  - `/etc`
+  - `/home`
+  - `/root`
+  - `/usr/local/etc`
+  - `/var/backups`
+  - `/var/log`

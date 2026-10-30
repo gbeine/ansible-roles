@@ -1,0 +1,4 @@
+- The role supports only backup within podman containers created by `database_postgresql` .
+- The default list for `backup_postgresql_ignore_databases` is:
+  - `template0`
+  - `template1`

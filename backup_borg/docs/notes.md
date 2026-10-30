@@ -1,0 +1,12 @@
+- Possible variants for `backup_borg_repository` are:
+  - local directories like: `/mnt/backup`
+  - remote repositories via SSH like: `ssh://backupuser@backuphost.example.org:23/./borgbackup`
+  - for other examples see the Borg Documentation on [Repository URLs](https://borgbackup.readthedocs.io/en/stable/usage/general.html#repository-urls)
+- To define `backup_borg_options` see the Borg Documentation for [Common options](https://borgbackup.readthedocs.io/en/stable/usage/general.html#common-options) and for [`borg create` options](https://borgbackup.readthedocs.io/en/stable/usage/create.html).
+- The default list for `backup_borg_include` is:
+  - `/etc`
+  - `/home`
+  - `/root`
+  - `/usr/local/etc`
+  - `/var/backups`
+  - `/var/log`

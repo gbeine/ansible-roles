@@ -1,5 +1,5 @@
 ---
-title: GitLab
+title: 'Backup: GitLab'
 permalink: /roles/backup-gitlab/
 ---
 

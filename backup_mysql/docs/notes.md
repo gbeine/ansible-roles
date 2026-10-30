@@ -1,0 +1,4 @@
+- The default list for `backup_mysql_ignore_databases` is:
+    - `information_schema`
+    - `performance_schema`
+    - `sys`

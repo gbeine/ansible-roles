@@ -1,0 +1,2 @@
+- The role uses the `slapcat` utility.
+- See OpenLDAP documentation for details about [off-line database tools](https://www.openldap.org/doc/admin23/dbtools.html#Creating%20a%20database%20off-line)
