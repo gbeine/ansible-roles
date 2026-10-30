@@ -23,16 +23,22 @@ def _render_scalar(value):
     return _quote(str(value))
 
 
+def _render_entries(value, indent, step):
+    pad = ' ' * indent
+
+    return '\n'.join(
+        '{0}{1} = {2}'.format(pad, _render_key(k), _render(v, indent, step))
+        for k, v in value.items()
+    )
+
+
 def _render(value, indent, step):
     pad, pad_in = ' ' * indent, ' ' * (indent + step)
 
     if isinstance(value, dict):
         if not value:
             return '{}'
-        body = '\n'.join(
-            '{0}{1} = {2}'.format(pad_in, _render_key(k), _render(v, indent + step, step))
-            for k, v in value.items()
-        )
+        body = _render_entries(value, indent + step, step)
         return '{\n' + body + '\n' + pad + '}'
 
     if isinstance(value, (list, tuple)):
@@ -53,17 +59,16 @@ def to_hocon(context, value, root=False, step=2):
 
     :param context: Jinja2 context.
     :param value: The data structure (dict/list/scalar) to render.
-    :param root: If True and value is a dict, strip the outer braces
+    :param root: If True and value is a dict, render it without the outer
+                 braces and with the top level keys not indented
                  (idiomatic for standalone .conf files).
     :param step: Indentation width in spaces.
     :returns: The value rendered as a HOCON string.
     """
-    rendered = _render(value, 0, step)
+    if root and isinstance(value, dict):
+        return _render_entries(value, 0, step)
 
-    if root and isinstance(value, dict) and rendered.startswith('{'):
-        return rendered[1:-1].strip('\n')
-
-    return rendered
+    return _render(value, 0, step)
 
 
 class FilterModule(object):
