@@ -9,6 +9,7 @@
     - 'bootstrap_debian'
 ```
 
+- The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by storage, so packages can rely on mounted directories.
 - Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, logrotate and unattended upgrades have to be enabled with `debian_networking_enable`, `debian_logrotate_enable` and `debian_unattended_upgrades_enable`, because they overwrite system configuration files completely.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
