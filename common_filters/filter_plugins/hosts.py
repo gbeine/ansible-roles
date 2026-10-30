@@ -13,7 +13,7 @@ def addresslist(context, nametable, reverse=True):
     result = []
 
     for host, address in nametable.items():
-        if reversed:
+        if reverse:
             h = host.split('.')
             host = '.'.join(reversed(h))
         result.append({'address': address, 'hostname': host})
