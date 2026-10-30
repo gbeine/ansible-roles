@@ -1,0 +1,55 @@
+---
+
+- name: Configure podman image cleanup
+  when: container_podman__cleanup_enabled | bool
+  block:
+
+    - name: Generate podman-image-cleanup units
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ container_podman__systemd_dir }}/{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '644'
+      loop:
+        - 'podman-image-cleanup.service'
+        - 'podman-image-cleanup.timer'
+      register: container_podman__cleanup_units
+
+    - name: Start and enable podman-image-cleanup.timer
+      ansible.builtin.systemd_service:
+        name: 'podman-image-cleanup.timer'
+        daemon_reload: "{{ container_podman__cleanup_units is changed }}"
+        enabled: true
+        state: "{{ 'restarted' if container_podman__cleanup_units is changed else 'started' }}"
+      when: not ansible_check_mode
+
+- name: Remove podman image cleanup
+  when: not container_podman__cleanup_enabled | bool
+  block:
+
+    - name: Check for podman-image-cleanup.timer
+      ansible.builtin.stat:
+        path: "{{ container_podman__systemd_dir }}/podman-image-cleanup.timer"
+      register: container_podman__cleanup_timer_stat
+
+    - name: Stop and disable podman-image-cleanup.timer
+      ansible.builtin.systemd_service:
+        name: 'podman-image-cleanup.timer'
+        enabled: false
+        state: stopped
+      when: container_podman__cleanup_timer_stat.stat.exists
+
+    - name: Delete podman-image-cleanup units
+      ansible.builtin.file:
+        path: "{{ container_podman__systemd_dir }}/{{ item }}"
+        state: absent
+      loop:
+        - 'podman-image-cleanup.service'
+        - 'podman-image-cleanup.timer'
+      register: container_podman__cleanup_units_removed
+
+    - name: Reload systemd after removing podman-image-cleanup units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: container_podman__cleanup_units_removed is changed

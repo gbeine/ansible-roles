@@ -1,0 +1,136 @@
+---
+
+- name: Validate podman_networks entries
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.address is defined
+      - item.netmask is defined
+      - item.gateway is defined
+      - not (item.ipv6 | default(false) | bool) or (item.ipv6_gateway is defined and item.ipv6_prefixlength is defined)
+    fail_msg: "Network needs name, address, netmask and gateway, with ipv6 also ipv6_gateway and ipv6_prefixlength: {{ item.name | default('?') }}"
+    quiet: true
+  loop: "{{ container_podman__networks }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+- name: Determine declared network configuration
+  ansible.builtin.set_fact:
+    container_podman__networks_declared: "{{ container_podman__networks_declared_json | trim | from_json }}"
+  vars:
+    container_podman__networks_declared_json: >-
+      {% set result = [] %}
+      {% for n in container_podman__networks %}
+      {%   set subnets = [ { 'subnet': n.address | ip_network_cidr(n.netmask), 'gateway': n.gateway | ip_address_normalize } ] %}
+      {%   if n.ipv6 | default(false) | bool %}
+      {%     set _ = subnets.append({ 'subnet': n.ipv6_address | default(n.ipv6_gateway) | ip_network_cidr(n.ipv6_prefixlength), 'gateway': n.ipv6_gateway | ip_address_normalize }) %}
+      {%   endif %}
+      {%   set _ = result.append({
+             'name': n.name,
+             'driver': n.driver | default('bridge'),
+             'network_interface': n.interface_name | default(n.name),
+             'subnets': subnets,
+             'ipv6_enabled': n.ipv6 | default(false) | bool,
+             'internal': n.internal | default(false) | bool,
+             'dns_enabled': not (n.disable_dns | default(false) | bool)
+           }) %}
+      {% endfor %}
+      {{ result | to_json }}
+
+- name: Generate network quadlets
+  containers.podman.podman_network:
+    name: "{{ item.name }}"
+    driver: "{{ item.driver }}"
+    internal: "{{ item.internal }}"
+    disable_dns: "{{ not item.dns_enabled }}"
+    ipv6: "{{ item.ipv6_enabled }}"
+    quadlet_dir: "{{ container_podman__quadlet_dir }}"
+    quadlet_options: >-
+      {{ item.subnets | map(attribute='subnet') | map('regex_replace', '^', 'Subnet=') | list
+         + item.subnets | map(attribute='gateway') | map('regex_replace', '^', 'Gateway=') | list
+         + [ 'PodmanArgs=--interface-name=' + item.network_interface, container_podman__network_unit ] }}
+    state: quadlet
+  vars:
+    container_podman__network_unit: |-
+      [Unit]
+      Description={{ item.name }} Network: {{ item.subnets | map(attribute='subnet') | join(' + ') }}
+  loop: "{{ container_podman__networks_declared }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read existing networks
+  ansible.builtin.command: podman network ls --format json
+  register: container_podman__networks_ls
+  changed_when: false
+  check_mode: false
+
+- name: Inspect existing declared networks
+  ansible.builtin.command:
+    argv: "{{ [ 'podman', 'network', 'inspect' ] + container_podman__networks_inspect_names }}"
+  vars:
+    container_podman__networks_inspect_names: >-
+      {{ container_podman__networks_declared | map(attribute='name')
+         | select('in', container_podman__networks_ls.stdout | from_json | map(attribute='name') | list) | list }}
+  register: container_podman__networks_inspect
+  changed_when: false
+  check_mode: false
+  when: container_podman__networks_inspect_names | length > 0
+
+- name: Determine networks to readdress
+  ansible.builtin.set_fact:
+    container_podman__networks_readdress: "{{ container_podman__networks_readdress_json | trim | from_json }}"
+  vars:
+    container_podman__networks_readdress_json: >-
+      {% set current = {} %}
+      {% if container_podman__networks_inspect.stdout is defined %}
+      {%   for c in container_podman__networks_inspect.stdout | from_json %}
+      {%     set _ = current.update({ c.name: {
+               'driver': c.driver,
+               'network_interface': c.network_interface,
+               'subnets': c.subnets | default([]),
+               'ipv6_enabled': c.ipv6_enabled | bool,
+               'internal': c.internal | bool,
+               'dns_enabled': c.dns_enabled | bool
+             } }) %}
+      {%   endfor %}
+      {% endif %}
+      {% set result = [] %}
+      {% for n in container_podman__networks_declared if n.name in current %}
+      {%   set c = current[n.name] %}
+      {%   set c_subnets = [] %}
+      {%   for s in c.subnets %}
+      {%     set _ = c_subnets.append((s.subnet.split('/')[0] | ip_network_cidr(s.subnet.split('/')[1])) ~ ' ' ~ (s.gateway | ip_address_normalize if s.gateway | default('') | length > 0 else '')) %}
+      {%   endfor %}
+      {%   set d_subnets = n.subnets | map(attribute='subnet') | zip(n.subnets | map(attribute='gateway')) | map('join', ' ') | list %}
+      {%   if (c_subnets | sort) != (d_subnets | sort)
+             or c.driver != n.driver
+             or c.network_interface != n.network_interface
+             or c.ipv6_enabled != n.ipv6_enabled
+             or c.internal != n.internal
+             or c.dns_enabled != n.dns_enabled %}
+      {%     set _ = result.append(n.name) %}
+      {%   endif %}
+      {% endfor %}
+      {{ result | to_json }}
+
+- name: Show networks to readdress
+  ansible.builtin.debug:
+    var: container_podman__networks_readdress
+  when: container_podman__networks_readdress | length > 0
+
+- name: Readdress networks
+  ansible.builtin.include_tasks: networks_readdress.yml
+  loop: "{{ container_podman__networks_readdress }}"
+  loop_control:
+    loop_var: container_podman__network
+  when: not ansible_check_mode
+
+- name: Start networks
+  ansible.builtin.systemd_service:
+    name: "{{ item.name }}-network.service"
+    daemon_reload: true
+    state: started
+  loop: "{{ container_podman__networks_declared }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode

@@ -1,0 +1,49 @@
+---
+
+- name: Configure podman-tcp.service
+  when: container_podman__tcp_address | length > 0
+  block:
+
+    - name: Generate podman-tcp.service
+      ansible.builtin.template:
+        src: 'podman-tcp.service.j2'
+        dest: "{{ container_podman__systemd_dir }}/podman-tcp.service"
+        owner: 'root'
+        group: 'root'
+        mode: '644'
+      register: container_podman__tcp_unit
+
+    - name: Start and enable podman-tcp.service
+      ansible.builtin.systemd_service:
+        name: 'podman-tcp.service'
+        daemon_reload: "{{ container_podman__tcp_unit is changed }}"
+        enabled: true
+        state: "{{ 'restarted' if container_podman__tcp_unit is changed else 'started' }}"
+      when: not ansible_check_mode
+
+- name: Remove podman-tcp.service
+  when: container_podman__tcp_address | length == 0
+  block:
+
+    - name: Check for podman-tcp.service
+      ansible.builtin.stat:
+        path: "{{ container_podman__systemd_dir }}/podman-tcp.service"
+      register: container_podman__tcp_unit_stat
+
+    - name: Stop and disable podman-tcp.service
+      ansible.builtin.systemd_service:
+        name: 'podman-tcp.service'
+        enabled: false
+        state: stopped
+      when: container_podman__tcp_unit_stat.stat.exists
+
+    - name: Delete podman-tcp.service
+      ansible.builtin.file:
+        path: "{{ container_podman__systemd_dir }}/podman-tcp.service"
+        state: absent
+      register: container_podman__tcp_unit_removed
+
+    - name: Reload systemd after removing podman-tcp.service
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: container_podman__tcp_unit_removed is changed

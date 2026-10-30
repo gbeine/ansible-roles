@@ -1,0 +1,49 @@
+---
+
+- name: "Find containers attached to {{ container_podman__network }}"
+  ansible.builtin.command:
+    argv: [ podman, ps, --all, --filter, "network={{ container_podman__network }}", --format, json ]
+  register: container_podman__network_ps
+  changed_when: false
+
+- name: "Remember containers attached to {{ container_podman__network }}"
+  ansible.builtin.set_fact:
+    container_podman__network_containers: "{{ container_podman__network_ps.stdout | from_json | map(attribute='Names') | map('first') | list }}"
+
+- name: "Stop containers attached to {{ container_podman__network }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    state: stopped
+  loop: "{{ container_podman__network_containers }}"
+
+- name: "Stop network unit of {{ container_podman__network }}"
+  ansible.builtin.systemd_service:
+    name: "{{ container_podman__network }}-network.service"
+    state: stopped
+
+- name: "Remove network {{ container_podman__network }}"
+  ansible.builtin.command:
+    argv: [ podman, network, rm, "{{ container_podman__network }}" ]
+  changed_when: true
+
+- name: "Recreate network {{ container_podman__network }}"
+  ansible.builtin.systemd_service:
+    name: "{{ container_podman__network }}-network.service"
+    daemon_reload: true
+    state: started
+
+- name: "Start containers attached to {{ container_podman__network }}"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    state: started
+  loop: "{{ container_podman__network_containers }}"
+  register: container_podman__network_restart
+  failed_when: false
+
+- name: "Warn about containers that did not start on {{ container_podman__network }}"
+  ansible.builtin.debug:
+    msg: >-
+      Containers did not start after readdressing {{ container_podman__network }}:
+      {{ container_podman__network_restart.results | selectattr('msg', 'defined') | map(attribute='item') | join(', ') }}.
+      Run their roles again with addresses from the new subnet.
+  when: container_podman__network_restart.results | selectattr('msg', 'defined') | list | length > 0

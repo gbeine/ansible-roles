@@ -1,0 +1,73 @@
+---
+
+- name: Determine undeclared networks
+  ansible.builtin.set_fact:
+    container_podman__networks_undeclared: >-
+      {{ container_podman__networks_ls.stdout | from_json | map(attribute='name')
+         | reject('in', container_podman__networks_declared | map(attribute='name') | list)
+         | reject('in', container_podman__networks_protected)
+         | list }}
+
+- name: Find containers attached to undeclared networks
+  ansible.builtin.command:
+    argv: [ podman, ps, --all, --filter, "network={{ item }}", --format, json ]
+  loop: "{{ container_podman__networks_undeclared }}"
+  register: container_podman__networks_undeclared_ps
+  changed_when: false
+  check_mode: false
+
+- name: Classify undeclared networks
+  ansible.builtin.set_fact:
+    container_podman__networks_remove: >-
+      {{ container_podman__networks_undeclared_ps.results | selectattr('stdout', 'in', ['[]', '']) | map(attribute='item') | list }}
+    container_podman__networks_in_use: >-
+      {{ container_podman__networks_undeclared_ps.results | rejectattr('stdout', 'in', ['[]', '']) | map(attribute='item') | list }}
+
+- name: Warn about undeclared networks still in use
+  ansible.builtin.debug:
+    msg: >-
+      Undeclared network {{ item.item }} is not removed, it is used by
+      {{ item.stdout | from_json | map(attribute='Names') | map('first') | join(', ') }}
+  loop: "{{ container_podman__networks_undeclared_ps.results | selectattr('item', 'in', container_podman__networks_in_use) }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Find network quadlets
+  ansible.builtin.find:
+    paths: "{{ container_podman__quadlet_dir }}"
+    patterns: '*.network'
+  register: container_podman__networks_quadlets
+
+- name: Determine undeclared network quadlets
+  ansible.builtin.set_fact:
+    container_podman__networks_quadlets_remove: >-
+      {{ container_podman__networks_quadlets.files | map(attribute='path') | map('basename') | map('regex_replace', '\.network$', '')
+         | reject('in', container_podman__networks_declared | map(attribute='name') | list)
+         | reject('in', container_podman__networks_protected)
+         | reject('in', container_podman__networks_in_use)
+         | list }}
+
+- name: Stop units of undeclared networks
+  ansible.builtin.systemd_service:
+    name: "{{ item }}-network.service"
+    state: stopped
+  loop: "{{ (container_podman__networks_remove + container_podman__networks_quadlets_remove) | unique }}"
+  failed_when: false
+
+- name: Remove undeclared networks
+  ansible.builtin.command:
+    argv: [ podman, network, rm, "{{ item }}" ]
+  loop: "{{ container_podman__networks_remove }}"
+  changed_when: true
+
+- name: Remove undeclared network quadlets
+  ansible.builtin.file:
+    path: "{{ container_podman__quadlet_dir }}/{{ item }}.network"
+    state: absent
+  loop: "{{ container_podman__networks_quadlets_remove }}"
+  register: container_podman__networks_quadlets_removed
+
+- name: Reload systemd after removing network quadlets
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: container_podman__networks_quadlets_removed is changed

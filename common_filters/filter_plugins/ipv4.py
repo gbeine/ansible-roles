@@ -1,6 +1,6 @@
 
+import ipaddress
 import jinja2
-import re
 
 @jinja2.pass_context
 def netmask2prefixlength(context, netmask):
@@ -10,8 +10,7 @@ def netmask2prefixlength(context, netmask):
     :param netmask: The netmask
     :returns: The prefix length of the netmask
     """
-    # See https://stackoverflow.com/a/38085892
-    result = sum(bin(int(x)).count('1') for x in netmask.split('.'))
+    result = ipaddress.IPv4Network("0.0.0.0/{0}".format(netmask)).prefixlen
 
     return result
 
@@ -25,16 +24,7 @@ def netaddress(context, address, netmask):
     :param netmask: The netmask
     :returns: Calculates the network address based on IP address and netmask
     """
-    address_split = address.split('.')
-    netmask_split = netmask.split('.')
-
-    netaddress_split = [None] * 4
-
-    for i in range(0,4):
-        split = int(address_split[i]) & int(netmask_split[i])
-        netaddress_split[i] = str(split)
-
-    result = '.'.join(netaddress_split)
+    result = str(ipaddress.IPv4Network("{0}/{1}".format(address, netmask), strict=False).network_address)
 
     return result
 
@@ -47,9 +37,7 @@ def map2ipv6(context, address):
     :param address: The address
     :returns: Converts an IPv4 address to an IPv6 address
     """
-    mapped = re.sub('\.', ':', address)
-
-    result = "::ffff:{0}".format(mapped)
+    result = "::ffff:{0}".format(address.replace('.', ':'))
 
     return result
 
