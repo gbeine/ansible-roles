@@ -35,9 +35,10 @@ def map2ipv6(context, address):
 
     :param context: Jinja2 context.
     :param address: The address
-    :returns: Converts an IPv4 address to an IPv6 address
+    :returns: Converts an IPv4 address to an IPv4-mapped IPv6 address in hex notation, e.g. ::ffff:a00:1
     """
-    result = "::ffff:{0}".format(address.replace('.', ':'))
+    value = int(ipaddress.IPv4Address(address))
+    result = "::ffff:{0:x}:{1:x}".format(value >> 16, value & 0xffff)
 
     return result
 
