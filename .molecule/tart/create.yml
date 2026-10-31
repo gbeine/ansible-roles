@@ -1,0 +1,114 @@
+---
+- name: 'Create'
+  hosts: 'localhost'
+  connection: 'local'
+  gather_facts: false
+
+  vars:
+    tart_image: "{{ lookup('ansible.builtin.env', 'MOLECULE_TART_IMAGE', default='ghcr.io/cirruslabs/debian:latest') }}"
+    tart_user: "{{ lookup('ansible.builtin.env', 'MOLECULE_TART_USER', default='admin') }}"
+    tart_password: "{{ lookup('ansible.builtin.env', 'MOLECULE_TART_PASSWORD', default='admin') }}"
+    tart_ssh_key: "{{ molecule_ephemeral_directory }}/id_ed25519"
+    tart_ssh_options: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+  tasks:
+
+    - name: 'Stop leftover VMs'
+      ansible.builtin.command: "tart stop '{{ item.name }}'"
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'tart_stop'
+      changed_when: tart_stop.rc == 0
+      failed_when: false
+
+    - name: 'Delete leftover VMs'
+      ansible.builtin.command: "tart delete '{{ item.name }}'"
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'tart_delete'
+      changed_when: tart_delete.rc == 0
+      failed_when: false
+
+    - name: 'Clone the base VM'
+      ansible.builtin.command: "tart clone '{{ tart_image }}' '{{ item.name }}'"
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: 'Create additional disks'
+      ansible.builtin.command: "mkfile -n '{{ item.disk_size }}' '{{ molecule_ephemeral_directory }}/{{ item.name }}-disk.img'"
+      args:
+        creates: "{{ molecule_ephemeral_directory }}/{{ item.name }}-disk.img"
+      loop: "{{ molecule_yml.platforms | selectattr('disk_size', 'defined') }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 'Start the VMs'
+      ansible.builtin.shell: >-
+        nohup tart run --no-graphics
+        {% if item.disk_size is defined %}--disk '{{ molecule_ephemeral_directory }}/{{ item.name }}-disk.img'{% endif %}
+        '{{ item.name }}' > '{{ molecule_ephemeral_directory }}/{{ item.name }}.log' 2>&1 &
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: 'Wait for the IP addresses of the VMs'
+      ansible.builtin.command: "tart ip --wait 180 '{{ item.name }}'"
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'tart_ip'
+      changed_when: false
+
+    - name: 'Wait for SSH'
+      ansible.builtin.wait_for:
+        host: "{{ item.stdout | trim }}"
+        port: 22
+        timeout: 180
+      loop: "{{ tart_ip.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: 'Generate the SSH key'
+      ansible.builtin.command: "ssh-keygen -q -t ed25519 -N '' -C 'molecule' -f '{{ tart_ssh_key }}'"
+      args:
+        creates: "{{ tart_ssh_key }}"
+
+    - name: 'Install the SSH key'
+      ansible.builtin.command: >-
+        sshpass -e ssh-copy-id {{ tart_ssh_options }}
+        -i '{{ tart_ssh_key }}.pub' '{{ tart_user }}@{{ item.stdout | trim }}'
+      environment:
+        SSHPASS: "{{ tart_password }}"
+      loop: "{{ tart_ip.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      register: 'tart_ssh_copy_id'
+      until: tart_ssh_copy_id.rc == 0
+      retries: 10
+      delay: 5
+      changed_when: true
+
+    - name: 'Collect the instance config'
+      ansible.builtin.set_fact:
+        tart_instances: >-
+          {{ tart_instances | default([]) + [ {
+               'instance': item.item.name,
+               'address': item.stdout | trim,
+               'user': tart_user,
+               'port': 22,
+               'identity_file': tart_ssh_key
+             } ] }}
+      loop: "{{ tart_ip.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: 'Write the instance config'
+      ansible.builtin.copy:
+        content: "{{ tart_instances | to_nice_yaml }}"
+        dest: "{{ molecule_instance_config }}"
+        mode: '600'

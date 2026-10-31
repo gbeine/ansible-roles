@@ -1,0 +1,42 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    bootstrap_debian__test_case: "{{ bootstrap_debian__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Prepare the storage disk'
+      when: bootstrap_debian__test_case.expect.storage is defined
+      block:
+
+        - name: 'Check the storage disk'
+          ansible.builtin.stat:
+            path: "{{ bootstrap_debian__test_case.expect.storage.disk }}"
+          register: 'bootstrap_debian__test_disk'
+
+        - name: 'Assert the storage disk exists'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_disk.stat.exists
+              - bootstrap_debian__test_disk.stat.isblk
+            fail_msg: >-
+              {{ bootstrap_debian__test_case.expect.storage.disk }} is missing,
+              check the device name of the additional tart disk (lsblk) and adjust test_cases.yml
+
+        - name: 'Check for an existing filesystem'
+          ansible.builtin.command: "blkid -o value -s TYPE '{{ bootstrap_debian__test_case.expect.storage.disk }}'"
+          register: 'bootstrap_debian__test_blkid'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Create the filesystem'
+          ansible.builtin.command: "mkfs.{{ bootstrap_debian__test_case.expect.storage.fs }} -q '{{ bootstrap_debian__test_case.expect.storage.disk }}'"
+          when: bootstrap_debian__test_blkid.stdout | trim | length == 0
+          changed_when: true

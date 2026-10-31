@@ -1,0 +1,175 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    bootstrap_debian__test_case: "{{ bootstrap_debian__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    bootstrap_debian__expect: "{{ bootstrap_debian__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Verify hostname and hosts'
+      block:
+
+        - name: 'Read /etc/hostname and /etc/hosts'
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop:
+            - '/etc/hostname'
+            - '/etc/hosts'
+          register: 'bootstrap_debian__test_hosts'
+
+        - name: 'Assert hostname and hosts'
+          ansible.builtin.assert:
+            that:
+              - (bootstrap_debian__test_hosts.results[0].content | b64decode | trim) == bootstrap_debian__expect.hostname_short
+              - ('127.0.1.1 ' + bootstrap_debian__expect.hostname) in (bootstrap_debian__test_hosts.results[1].content | b64decode)
+              - ('127.0.1.1 ' + bootstrap_debian__expect.hostname_short) in (bootstrap_debian__test_hosts.results[1].content | b64decode)
+
+    - name: 'Verify timezone'
+      block:
+
+        - name: 'Read /etc/timezone'
+          ansible.builtin.slurp:
+            src: '/etc/timezone'
+          register: 'bootstrap_debian__test_timezone'
+
+        - name: 'Read /etc/localtime'
+          ansible.builtin.stat:
+            path: '/etc/localtime'
+          register: 'bootstrap_debian__test_localtime'
+
+        - name: 'Assert timezone'
+          ansible.builtin.assert:
+            that:
+              - (bootstrap_debian__test_timezone.content | b64decode | trim) == bootstrap_debian__expect.timezone
+              - bootstrap_debian__test_localtime.stat.islnk
+              - bootstrap_debian__test_localtime.stat.lnk_target == '/usr/share/zoneinfo/' + bootstrap_debian__expect.timezone
+
+    - name: 'Verify repositories'
+      block:
+
+        - name: 'Check repository files'
+          ansible.builtin.stat:
+            path: "/etc/apt/sources.list.d/{{ item }}.sources"
+          loop: "{{ bootstrap_debian__expect.repositories }}"
+          register: 'bootstrap_debian__test_repositories'
+
+        - name: 'Assert repository files exist'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_repositories.results | map(attribute='stat.exists') | min
+
+    - name: 'Verify packages'
+      block:
+
+        - name: 'Gather package facts'
+          ansible.builtin.package_facts:
+
+        - name: 'Assert packages are installed'
+          ansible.builtin.assert:
+            that:
+              - item in ansible_facts.packages
+            quiet: true
+          loop: "{{ bootstrap_debian__expect.packages }}"
+
+    - name: 'Verify storage'
+      when: bootstrap_debian__expect.storage is defined
+      block:
+
+        - name: 'Read the storage mount'
+          ansible.builtin.command: "findmnt -n -o SOURCE,FSTYPE '{{ bootstrap_debian__expect.storage.path }}'"
+          register: 'bootstrap_debian__test_findmnt'
+          changed_when: false
+
+        - name: 'Assert the storage mount'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_findmnt.stdout.split() == [ bootstrap_debian__expect.storage.disk, bootstrap_debian__expect.storage.fs ]
+
+        - name: 'Write a file to the bind mount source'
+          ansible.builtin.copy:
+            content: "{{ inventory_hostname }}\n"
+            dest: "{{ bootstrap_debian__expect.storage.bind_src }}/molecule.txt"
+            mode: '644'
+
+        - name: 'Read the file from the bind mount'
+          ansible.builtin.slurp:
+            src: "{{ bootstrap_debian__expect.storage.bind_path }}/molecule.txt"
+          register: 'bootstrap_debian__test_bind'
+
+        - name: 'Assert the bind mount'
+          ansible.builtin.assert:
+            that:
+              - (bootstrap_debian__test_bind.content | b64decode | trim) == inventory_hostname
+
+    - name: 'Verify networking'
+      when: bootstrap_debian__expect.networking is defined
+      block:
+
+        - name: 'Read the interface addresses'
+          ansible.builtin.command: "ip -4 -o addr show '{{ bootstrap_debian__expect.networking.interface }}'"
+          register: 'bootstrap_debian__test_ip'
+          changed_when: false
+
+        - name: 'Assert the interface address'
+          ansible.builtin.assert:
+            that:
+              - ('inet ' + bootstrap_debian__expect.networking.address + ' ') in bootstrap_debian__test_ip.stdout
+
+    - name: 'Verify accounts'
+      when: bootstrap_debian__expect.accounts is defined
+      block:
+
+        - name: 'Read groups and users'
+          ansible.builtin.getent:
+            database: "{{ item }}"
+          loop:
+            - 'group'
+            - 'passwd'
+
+        - name: 'Assert group and user'
+          ansible.builtin.assert:
+            that:
+              - (ansible_facts.getent_group[bootstrap_debian__expect.accounts.group][1] | int) == bootstrap_debian__expect.accounts.gid
+              - (ansible_facts.getent_passwd[bootstrap_debian__expect.accounts.user][1] | int) == bootstrap_debian__expect.accounts.uid
+              - (ansible_facts.getent_passwd[bootstrap_debian__expect.accounts.user][2] | int) == bootstrap_debian__expect.accounts.gid
+              - ansible_facts.getent_passwd[bootstrap_debian__expect.accounts.user][5] == bootstrap_debian__expect.accounts.shell
+
+    - name: 'Verify logrotate'
+      when: bootstrap_debian__expect.logrotate is defined
+      block:
+
+        - name: 'Check the logrotate file'
+          ansible.builtin.stat:
+            path: "{{ bootstrap_debian__expect.logrotate.file }}"
+          register: 'bootstrap_debian__test_logrotate_file'
+
+        - name: 'Assert the logrotate file'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_logrotate_file.stat.exists
+              - bootstrap_debian__test_logrotate_file.stat.mode == '0640'
+
+        - name: 'Check the logrotate configuration'
+          ansible.builtin.command: 'logrotate -d /etc/logrotate.conf'
+          changed_when: false
+
+    - name: 'Verify unattended upgrades'
+      when: bootstrap_debian__expect.unattended_upgrades is defined
+      block:
+
+        - name: 'Read the apt configuration'
+          ansible.builtin.command: 'apt-config dump'
+          register: 'bootstrap_debian__test_apt_config'
+          changed_when: false
+
+        - name: 'Assert the unattended upgrades configuration'
+          ansible.builtin.assert:
+            that:
+              - ('APT::Periodic::Unattended-Upgrade "1";') in bootstrap_debian__test_apt_config.stdout_lines
+              - ('Unattended-Upgrade::Mail "' + bootstrap_debian__expect.unattended_upgrades.mail + '";') in bootstrap_debian__test_apt_config.stdout_lines
