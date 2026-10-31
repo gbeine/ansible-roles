@@ -4,6 +4,36 @@
   tags: [ 'app_bookstack' ]
   block:
 
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_bookstack__environment_missing | length == 0
+          - app_bookstack__secrets | rejectattr('name', 'defined') | list | length == 0
+          - app_bookstack__secrets | rejectattr('data', 'defined') | list | length == 0
+          - app_bookstack__secrets | rejectattr('target', 'defined') | list | length == 0
+          - app_bookstack__secrets_missing | length == 0
+          - app_bookstack__secrets_in_environment | length == 0
+        fail_msg: >-
+          BookStack needs the environment variables {{ app_bookstack__environment_required | join(', ') }},
+          missing or empty: {{ app_bookstack__environment_missing | join(', ') | default('none', true) }}.
+          BookStack needs the secrets {{ app_bookstack__secrets_required | join(', ') }},
+          missing: {{ app_bookstack__secrets_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secret targets must not be set in bookstack_environment:
+          {{ app_bookstack__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        app_bookstack__environment_missing: >-
+          {{ app_bookstack__environment_required
+             | reject('in', app_bookstack__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        app_bookstack__secrets_missing: >-
+          {{ app_bookstack__secrets_required
+             | reject('in', app_bookstack__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        app_bookstack__secrets_in_environment: >-
+          {{ app_bookstack__secrets | selectattr('target', 'defined') | map(attribute='target')
+             | select('in', app_bookstack__environment.keys() | list) | list }}
+
     - name: 'Create directories'
       ansible.builtin.file:
         dest: "{{ item.dest }}"
@@ -14,21 +44,14 @@
       with_items:
         - dest: "{{ app_bookstack__podman_config_dir }}"
 
-    - name: 'Generate BookStack .env file'
-      ansible.builtin.template:
-        src: 'env.j2'
-        dest: "{{ app_bookstack__podman_config_dir }}/.env"
-        owner: "{{ app_bookstack__uid }}"
-        group: "{{ app_bookstack__gid }}"
-        mode: '600'
-      when: 'not podman___update_mode | bool'
-
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'bookstack_database_pass'
-        data: "{{ app_bookstack__db_pass }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_bookstack__secrets }}"
+      register: 'app_bookstack__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -76,13 +99,21 @@
         restart_policy: 'no'
         state: 'quadlet'
         recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_bookstack__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd:
         name: "{{ app_bookstack__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_bookstack__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_bookstack__running: >-
+          {{ (ansible_facts.services[app_bookstack__container.name + '.service'].state | default('')) == 'running' }}
+        app_bookstack__restart: >-
+          {{ podman___update_mode | bool
+             or (app_bookstack__running | bool
+                 and (app_bookstack__secrets_result is changed or app_bookstack__quadlet_result is changed)) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'

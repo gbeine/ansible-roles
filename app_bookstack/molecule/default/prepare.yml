@@ -1,0 +1,53 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_bookstack__test_network }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ app_bookstack__test_image }}"
+        - "{{ app_bookstack__test_database.image }}"
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ app_bookstack__test_database.name }}"
+        image: "{{ app_bookstack__test_database.image }}"
+        network: "{{ app_bookstack__test_network.name }}"
+        ip: "{{ app_bookstack__test_database.ip }}"
+        env:
+          MARIADB_DATABASE: "{{ app_bookstack__test_database.database }}"
+          MARIADB_USER: "{{ app_bookstack__test_database.user }}"
+          MARIADB_PASSWORD: "{{ app_bookstack__test_database.password }}"
+          MARIADB_RANDOM_ROOT_PASSWORD: '1'
+        state: 'started'
+
+    - name: 'Wait for the database'
+      ansible.builtin.wait_for:
+        host: "{{ app_bookstack__test_database.ip }}"
+        port: 3306
+        timeout: 120

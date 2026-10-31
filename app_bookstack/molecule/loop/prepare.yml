@@ -1,0 +1,69 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_bookstack__test_network }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ app_bookstack__test_image }}"
+        - "{{ app_bookstack__test_database.image }}"
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ app_bookstack__test_database.name }}"
+        image: "{{ app_bookstack__test_database.image }}"
+        network: "{{ app_bookstack__test_network.name }}"
+        ip: "{{ app_bookstack__test_database.ip }}"
+        env:
+          MARIADB_ROOT_PASSWORD: "{{ app_bookstack__test_database.root_password }}"
+        state: 'started'
+
+    - name: 'Create the databases and users of the instances'
+      ansible.builtin.command:
+        argv:
+          - 'podman'
+          - 'exec'
+          - "{{ app_bookstack__test_database.name }}"
+          - 'mariadb'
+          - '-uroot'
+          - "-p{{ app_bookstack__test_database.root_password }}"
+          - '-e'
+          - "{{ app_bookstack__test_sql }}"
+      vars:
+        app_bookstack__test_sql: >-
+          {% for a in app_bookstack__test_database.accounts %}
+          CREATE DATABASE IF NOT EXISTS `{{ a.database }}`;
+          CREATE USER IF NOT EXISTS '{{ a.user }}'@'%' IDENTIFIED BY '{{ a.password }}';
+          GRANT ALL PRIVILEGES ON `{{ a.database }}`.* TO '{{ a.user }}'@'%';
+          {% endfor %}
+      register: 'app_bookstack__test_sql_result'
+      until: app_bookstack__test_sql_result.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: true
+      no_log: true
