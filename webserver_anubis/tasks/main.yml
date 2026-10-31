@@ -4,6 +4,29 @@
   tags: [ 'webserver_anubis' ]
   block:
 
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - webserver_anubis__environment_missing | length == 0
+          - webserver_anubis__secrets | rejectattr('name', 'defined') | list | length == 0
+          - webserver_anubis__secrets | rejectattr('data', 'defined') | list | length == 0
+          - webserver_anubis__secrets | rejectattr('target', 'defined') | list | length == 0
+          - webserver_anubis__secrets_in_environment | length == 0
+        fail_msg: >-
+          Anubis needs the environment variables {{ webserver_anubis__environment_required | join(', ') }},
+          missing or empty: {{ webserver_anubis__environment_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secret targets must not be set in anubis_environment:
+          {{ webserver_anubis__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        webserver_anubis__environment_missing: >-
+          {{ webserver_anubis__environment_required
+             | reject('in', webserver_anubis__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        webserver_anubis__secrets_in_environment: >-
+          {{ webserver_anubis__secrets | selectattr('target', 'defined') | map(attribute='target')
+             | select('in', webserver_anubis__environment.keys() | list) | list }}
+
     - name: 'Create directories'
       ansible.builtin.file:
         dest: "{{ item }}"
@@ -16,7 +39,16 @@
         content: "{{ webserver_anubis__config | to_nice_yaml(indent=2) }}"
         dest: "{{ webserver_anubis__podman_home }}/botPolicies.yaml"
       when: 'not podman___update_mode | bool'
-      notify: 'Restart Anubis container'
+      register: 'webserver_anubis__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ webserver_anubis__secrets }}"
+      register: 'webserver_anubis__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -60,13 +92,23 @@
         restart_policy: 'no'
         state: 'quadlet'
         recreate: "{{ podman___update_mode | bool }}"
+      register: 'webserver_anubis__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd:
         name: "{{ webserver_anubis__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if webserver_anubis__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        webserver_anubis__running: >-
+          {{ (ansible_facts.services[webserver_anubis__container.name + '.service'].state | default('')) == 'running' }}
+        webserver_anubis__restart: >-
+          {{ podman___update_mode | bool
+             or (webserver_anubis__running | bool
+                 and (webserver_anubis__config_result is changed
+                      or webserver_anubis__secrets_result is changed
+                      or webserver_anubis__quadlet_result is changed)) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'

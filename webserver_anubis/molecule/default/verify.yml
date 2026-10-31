@@ -1,27 +1,80 @@
 ---
 - name: 'Verify'
   hosts: 'all'
+  become: true
 
   vars_files:
     - 'test_cases.yml'
 
   vars:
     webserver_anubis__test_case: "{{ webserver_anubis__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_anubis__expect: "{{ webserver_anubis__test_case.expect }}"
 
   tasks:
 
-    - name: 'Read generated quadlet unit'
-      ansible.builtin.command: 'cat /etc/containers/systemd/anubis.container'
-      register: 'webserver_anubis__quadlet'
-      changed_when: false
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/anubis.container'
+      register: 'webserver_anubis__test_quadlet'
 
-    - name: 'Assert IPv4/IPv6 expectations'
+    - name: 'Assert the IPv4 and IPv6 addresses in the quadlet unit'
       ansible.builtin.assert:
         that:
-          - "('IP=' + webserver_anubis__test_case.expect.ip) in webserver_anubis__quadlet.stdout"
-          - "webserver_anubis__test_case.expect.ip6 is none or ('IP6=' + webserver_anubis__test_case.expect.ip6) in webserver_anubis__quadlet.stdout"
-          - "webserver_anubis__test_case.expect.ip6 is not none or 'IP6=' not in webserver_anubis__quadlet.stdout"
+          - ('IP=' + webserver_anubis__expect.ip) in webserver_anubis__test_quadlet_lines
+          - webserver_anubis__expect.ip6 is none or ('IP6=' + webserver_anubis__expect.ip6) in webserver_anubis__test_quadlet_lines
+          - webserver_anubis__expect.ip6 is not none or webserver_anubis__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Network=' + webserver_anubis__test_case.role_vars.anubis_network) in webserver_anubis__test_quadlet_lines
+          - >-
+            webserver_anubis__test_quadlet_lines | select('match', 'Secret=') | map('regex_replace', '^Secret=', '') | list | sort
+            == webserver_anubis__expect.secrets | sort
+      vars:
+        webserver_anubis__test_quadlet_lines: "{{ (webserver_anubis__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the bot policy'
+      ansible.builtin.slurp:
+        src: "{{ webserver_anubis__test_case.role_vars.anubis_home }}/botPolicies.yaml"
+      register: 'webserver_anubis__test_policy'
+
+    - name: 'Assert the bot policy contains the trusted hosts'
+      ansible.builtin.assert:
+        that:
+          - webserver_anubis__test_trusted.remote_addresses == webserver_anubis__test_trusted_hosts
+      vars:
+        webserver_anubis__test_trusted: >-
+          {{ (webserver_anubis__test_policy.content | b64decode | from_yaml).bots
+             | selectattr('name', 'defined') | selectattr('name', 'eq', 'trusted-internal-network') | first }}
+
+    - name: 'Read the state of the anubis service'
+      ansible.builtin.command: 'systemctl is-active anubis'
+      register: 'webserver_anubis__test_service'
+      changed_when: false
+      failed_when: false
 
     - name: 'Assert the anubis service is active'
-      ansible.builtin.command: 'systemctl is-active anubis'
+      ansible.builtin.assert:
+        that:
+          - webserver_anubis__test_service.stdout == 'active'
+
+    - name: 'Inspect the anubis container'
+      ansible.builtin.command: 'podman inspect anubis'
+      register: 'webserver_anubis__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses and environment'
+      ansible.builtin.assert:
+        that:
+          - webserver_anubis__test_net.IPAddress == webserver_anubis__expect.ip
+          - webserver_anubis__expect.ip6 is none or webserver_anubis__test_net.GlobalIPv6Address == webserver_anubis__expect.ip6
+          - webserver_anubis__expect.env is subset(webserver_anubis__test_container.Config.Env)
+        fail_msg: >-
+          IPv4 {{ webserver_anubis__test_net.IPAddress }}, IPv6 {{ webserver_anubis__test_net.GlobalIPv6Address }},
+          environment {{ webserver_anubis__test_container.Config.Env | select('match', '(TARGET|WEBMASTER_EMAIL)=') | list }}
+      vars:
+        webserver_anubis__test_container: "{{ (webserver_anubis__test_inspect.stdout | from_json)[0] }}"
+        webserver_anubis__test_net: "{{ webserver_anubis__test_container.NetworkSettings.Networks[webserver_anubis__test_case.role_vars.anubis_network] }}"
+
+    - name: 'Check the podman secrets'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', "{{ item.split(',') | first }}" ]
+      loop: "{{ webserver_anubis__expect.secrets }}"
       changed_when: false
