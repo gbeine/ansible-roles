@@ -1,21 +1,21 @@
 ---
 
-- name: 'Install container update for'
+- name: 'Install container update'
   tags: [ 'container_update' ]
   block:
 
     - name: 'Include OS-specific variables'
       ansible.builtin.include_vars: "{{ item }}"
       with_first_found:
-        - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yml"
-        - "{{ ansible_distribution }}.yml"
-        - "{{ ansible_os_family }}-{{ ansible_distribution_major_version }}.yml"
-        - "{{ ansible_os_family }}.yml"
+        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+        - "{{ ansible_facts['distribution'] }}.yml"
+        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+        - "{{ ansible_facts['os_family'] }}.yml"
 
     - name: 'Install container update packages'
       ansible.builtin.apt:
-        update_cache: 'yes'
-        install_recommends: 'no'
+        update_cache: true
+        install_recommends: false
         pkg: "{{ container_update__packages }}"
 
     - name: 'Create environment file'
@@ -23,60 +23,108 @@
         content: |
           PUSHOVER_APP_TOKEN="{{ container_update__pushover_token }}"
           PUSHOVER_USER_KEY="{{ container_update__pushover_key }}"
-        dest: "/etc/systemd/container-update.env"
-        mode: '0600'
-      when: 'container_update__pushover_key | length > 0 and container_update__pushover_token | length > 0'
+        dest: "{{ container_update__environment_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '600'
+      no_log: true
+      when: container_update__pushover_enabled | bool
 
-    - name: 'Create autoupdate systemd service template'
+    - name: 'Remove environment file'
+      ansible.builtin.file:
+        path: "{{ container_update__environment_file }}"
+        state: absent
+      when: not container_update__pushover_enabled | bool
+
+    - name: 'Create systemd unit templates'
       ansible.builtin.template:
-        src: 'container-update.service.j2'
-        dest:  "/etc/systemd/system/container-update@.service"
+        src: "{{ item }}.j2"
+        dest: "{{ container_update__systemd_dir }}/{{ item | regex_replace('\\.(service|timer)$', '@.\\1') }}"
+        owner: 'root'
+        group: 'root'
+        mode: '644'
+      loop:
+        - 'container-update.service'
+        - 'container-update.timer'
+      register: 'container_update__units'
 
-    - name: 'Create autoupdate systemd timer template'
-      ansible.builtin.template:
-        src: 'container-update.timer.j2'
-        dest:  "/etc/systemd/system/container-update@.timer"
-
-    - name: 'Create autoupdate systemd failure notification template'
+    - name: 'Create failure notification unit template'
       ansible.builtin.template:
         src: 'container-update-notify-failure.service.j2'
-        dest:  "/etc/systemd/system/container-update-notify-failure@.service"
-      when: 'container_update__pushover_key | length > 0 and container_update__pushover_token | length > 0'
+        dest: "{{ container_update__systemd_dir }}/container-update-notify-failure@.service"
+        owner: 'root'
+        group: 'root'
+        mode: '644'
+      register: 'container_update__notify_unit'
+      when: container_update__pushover_enabled | bool
 
-    - name: 'Create directory for container service'
+    - name: 'Remove failure notification unit template'
       ansible.builtin.file:
-        path: "/etc/systemd/system/container-update@{{ container_update__container_name }}.service.d"
-        state: 'directory'
-        mode: '0755'
-      when: 'container_update__container_name | length > 0'
+        path: "{{ container_update__systemd_dir }}/container-update-notify-failure@.service"
+        state: absent
+      register: 'container_update__notify_unit_removed'
+      when: not container_update__pushover_enabled | bool
 
-    - name: 'Create override for container service'
-      ansible.builtin.template:
-        src: 'service.override.conf.j2'
-        dest:  "/etc/systemd/system/container-update@{{ container_update__container_name }}.service.d/override.conf"
-      when: 'container_update__container_name | length > 0'
+    - name: 'Configure the container'
+      when: container_update__container_name | length > 0
+      block:
 
-    - name: 'Create directory for container timer'
-      ansible.builtin.file:
-        path: "/etc/systemd/system/container-update@{{ container_update__container_name }}.timer.d"
-        state: 'directory'
-        mode: '0755'
-      when: 'container_update__container_name | length > 0 and container_update__schedule | length > 0'
+        - name: 'Create directories for the overrides'
+          ansible.builtin.file:
+            path: "{{ container_update__systemd_dir }}/container-update@{{ container_update__container_name }}.{{ item }}.d"
+            state: 'directory'
+            owner: 'root'
+            group: 'root'
+            mode: '755'
+          loop:
+            - 'service'
+            - 'timer'
 
-    - name: 'Create override for container timer'
-      ansible.builtin.template:
-        src: 'timer.override.conf.j2'
-        dest:  "/etc/systemd/system/container-update@{{ container_update__container_name }}.timer.d/override.conf"
-      when: 'container_update__container_name | length > 0 and container_update__schedule | length > 0'
+        - name: 'Create override for the service'
+          ansible.builtin.template:
+            src: 'service.override.conf.j2'
+            dest: "{{ container_update__systemd_dir }}/container-update@{{ container_update__container_name }}.service.d/override.conf"
+            owner: 'root'
+            group: 'root'
+            mode: '644'
+          register: 'container_update__service_override'
 
-    - name: 'Start and enable autoupdate timer'
-      ansible.builtin.systemd:
-        name: "container-update@{{ container_update__container_name }}.timer"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
-      when: 'not ansible_check_mode and container_update__container_name | length > 0'
+        - name: 'Create override for the timer'
+          ansible.builtin.template:
+            src: 'timer.override.conf.j2'
+            dest: "{{ container_update__systemd_dir }}/container-update@{{ container_update__container_name }}.timer.d/override.conf"
+            owner: 'root'
+            group: 'root'
+            mode: '644'
+          register: 'container_update__timer_override'
+          when: container_update__schedule | length > 0
+
+        - name: 'Remove override for the timer'
+          ansible.builtin.file:
+            path: "{{ container_update__systemd_dir }}/container-update@{{ container_update__container_name }}.timer.d/override.conf"
+            state: absent
+          register: 'container_update__timer_override_removed'
+          when: container_update__schedule | length == 0
 
     - name: 'Reload systemd'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         daemon_reload: true
+      when: >-
+        container_update__units is changed
+        or container_update__notify_unit is changed
+        or container_update__notify_unit_removed is changed
+        or container_update__service_override is changed
+        or container_update__timer_override is changed
+        or container_update__timer_override_removed is changed
+
+    - name: 'Start and enable the timer'
+      ansible.builtin.systemd_service:
+        name: "container-update@{{ container_update__container_name }}.timer"
+        state: "{{ 'restarted' if container_update__timer_changed | bool else 'started' }}"
+        enabled: true
+      vars:
+        container_update__timer_changed: >-
+          {{ container_update__units is changed
+             or container_update__timer_override is changed
+             or container_update__timer_override_removed is changed }}
+      when: not ansible_check_mode and container_update__container_name | length > 0

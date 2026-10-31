@@ -4,27 +4,37 @@
 
 [Unit]
 Description=Auto-update container %i
+{% if container_update__pushover_enabled %}
 OnFailure=container-update-notify-failure@%i.service
+{% endif %}
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/systemd/container-update.env
+EnvironmentFile=-{{ container_update__environment_file }}
+# Only update when the local image differs from the remote one.
+# Multi-arch images: compare with the manifest of the host architecture in the index,
+# single-arch images: compare with the digest of the manifest itself.
 ExecCondition=/usr/bin/sh -c '\
   LOCAL=$(skopeo inspect containers-storage:$CONTAINER_IMAGE --format {{ '{{' }}.Digest{{ '}}' }} 2>/dev/null); \
   [ -z "$LOCAL" ] && exit 0; \
   ARCH=$(podman info --format {{ '{{' }}.Host.Arch{{ '}}' }}); \
-  REMOTE=$(skopeo inspect docker://$CONTAINER_IMAGE --raw | jq -r " \
-    .manifests[] \
-    | select( \
-      .platform.architecture==\\"$ARCH\\" and \
-      .platform.os==\\"linux\\" and \
-      (.annotations[\\"vnd.docker.reference.type\\"] | not) \
-    ) \
-    | .digest"); \
+  RAW=$(skopeo inspect docker://$CONTAINER_IMAGE --raw); \
+  if echo "$RAW" | jq -e ".manifests" >/dev/null 2>&1; then \
+    REMOTE=$(echo "$RAW" | jq -r " \
+      .manifests[] \
+      | select( \
+        .platform.architecture==\\"$ARCH\\" and \
+        .platform.os==\\"linux\\" and \
+        (.annotations[\\"vnd.docker.reference.type\\"] | not) \
+      ) \
+      | .digest"); \
+  else \
+    REMOTE=$(skopeo inspect docker://$CONTAINER_IMAGE --format {{ '{{' }}.Digest{{ '}}' }}); \
+  fi; \
   [ "$LOCAL" != "$REMOTE" ]'
 ExecStart=/usr/bin/podman pull $CONTAINER_IMAGE
 ExecStart=/usr/bin/systemctl restart $CONTAINER_NAME
-{% if container_update__pushover_key | length > 0 and container_update__pushover_token | length > 0 %}
+{% if container_update__pushover_enabled %}
 ExecStartPost=/bin/bash -c '/usr/bin/curl -s \
   --form-string "token=$PUSHOVER_APP_TOKEN" \
   --form-string "user=$PUSHOVER_USER_KEY" \

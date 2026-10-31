@@ -1,0 +1,110 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    container_update__test_case: "{{ container_update__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    container_update__expect: "{{ container_update__test_case.expect }}"
+    container_update__test_name: "{{ container_update__test_container.name }}"
+
+  tasks:
+
+    - name: 'Check the unit files'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - '/etc/systemd/system/container-update@.service'
+        - '/etc/systemd/system/container-update@.timer'
+        - "/etc/systemd/system/container-update@{{ container_update__test_name }}.service.d/override.conf"
+        - '/etc/systemd/system/container-update-notify-failure@.service'
+        - '/etc/systemd/container-update.env'
+      register: 'container_update__test_files'
+
+    - name: 'Assert the unit files'
+      ansible.builtin.assert:
+        that:
+          - container_update__test_files.results[0].stat.exists and container_update__test_files.results[0].stat.mode == '0644'
+          - container_update__test_files.results[1].stat.exists and container_update__test_files.results[1].stat.mode == '0644'
+          - container_update__test_files.results[2].stat.exists and container_update__test_files.results[2].stat.mode == '0644'
+          - container_update__test_files.results[3].stat.exists == container_update__expect.pushover
+          - container_update__test_files.results[4].stat.exists == container_update__expect.pushover
+          - not container_update__expect.pushover or container_update__test_files.results[4].stat.mode == '0600'
+
+    - name: 'Read the properties of the units'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', "container-update@{{ container_update__test_name }}.{{ item }}" ]
+      loop:
+        - 'timer'
+        - 'service'
+      register: 'container_update__test_show'
+      changed_when: false
+
+    - name: 'Assert the timer and service configuration'
+      ansible.builtin.assert:
+        that:
+          # exactly one schedule, the default one is replaced by the override
+          - container_update__test_timer.TimersCalendar.split('OnCalendar=') | length == 2
+          - ('OnCalendar=' + container_update__expect.schedule) in container_update__test_timer.TimersCalendar
+          - container_update__test_timer.ActiveState == 'active'
+          - container_update__test_timer.UnitFileState == 'enabled'
+          - ('CONTAINER_IMAGE=' + container_update__test_container.image) in container_update__test_service.Environment.split()
+          - ('CONTAINER_NAME=' + container_update__test_name) in container_update__test_service.Environment.split()
+          - >-
+            (container_update__test_service.OnFailure | default('') | length > 0)
+            == container_update__expect.pushover
+        fail_msg: >-
+          timer: {{ container_update__test_timer.TimersCalendar }}
+          {{ container_update__test_timer.ActiveState }} {{ container_update__test_timer.UnitFileState }},
+          service: {{ container_update__test_service.Environment }} OnFailure={{ container_update__test_service.OnFailure | default('') }}
+      vars:
+        container_update__test_timer: >-
+          {{ dict(container_update__test_show.results[0].stdout_lines | select('search', '=') | map('split', '=', 1)) }}
+        container_update__test_service: >-
+          {{ dict(container_update__test_show.results[1].stdout_lines | select('search', '=') | map('split', '=', 1)) }}
+
+    - name: 'Read the start time of the test container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }}.State.StartedAt{{ "}}" }}', "{{ container_update__test_name }}" ]
+      register: 'container_update__test_started_before'
+      changed_when: false
+
+    - name: 'Run the update once'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'start', "container-update@{{ container_update__test_name }}.service" ]
+      register: 'container_update__test_run'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the result of the update'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property', 'Result', '--value', "container-update@{{ container_update__test_name }}.service" ]
+      register: 'container_update__test_result'
+      changed_when: false
+
+    - name: 'Read the journal of the update'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '--unit', "container-update@{{ container_update__test_name }}.service", '--no-pager', '--lines', '20' ]
+      register: 'container_update__test_journal'
+      changed_when: false
+
+    - name: 'Read the start time of the test container again'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }}.State.StartedAt{{ "}}" }}', "{{ container_update__test_name }}" ]
+      register: 'container_update__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the up to date container was not updated'
+      ansible.builtin.assert:
+        that:
+          - container_update__test_run.rc == 0
+          - container_update__test_result.stdout in [ 'success', 'exec-condition' ]
+          - container_update__test_started_before.stdout == container_update__test_started_after.stdout
+        fail_msg: |-
+          rc={{ container_update__test_run.rc }} {{ container_update__test_run.stderr }}
+          result={{ container_update__test_result.stdout }}
+          started {{ container_update__test_started_before.stdout }} -> {{ container_update__test_started_after.stdout }}
+          {{ container_update__test_journal.stdout }}
