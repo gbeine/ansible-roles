@@ -98,3 +98,33 @@ Setting `podman_cleanup_enabled` to `false` removes the timer.
 - The role was renamed from `bootstrap_podman` to `container_podman`, the tags are `container` and `container_podman`.
 - `podman_network`, `podman_environment` and `podman_containers` are no longer used.
 - `podman___update_mode` is no longer evaluated by this role.
+
+### Tests
+
+The molecule scenario `default` runs the role in a [tart](https://tart.run) VM on a macOS controller, the base VM has to be Debian 13.
+The base VM is cloned and the clone is deleted afterwards, the base VM itself is never changed.
+The playbooks creating and destroying the VM are shared by all tart scenarios and live in `.molecule/tart/` in the repository root.
+
+The scenario runs the role twice:
+
+| Step | What happens |
+|---|---|
+| `prepare` | installs podman and creates the networks `molstale` (unused) and `molbusy` (used by a container) and the orphaned quadlet `molghost.network` |
+| `converge`, `idempotence` | creates `molnet-a` (IPv4 and IPv6) and `molnet-b` (without DNS), enables socket, TCP service and image cleanup, prunes `molstale` and `molghost`, keeps `molbusy` |
+| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled |
+| `verify` | checks the state after the second run, `molapp` has to run with an address from the new subnet |
+
+The containers use `docker.io/library/alpine:3`, so the VM needs access to Docker Hub. The image can be changed in `molecule/default/test_cases.yml`.
+
+Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `containers.podman`.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `MOLECULE_TART_IMAGE` | `ghcr.io/cirruslabs/debian:latest` | Base VM or image that is cloned |
+| `MOLECULE_TART_USER` | `admin` | SSH user of the base VM |
+| `MOLECULE_TART_PASSWORD` | `admin` | Password of the SSH user, used to install the SSH key and for `sudo` |
+
+```shell
+cd container_podman
+MOLECULE_TART_IMAGE='debian' molecule test
+```

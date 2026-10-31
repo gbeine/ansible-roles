@@ -1,0 +1,68 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    container_podman__test_case: "{{ container_podman__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Install podman'
+      ansible.builtin.apt:
+        pkg: 'podman'
+        install_recommends: false
+        update_cache: true
+
+    - name: 'Read existing networks'
+      ansible.builtin.command: 'podman network ls --format {% raw %}"{{.Name}}"{% endraw %}'
+      register: 'container_podman__test_networks'
+      changed_when: false
+
+    - name: 'Create unused networks'
+      ansible.builtin.command:
+        argv: [ 'podman', 'network', 'create', "{{ item }}" ]
+      loop: "{{ container_podman__test_case.prepare.networks_unused + container_podman__test_case.prepare.networks_in_use | map(attribute='network') | list }}"
+      when: item not in container_podman__test_networks.stdout_lines
+      changed_when: true
+
+    - name: 'Read existing containers'
+      ansible.builtin.command: 'podman ps --all --format {% raw %}"{{.Names}}"{% endraw %}'
+      register: 'container_podman__test_containers'
+      changed_when: false
+
+    - name: 'Attach containers to networks in use'
+      ansible.builtin.command:
+        argv:
+          - 'podman'
+          - 'create'
+          - '--name'
+          - "{{ item.container }}"
+          - '--network'
+          - "{{ item.network }}"
+          - "{{ container_podman__test_case.image }}"
+          - 'sleep'
+          - 'infinity'
+      loop: "{{ container_podman__test_case.prepare.networks_in_use }}"
+      loop_control:
+        label: "{{ item.container }}"
+      when: item.container not in container_podman__test_containers.stdout_lines
+      changed_when: true
+
+    - name: 'Create the quadlet directory'
+      ansible.builtin.file:
+        path: '/etc/containers/systemd'
+        state: directory
+        mode: '755'
+
+    - name: 'Create orphaned network quadlets'
+      ansible.builtin.copy:
+        dest: "/etc/containers/systemd/{{ item }}.network"
+        content: |
+          [Network]
+          NetworkName={{ item }}
+        mode: '644'
+      loop: "{{ container_podman__test_case.prepare.quadlets_orphaned }}"

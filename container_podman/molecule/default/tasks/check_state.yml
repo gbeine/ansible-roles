@@ -1,0 +1,149 @@
+---
+# Checks the state of the host against container_podman__test_expect,
+# used by side_effect.yml (state after converge) and verify.yml (state after side_effect)
+
+- name: 'Read existing networks'
+  ansible.builtin.command: 'podman network ls --format json'
+  register: 'container_podman__test_networks_ls'
+  changed_when: false
+
+- name: 'Assert networks exist or are removed'
+  ansible.builtin.assert:
+    that:
+      - (container_podman__test_expect.networks | map(attribute='name') + container_podman__test_expect.networks_present)
+        is subset(container_podman__test_network_names)
+      - container_podman__test_expect.networks_absent | intersect(container_podman__test_network_names) | length == 0
+    fail_msg: "Existing networks: {{ container_podman__test_network_names | join(', ') }}"
+  vars:
+    container_podman__test_network_names: "{{ container_podman__test_networks_ls.stdout | from_json | map(attribute='name') | list }}"
+
+- name: 'Check removed network quadlets'
+  ansible.builtin.stat:
+    path: "/etc/containers/systemd/{{ item }}.network"
+  loop: "{{ container_podman__test_expect.quadlets_absent }}"
+  register: 'container_podman__test_quadlets_absent'
+
+- name: 'Assert network quadlets are removed'
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists
+    fail_msg: "{{ item.item }}.network still exists"
+    quiet: true
+  loop: "{{ container_podman__test_quadlets_absent.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: 'Inspect declared networks'
+  ansible.builtin.command:
+    argv: "{{ [ 'podman', 'network', 'inspect' ] + container_podman__test_expect.networks | map(attribute='name') }}"
+  register: 'container_podman__test_networks_inspect'
+  changed_when: false
+
+- name: 'Assert declared networks'
+  ansible.builtin.assert:
+    that:
+      - container_podman__test_network.network_interface == item.name
+      - container_podman__test_network.ipv6_enabled == item.ipv6_enabled
+      - container_podman__test_network.dns_enabled == item.dns_enabled
+      - container_podman__test_subnets | sort == item.subnets | sort
+    fail_msg: "{{ item.name }}: {{ container_podman__test_subnets }}"
+  loop: "{{ container_podman__test_expect.networks }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    container_podman__test_network: "{{ container_podman__test_networks_inspect.stdout | from_json | selectattr('name', 'eq', item.name) | first }}"
+    container_podman__test_subnets: "{{ container_podman__test_subnets_json | trim | from_json }}"
+    container_podman__test_subnets_json: >-
+      {% set result = [] %}
+      {% for s in container_podman__test_network.subnets %}
+      {%   set _ = result.append((s.subnet.split('/')[0] | ip_network_cidr(s.subnet.split('/')[1])) ~ ' ' ~ (s.gateway | ip_address_normalize)) %}
+      {% endfor %}
+      {{ result | to_json }}
+
+- name: 'Check attached containers'
+  ansible.builtin.command:
+    argv: [ 'podman', 'inspect', "{{ item.name }}" ]
+  loop: "{{ container_podman__test_expect.containers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: 'container_podman__test_containers_inspect'
+  changed_when: false
+
+- name: 'Assert attached containers run in the expected subnet'
+  ansible.builtin.assert:
+    that:
+      - container_podman__test_container.State.Running
+      - (container_podman__test_address | ip_network_cidr(item.subnet.split('/')[1])) == item.subnet
+    fail_msg: "{{ item.name }} has address {{ container_podman__test_address }}"
+  loop: "{{ container_podman__test_expect.containers }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: 'container_podman__test_index'
+  vars:
+    container_podman__test_container: "{{ (container_podman__test_containers_inspect.results[container_podman__test_index].stdout | from_json)[0] }}"
+    container_podman__test_address: "{{ container_podman__test_container.NetworkSettings.Networks[item.network].IPAddress }}"
+
+- name: 'Read the state of the podman units'
+  ansible.builtin.command:
+    argv: [ 'systemctl', 'is-active', "{{ item }}" ]
+  loop:
+    - 'podman.socket'
+    - 'podman-tcp.service'
+    - 'podman-image-cleanup.timer'
+  register: 'container_podman__test_units'
+  changed_when: false
+  failed_when: false
+
+- name: 'Assert the state of the podman units'
+  ansible.builtin.assert:
+    that:
+      - (container_podman__test_units.results[0].stdout == 'active') == container_podman__test_expect.socket
+      - (container_podman__test_units.results[1].stdout == 'active') == container_podman__test_expect.tcp
+      - (container_podman__test_units.results[2].stdout == 'active') == container_podman__test_expect.cleanup
+    fail_msg: >-
+      {{ container_podman__test_units.results | map(attribute='item')
+         | zip(container_podman__test_units.results | map(attribute='stdout'))
+         | map('join', ': ') | join(', ') }}
+
+- name: 'Check the podman unit files'
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ item }}"
+  loop:
+    - 'podman-tcp.service'
+    - 'podman-image-cleanup.service'
+    - 'podman-image-cleanup.timer'
+  register: 'container_podman__test_unit_files'
+
+- name: 'Assert the podman unit files exist only when enabled'
+  ansible.builtin.assert:
+    that:
+      - container_podman__test_unit_files.results[0].stat.exists == container_podman__test_expect.tcp
+      - container_podman__test_unit_files.results[1].stat.exists == container_podman__test_expect.cleanup
+      - container_podman__test_unit_files.results[2].stat.exists == container_podman__test_expect.cleanup
+
+- name: 'Read the enablement of podman.socket'
+  ansible.builtin.command: 'systemctl is-enabled podman.socket'
+  register: 'container_podman__test_socket_enabled'
+  changed_when: false
+  failed_when: false
+
+- name: 'Assert the enablement of podman.socket'
+  ansible.builtin.assert:
+    that:
+      - (container_podman__test_socket_enabled.stdout == 'enabled') == container_podman__test_expect.socket
+
+- name: 'Ping the podman API via TCP'
+  ansible.builtin.uri:
+    url: 'http://127.0.0.1:2376/_ping'
+    return_content: true
+  register: 'container_podman__test_ping'
+  until: container_podman__test_ping.status == 200
+  retries: 5
+  delay: 2
+  when: container_podman__test_expect.tcp
+
+- name: 'Assert the podman API answers'
+  ansible.builtin.assert:
+    that:
+      - container_podman__test_ping.content | trim == 'OK'
+  when: container_podman__test_expect.tcp

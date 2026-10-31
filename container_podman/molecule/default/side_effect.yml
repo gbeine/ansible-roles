@@ -1,0 +1,82 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    container_podman__test_case: "{{ container_podman__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  roles:
+    - role: 'common_filters'
+
+  tasks:
+
+    - name: 'Check the state after converge'
+      ansible.builtin.include_tasks: 'tasks/check_state.yml'
+      vars:
+        container_podman__test_expect: "{{ container_podman__test_case.expect.converge }}"
+
+    - name: 'Start the container in the network'
+      block:
+
+        - name: 'Generate the container quadlet'
+          ansible.builtin.copy:
+            dest: "/etc/containers/systemd/{{ container_podman__test_case.container.name }}.container"
+            content: |
+              [Container]
+              ContainerName={{ container_podman__test_case.container.name }}
+              Image={{ container_podman__test_case.image }}
+              Network={{ container_podman__test_case.container.network }}.network
+              Exec=sleep infinity
+
+              [Service]
+              TimeoutStartSec=300
+            mode: '644'
+
+        - name: 'Start the container'
+          ansible.builtin.systemd_service:
+            name: "{{ container_podman__test_case.container.name }}.service"
+            daemon_reload: true
+            state: started
+
+      rescue:
+
+        - name: 'Collect diagnostics of the failed container start'
+          ansible.builtin.command:
+            argv: "{{ item }}"
+          loop:
+            - [ '/usr/lib/systemd/system-generators/podman-system-generator', '--dryrun' ]
+            - [ 'systemctl', 'status', "{{ container_podman__test_case.container.name }}.service",
+                "{{ container_podman__test_case.container.network }}-network.service", '--no-pager' ]
+            - [ 'journalctl', '-u', "{{ container_podman__test_case.container.name }}.service",
+                '-u', "{{ container_podman__test_case.container.network }}-network.service", '--no-pager', '-n', '80' ]
+            - [ 'podman', 'ps', '--all' ]
+            - [ 'podman', 'network', 'ls' ]
+          loop_control:
+            label: "{{ item | join(' ') }}"
+          register: 'container_podman__test_diagnostics'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Fail with the diagnostics'
+          ansible.builtin.fail:
+            msg: |-
+              {% for r in container_podman__test_diagnostics.results %}
+              ===== {{ r.item | join(' ') }} (rc={{ r.rc | default('-') }})
+              {{ r.stdout | default('') }}
+              {{ r.stderr | default('') }}
+              {% endfor %}
+
+    - name: 'Set the role variables of the second run'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ container_podman__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run container_podman again'
+      ansible.builtin.include_role:
+        name: 'container_podman'

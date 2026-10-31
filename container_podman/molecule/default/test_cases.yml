@@ -1,0 +1,105 @@
+---
+container_podman__test_cases:
+
+  - name: 'molecule-container-podman'
+    image: 'docker.io/library/alpine:3'
+
+    # Created by prepare.yml, expected to be pruned or kept by the role
+    prepare:
+      networks_unused:
+        - 'molstale'
+      networks_in_use:
+        - network: 'molbusy'
+          container: 'molbusy-ctr'
+      quadlets_orphaned:
+        - 'molghost'
+
+    # Role variables of the first run (converge and idempotence)
+    converge:
+      role_vars:
+        podman_networks:
+          - name: 'molnet-a'
+            address: '10.90.1.0'
+            gateway: '10.90.1.1'
+            netmask: 24
+            ipv6: true
+            ipv6_gateway: 'fd00:90:1::1'
+            ipv6_prefixlength: 64
+          - name: 'molnet-b'
+            address: '10.90.2.0'
+            gateway: '10.90.2.1'
+            netmask: 24
+            disable_dns: true
+        podman_tcp_address: '127.0.0.1'
+
+    # Container attached to molnet-a before the second run, it has to survive the readdressing
+    container:
+      name: 'molapp'
+      network: 'molnet-a'
+
+    # Role variables of the second run (side_effect): readdress molnet-a, drop molnet-b, disable services
+    side_effect:
+      role_vars:
+        podman_networks:
+          - name: 'molnet-a'
+            address: '10.90.11.0'
+            gateway: '10.90.11.1'
+            netmask: 24
+            ipv6: true
+            ipv6_gateway: 'fd00:90:11::1'
+            ipv6_prefixlength: 64
+        podman_tcp_address: ''
+        podman_socket_enabled: false
+        podman_cleanup_enabled: false
+
+    expect:
+
+      converge:
+        networks:
+          - name: 'molnet-a'
+            subnets:
+              - '10.90.1.0/24 10.90.1.1'
+              - 'fd00:90:1::/64 fd00:90:1::1'
+            ipv6_enabled: true
+            dns_enabled: true
+          - name: 'molnet-b'
+            subnets:
+              - '10.90.2.0/24 10.90.2.1'
+            ipv6_enabled: false
+            dns_enabled: false
+        networks_present:
+          - 'molbusy'
+          - 'podman'
+        networks_absent:
+          - 'molstale'
+        quadlets_absent:
+          - 'molghost'
+        containers: []
+        tcp: true
+        socket: true
+        cleanup: true
+
+      side_effect:
+        networks:
+          - name: 'molnet-a'
+            subnets:
+              - '10.90.11.0/24 10.90.11.1'
+              - 'fd00:90:11::/64 fd00:90:11::1'
+            ipv6_enabled: true
+            dns_enabled: true
+        networks_present:
+          - 'molbusy'
+          - 'podman'
+        networks_absent:
+          - 'molstale'
+          - 'molnet-b'
+        quadlets_absent:
+          - 'molghost'
+          - 'molnet-b'
+        containers:
+          - name: 'molapp'
+            network: 'molnet-a'
+            subnet: '10.90.11.0/24'
+        tcp: false
+        socket: false
+        cleanup: false
