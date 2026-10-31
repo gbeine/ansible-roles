@@ -1,10 +1,62 @@
 ---
 
 - name: 'Install unbound'
-  tags: [ 'dns_unbound'  ]
+  tags: [ 'dns_unbound' ]
   block:
 
-    - name: 'Install unbound using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'dns_unbound__use_podman'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ dns_unbound__container.name }}"
+        hostname: "{{ dns_unbound__container.hostname }}"
+        image: "{{ dns_unbound__container.image }}"
+        ip: "{{ dns_unbound__container.ip }}"
+        ip6: "{{ dns_unbound__container.ipv6 | default(omit) }}"
+        network: "{{ dns_unbound__container.network }}"
+        timezone: "{{ dns_unbound__container.timezone }}"
+        env: "{{ dns_unbound__container.environment | default(omit) }}"
+        etc_hosts: "{{ dns_unbound__container.etc_hosts | default(omit) }}"
+        expose: "{{ dns_unbound__container.expose | default(omit) }}"
+        label: "{{ dns_unbound__container.labels | default(omit) }}"
+        publish: "{{ dns_unbound__container.publish | default(omit) }}"
+        secrets: "{{ dns_unbound__container.secrets | default(omit) }}"
+        volume: "{{ dns_unbound__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if dns_unbound__container.requires is defined %}
+          Requires={{ dns_unbound__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'dns_unbound__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ dns_unbound__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if dns_unbound__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        dns_unbound__running: >-
+          {{ (ansible_facts.services[dns_unbound__container.name + '.service'].state | default('')) == 'running' }}
+        dns_unbound__restart: >-
+          {{ dns_unbound__running | bool and dns_unbound__quadlet_result is changed }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'dns_unbound__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ dns_unbound__container.name }}"
+        container_image: "{{ dns_unbound__container.image }}"
+        container_schedule: "{{ dns_unbound__autoupdate_schedule }}"

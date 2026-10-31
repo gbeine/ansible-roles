@@ -1,0 +1,76 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_unbound__test_case: "{{ dns_unbound__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_unbound__expect: "{{ dns_unbound__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/unbound.container'
+      register: 'dns_unbound__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + dns_unbound__test_image) in dns_unbound__test_quadlet_lines
+          - ('IP=' + dns_unbound__expect.ip) in dns_unbound__test_quadlet_lines
+          - dns_unbound__expect.ip6 is none or ('IP6=' + dns_unbound__expect.ip6) in dns_unbound__test_quadlet_lines
+          - dns_unbound__expect.ip6 is not none or dns_unbound__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Network=' + dns_unbound__test_case.role_vars.unbound_network) in dns_unbound__test_quadlet_lines
+        fail_msg: "{{ dns_unbound__test_quadlet.content | b64decode }}"
+      vars:
+        dns_unbound__test_quadlet_lines: "{{ (dns_unbound__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the unbound service'
+      ansible.builtin.command: 'systemctl is-active unbound'
+      register: 'dns_unbound__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the unbound service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__test_service.stdout == 'active'
+
+    - name: 'Inspect the unbound container'
+      ansible.builtin.command: 'podman inspect unbound'
+      register: 'dns_unbound__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__test_net.IPAddress == dns_unbound__expect.ip
+          - dns_unbound__expect.ip6 is none or dns_unbound__test_net.GlobalIPv6Address == dns_unbound__expect.ip6
+        fail_msg: "IPv4 {{ dns_unbound__test_net.IPAddress }}, IPv6 {{ dns_unbound__test_net.GlobalIPv6Address }}"
+      vars:
+        dns_unbound__test_net: >-
+          {{ (dns_unbound__test_inspect.stdout | from_json)[0].NetworkSettings.Networks[dns_unbound__test_case.role_vars.unbound_network] }}
+
+    - name: 'Resolve example.org with unbound'
+      ansible.builtin.command: "dig @{{ dns_unbound__expect.ip }} example.org A +time=3 +tries=1"
+      register: 'dns_unbound__test_dig'
+      changed_when: false
+      failed_when: false
+      until: >-
+        dns_unbound__test_dig.rc == 0
+        and 'status: NOERROR' in dns_unbound__test_dig.stdout
+        and dns_unbound__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the answer of unbound'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__test_dig.rc == 0
+          - "'status: NOERROR' in dns_unbound__test_dig.stdout"
+          - dns_unbound__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+        fail_msg: "{{ dns_unbound__test_dig.stdout | default(dns_unbound__test_dig.stderr) }}"
