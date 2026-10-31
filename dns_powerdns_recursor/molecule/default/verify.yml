@@ -1,0 +1,132 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_powerdns_recursor__test_case: "{{ dns_powerdns_recursor__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_powerdns_recursor__test_release: "{{ dns_powerdns_recursor__test_case.release }}"
+    dns_powerdns_recursor__test_home: "{{ dns_powerdns_recursor__test_common.recursor_home }}"
+    dns_powerdns_recursor__test_ip: "{{ dns_powerdns_recursor__test_common.recursor_ip }}"
+    # Active settings expected in recursor.yml: defaults of the role, settings of the test and side effect
+    dns_powerdns_recursor__test_expected:
+      incoming:
+        listen: [ '0.0.0.0', '::' ]
+      logging:
+        loglevel: 5
+      recordcache:
+        max_ttl: 3600
+      recursor:
+        include_dir: '/etc/powerdns/recursor.d'
+        security_poll_suffix: ''
+      webservice:
+        webserver: true
+        address: '0.0.0.0'
+        allow_from: [ '10.89.0.0/24', '127.0.0.1', '::1' ]
+        api_key: 'molecule-api-key'
+
+  tasks:
+
+    - name: 'Read the configuration file'
+      ansible.builtin.slurp:
+        src: "{{ dns_powerdns_recursor__test_home }}/config/recursor.yml"
+      register: 'dns_powerdns_recursor__test_config'
+
+    - name: 'Assert recursor.yml contains the active settings only'
+      ansible.builtin.assert:
+        that:
+          - ('# PowerDNS Recursor ' + dns_powerdns_recursor__test_release | list | join('.')) in dns_powerdns_recursor__test_content.splitlines()
+          - (dns_powerdns_recursor__test_content | from_yaml) == dns_powerdns_recursor__test_expected
+        fail_msg: "{{ dns_powerdns_recursor__test_content }}"
+      vars:
+        dns_powerdns_recursor__test_content: "{{ dns_powerdns_recursor__test_config.content | b64decode }}"
+
+    - name: 'Read the mode of the configuration file'
+      ansible.builtin.stat:
+        path: "{{ dns_powerdns_recursor__test_home }}/config/recursor.yml"
+      register: 'dns_powerdns_recursor__test_mode'
+
+    - name: 'Assert the mode of the configuration file'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns_recursor__test_mode.stat.mode == '0640'
+          - dns_powerdns_recursor__test_mode.stat.pw_name == 'root'
+          - dns_powerdns_recursor__test_mode.stat.gid == 953
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/recursor.container'
+      register: 'dns_powerdns_recursor__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=docker.io/powerdns/pdns-recursor-' + dns_powerdns_recursor__test_release + ':latest') in dns_powerdns_recursor__test_lines
+          - ('IP=' + dns_powerdns_recursor__test_ip) in dns_powerdns_recursor__test_lines
+          - ('IP6=' + dns_powerdns_recursor__test_common.recursor_ipv6) in dns_powerdns_recursor__test_lines
+          - (dns_powerdns_recursor__test_quadlet.content | b64decode) is search('(Sysctl=|--sysctl )net\\.ipv4\\.ip_unprivileged_port_start=53')
+        fail_msg: "{{ dns_powerdns_recursor__test_quadlet.content | b64decode }}"
+      vars:
+        dns_powerdns_recursor__test_lines: "{{ (dns_powerdns_recursor__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the recursor service'
+      ansible.builtin.command: 'systemctl is-active recursor'
+      register: 'dns_powerdns_recursor__test_service'
+      changed_when: false
+      failed_when: false
+      until: dns_powerdns_recursor__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the recursor service'
+      ansible.builtin.command: 'journalctl -u recursor --no-pager -n 60'
+      register: 'dns_powerdns_recursor__test_journal'
+      changed_when: false
+      when: dns_powerdns_recursor__test_service.stdout != 'active'
+
+    - name: 'Assert the recursor service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns_recursor__test_service.stdout == 'active'
+        fail_msg: "{{ dns_powerdns_recursor__test_service.stdout }}: {{ dns_powerdns_recursor__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the server information from the API'
+      ansible.builtin.uri:
+        url: "http://{{ dns_powerdns_recursor__test_ip }}:8082/api/v1/servers/localhost"
+        headers:
+          X-API-Key: "{{ dns_powerdns_recursor__test_api_key }}"
+        return_content: true
+      register: 'dns_powerdns_recursor__test_server'
+      until: dns_powerdns_recursor__test_server.status == 200
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the version of the recursor'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns_recursor__test_server.json.version is match((dns_powerdns_recursor__test_release | list | join('\\.')) + '\\.')
+        fail_msg: "{{ dns_powerdns_recursor__test_server.json.version }}"
+
+    - name: 'Resolve example.org with the recursor'
+      ansible.builtin.command: "dig @{{ dns_powerdns_recursor__test_ip }} example.org A +time=3 +tries=1"
+      register: 'dns_powerdns_recursor__test_dig'
+      changed_when: false
+      failed_when: false
+      until: >-
+        dns_powerdns_recursor__test_dig.rc == 0
+        and 'status: NOERROR' in dns_powerdns_recursor__test_dig.stdout
+        and dns_powerdns_recursor__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the answer of the recursor'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns_recursor__test_dig.rc == 0
+          - "'status: NOERROR' in dns_powerdns_recursor__test_dig.stdout"
+          - dns_powerdns_recursor__test_dig.stdout is search('flags:[a-z ]* ra')
+          - dns_powerdns_recursor__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+        fail_msg: "{{ dns_powerdns_recursor__test_dig.stdout | default(dns_powerdns_recursor__test_dig.stderr) }}"

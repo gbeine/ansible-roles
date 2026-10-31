@@ -1,22 +1,140 @@
 ---
 
-- name: Install PowerDNS Recursor
+- name: 'Install PowerDNS Recursor'
   tags: [ 'dns_powerdns_recursor' ]
   block:
 
-    - name: Install PowerDNS Recursor packages
-      ansible.builtin.apt:
-        update_cache: 'yes'
-        install_recommends: 'no'
-        pkg: "{{ dns_powerdns_recursor__packages }}"
+    - name: 'Validate release'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns_recursor__release | string in dns_powerdns_recursor__releases
+        fail_msg: "recursor_release must be one of {{ dns_powerdns_recursor__releases | join(', ') }}, got {{ dns_powerdns_recursor__release }}"
+        quiet: true
 
-    - name: Generate PowerDNS Recursor configuration
-      ansible.builtin.template:
-        src: "{{ item.src }}"
+    - name: 'Include settings of the release'
+      ansible.builtin.include_vars:
+        file: "settings-{{ dns_powerdns_recursor__release }}.yml"
+
+    - name: 'Validate settings'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns_recursor__unknown_settings | from_json | length == 0
+        fail_msg: >-
+          Unknown settings for PowerDNS Recursor {{ dns_powerdns_recursor__release }}:
+          {{ dns_powerdns_recursor__unknown_settings | from_json | join(', ') }}
+        quiet: true
+      vars:
+        dns_powerdns_recursor__known_settings: >-
+          {{ dns_powerdns_recursor__release_settings | items2dict(key_name='name', value_name='settings') }}
+        dns_powerdns_recursor__unknown_settings: >-
+          {% set unknown = [] %}
+          {% for section, settings in dns_powerdns_recursor__settings.items() %}
+          {%   if section not in dns_powerdns_recursor__known_settings %}
+          {%     set _ = unknown.append(section) %}
+          {%   elif settings is not mapping %}
+          {%     set _ = unknown.append(section + ' (not a mapping)') %}
+          {%   else %}
+          {%     set known = dns_powerdns_recursor__known_settings[section] | map(attribute='name') | list %}
+          {%     for name in settings.keys() if name not in known %}
+          {%       set _ = unknown.append(section + '.' + name) %}
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+          {{ unknown | sort | to_json }}
+
+    - name: 'Create PowerDNS Recursor directories'
+      ansible.builtin.file:
         dest: "{{ item.dest }}"
-      with_items:
-        - src: 'recursor.lua.j2'
-          dest: "{{ dns_powerdns_recursor__etc }}/recursor.lua"
-        - src: 'recursor.conf.j2'
-          dest: "{{ dns_powerdns_recursor__etc }}/recursor.conf"
-      notify: Restart PowerDNS Recursor
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
+        state: 'directory'
+      loop:
+        - dest: "{{ dns_powerdns_recursor__podman_home }}"
+        - dest: "{{ dns_powerdns_recursor__podman_config_dir }}"
+        - dest: "{{ dns_powerdns_recursor__podman_config_dir }}/{{ dns_powerdns_recursor__include_subdir }}"
+        - dest: "{{ dns_powerdns_recursor__podman_run_dir }}"
+          owner: "{{ dns_powerdns_recursor__uid }}"
+          group: "{{ dns_powerdns_recursor__gid }}"
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: 'Generate PowerDNS Recursor configuration'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          # PowerDNS Recursor {{ dns_powerdns_recursor__release | string | list | join('.') }}
+          #
+          {{ dns_powerdns_recursor__settings | to_nice_yaml(indent=2, sort_keys=true) }}
+        dest: "{{ dns_powerdns_recursor__podman_config_dir }}/recursor.yml"
+        owner: 'root'
+        group: "{{ dns_powerdns_recursor__gid }}"
+        mode: '0640'
+      diff: false
+      register: 'dns_powerdns_recursor__config_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ dns_powerdns_recursor__container.name }}"
+        hostname: "{{ dns_powerdns_recursor__container.hostname }}"
+        image: "{{ dns_powerdns_recursor__container.image }}"
+        ip: "{{ dns_powerdns_recursor__container.ip }}"
+        ip6: "{{ dns_powerdns_recursor__container.ipv6 | default(omit) }}"
+        network: "{{ dns_powerdns_recursor__container.network }}"
+        env: "{{ dns_powerdns_recursor__container.environment | default(omit) }}"
+        etc_hosts: "{{ dns_powerdns_recursor__container.etc_hosts | default(omit) }}"
+        expose: "{{ dns_powerdns_recursor__container.expose | default(omit) }}"
+        publish: "{{ dns_powerdns_recursor__container.publish | default(omit) }}"
+        timezone: "{{ dns_powerdns_recursor__container.timezone }}"
+        label: "{{ dns_powerdns_recursor__container.labels | default(omit) }}"
+        secrets: "{{ dns_powerdns_recursor__container.secrets | default(omit) }}"
+        sysctl: "{{ dns_powerdns_recursor__container.sysctls | default(omit) }}"
+        volume: "{{ dns_powerdns_recursor__container.volumes | default(omit) }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% if dns_powerdns_recursor__container.exec_start_pre is defined %}
+          {% for command in dns_powerdns_recursor__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if dns_powerdns_recursor__container.requires is defined %}
+          Requires={{ dns_powerdns_recursor__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'dns_powerdns_recursor__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ dns_powerdns_recursor__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if dns_powerdns_recursor__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        dns_powerdns_recursor__running: >-
+          {{ (ansible_facts.services[dns_powerdns_recursor__container.name + '.service'].state | default('')) == 'running' }}
+        dns_powerdns_recursor__restart: >-
+          {{ dns_powerdns_recursor__running | bool
+             and (dns_powerdns_recursor__config_result is changed or dns_powerdns_recursor__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'dns_powerdns_recursor__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ dns_powerdns_recursor__container.name }}"
+        container_image: "{{ dns_powerdns_recursor__container.image }}"
