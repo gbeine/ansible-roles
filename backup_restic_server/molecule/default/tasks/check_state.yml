@@ -1,0 +1,93 @@
+---
+# Checks the state of the host against backup_restic_server__test_expect
+
+- name: 'Read the quadlet unit'
+  ansible.builtin.slurp:
+    src: '/etc/containers/systemd/restic-server.container'
+  register: 'backup_restic_server__test_quadlet'
+
+- name: 'Assert the quadlet unit'
+  ansible.builtin.assert:
+    that:
+      - "'IP=10.89.0.10' in backup_restic_server__test_quadlet_lines"
+      - backup_restic_server__test_quadlet_lines | select('match', 'Environment=.*OPTIONS=') | list | length == 1
+    fail_msg: "{{ backup_restic_server__test_quadlet_lines | select('match', '(IP|Environment)=') | list }}"
+  vars:
+    backup_restic_server__test_quadlet_lines: "{{ (backup_restic_server__test_quadlet.content | b64decode).splitlines() }}"
+
+- name: 'Check the htpasswd file'
+  ansible.builtin.stat:
+    path: "{{ backup_restic_server__test_home }}/.htpasswd"
+  register: 'backup_restic_server__test_htpasswd_stat'
+
+- name: 'Read the htpasswd file'
+  ansible.builtin.slurp:
+    src: "{{ backup_restic_server__test_home }}/.htpasswd"
+  register: 'backup_restic_server__test_htpasswd'
+
+- name: 'Assert the htpasswd file'
+  ansible.builtin.assert:
+    that:
+      - backup_restic_server__test_htpasswd_stat.stat.mode == '0600'
+      - backup_restic_server__test_htpasswd_lines | map('regex_replace', ':.*$', '') | list | sort == backup_restic_server__test_expect.users | sort
+      - backup_restic_server__test_htpasswd_lines | reject('search', ':\$2y\$') | list | length == 0
+    fail_msg: "users: {{ backup_restic_server__test_htpasswd_lines | map('regex_replace', ':.*$', '') | list }}"
+  vars:
+    backup_restic_server__test_htpasswd_lines: "{{ (backup_restic_server__test_htpasswd.content | b64decode).splitlines() | select | list }}"
+
+- name: 'Read the state of the restic-server service'
+  ansible.builtin.command: 'systemctl is-active restic-server'
+  register: 'backup_restic_server__test_service'
+  changed_when: false
+  failed_when: false
+
+- name: 'Assert the restic-server service is active'
+  ansible.builtin.assert:
+    that:
+      - backup_restic_server__test_service.stdout == 'active'
+
+- name: 'Request the server without credentials'
+  ansible.builtin.uri:
+    url: 'http://10.89.0.10:8000/'
+    status_code: [ 401 ]
+  register: 'backup_restic_server__test_anonymous'
+  until: backup_restic_server__test_anonymous.status == 401
+  retries: 15
+  delay: 2
+
+- name: 'Back up with every valid user'
+  ansible.builtin.include_tasks: 'tasks/check_login.yml'
+  loop: "{{ backup_restic_server__test_expect.logins }}"
+  loop_control:
+    loop_var: 'backup_restic_server__test_login'
+    label: "{{ backup_restic_server__test_login.user }}"
+  vars:
+    backup_restic_server__test_repository: "{{ backup_restic_server__test_url }}/{{ backup_restic_server__test_login.user }}"
+    backup_restic_server__test_restic_env:
+      RESTIC_REST_USERNAME: "{{ backup_restic_server__test_login.user }}"
+      RESTIC_REST_PASSWORD: "{{ backup_restic_server__test_login.password }}"
+      RESTIC_PASSWORD: "{{ backup_restic_server__test_passwords.repository }}"
+
+- name: 'Access the repositories with rejected credentials'
+  ansible.builtin.command:
+    argv: [ 'restic', '-r', "{{ backup_restic_server__test_url }}/{{ item.repository }}", 'cat', 'config' ]
+  environment:
+    RESTIC_REST_USERNAME: "{{ item.user }}"
+    RESTIC_REST_PASSWORD: "{{ item.password }}"
+    RESTIC_PASSWORD: "{{ backup_restic_server__test_passwords.repository }}"
+  loop: "{{ backup_restic_server__test_expect.rejected }}"
+  loop_control:
+    label: "{{ item.user }} -> /{{ item.repository }}"
+  register: 'backup_restic_server__test_rejected'
+  changed_when: false
+  failed_when: false
+
+- name: 'Assert the rejected credentials were rejected'
+  ansible.builtin.assert:
+    that:
+      - item.rc != 0
+    fail_msg: "{{ item.item.user }} could access /{{ item.item.repository }}"
+    quiet: true
+  loop: "{{ backup_restic_server__test_rejected.results }}"
+  loop_control:
+    label: "{{ item.item.user }} -> /{{ item.item.repository }}"

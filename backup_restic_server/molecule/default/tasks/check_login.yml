@@ -1,0 +1,65 @@
+---
+# Backs up a file with backup_restic_server__test_login into its private repository
+
+- name: "Check the repository of {{ backup_restic_server__test_login.user }}"
+  ansible.builtin.command:
+    argv: [ 'restic', '-r', "{{ backup_restic_server__test_repository }}", 'cat', 'config' ]
+  environment: "{{ backup_restic_server__test_restic_env }}"
+  register: 'backup_restic_server__test_repo'
+  changed_when: false
+  failed_when: false
+  retries: 10
+  delay: 3
+  until: backup_restic_server__test_repo.rc in [0, 10]
+
+- name: "Initialize the repository of {{ backup_restic_server__test_login.user }}"
+  ansible.builtin.command:
+    argv: [ 'restic', '-r', "{{ backup_restic_server__test_repository }}", 'init' ]
+  environment: "{{ backup_restic_server__test_restic_env }}"
+  when: backup_restic_server__test_repo.rc != 0
+  changed_when: true
+
+- name: "Back up a file as {{ backup_restic_server__test_login.user }}"
+  ansible.builtin.command:
+    argv: [ 'restic', '-r', "{{ backup_restic_server__test_repository }}", 'backup', '/etc/hostname' ]
+  environment: "{{ backup_restic_server__test_restic_env }}"
+  changed_when: true
+
+- name: "List the snapshots of {{ backup_restic_server__test_login.user }}"
+  ansible.builtin.command:
+    argv: [ 'restic', '-r', "{{ backup_restic_server__test_repository }}", 'snapshots', '--json' ]
+  environment: "{{ backup_restic_server__test_restic_env }}"
+  register: 'backup_restic_server__test_snapshots'
+  changed_when: false
+
+- name: "Try to delete a snapshot as {{ backup_restic_server__test_login.user }}"
+  ansible.builtin.command:
+    argv:
+      - 'restic'
+      - '-r'
+      - "{{ backup_restic_server__test_repository }}"
+      - 'forget'
+      - "{{ (backup_restic_server__test_snapshots.stdout | from_json)[0].short_id }}"
+  environment: "{{ backup_restic_server__test_restic_env }}"
+  register: 'backup_restic_server__test_forget'
+  changed_when: false
+  failed_when: false
+
+- name: "List the snapshots of {{ backup_restic_server__test_login.user }} again"
+  ansible.builtin.command:
+    argv: [ 'restic', '-r', "{{ backup_restic_server__test_repository }}", 'snapshots', '--json' ]
+  environment: "{{ backup_restic_server__test_restic_env }}"
+  register: 'backup_restic_server__test_snapshots_after'
+  changed_when: false
+
+# restic forget exits with 0 even if the server refuses to delete, so check the result
+- name: "Assert the backup and the append-only mode of {{ backup_restic_server__test_login.user }}"
+  ansible.builtin.assert:
+    that:
+      - backup_restic_server__test_snapshots.stdout | from_json | length > 0
+      - (backup_restic_server__test_snapshots_after.stdout | from_json | length) == (backup_restic_server__test_snapshots.stdout | from_json | length)
+      - backup_restic_server__test_forget.stderr is search('\\b403\\b')
+    fail_msg: >-
+      snapshots before: {{ backup_restic_server__test_snapshots.stdout | from_json | length }},
+      after: {{ backup_restic_server__test_snapshots_after.stdout | from_json | length }},
+      forget: rc={{ backup_restic_server__test_forget.rc }} {{ backup_restic_server__test_forget.stderr | default('') }}

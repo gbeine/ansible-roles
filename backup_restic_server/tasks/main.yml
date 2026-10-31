@@ -4,13 +4,90 @@
   tags: [ 'backup_restic_server' ]
   block:
 
+    - name: 'Validate environment and users'
+      ansible.builtin.assert:
+        that:
+          - backup_restic_server__users | rejectattr('name', 'defined') | list | length == 0
+          - backup_restic_server__users | rejectattr('password', 'defined') | list | length == 0
+          - backup_restic_server__user_names | unique | length == backup_restic_server__user_names | length
+          - backup_restic_server__user_names | select('search', ':') | list | length == 0
+          - backup_restic_server__users | length > 0 or 'DISABLE_AUTHENTICATION' in backup_restic_server__environment
+          - "'PASSWORD_FILE' not in backup_restic_server__environment"
+        fail_msg: >-
+          Every user in restic_server_users needs name and password, names must be unique and must not contain ':'.
+          At least one user is required unless DISABLE_AUTHENTICATION is set in restic_server_environment.
+          PASSWORD_FILE must not be set, the role manages /data/.htpasswd.
+        quiet: true
+      vars:
+        backup_restic_server__user_names: "{{ backup_restic_server__users | map(attribute='name', default='') | list }}"
+
+    - name: 'Install packages'
+      ansible.builtin.apt:
+        update_cache: true
+        install_recommends: false
+        pkg: "{{ backup_restic_server__packages }}"
+
     - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        dest: "{{ backup_restic_server__podman_home }}"
+        owner: 'root'
+        group: 'root'
         mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ backup_restic_server__podman_home }}"
+
+    - name: 'Check for the htpasswd file'
+      ansible.builtin.stat:
+        path: "{{ backup_restic_server__htpasswd_file }}"
+      register: 'backup_restic_server__htpasswd_stat'
+
+    - name: 'Check the passwords of the users'
+      ansible.builtin.command:
+        argv: [ 'htpasswd', '-v', '-i', "{{ backup_restic_server__htpasswd_file }}", "{{ item.name }}" ]
+        stdin: "{{ item.password }}"
+      loop: "{{ backup_restic_server__users }}"
+      register: 'backup_restic_server__users_check'
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: 'Set the passwords of the users'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'htpasswd', '-B', '-C', '10', '-i' ]
+             + ([ '-c' ] if not backup_restic_server__htpasswd_stat.stat.exists and backup_restic_server__index == 0 else [])
+             + [ backup_restic_server__htpasswd_file, item.item.name ] }}
+        stdin: "{{ item.item.password }}"
+      loop: "{{ backup_restic_server__users_check.results | rejectattr('rc', 'eq', 0) | list }}"
+      loop_control:
+        index_var: 'backup_restic_server__index'
+      register: 'backup_restic_server__users_set'
+      changed_when: true
+      no_log: true
+
+    - name: 'Read the users of the htpasswd file'
+      ansible.builtin.slurp:
+        src: "{{ backup_restic_server__htpasswd_file }}"
+      register: 'backup_restic_server__htpasswd'
+      failed_when: false
+
+    - name: 'Remove undeclared users'
+      ansible.builtin.command:
+        argv: [ 'htpasswd', '-D', "{{ backup_restic_server__htpasswd_file }}", "{{ item }}" ]
+      loop: >-
+        {{ (backup_restic_server__htpasswd.content | default('') | b64decode).splitlines()
+           | select('search', ':') | map('regex_replace', ':.*$', '')
+           | reject('in', backup_restic_server__users | map(attribute='name') | list) | list }}
+      register: 'backup_restic_server__users_removed'
+      changed_when: true
+
+    - name: 'Set the permissions of the htpasswd file'
+      ansible.builtin.file:
+        path: "{{ backup_restic_server__htpasswd_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0600'
+      when: backup_restic_server__users | length > 0 or backup_restic_server__htpasswd.content is defined
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -58,18 +135,28 @@
         restart_policy: 'no'
         state: 'quadlet'
         recreate: "{{ podman___update_mode | bool }}"
+      register: 'backup_restic_server__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd:
         name: "{{ backup_restic_server__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if backup_restic_server__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        backup_restic_server__running: >-
+          {{ (ansible_facts.services[backup_restic_server__container.name + '.service'].state | default('')) == 'running' }}
+        backup_restic_server__restart: >-
+          {{ podman___update_mode | bool
+             or (backup_restic_server__running | bool
+                 and (backup_restic_server__users_set is changed
+                      or backup_restic_server__users_removed is changed
+                      or backup_restic_server__quadlet_result is changed)) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
       when: 'backup_restic_server__autoupdate_enabled'
-      include_role:
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ backup_restic_server__container.name }}"
