@@ -17,7 +17,7 @@
         content: "{{ webserver_traefik__config | to_nice_yaml(indent=2) }}"
         dest: "{{ webserver_traefik__podman_config_file }}"
       when: 'not podman___update_mode | bool and webserver_traefik__config | length > 0'
-      notify: 'Restart traefik container'
+      register: 'webserver_traefik__config_result'
 
     - name: 'Ensure acme.json exists with correct permissions'
       ansible.builtin.copy:
@@ -83,13 +83,21 @@
         restart_policy: 'no'
         state: 'quadlet'
         recreate: "{{ podman___update_mode | bool }}"
+      register: 'webserver_traefik__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd:
         name: "{{ webserver_traefik__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if webserver_traefik__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        webserver_traefik__running: >-
+          {{ (ansible_facts.services[webserver_traefik__container.name + '.service'].state | default('')) == 'running' }}
+        webserver_traefik__restart: >-
+          {{ podman___update_mode | bool
+             or (webserver_traefik__running | bool
+                 and (webserver_traefik__config_result is changed or webserver_traefik__quadlet_result is changed)) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'

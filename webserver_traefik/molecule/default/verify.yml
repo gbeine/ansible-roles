@@ -1,27 +1,79 @@
 ---
 - name: 'Verify'
   hosts: 'all'
+  become: true
 
   vars_files:
     - 'test_cases.yml'
 
   vars:
     webserver_traefik__test_case: "{{ webserver_traefik__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_traefik__expect: "{{ webserver_traefik__test_case.expect }}"
 
   tasks:
 
-    - name: 'Read generated quadlet unit'
-      ansible.builtin.command: 'cat /etc/containers/systemd/traefik.container'
-      register: 'webserver_traefik__quadlet'
-      changed_when: false
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/traefik.container'
+      register: 'webserver_traefik__test_quadlet'
 
-    - name: 'Assert IPv4/IPv6 expectations'
+    - name: 'Assert the IPv4 and IPv6 addresses in the quadlet unit'
       ansible.builtin.assert:
         that:
-          - "('IP=' + webserver_traefik__test_case.expect.ip) in webserver_traefik__quadlet.stdout"
-          - "webserver_traefik__test_case.expect.ip6 is none or ('IP6=' + webserver_traefik__test_case.expect.ip6) in webserver_traefik__quadlet.stdout"
-          - "webserver_traefik__test_case.expect.ip6 is not none or 'IP6=' not in webserver_traefik__quadlet.stdout"
+          - ('IP=' + webserver_traefik__expect.ip) in webserver_traefik__test_quadlet_lines
+          - webserver_traefik__expect.ip6 is none or ('IP6=' + webserver_traefik__expect.ip6) in webserver_traefik__test_quadlet_lines
+          - webserver_traefik__expect.ip6 is not none or webserver_traefik__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Network=' + webserver_traefik__test_case.role_vars.traefik_network) in webserver_traefik__test_quadlet_lines
+      vars:
+        webserver_traefik__test_quadlet_lines: "{{ (webserver_traefik__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the traefik service'
+      ansible.builtin.command: 'systemctl is-active traefik'
+      register: 'webserver_traefik__test_service'
+      changed_when: false
+      failed_when: false
 
     - name: 'Assert the traefik service is active'
-      ansible.builtin.command: 'systemctl is-active traefik'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_service.stdout == 'active'
+
+    - name: 'Inspect the traefik container'
+      ansible.builtin.command: 'podman inspect traefik'
+      register: 'webserver_traefik__test_inspect'
       changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_net.IPAddress == webserver_traefik__expect.ip
+          - webserver_traefik__expect.ip6 is none or webserver_traefik__test_net.GlobalIPv6Address == webserver_traefik__expect.ip6
+        fail_msg: "IPv4 {{ webserver_traefik__test_net.IPAddress }}, IPv6 {{ webserver_traefik__test_net.GlobalIPv6Address }}"
+      vars:
+        webserver_traefik__test_net: >-
+          {{ (webserver_traefik__test_inspect.stdout | from_json)[0].NetworkSettings.Networks[webserver_traefik__test_case.role_vars.traefik_network] }}
+
+    - name: 'Request http on the published port'
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1/'
+        follow_redirects: 'none'
+        status_code: [ 301, 302, 307, 308 ]
+      register: 'webserver_traefik__test_http'
+      until: webserver_traefik__test_http.status in [ 301, 302, 307, 308 ]
+      retries: 15
+      delay: 2
+
+    - name: 'Assert http is redirected to https'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_http.location is match('https://')
+
+    - name: 'Request https on the published port'
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1/'
+        validate_certs: false
+        status_code: [ 404 ]
+      register: 'webserver_traefik__test_https'
+      until: webserver_traefik__test_https.status == 404
+      retries: 15
+      delay: 2
