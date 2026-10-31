@@ -4,7 +4,199 @@
   tags: [ 'dns_powerdns' ]
   block:
 
-    - name: 'Install PowerDNS Authoritative Server using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'dns_powerdns__use_podman'
+    - name: 'Validate release'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__release | string in dns_powerdns__releases
+        fail_msg: "powerdns_release must be one of {{ dns_powerdns__releases | join(', ') }}, got {{ dns_powerdns__release }}"
+        quiet: true
+
+    - name: 'Include settings of the release'
+      ansible.builtin.include_vars:
+        file: "settings-{{ dns_powerdns__release }}.yml"
+
+    - name: 'Validate settings'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__unknown_settings | length == 0
+        fail_msg: "Unknown settings for PowerDNS {{ dns_powerdns__release }}: {{ dns_powerdns__unknown_settings | join(', ') }}"
+        quiet: true
+      vars:
+        dns_powerdns__unknown_settings: >-
+          {{ dns_powerdns__settings.keys() | difference(dns_powerdns__release_settings | map(attribute='name')) | sort }}
+
+    - name: 'Validate gpgsql settings'
+      when: 'dns_powerdns__gpgsql_enabled | bool'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__unknown_gpgsql_settings | length == 0
+        fail_msg: "Unknown gpgsql settings for PowerDNS {{ dns_powerdns__release }}: {{ dns_powerdns__unknown_gpgsql_settings | join(', ') }}"
+        quiet: true
+      vars:
+        dns_powerdns__unknown_gpgsql_settings: >-
+          {{ dns_powerdns__gpgsql_settings.keys()
+             | difference(dns_powerdns__release_gpgsql_settings | map(attribute='name'))
+             | difference(dns_powerdns__release_gpgsql_queries) | sort }}
+
+    - name: 'Validate gpgsql connection'
+      when: 'dns_powerdns__gpgsql_enabled | bool'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__gpgsql_settings['gpgsql-host'] | default('', true) | string | length > 0
+          - dns_powerdns__gpgsql_settings['gpgsql-password'] | default('', true) | string | length > 0
+          - "'launch' not in dns_powerdns__settings"
+        fail_msg: >-
+          powerdns_gpgsql_settings needs gpgsql-host and gpgsql-password,
+          and launch must not be set in powerdns_settings, the role adds the backend in gpgsql.conf
+        quiet: true
+
+    - name: 'Create PowerDNS directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
+        state: 'directory'
+      loop:
+        - dest: "{{ dns_powerdns__podman_home }}"
+        - dest: "{{ dns_powerdns__podman_config_dir }}"
+        - dest: "{{ dns_powerdns__podman_config_dir }}/{{ dns_powerdns__include_subdir }}"
+        - dest: "{{ dns_powerdns__podman_run_dir }}"
+          owner: "{{ dns_powerdns__uid }}"
+          group: "{{ dns_powerdns__gid }}"
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: 'Generate PowerDNS configuration'
+      ansible.builtin.copy:
+        content: |
+          {% macro value(v) -%}
+          {{ v | ternary('yes', 'no') if v is boolean else (v | join(',') if v is iterable and v is not string and v is not mapping else v) }}
+          {%- endmacro %}
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          # PowerDNS Authoritative Server {{ dns_powerdns__release | string | list | join('.') }}
+          #
+          {% for setting in dns_powerdns__release_settings %}
+          {%   set v = dns_powerdns__settings.get(setting.name) %}
+          {%   set v = value(setting.default if v is none else v) %}
+
+          #################################
+          # {{ setting.name }}    {{ setting.description }}
+          #
+          {{ '# ' if v | string | length == 0 and setting.name not in dns_powerdns__settings_always }}{{ setting.name }}={{ v }}
+          {% endfor %}
+        dest: "{{ dns_powerdns__podman_config_dir }}/pdns.conf"
+        owner: 'root'
+        group: "{{ dns_powerdns__gid }}"
+        mode: '0640'
+      diff: false
+      register: 'dns_powerdns__config_result'
+
+    - name: 'Generate PowerDNS gpgsql backend configuration'
+      when: 'dns_powerdns__gpgsql_enabled | bool'
+      ansible.builtin.copy:
+        content: |
+          {% macro value(v) -%}
+          {{ v | ternary('yes', 'no') if v is boolean else (v | join(',') if v is iterable and v is not string and v is not mapping else v) }}
+          {%- endmacro %}
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          # See https://doc.powerdns.com/authoritative/backends/generic-postgresql.html
+          #
+          launch+=gpgsql
+          {% for setting in dns_powerdns__release_gpgsql_settings %}
+          {%   set v = dns_powerdns__gpgsql_settings.get(setting.name) %}
+          {%   set v = value(setting.default if v is none else v) %}
+
+          #################################
+          # {{ setting.name }}    {{ setting.description }}
+          #
+          {{ '# ' if v | string | length == 0 }}{{ setting.name }}={{ v }}
+          {% endfor %}
+          {% for name in dns_powerdns__release_gpgsql_queries if dns_powerdns__gpgsql_settings.get(name) is not none %}
+
+          {{ name }}={{ value(dns_powerdns__gpgsql_settings[name]) }}
+          {% endfor %}
+        dest: "{{ dns_powerdns__podman_config_dir }}/{{ dns_powerdns__include_subdir }}/gpgsql.conf"
+        owner: 'root'
+        group: "{{ dns_powerdns__gid }}"
+        mode: '0640'
+      diff: false
+      register: 'dns_powerdns__gpgsql_result'
+
+    - name: 'Remove PowerDNS gpgsql backend configuration'
+      when: 'not dns_powerdns__gpgsql_enabled | bool'
+      ansible.builtin.file:
+        path: "{{ dns_powerdns__podman_config_dir }}/{{ dns_powerdns__include_subdir }}/gpgsql.conf"
+        state: 'absent'
+      register: 'dns_powerdns__gpgsql_removed_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ dns_powerdns__container.name }}"
+        hostname: "{{ dns_powerdns__container.hostname }}"
+        image: "{{ dns_powerdns__container.image }}"
+        ip: "{{ dns_powerdns__container.ip }}"
+        ip6: "{{ dns_powerdns__container.ipv6 | default(omit) }}"
+        network: "{{ dns_powerdns__container.network }}"
+        env: "{{ dns_powerdns__container.environment | default(omit) }}"
+        etc_hosts: "{{ dns_powerdns__container.etc_hosts | default(omit) }}"
+        expose: "{{ dns_powerdns__container.expose | default(omit) }}"
+        publish: "{{ dns_powerdns__container.publish | default(omit) }}"
+        timezone: "{{ dns_powerdns__container.timezone }}"
+        label: "{{ dns_powerdns__container.labels | default(omit) }}"
+        secrets: "{{ dns_powerdns__container.secrets | default(omit) }}"
+        sysctl: "{{ dns_powerdns__container.sysctls | default(omit) }}"
+        volume: "{{ dns_powerdns__container.volumes | default(omit) }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% if dns_powerdns__container.exec_start_pre is defined %}
+          {% for command in dns_powerdns__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if dns_powerdns__container.requires is defined %}
+          Requires={{ dns_powerdns__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'dns_powerdns__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ dns_powerdns__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if dns_powerdns__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        dns_powerdns__running: >-
+          {{ (ansible_facts.services[dns_powerdns__container.name + '.service'].state | default('')) == 'running' }}
+        dns_powerdns__restart: >-
+          {{ dns_powerdns__running | bool
+             and (dns_powerdns__config_result is changed
+                  or dns_powerdns__gpgsql_result is changed
+                  or dns_powerdns__gpgsql_removed_result is changed
+                  or dns_powerdns__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'dns_powerdns__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ dns_powerdns__container.name }}"
+        container_image: "{{ dns_powerdns__container.image }}"

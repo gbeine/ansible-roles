@@ -3,7 +3,7 @@ title: PowerDNS Authoritative Server
 permalink: /roles/dns-powerdns/
 project_link: https://www.powerdns.com/
 project_repository: https://github.com/PowerDNS/pdns
-container_link: https://hub.docker.com/r/powerdns/pdns-auth-49
+container_link: https://hub.docker.com/u/powerdns
 documentation_link: https://doc.powerdns.com/authoritative/
 ---
 

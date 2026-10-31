@@ -1,0 +1,86 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_powerdns__test_case: "{{ dns_powerdns__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_powerdns__test_image: "docker.io/powerdns/pdns-auth-{{ dns_powerdns__test_case.release }}:latest"
+    podman_networks:
+      - "{{ dns_powerdns__test_network }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '644'
+
+    - name: 'Install dig'
+      ansible.builtin.apt:
+        name: 'dnsutils'
+        install_recommends: false
+        update_cache: true
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ dns_powerdns__test_image }}"
+        - "{{ dns_powerdns__test_database.image }}"
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ dns_powerdns__test_database.name }}"
+        image: "{{ dns_powerdns__test_database.image }}"
+        network: "{{ dns_powerdns__test_network.name }}"
+        ip: "{{ dns_powerdns__test_database.ip }}"
+        env:
+          POSTGRES_DB: "{{ dns_powerdns__test_database.database }}"
+          POSTGRES_USER: "{{ dns_powerdns__test_database.user }}"
+          POSTGRES_PASSWORD: "{{ dns_powerdns__test_database.password }}"
+        state: 'started'
+
+    - name: 'Wait for the database'
+      ansible.builtin.command: >-
+        podman exec {{ dns_powerdns__test_database.name }}
+        psql -U {{ dns_powerdns__test_database.user }} -d {{ dns_powerdns__test_database.database }} -c 'SELECT 1'
+      register: 'dns_powerdns__test_db_ready'
+      changed_when: false
+      until: dns_powerdns__test_db_ready.rc == 0
+      retries: 30
+      delay: 2
+
+    - name: 'Read the schema of the gpgsql backend from the PowerDNS image'
+      ansible.builtin.command: >-
+        podman run --rm --entrypoint cat {{ dns_powerdns__test_image }} /usr/local/share/doc/pdns/schema.pgsql.sql
+      register: 'dns_powerdns__test_schema'
+      changed_when: false
+
+    - name: 'Check whether the schema exists'
+      ansible.builtin.command: >-
+        podman exec {{ dns_powerdns__test_database.name }}
+        psql -U {{ dns_powerdns__test_database.user }} -d {{ dns_powerdns__test_database.database }} -tAc "SELECT to_regclass('public.domains')"
+      register: 'dns_powerdns__test_schema_exists'
+      changed_when: false
+
+    - name: 'Import the schema'
+      ansible.builtin.command:
+        cmd: >-
+          podman exec -i {{ dns_powerdns__test_database.name }}
+          psql -v ON_ERROR_STOP=1 -U {{ dns_powerdns__test_database.user }} -d {{ dns_powerdns__test_database.database }}
+        stdin: "{{ dns_powerdns__test_schema.stdout }}"
+      changed_when: true
+      when: dns_powerdns__test_schema_exists.stdout | trim != 'domains'

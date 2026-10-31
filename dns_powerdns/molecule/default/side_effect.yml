@@ -1,0 +1,44 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_powerdns__test_case: "{{ dns_powerdns__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value powerdns'
+      register: 'dns_powerdns__test_started_before'
+      changed_when: false
+
+    - name: 'Set the role variables with changed settings'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ dns_powerdns__test_common
+           | combine({'powerdns_release': dns_powerdns__test_case.release,
+                      'powerdns_settings': dns_powerdns__test_common.powerdns_settings | combine(dns_powerdns__test_side_effect_settings)})
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run dns_powerdns with changed settings'
+      ansible.builtin.include_role:
+        name: 'dns_powerdns'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value powerdns'
+      register: 'dns_powerdns__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the configuration changed and the service was restarted'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__config_result is changed
+          - dns_powerdns__test_started_after.stdout | int > dns_powerdns__test_started_before.stdout | int
+        fail_msg: "before {{ dns_powerdns__test_started_before.stdout }}, after {{ dns_powerdns__test_started_after.stdout }}"

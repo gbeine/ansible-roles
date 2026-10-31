@@ -1,0 +1,190 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_powerdns__test_case: "{{ dns_powerdns__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_powerdns__test_expect: "{{ dns_powerdns__test_case.expect }}"
+    dns_powerdns__test_home: "{{ dns_powerdns__test_common.powerdns_home }}"
+    dns_powerdns__test_ip: "{{ dns_powerdns__test_common.powerdns_ip }}"
+    dns_powerdns__test_api: "http://{{ dns_powerdns__test_ip }}:8081/api/v1/servers/localhost"
+
+  tasks:
+
+    - name: 'Read the configuration files'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ dns_powerdns__test_home }}/config/pdns.conf"
+        - "{{ dns_powerdns__test_home }}/config/pdns.d/gpgsql.conf"
+      register: 'dns_powerdns__test_configs'
+
+    - name: 'Assert pdns.conf'
+      ansible.builtin.assert:
+        that:
+          - ('# PowerDNS Authoritative Server ' + dns_powerdns__test_case.release[0] + '.' + dns_powerdns__test_case.release[1]) in dns_powerdns__test_lines
+          # set values
+          - "'api=yes' in dns_powerdns__test_lines"
+          - ('api-key=' + dns_powerdns__test_api_key) in dns_powerdns__test_lines
+          - "'webserver-address=0.0.0.0' in dns_powerdns__test_lines"
+          - "'webserver-allow-from=10.89.0.0/24,127.0.0.1,::1' in dns_powerdns__test_lines"
+          - "'loglevel=5' in dns_powerdns__test_lines"
+          - "'default-ttl=600' in dns_powerdns__test_lines"
+          - "'include-dir=/etc/powerdns/pdns.d' in dns_powerdns__test_lines"
+          # defaults of the release
+          - "'cache-ttl=20' in dns_powerdns__test_lines"
+          - "'lua-records-insert-whitespace=no' in dns_powerdns__test_lines"
+          - dns_powerdns__test_expect.settings | difference(dns_powerdns__test_lines) | length == 0
+          # launch is always written, launch+=gpgsql in pdns.d needs it
+          - "'launch=' in dns_powerdns__test_lines"
+          # other settings without value are commented out
+          - "'# server-id=' in dns_powerdns__test_lines"
+          # settings unknown to the release are not written
+          - >-
+            dns_powerdns__test_expect.absent
+            | select('in', dns_powerdns__test_lines | map('regex_replace', '^(# )?([a-z0-9-]+)=.*$', '\\2') | list)
+            | list | length == 0
+        quiet: true
+      vars:
+        dns_powerdns__test_lines: "{{ (dns_powerdns__test_configs.results[0].content | b64decode).splitlines() }}"
+
+    - name: 'Assert gpgsql.conf'
+      ansible.builtin.assert:
+        that:
+          - "'launch+=gpgsql' in dns_powerdns__test_lines"
+          - "'gpgsql-host=10.89.0.20' in dns_powerdns__test_lines"
+          - "'gpgsql-dbname=powerdns' in dns_powerdns__test_lines"
+          - "'gpgsql-user=powerdns' in dns_powerdns__test_lines"
+          - "'gpgsql-dnssec=yes' in dns_powerdns__test_lines"
+          - "'# gpgsql-port=' in dns_powerdns__test_lines"
+        quiet: true
+      vars:
+        dns_powerdns__test_lines: "{{ (dns_powerdns__test_configs.results[1].content | b64decode).splitlines() }}"
+
+    - name: 'Read the mode of the configuration files'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ dns_powerdns__test_home }}/config/pdns.conf"
+        - "{{ dns_powerdns__test_home }}/config/pdns.d/gpgsql.conf"
+      register: 'dns_powerdns__test_modes'
+
+    - name: 'Assert the mode of the configuration files'
+      ansible.builtin.assert:
+        that:
+          - item.stat.mode == '0640'
+          - item.stat.pw_name == 'root'
+          - item.stat.gid == 953
+        quiet: true
+      loop: "{{ dns_powerdns__test_modes.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/powerdns.container'
+      register: 'dns_powerdns__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=docker.io/powerdns/pdns-auth-' + dns_powerdns__test_case.release + ':latest') in dns_powerdns__test_lines
+          - ('IP=' + dns_powerdns__test_ip) in dns_powerdns__test_lines
+          - ('IP6=' + dns_powerdns__test_common.powerdns_ipv6) in dns_powerdns__test_lines
+          - (dns_powerdns__test_quadlet.content | b64decode) is search('(Sysctl=|--sysctl )net\\.ipv4\\.ip_unprivileged_port_start=53')
+        fail_msg: "{{ dns_powerdns__test_quadlet.content | b64decode }}"
+      vars:
+        dns_powerdns__test_lines: "{{ (dns_powerdns__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the powerdns service'
+      ansible.builtin.command: 'systemctl is-active powerdns'
+      register: 'dns_powerdns__test_service'
+      changed_when: false
+      failed_when: false
+      until: dns_powerdns__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the powerdns service'
+      ansible.builtin.command: 'journalctl -u powerdns --no-pager -n 60'
+      register: 'dns_powerdns__test_journal'
+      changed_when: false
+      when: dns_powerdns__test_service.stdout != 'active'
+
+    - name: 'Assert the powerdns service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__test_service.stdout == 'active'
+        fail_msg: "{{ dns_powerdns__test_service.stdout }}: {{ dns_powerdns__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the server information from the API'
+      ansible.builtin.uri:
+        url: "{{ dns_powerdns__test_api }}"
+        headers:
+          X-API-Key: "{{ dns_powerdns__test_api_key }}"
+        return_content: true
+      register: 'dns_powerdns__test_server'
+      until: dns_powerdns__test_server.status == 200
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the version of the server'
+      ansible.builtin.assert:
+        that:
+          - dns_powerdns__test_server.json.version is match(dns_powerdns__test_case.release[0] + '\\.' + dns_powerdns__test_case.release[1] + '\\.')
+        fail_msg: "{{ dns_powerdns__test_server.json.version }}"
+
+    - name: 'Create a zone with the API'
+      ansible.builtin.uri:
+        url: "{{ dns_powerdns__test_api }}/zones"
+        method: 'POST'
+        headers:
+          X-API-Key: "{{ dns_powerdns__test_api_key }}"
+        body_format: 'json'
+        body:
+          name: 'example.test.'
+          kind: 'Native'
+          nameservers: [ 'ns1.example.test.' ]
+          rrsets:
+            - name: 'www.example.test.'
+              type: 'A'
+              ttl: 300
+              changetype: 'REPLACE'
+              records:
+                - content: '192.0.2.10'
+                  disabled: false
+        status_code: [ 201, 409 ]
+
+    - name: 'Query the zone'
+      ansible.builtin.command: "dig @{{ dns_powerdns__test_ip }} {{ item.name }} {{ item.type }} +norecurse +time=3 +tries=1"
+      loop:
+        - name: 'example.test'
+          type: 'SOA'
+        - name: 'www.example.test'
+          type: 'A'
+          answer: '192.0.2.10'
+      loop_control:
+        label: "{{ item.name }} {{ item.type }}"
+      register: 'dns_powerdns__test_dig'
+      changed_when: false
+      failed_when: false
+      until: "dns_powerdns__test_dig.rc == 0 and 'status: NOERROR' in dns_powerdns__test_dig.stdout"
+      retries: 10
+      delay: 2
+
+    - name: 'Assert the answers'
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - "'status: NOERROR' in item.stdout"
+          - item.stdout is search('flags:[a-z ]* aa')
+          - item.item.answer is not defined or item.stdout is search('\\sA\\s+' + item.item.answer | regex_escape)
+        fail_msg: "{{ item.stdout }}"
+        quiet: true
+      loop: "{{ dns_powerdns__test_dig.results }}"
+      loop_control:
+        label: "{{ item.item.name }} {{ item.item.type }}"
