@@ -1,0 +1,72 @@
+---
+# Test keys only, generated with wg genkey, wg pubkey and wg genpsk. Never use them elsewhere.
+vpn_wireguard__test_keys:
+  a_private: 'yG8jESpsEWccYxxaKoIPqGVERRw9ljxwTM3zu17shlE='
+  a_public: 'JsX9OuH8J3w8VOn1Mw0mwkt+rlmkDGlYd8gDhcnHkgQ='
+  b_private: '6JdedNag0BEHN+seRISfbrpe2LEiXhe52hWJMpETo2w='
+  b_public: '3yp6ihSEAuGAJ3Jx2Ga5SkeRTpbgTBVEkfJSIkUwInI='
+  x_public: 'aUHr69byXdhtL0jOA9WLezz967G6zmdGJXlaxZkGMzg='
+  old_private: 'uMAaj745B1Y6tqYmV1x7/ZsFHLwqe+zfk6O8DYeYc1A='
+  ab_preshared: 'Skj2vkyh4ReDjXlTrfquXu03H5H5HmxOCNjPr9KEy4w='
+
+vpn_wireguard__test_cases:
+
+  # Server: listens on 51820, knows b and an additional peer without preshared key and endpoint
+  - name: 'molecule-vpn-wireguard-a'
+    prepare:
+      old_interfaces:
+        - interface: 'wgold'
+          address: '10.91.0.1/24'
+    role_vars:
+      wireguard_networks:
+        - interface: 'wg0'
+          address: '10.90.0.1/24, fd00:90::1/64'
+          private_key: "{{ vpn_wireguard__test_keys.a_private }}"
+          listen_port: 51820
+          peers:
+            - public_key: "{{ vpn_wireguard__test_keys.b_public }}"
+              preshared_key: "{{ vpn_wireguard__test_keys.ab_preshared }}"
+              allowed_ips: '10.90.0.2/32, fd00:90::2/128'
+            - public_key: "{{ vpn_wireguard__test_keys.x_public }}"
+              allowed_ips: '10.90.0.3/32'
+    expect:
+      interface: 'wg0'
+      lines_present:
+        - 'Address = 10.90.0.1/24, fd00:90::1/64'
+        - 'ListenPort = 51820'
+        - "PresharedKey = {{ vpn_wireguard__test_keys.ab_preshared }}"
+        - 'AllowedIPs = 10.90.0.3/32'
+      lines_absent:
+        - 'MTU'
+        - 'Endpoint'
+        - 'PersistentKeepalive'
+      preshared_keys: 1
+      removed_interfaces:
+        - 'wgold'
+
+  # Client: connects to a, keeps the connection alive
+  - name: 'molecule-vpn-wireguard-b'
+    prepare:
+      old_interfaces: []
+    role_vars:
+      wireguard_networks:
+        - interface: 'wg0'
+          address: '10.90.0.2/24, fd00:90::2/64'
+          private_key: "{{ vpn_wireguard__test_keys.b_private }}"
+          peers:
+            - public_key: "{{ vpn_wireguard__test_keys.a_public }}"
+              preshared_key: "{{ vpn_wireguard__test_keys.ab_preshared }}"
+              allowed_ips: '10.90.0.0/24, fd00:90::/64'
+              endpoint: "{{ hostvars['molecule-vpn-wireguard-a']['ansible_host'] }}:51820"
+              persistent_keepalive: 25
+    expect:
+      interface: 'wg0'
+      lines_present:
+        - 'Address = 10.90.0.2/24, fd00:90::2/64'
+        - "Endpoint = {{ hostvars['molecule-vpn-wireguard-a']['ansible_host'] }}:51820"
+        - 'PersistentKeepalive = 25'
+      lines_absent:
+        - 'ListenPort'
+        - 'MTU'
+      preshared_keys: 1
+      removed_interfaces: []

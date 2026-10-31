@@ -12,6 +12,24 @@
         - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
         - "{{ ansible_facts['os_family'] }}.yml"
 
+    - name: 'Validate wireguard_networks entries'
+      ansible.builtin.assert:
+        that:
+          - item.interface is defined
+          - item.address is defined
+          - item.private_key is defined
+          - item.peers is defined
+          - item.peers is sequence and item.peers is not string
+          - item.peers | rejectattr('public_key', 'defined') | list | length == 0
+          - item.peers | rejectattr('allowed_ips', 'defined') | list | length == 0
+        fail_msg: >-
+          WireGuard network {{ item.interface | default('?') }} needs interface, address, private_key and peers,
+          every peer needs public_key and allowed_ips
+        quiet: true
+      loop: "{{ vpn_wireguard__networks }}"
+      loop_control:
+        label: "{{ item.interface | default('?') }}"
+
     - name: 'Install packages'
       ansible.builtin.apt:
         update_cache: true
@@ -19,18 +37,55 @@
         pkg: "{{ vpn_wireguard__packages }}"
 
     - name: 'Generate configuration files'
-      ansible.builtin.template:
-        src: 'wg.conf.j2'
-        dest: "/etc/wireguard/{{ item.interface }}.conf"
+      ansible.builtin.copy:
+        content: "{{ vpn_wireguard__config }}"
+        dest: "{{ vpn_wireguard__etc_dir }}/{{ item.interface }}.conf"
         owner: 'root'
         group: 'root'
         mode: '640'
+      diff: false
       vars:
-        wgnet: "{{ item }}"
+        vpn_wireguard__config: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          [Interface]
+          PrivateKey = {{ item.private_key }}
+          Address = {{ item.address }}
+          {% if item.listen_port is defined %}
+          ListenPort = {{ item.listen_port }}
+          {% endif %}
+          {% if item.mtu is defined %}
+          MTU = {{ item.mtu }}
+          {% endif %}
+          {% if item.postup is defined %}
+          PostUp = {{ item.postup }}
+          {% endif %}
+          {% if item.postdown is defined %}
+          PostDown = {{ item.postdown }}
+          {% endif %}
+          {% for peer in item.peers %}
+
+          [Peer]
+          PublicKey = {{ peer.public_key }}
+          {% if peer.preshared_key is defined %}
+          PresharedKey = {{ peer.preshared_key }}
+          {% endif %}
+          AllowedIPs = {{ peer.allowed_ips }}
+          {% if peer.endpoint is defined %}
+          Endpoint = {{ peer.endpoint }}
+          {% endif %}
+          {% if peer.persistent_keepalive is defined %}
+          PersistentKeepalive = {{ peer.persistent_keepalive }}
+          {% endif %}
+          {% endfor %}
+      loop: "{{ vpn_wireguard__networks }}"
+      loop_control:
+        label: "{{ item.interface }}"
       register: 'vpn_wireguard__create_config_result'
       notify:
         - 'Restart WireGuard'
-      with_items: "{{ vpn_wireguard__networks }}"
 
     - name: 'Enable service'
       ansible.builtin.systemd_service:
@@ -38,5 +93,38 @@
         daemon_reload: true
         state: 'started'
         enabled: true
-      with_items: "{{ vpn_wireguard__networks }}"
+      loop: "{{ vpn_wireguard__networks }}"
+      loop_control:
+        label: "{{ item.interface }}"
       when: 'not ansible_check_mode'
+
+    - name: 'Remove undeclared interfaces'
+      when: vpn_wireguard__networks_prune | bool
+      block:
+
+        - name: 'Find configuration files'
+          ansible.builtin.find:
+            paths: "{{ vpn_wireguard__etc_dir }}"
+            patterns: '*.conf'
+          register: 'vpn_wireguard__configs'
+
+        - name: 'Determine undeclared interfaces'
+          ansible.builtin.set_fact:
+            vpn_wireguard__undeclared: >-
+              {{ vpn_wireguard__configs.files | map(attribute='path') | map('basename') | map('regex_replace', '\.conf$', '')
+                 | reject('in', vpn_wireguard__networks | map(attribute='interface') | list) | list }}
+
+        - name: 'Stop and disable undeclared interfaces'
+          ansible.builtin.systemd_service:
+            name: "wg-quick@{{ item }}"
+            state: 'stopped'
+            enabled: false
+          loop: "{{ vpn_wireguard__undeclared }}"
+          failed_when: false
+          when: 'not ansible_check_mode'
+
+        - name: 'Delete configuration files of undeclared interfaces'
+          ansible.builtin.file:
+            path: "{{ vpn_wireguard__etc_dir }}/{{ item }}.conf"
+            state: absent
+          loop: "{{ vpn_wireguard__undeclared }}"

@@ -1,0 +1,42 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    vpn_wireguard__test_case: "{{ vpn_wireguard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Install wireguard-tools'
+      ansible.builtin.apt:
+        pkg: 'wireguard-tools'
+        install_recommends: false
+        update_cache: true
+      when: vpn_wireguard__test_case.prepare.old_interfaces | length > 0
+
+    - name: 'Create old interfaces that have to be removed'
+      ansible.builtin.copy:
+        dest: "/etc/wireguard/{{ item.interface }}.conf"
+        content: |
+          [Interface]
+          PrivateKey = {{ vpn_wireguard__test_keys.old_private }}
+          Address = {{ item.address }}
+        owner: 'root'
+        group: 'root'
+        mode: '600'
+      loop: "{{ vpn_wireguard__test_case.prepare.old_interfaces }}"
+      loop_control:
+        label: "{{ item.interface }}"
+
+    - name: 'Start old interfaces'
+      ansible.builtin.systemd_service:
+        name: "wg-quick@{{ item.interface }}"
+        state: 'started'
+        enabled: true
+      loop: "{{ vpn_wireguard__test_case.prepare.old_interfaces }}"
+      loop_control:
+        label: "{{ item.interface }}"

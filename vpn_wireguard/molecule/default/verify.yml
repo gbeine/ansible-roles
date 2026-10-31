@@ -1,0 +1,88 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    vpn_wireguard__test_case: "{{ vpn_wireguard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    vpn_wireguard__expect: "{{ vpn_wireguard__test_case.expect }}"
+    vpn_wireguard__config_file: "/etc/wireguard/{{ vpn_wireguard__expect.interface }}.conf"
+
+  tasks:
+
+    - name: 'Check the configuration file'
+      ansible.builtin.stat:
+        path: "{{ vpn_wireguard__config_file }}"
+      register: 'vpn_wireguard__test_stat'
+
+    - name: 'Read the configuration file'
+      ansible.builtin.slurp:
+        src: "{{ vpn_wireguard__config_file }}"
+      register: 'vpn_wireguard__test_config'
+      no_log: true
+
+    - name: 'Assert the configuration file'
+      ansible.builtin.assert:
+        that:
+          - vpn_wireguard__test_stat.stat.mode == '0640'
+          - vpn_wireguard__test_stat.stat.pw_name == 'root'
+          - vpn_wireguard__expect.lines_present is subset(vpn_wireguard__test_lines)
+          - vpn_wireguard__test_lines | select('match', '(' + vpn_wireguard__expect.lines_absent | join('|') + ') =') | list | length == 0
+          - vpn_wireguard__test_lines | select('match', 'PresharedKey =') | list | length == vpn_wireguard__expect.preshared_keys
+          - "'\n\n\n' not in vpn_wireguard__test_content"
+        fail_msg: 'The configuration file does not match the expectations'
+      vars:
+        vpn_wireguard__test_content: "{{ vpn_wireguard__test_config.content | b64decode }}"
+        vpn_wireguard__test_lines: "{{ vpn_wireguard__test_content.splitlines() }}"
+
+    - name: 'Read the state of the interface service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', "{{ item }}", "wg-quick@{{ vpn_wireguard__expect.interface }}" ]
+      loop:
+        - 'is-active'
+        - 'is-enabled'
+      register: 'vpn_wireguard__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the interface service is active and enabled'
+      ansible.builtin.assert:
+        that:
+          - vpn_wireguard__test_service.results[0].stdout == 'active'
+          - vpn_wireguard__test_service.results[1].stdout == 'enabled'
+
+    - name: 'Check removed interfaces'
+      ansible.builtin.command:
+        argv: [ 'ip', 'link', 'show', "{{ item }}" ]
+      loop: "{{ vpn_wireguard__expect.removed_interfaces }}"
+      register: 'vpn_wireguard__test_removed_link'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Check removed interface services'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-enabled', "wg-quick@{{ item }}" ]
+      loop: "{{ vpn_wireguard__expect.removed_interfaces }}"
+      register: 'vpn_wireguard__test_removed_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Check removed configuration files'
+      ansible.builtin.stat:
+        path: "/etc/wireguard/{{ item }}.conf"
+      loop: "{{ vpn_wireguard__expect.removed_interfaces }}"
+      register: 'vpn_wireguard__test_removed_file'
+
+    - name: 'Assert removed interfaces are gone'
+      ansible.builtin.assert:
+        that:
+          - vpn_wireguard__test_removed_link.results[vpn_wireguard__test_index].rc != 0
+          - vpn_wireguard__test_removed_service.results[vpn_wireguard__test_index].stdout != 'enabled'
+          - not vpn_wireguard__test_removed_file.results[vpn_wireguard__test_index].stat.exists
+        fail_msg: "{{ item }} still exists"
+      loop: "{{ vpn_wireguard__expect.removed_interfaces }}"
+      loop_control:
+        index_var: 'vpn_wireguard__test_index'
