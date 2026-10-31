@@ -11,6 +11,8 @@ backup_timemachine_server__ipv6: "{{ timemachine_server_ipv6 }}"
 backup_timemachine_server__network: "{{ timemachine_server_network }}"
 backup_timemachine_server__hostname: "{{ timemachine_server_hostname | mandatory }}"
 backup_timemachine_server__timezone: "{{ timemachine_server_timezone | mandatory }}"
+
+backup_timemachine_server__environment: "{{ backup_timemachine_server__environment_default | combine(timemachine_server_environment | default({})) }}"
 backup_timemachine_server__secrets: "{{ timemachine_server_secrets | default([]) }}"
 
 backup_timemachine_server__version: "{{ timemachine_server_version | default('latest') }}"
@@ -18,13 +20,8 @@ backup_timemachine_server__version: "{{ timemachine_server_version | default('la
 backup_timemachine_server__container: "{{ backup_timemachine_server__podman_container_default | combine(timemachine_server_container | default({})) }}"
 
 backup_timemachine_server__autoupdate_enabled: "{{ timemachine_server_autoupdate_enabled | default(false) }}"
-backup_timemachine_server__autoupdate_schedule:  "{{ timemachine_server_autoupdate_schedule | default('*-*-* 02:00:00') }}"
+backup_timemachine_server__autoupdate_schedule: "{{ timemachine_server_autoupdate_schedule | default('*-*-* 02:00:00') }}"
 
-backup_timemachine_server__advertised_hostname: "{{ timemachine_server_advertised_hostname }}"
-backup_timemachine_server__username: "{{ timemachine_server_username | default('timemachine') }}"
-backup_timemachine_server__groupname: "{{ timemachine_server_groupname | default('timemachine') }}"
-backup_timemachine_server__volume_size: "{{ timemachine_server_volume_size | default(0) }}"
-backup_timemachine_server__workgroup: "{{ timemachine_server_workgroup | default('WORKGROUP') }}"
 backup_timemachine_server__users: "{{ timemachine_server_users | default([]) }}"
 backup_timemachine_server__passwords: "{{ timemachine_server_passwords | default({}) }}"
 backup_timemachine_server__interfaces: "{{ timemachine_server_interfaces | default([]) }}"
@@ -33,14 +30,36 @@ backup_timemachine_server__interfaces: "{{ timemachine_server_interfaces | defau
 # Defaults - do not change
 #
 
-backup_timemachine_server__uid: 1000
-backup_timemachine_server__gid: "{{ backup_timemachine_server__uid }}"
-
 backup_timemachine_server__podman_name: 'timemachine'
 backup_timemachine_server__podman_image: 'docker.io/mbentley/timemachine'
 backup_timemachine_server__podman_tag: "{{ backup_timemachine_server__version }}"
 
 backup_timemachine_server__podman_home: "{{ backup_timemachine_server__home }}"
+backup_timemachine_server__external_home: "{{ backup_timemachine_server__podman_home }}/external"
+backup_timemachine_server__external_dir: '/etc/samba/external'
+
+backup_timemachine_server__environment_default:
+  TM_USERNAME: 'timemachine'
+  TM_GROUPNAME: 'timemachine'
+  TM_UID: '1000'
+  TM_GID: '1000'
+  VOLUME_SIZE_LIMIT: '0'
+  WORKGROUP: 'WORKGROUP'
+  SET_PERMISSIONS: 'false'
+
+backup_timemachine_server__environment_required:
+  - 'TM_USERNAME'
+  - 'TM_GROUPNAME'
+  - 'TM_UID'
+  - 'TM_GID'
+
+backup_timemachine_server__user_keys_required:
+  - 'TM_USERNAME'
+  - 'TM_GROUPNAME'
+  - 'SHARE_NAME'
+  - 'VOLUME_SIZE_LIMIT'
+  - 'TM_UID'
+  - 'TM_GID'
 
 backup_timemachine_server__podman_container_default:
   name: "{{ backup_timemachine_server__podman_name }}"
@@ -50,16 +69,9 @@ backup_timemachine_server__podman_container_default:
   ipv6: "{{ backup_timemachine_server__ipv6 | default(omit) }}"
   network: "{{ backup_timemachine_server__network | default('host') }}"
   timezone: "{{ backup_timemachine_server__timezone }}"
-  environment:
-    ADVERTISED_HOSTNAME: "{{ backup_timemachine_server__advertised_hostname | default(omit) }}"
-    EXTERNAL_CONF: "{{ '/etc/samba/external' if (backup_timemachine_server__users | length > 0) else omit }}"
-    TM_USERNAME: "{{ backup_timemachine_server__username }}"
-    TM_GROUPNAME: "{{ backup_timemachine_server__groupname }}"
-    TM_UID: "{{ backup_timemachine_server__uid }}"
-    TM_GID: "{{ backup_timemachine_server__gid }}"
-    VOLUME_SIZE_LIMIT: "{{ backup_timemachine_server__volume_size }}"
-    WORKGROUP: "{{ backup_timemachine_server__workgroup }}"
-    SET_PERMISSIONS: 'false'
+  environment: >-
+    {{ backup_timemachine_server__environment
+       | combine({ 'EXTERNAL_CONF': backup_timemachine_server__external_dir } if (backup_timemachine_server__users | length > 0) else {}) }}
   secrets: >-
     {{ (backup_timemachine_server__secrets | map(attribute='name') | zip(backup_timemachine_server__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
       if (backup_timemachine_server__secrets | default([]) | length > 0)
@@ -75,7 +87,7 @@ backup_timemachine_server__podman_container_default:
       ]
       +
       (
-        [ backup_timemachine_server__podman_home ~ '/external:/etc/samba/external:ro,Z' ]
+        [ backup_timemachine_server__external_home ~ ':' ~ backup_timemachine_server__external_dir ~ ':ro,Z' ]
         if (backup_timemachine_server__users | length > 0)
         else []
       )

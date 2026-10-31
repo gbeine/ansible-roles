@@ -1,0 +1,97 @@
+---
+# Network created by container_podman in prepare.yml
+backup_timemachine_server__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+backup_timemachine_server__test_image: 'docker.io/mbentley/timemachine:latest'
+backup_timemachine_server__test_home: '/opt/timemachine-molecule'
+backup_timemachine_server__test_address: '10.89.0.10'
+
+# Test passwords only
+backup_timemachine_server__test_passwords:
+  alice: 'GQiur-YlIY8qmWXG'
+  bob: 'VoUpgaWBp077omXR'
+  molecule: '40G1s9b85ByIMiyz'
+
+backup_timemachine_server__test_common:
+  timemachine_server_home: "{{ backup_timemachine_server__test_home }}"
+  timemachine_server_hostname: 'timemachine-molecule'
+  timemachine_server_timezone: 'Europe/Berlin'
+  timemachine_server_network: 'podman-molecule'
+  timemachine_server_ip: "{{ backup_timemachine_server__test_address }}"
+
+# First run: multi user mode with timemachine_server_users and timemachine_server_passwords
+backup_timemachine_server__test_converge:
+  role_vars:
+    timemachine_server_users:
+      - TM_USERNAME: 'alice'
+        TM_GROUPNAME: 'alice'
+        SHARE_NAME: 'alice'
+        VOLUME_SIZE_LIMIT: '1 T'
+        TM_UID: 1001
+        TM_GID: 1001
+      - TM_USERNAME: 'bob'
+        TM_GROUPNAME: 'bob'
+        SHARE_NAME: 'bob'
+        VOLUME_SIZE_LIMIT: '0'
+        TM_UID: 1002
+        TM_GID: 1002
+    timemachine_server_passwords:
+      alice: "{{ backup_timemachine_server__test_passwords.alice }}"
+      bob: "{{ backup_timemachine_server__test_passwords.bob }}"
+    timemachine_server_secrets: []
+    timemachine_server_environment: {}
+  expect:
+    external_conf: true
+    external_files:
+      - 'alice.conf'
+      - 'alice.pw'
+      - 'bob.conf'
+      - 'bob.pw'
+    secrets: []
+    env:
+      - 'EXTERNAL_CONF=/etc/samba/external'
+    logins:
+      - user: 'alice'
+        password: "{{ backup_timemachine_server__test_passwords.alice }}"
+        share: 'alice'
+      - user: 'bob'
+        password: "{{ backup_timemachine_server__test_passwords.bob }}"
+        share: 'bob'
+    rejected:
+      - user: 'alice'
+        password: 'wrong-password'
+
+# Second run (side_effect): single user mode with the password as secret
+backup_timemachine_server__test_side_effect:
+  role_vars:
+    timemachine_server_users: []
+    timemachine_server_passwords: {}
+    timemachine_server_secrets:
+      - name: 'timemachine_molecule_password'
+        data: "{{ backup_timemachine_server__test_passwords.molecule }}"
+        target: 'PASSWORD'
+    timemachine_server_environment:
+      TM_USERNAME: 'molecule'
+      SHARE_NAME: 'MoleculeTM'
+  expect:
+    external_conf: false
+    external_files: []
+    secrets:
+      - 'timemachine_molecule_password,type=env,target=PASSWORD'
+    env:
+      - 'TM_USERNAME=molecule'
+      - 'SHARE_NAME=MoleculeTM'
+    logins:
+      - user: 'molecule'
+        password: "{{ backup_timemachine_server__test_passwords.molecule }}"
+        share: 'MoleculeTM'
+    rejected:
+      - user: 'alice'
+        password: "{{ backup_timemachine_server__test_passwords.alice }}"

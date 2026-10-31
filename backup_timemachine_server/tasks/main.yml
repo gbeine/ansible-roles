@@ -1,20 +1,63 @@
 ---
 
-- name: 'Deploy Restic REST container'
+- name: 'Deploy Time Machine container'
   tags: [ 'backup_timemachine_server' ]
   block:
+
+    - name: 'Validate environment, secrets and users'
+      ansible.builtin.assert:
+        that:
+          - backup_timemachine_server__environment_missing | length == 0
+          - backup_timemachine_server__secrets | rejectattr('name', 'defined') | list | length == 0
+          - backup_timemachine_server__secrets | rejectattr('data', 'defined') | list | length == 0
+          - backup_timemachine_server__secrets | rejectattr('target', 'defined') | list | length == 0
+          - backup_timemachine_server__secrets_in_environment | length == 0
+          - backup_timemachine_server__users | length > 0 or 'PASSWORD' in backup_timemachine_server__secret_targets
+          - backup_timemachine_server__users_incomplete | length == 0
+          - backup_timemachine_server__usernames | unique | length == backup_timemachine_server__usernames | length
+        fail_msg: >-
+          Time Machine needs the environment variables {{ backup_timemachine_server__environment_required | join(', ') }},
+          missing or empty: {{ backup_timemachine_server__environment_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secret targets must not be set in timemachine_server_environment:
+          {{ backup_timemachine_server__secrets_in_environment | join(', ') | default('none', true) }}.
+          Without timemachine_server_users the password has to be a secret with target PASSWORD.
+          Every user needs {{ backup_timemachine_server__user_keys_required | join(', ') }} and a password
+          (PASSWORD, PASSWORD_FILE or an entry in timemachine_server_passwords), usernames must be unique,
+          incomplete users: {{ backup_timemachine_server__users_incomplete | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        backup_timemachine_server__environment_missing: >-
+          {{ backup_timemachine_server__environment_required
+             | reject('in', backup_timemachine_server__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        backup_timemachine_server__secret_targets: "{{ backup_timemachine_server__secrets | selectattr('target', 'defined') | map(attribute='target') | list }}"
+        backup_timemachine_server__secrets_in_environment: >-
+          {{ backup_timemachine_server__secret_targets | select('in', backup_timemachine_server__environment.keys() | list) | list }}
+        backup_timemachine_server__usernames: "{{ backup_timemachine_server__users | map(attribute='TM_USERNAME', default='?') | list }}"
+        backup_timemachine_server__users_incomplete: "{{ backup_timemachine_server__users_incomplete_json | trim | from_json }}"
+        backup_timemachine_server__users_incomplete_json: >-
+          {% set result = [] %}
+          {% for u in backup_timemachine_server__users %}
+          {%   set missing = backup_timemachine_server__user_keys_required | reject('in', u.keys() | list) | list %}
+          {%   set has_password = 'PASSWORD' in u or 'PASSWORD_FILE' in u or u.TM_USERNAME | default('') in backup_timemachine_server__passwords %}
+          {%   if missing | length > 0 or not has_password %}
+          {%     set _ = result.append(u.TM_USERNAME | default('?')) %}
+          {%   endif %}
+          {% endfor %}
+          {{ result | to_json }}
 
     - name: 'Create directories'
       ansible.builtin.file:
         dest: "{{ item.dest }}"
-        owner: "{{ item.owner | default('root') }}"
-        group: "{{ item.group | default('root') }}"
-        mode: "{{ item.mode | default('0700') }}"
+        owner: 'root'
+        group: 'root'
+        mode: "{{ item.mode }}"
         state: 'directory'
-      with_items:
-        - dest: "{{ backup_timemachine_server__podman_home }}/opt"
-          mode: '0755'
-        - dest: "{{ backup_timemachine_server__podman_home }}/external"
+      loop: >-
+        {{ [ { 'dest': backup_timemachine_server__podman_home + '/opt', 'mode': '0755' } ]
+           + ([ { 'dest': backup_timemachine_server__external_home, 'mode': '0700' } ] if backup_timemachine_server__users | length > 0 else []) }}
+      loop_control:
+        label: "{{ item.dest }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -22,7 +65,8 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items: "{{ backup_timemachine_server__secrets }}"
+      loop: "{{ backup_timemachine_server__secrets }}"
+      register: 'backup_timemachine_server__secrets_result'
 
     - name: 'Create avahi configuration'
       ansible.builtin.copy:
@@ -30,27 +74,63 @@
           [server]
           allow-interfaces={{ backup_timemachine_server__interfaces | join(',') }}
         dest: "{{ backup_timemachine_server__podman_home }}/avahi-daemon.conf"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'backup_timemachine_server__avahi_result'
       when: 'not podman___update_mode | bool and backup_timemachine_server__interfaces | length > 0'
 
     - name: 'Create user configuration'
       ansible.builtin.copy:
         content: |
           {% for key, value in item.items() %}
-          {{ key }}={{ value }}
+          {{ key }}={{ value | string | quote }}
           {% endfor %}
-        dest: "{{ backup_timemachine_server__podman_home }}/external/{{ item.TM_USERNAME }}.conf"
+          {% if 'PASSWORD' not in item and 'PASSWORD_FILE' not in item and item.TM_USERNAME in backup_timemachine_server__passwords %}
+          PASSWORD_FILE={{ backup_timemachine_server__external_dir }}/{{ item.TM_USERNAME }}.pw
+          {% endif %}
+        dest: "{{ backup_timemachine_server__external_home }}/{{ item.TM_USERNAME }}.conf"
+        owner: 'root'
+        group: 'root'
         mode: '0400'
-      with_items: "{{ backup_timemachine_server__users }}"
+      no_log: true
+      loop: "{{ backup_timemachine_server__users }}"
+      register: 'backup_timemachine_server__users_result'
       when: 'not podman___update_mode | bool'
 
     - name: 'Create user passwords'
       no_log: true
       ansible.builtin.copy:
         content: "{{ item.value }}"
-        dest: "{{ backup_timemachine_server__podman_home }}/external/{{ item.key }}.pw"
+        dest: "{{ backup_timemachine_server__external_home }}/{{ item.key }}.pw"
+        owner: 'root'
+        group: 'root'
         mode: '0400'
-      with_dict: "{{ backup_timemachine_server__passwords }}"
-      when: 'not podman___update_mode | bool'
+      loop: "{{ backup_timemachine_server__passwords | dict2items }}"
+      register: 'backup_timemachine_server__passwords_result'
+      when: 'not podman___update_mode | bool and backup_timemachine_server__users | length > 0'
+
+    - name: 'Find user configuration files'
+      ansible.builtin.find:
+        paths: "{{ backup_timemachine_server__external_home }}"
+        patterns: [ '*.conf', '*.pw' ]
+      register: 'backup_timemachine_server__external_files'
+
+    - name: 'Remove configuration files of undeclared users'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: >-
+        {{ backup_timemachine_server__external_files.files | map(attribute='path')
+           | reject('in', backup_timemachine_server__external_keep) | list }}
+      vars:
+        backup_timemachine_server__external_keep: >-
+          {{ (backup_timemachine_server__users | map(attribute='TM_USERNAME')
+              | map('regex_replace', '^', backup_timemachine_server__external_home + '/') | map('regex_replace', '$', '.conf') | list
+              + backup_timemachine_server__passwords.keys()
+              | map('regex_replace', '^', backup_timemachine_server__external_home + '/') | map('regex_replace', '$', '.pw') | list)
+             if backup_timemachine_server__users | length > 0 else [] }}
+      register: 'backup_timemachine_server__external_removed'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -72,7 +152,7 @@
         name: "{{ backup_timemachine_server__container.name }}"
         hostname: "{{ backup_timemachine_server__container.hostname }}"
         image: "{{ backup_timemachine_server__container.image }}"
-        ip: "{{ backup_timemachine_server__container.ip }}"
+        ip: "{{ backup_timemachine_server__container.ip | default(omit) }}"
         ip6: "{{ backup_timemachine_server__container.ipv6 | default(omit) }}"
         network: "{{ backup_timemachine_server__container.network }}"
         timezone: "{{ backup_timemachine_server__container.timezone }}"
@@ -99,18 +179,31 @@
         restart_policy: 'no'
         state: 'quadlet'
         recreate: "{{ podman___update_mode | bool }}"
+      register: 'backup_timemachine_server__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd:
         name: "{{ backup_timemachine_server__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if backup_timemachine_server__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        backup_timemachine_server__running: >-
+          {{ (ansible_facts.services[backup_timemachine_server__container.name + '.service'].state | default('')) == 'running' }}
+        backup_timemachine_server__restart: >-
+          {{ podman___update_mode | bool
+             or (backup_timemachine_server__running | bool
+                 and (backup_timemachine_server__secrets_result is changed
+                      or backup_timemachine_server__avahi_result is changed
+                      or backup_timemachine_server__users_result is changed
+                      or backup_timemachine_server__passwords_result is changed
+                      or backup_timemachine_server__external_removed is changed
+                      or backup_timemachine_server__quadlet_result is changed)) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
       when: 'backup_timemachine_server__autoupdate_enabled'
-      include_role:
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ backup_timemachine_server__container.name }}"

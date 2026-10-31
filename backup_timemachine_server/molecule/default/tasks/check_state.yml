@@ -1,0 +1,123 @@
+---
+# Checks the state of the host against backup_timemachine_server__test_expect
+
+- name: 'Read the quadlet unit'
+  ansible.builtin.slurp:
+    src: '/etc/containers/systemd/timemachine.container'
+  register: 'backup_timemachine_server__test_quadlet'
+
+- name: 'Assert the quadlet unit'
+  ansible.builtin.assert:
+    that:
+      - ('IP=' + backup_timemachine_server__test_address) in backup_timemachine_server__test_quadlet_lines
+      - >-
+        (backup_timemachine_server__test_quadlet_lines | select('match', 'Environment=.*EXTERNAL_CONF=') | list | length > 0)
+        == backup_timemachine_server__test_expect.external_conf
+      - >-
+        backup_timemachine_server__test_quadlet_lines | select('match', 'Secret=') | map('regex_replace', '^Secret=', '') | list | sort
+        == backup_timemachine_server__test_expect.secrets | sort
+    fail_msg: "{{ backup_timemachine_server__test_quadlet_lines | select('match', '(IP|Environment|Secret)=') | list }}"
+  vars:
+    backup_timemachine_server__test_quadlet_lines: "{{ (backup_timemachine_server__test_quadlet.content | b64decode).splitlines() }}"
+
+- name: 'Find the user configuration files'
+  ansible.builtin.find:
+    paths: "{{ backup_timemachine_server__test_home }}/external"
+    patterns: [ '*.conf', '*.pw' ]
+  register: 'backup_timemachine_server__test_external'
+
+- name: 'Assert the user configuration files'
+  ansible.builtin.assert:
+    that:
+      - backup_timemachine_server__test_external.files | map(attribute='path') | map('basename') | list | sort
+        == backup_timemachine_server__test_expect.external_files | sort
+      - backup_timemachine_server__test_external.files | map(attribute='mode') | reject('eq', '0400') | list | length == 0
+    fail_msg: "{{ backup_timemachine_server__test_external.files | map(attribute='path') | map('basename') | list }}"
+
+- name: 'Read the configuration files of the users'
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: >-
+    {{ backup_timemachine_server__test_external.files | map(attribute='path') | select('match', '.*\.conf$') | list }}
+  register: 'backup_timemachine_server__test_confs'
+
+- name: 'Assert the configuration files of the users reference their password files'
+  ansible.builtin.assert:
+    that:
+      - ('PASSWORD_FILE=/etc/samba/external/' + (item.item | basename | regex_replace('\.conf$', '.pw'))) in (item.content | b64decode)
+    quiet: true
+  loop: "{{ backup_timemachine_server__test_confs.results }}"
+  loop_control:
+    label: "{{ item.item | basename }}"
+
+- name: 'Read the state of the timemachine service'
+  ansible.builtin.command: 'systemctl is-active timemachine'
+  register: 'backup_timemachine_server__test_service'
+  changed_when: false
+  failed_when: false
+
+- name: 'Assert the timemachine service is active'
+  ansible.builtin.assert:
+    that:
+      - backup_timemachine_server__test_service.stdout == 'active'
+
+- name: 'Inspect the timemachine container'
+  ansible.builtin.command: 'podman inspect timemachine'
+  register: 'backup_timemachine_server__test_inspect'
+  changed_when: false
+
+- name: 'Assert the environment of the running container'
+  ansible.builtin.assert:
+    that:
+      - backup_timemachine_server__test_expect.env is subset(backup_timemachine_server__test_env)
+      - backup_timemachine_server__test_expect.external_conf or backup_timemachine_server__test_env | select('match', 'EXTERNAL_CONF=') | list | length == 0
+    fail_msg: "{{ backup_timemachine_server__test_env | select('match', '(TM_|SHARE_|EXTERNAL_)') | list }}"
+  vars:
+    backup_timemachine_server__test_env: "{{ (backup_timemachine_server__test_inspect.stdout | from_json)[0].Config.Env }}"
+
+- name: 'List the shares with valid credentials'
+  ansible.builtin.command:
+    argv: [ 'smbclient', '-L', "//{{ backup_timemachine_server__test_address }}", '-U', "{{ item.user }}" ]
+  environment:
+    PASSWD: "{{ item.password }}"
+  loop: "{{ backup_timemachine_server__test_expect.logins }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: 'backup_timemachine_server__test_logins'
+  until: backup_timemachine_server__test_logins.rc == 0
+  retries: 20
+  delay: 3
+  changed_when: false
+
+- name: 'Assert the shares are offered'
+  ansible.builtin.assert:
+    that:
+      - backup_timemachine_server__test_logins.results[backup_timemachine_server__test_index].stdout is search('\s' + item.share + '\s+Disk')
+    fail_msg: "{{ item.user }}: share {{ item.share }} not listed"
+    quiet: true
+  loop: "{{ backup_timemachine_server__test_expect.logins }}"
+  loop_control:
+    label: "{{ item.user }}: {{ item.share }}"
+    index_var: 'backup_timemachine_server__test_index'
+
+- name: 'List the shares with invalid credentials'
+  ansible.builtin.command:
+    argv: [ 'smbclient', '-L', "//{{ backup_timemachine_server__test_address }}", '-U', "{{ item.user }}" ]
+  environment:
+    PASSWD: "{{ item.password }}"
+  loop: "{{ backup_timemachine_server__test_expect.rejected }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: 'backup_timemachine_server__test_rejected'
+  changed_when: false
+  failed_when: false
+
+- name: 'Assert invalid credentials are rejected'
+  ansible.builtin.assert:
+    that:
+      - item.rc != 0
+    fail_msg: "{{ item.item.user }} was accepted"
+    quiet: true
+  loop: "{{ backup_timemachine_server__test_rejected.results }}"
+  loop_control:
+    label: "{{ item.item.user }}"
