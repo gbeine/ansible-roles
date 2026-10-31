@@ -1,27 +1,94 @@
 ---
 - name: 'Verify'
   hosts: 'all'
+  become: true
 
   vars_files:
     - 'test_cases.yml'
 
   vars:
     webserver_sws__test_case: "{{ webserver_sws__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_sws__expect: "{{ webserver_sws__test_case.expect }}"
 
   tasks:
 
-    - name: 'Read generated quadlet unit'
-      ansible.builtin.command: 'cat /etc/containers/systemd/sws.container'
-      register: 'webserver_sws__quadlet'
-      changed_when: false
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/sws.container'
+      register: 'webserver_sws__test_quadlet'
 
-    - name: 'Assert IPv4/IPv6 expectations'
+    - name: 'Assert the IPv4 and IPv6 addresses in the quadlet unit'
       ansible.builtin.assert:
         that:
-          - "('IP=' + webserver_sws__test_case.expect.ip) in webserver_sws__quadlet.stdout"
-          - "webserver_sws__test_case.expect.ip6 is none or ('IP6=' + webserver_sws__test_case.expect.ip6) in webserver_sws__quadlet.stdout"
-          - "webserver_sws__test_case.expect.ip6 is not none or 'IP6=' not in webserver_sws__quadlet.stdout"
+          - ('IP=' + webserver_sws__expect.ip) in webserver_sws__test_quadlet_lines
+          - webserver_sws__expect.ip6 is none or ('IP6=' + webserver_sws__expect.ip6) in webserver_sws__test_quadlet_lines
+          - webserver_sws__expect.ip6 is not none or webserver_sws__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Network=' + webserver_sws__test_case.role_vars.sws_network) in webserver_sws__test_quadlet_lines
+      vars:
+        webserver_sws__test_quadlet_lines: "{{ (webserver_sws__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the configuration file'
+      ansible.builtin.slurp:
+        src: "{{ webserver_sws__test_case.role_vars.sws_home }}/sws.toml"
+      register: 'webserver_sws__test_config'
+
+    - name: 'Assert the configuration file'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__test_config_lines[1] is match('# ')
+          - >-
+            webserver_sws__test_config_lines | select('match', 'host = ')
+            | map('regex_replace', '^host = "(.*)"$', '\\1') | list == webserver_sws__expect.vhosts
+          - webserver_sws__test_config_lines | select('match', 'root = ') | list | length == webserver_sws__expect.vhosts | length
+          - (webserver_sws__expect.vhosts | length > 0) == ('[advanced]' in webserver_sws__test_config_lines)
+        fail_msg: "{{ webserver_sws__test_config.content | b64decode }}"
+      vars:
+        webserver_sws__test_config_lines: "{{ (webserver_sws__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the sws service'
+      ansible.builtin.command: 'systemctl is-active sws'
+      register: 'webserver_sws__test_service'
+      changed_when: false
+      failed_when: false
 
     - name: 'Assert the sws service is active'
-      ansible.builtin.command: 'systemctl is-active sws'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__test_service.stdout == 'active'
+
+    - name: 'Inspect the sws container'
+      ansible.builtin.command: 'podman inspect sws'
+      register: 'webserver_sws__test_inspect'
       changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__test_net.IPAddress == webserver_sws__expect.ip
+          - webserver_sws__expect.ip6 is none or webserver_sws__test_net.GlobalIPv6Address == webserver_sws__expect.ip6
+        fail_msg: "IPv4 {{ webserver_sws__test_net.IPAddress }}, IPv6 {{ webserver_sws__test_net.GlobalIPv6Address }}"
+      vars:
+        webserver_sws__test_net: >-
+          {{ (webserver_sws__test_inspect.stdout | from_json)[0].NetworkSettings.Networks[webserver_sws__test_case.role_vars.sws_network] }}
+
+    - name: 'Request the pages'
+      ansible.builtin.uri:
+        url: "{{ item.url }}"
+        headers: "{{ {'Host': item.host} if item.host is defined else {} }}"
+        return_content: true
+      loop: "{{ webserver_sws__expect.urls }}"
+      loop_control:
+        label: "{{ item.url }} {{ item.host | default('') }}"
+      register: 'webserver_sws__test_pages'
+      until: webserver_sws__test_pages.status == 200
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the content of the pages'
+      ansible.builtin.assert:
+        that:
+          - item.content | trim == item.item.content
+        fail_msg: "{{ item.item.url }} {{ item.item.host | default('') }}: {{ item.content | trim }}"
+      loop: "{{ webserver_sws__test_pages.results }}"
+      loop_control:
+        label: "{{ item.item.url }} {{ item.item.host | default('') }}"

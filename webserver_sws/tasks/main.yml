@@ -14,10 +14,24 @@
         - "{{ webserver_sws__podman_vhost_dir }}"
 
     - name: 'Generate configuration'
-      ansible.builtin.template:
-        src: 'sws.toml.j2'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          {% if webserver_sws__vhosts | length > 0 %}
+
+          [advanced]
+
+          {%   for host in webserver_sws__vhosts %}
+          [[advanced.virtual-hosts]]
+          host = "{{ host }}"
+          root = "/var/vhosts/{{ host }}"
+
+          {%   endfor %}
+          {% endif %}
         dest: "{{ webserver_sws__podman_config_file }}"
-      notify: 'Restart SWS container'
+      register: 'webserver_sws__config_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -61,13 +75,21 @@
         restart_policy: 'no'
         state: 'quadlet'
         recreate: "{{ podman___update_mode | bool }}"
+      register: 'webserver_sws__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd:
         name: "{{ webserver_sws__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if webserver_sws__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        webserver_sws__running: >-
+          {{ (ansible_facts.services[webserver_sws__container.name + '.service'].state | default('')) == 'running' }}
+        webserver_sws__restart: >-
+          {{ podman___update_mode | bool
+             or (webserver_sws__running | bool
+                 and (webserver_sws__config_result is changed or webserver_sws__quadlet_result is changed)) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'

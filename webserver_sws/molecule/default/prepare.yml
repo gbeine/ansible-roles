@@ -1,38 +1,55 @@
 ---
-- name: 'Prepare test instance'
+- name: 'Prepare'
   hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    webserver_sws__test_case: "{{ webserver_sws__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_sws__test_home: "{{ webserver_sws__test_case.role_vars.sws_home }}"
+    podman_networks:
+      - "{{ webserver_sws__test_network }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
   tasks:
-
-    - name: 'Install podman and dependencies'
-      ansible.builtin.apt:
-        name:
-          - 'podman'
-          - 'curl'
-        state: 'present'
-        update_cache: true
-
-    - name: 'Use the vfs storage driver'
-      ansible.builtin.copy:
-        dest: '/etc/containers/storage.conf'
-        content: |
-          [storage]
-          driver = "vfs"
-          runroot = "/run/containers/storage"
-          graphroot = "/var/lib/containers/storage"
-
-    - name: 'Create the podman network used by the test container'
-      containers.podman.podman_network:
-        name: 'podman-molecule'
-        state: 'present'
-        ipv6: true
-        net_config:
-          - subnet: '10.89.0.0/24'
-            gateway: '10.89.0.1'
-          - subnet: 'fd00:89::/64'
-            gateway: 'fd00:89::1'
 
     - name: 'Ensure /etc/timezone exists'
       ansible.builtin.copy:
         dest: '/etc/timezone'
         content: |
           Etc/UTC
+        force: false
+        mode: '644'
+
+    - name: 'Pull the sws image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ webserver_sws__test_image }}"
+
+    - name: 'Create content directories'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '755'
+      loop: "{{ [ webserver_sws__test_home + '/public' ] + webserver_sws__test_case.expect.vhosts | map('regex_replace', '^', webserver_sws__test_home + '/vhosts/') | list }}"
+
+    - name: 'Create the default page'
+      ansible.builtin.copy:
+        dest: "{{ webserver_sws__test_home }}/public/index.html"
+        content: |
+          molecule default
+        mode: '644'
+
+    - name: 'Create the pages of the virtual hosts'
+      ansible.builtin.copy:
+        dest: "{{ webserver_sws__test_home }}/vhosts/{{ item }}/index.html"
+        content: |
+          molecule {{ item }}
+        mode: '644'
+      loop: "{{ webserver_sws__test_case.expect.vhosts }}"
