@@ -1,0 +1,91 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_nebula_sync__test_replica: "{{ dns_nebula_sync__test_piholes | selectattr('name', 'eq', 'molecule-pihole-replica') | first }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/nebula-sync.container'
+      register: 'dns_nebula_sync__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + dns_nebula_sync__test_vars.nebula_sync_ip) in dns_nebula_sync__test_lines
+          - "'Secret=nebula_sync_primary,type=env,target=PRIMARY' in dns_nebula_sync__test_lines"
+          - "'Secret=nebula_sync_replicas,type=env,target=REPLICAS' in dns_nebula_sync__test_lines"
+          - dns_nebula_sync__test_lines | select('match', 'Environment=.*FULL_SYNC=false') | list | length == 1
+          - dns_nebula_sync__test_lines | select('match', 'Environment=.*SYNC_CONFIG_DNS=true') | list | length == 1
+          - dns_nebula_sync__test_lines | select('match', 'Environment=.*CLIENT_TIMEOUT_SECONDS=30') | list | length == 1
+          - dns_nebula_sync__test_lines | select('search', '(PRIMARY|REPLICAS)=') | list | length == 0
+          - dns_nebula_sync__test_lines | select('search', 'molecule-pihole-password') | list | length == 0
+        fail_msg: "{{ dns_nebula_sync__test_quadlet.content | b64decode }}"
+      vars:
+        dns_nebula_sync__test_lines: "{{ (dns_nebula_sync__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Check the podman secrets'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', "{{ item }}" ]
+      loop: [ 'nebula_sync_primary', 'nebula_sync_replicas' ]
+      changed_when: false
+
+    - name: 'Read the state of the nebula-sync service'
+      ansible.builtin.command: 'systemctl is-active nebula-sync'
+      register: 'dns_nebula_sync__test_service'
+      changed_when: false
+      failed_when: false
+      until: dns_nebula_sync__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the nebula-sync service'
+      ansible.builtin.command: 'journalctl -u nebula-sync --no-pager -n 60'
+      register: 'dns_nebula_sync__test_journal'
+      changed_when: false
+
+    - name: 'Assert the nebula-sync service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_nebula_sync__test_service.stdout == 'active'
+        fail_msg: "{{ dns_nebula_sync__test_service.stdout }}: {{ dns_nebula_sync__test_journal.stdout_lines }}"
+
+    - name: 'Log in to the API of the replica'
+      ansible.builtin.uri:
+        url: "http://{{ dns_nebula_sync__test_replica.ip }}/api/auth"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          password: "{{ dns_nebula_sync__test_pihole_password }}"
+      register: 'dns_nebula_sync__test_auth'
+      # FTL of the replica restarts after nebula-sync changed its configuration
+      until: dns_nebula_sync__test_auth.status == 200
+      retries: 20
+      delay: 3
+
+    - name: 'Read the upstreams of the replica'
+      ansible.builtin.uri:
+        url: "http://{{ dns_nebula_sync__test_replica.ip }}/api/config/dns/upstreams"
+        headers:
+          sid: "{{ dns_nebula_sync__test_auth.json.session.sid }}"
+      register: 'dns_nebula_sync__test_upstreams'
+      until: >-
+        dns_nebula_sync__test_upstreams.status == 200
+        and dns_nebula_sync__test_upstreams.json.config.dns.upstreams == dns_nebula_sync__test_expected_upstreams
+      retries: 20
+      delay: 3
+
+    - name: 'Assert the upstreams were synchronized from the primary to the replica'
+      ansible.builtin.assert:
+        that:
+          - dns_nebula_sync__test_upstreams.json.config.dns.upstreams == dns_nebula_sync__test_expected_upstreams
+        fail_msg: >-
+          {{ dns_nebula_sync__test_upstreams.json.config.dns.upstreams | default('') | string }}
+          {{ dns_nebula_sync__test_journal.stdout_lines | string }}

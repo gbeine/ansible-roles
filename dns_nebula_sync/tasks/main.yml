@@ -1,23 +1,51 @@
 ---
 
-- name: Install nebula-sync
+- name: 'Install nebula-sync'
   tags: [ 'dns_nebula_sync' ]
   block:
 
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - dns_nebula_sync__environment_missing | length == 0
+          - dns_nebula_sync__secrets | rejectattr('name', 'defined') | list | length == 0
+          - dns_nebula_sync__secrets | rejectattr('data', 'defined') | list | length == 0
+          - dns_nebula_sync__secrets | rejectattr('target', 'defined') | list | length == 0
+          - dns_nebula_sync__secrets_missing | length == 0
+          - dns_nebula_sync__secrets_in_environment | length == 0
+        fail_msg: >-
+          nebula-sync needs the environment variables {{ dns_nebula_sync__environment_required | join(', ') }},
+          missing or empty: {{ dns_nebula_sync__environment_missing | join(', ') | default('none', true) }}.
+          nebula-sync needs the secrets {{ dns_nebula_sync__secrets_required | join(', ') }},
+          missing: {{ dns_nebula_sync__secrets_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secrets must not be set in nebula_sync_environment:
+          {{ dns_nebula_sync__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        dns_nebula_sync__environment_missing: >-
+          {{ dns_nebula_sync__environment_required
+             | reject('in', dns_nebula_sync__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        dns_nebula_sync__secrets_missing: >-
+          {{ dns_nebula_sync__secrets_required
+             | reject('in', dns_nebula_sync__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        dns_nebula_sync__secrets_in_environment: >-
+          {{ (dns_nebula_sync__secrets | selectattr('target', 'defined') | map(attribute='target') | list
+              + dns_nebula_sync__secret_variables)
+             | select('in', dns_nebula_sync__environment.keys() | list) | unique | list }}
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ dns_nebula_sync__secrets }}"
+      register: 'dns_nebula_sync__secrets_result'
+
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ dns_nebula_sync__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[dns_nebula_sync__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ dns_nebula_sync__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -41,18 +69,34 @@
           WantedBy=default.target
 
           [Service]
+          {% if dns_nebula_sync__container.exec_start_pre is defined %}
+          {% for command in dns_nebula_sync__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if dns_nebula_sync__container.requires is defined %}
+          Requires={{ dns_nebula_sync__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'dns_nebula_sync__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ dns_nebula_sync__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        state: "{{ 'restarted' if dns_nebula_sync__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        dns_nebula_sync__running: >-
+          {{ (ansible_facts.services[dns_nebula_sync__container.name + '.service'].state | default('')) == 'running' }}
+        dns_nebula_sync__restart: >-
+          {{ dns_nebula_sync__running | bool
+             and (dns_nebula_sync__secrets_result is changed or dns_nebula_sync__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'

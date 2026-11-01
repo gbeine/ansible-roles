@@ -1,0 +1,64 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ dns_nebula_sync__test_network }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ dns_nebula_sync__test_image }}"
+        - "{{ dns_nebula_sync__test_pihole_image }}"
+
+    - name: 'Start the Pi-hole instances'
+      containers.podman.podman_container:
+        name: "{{ item.name }}"
+        image: "{{ dns_nebula_sync__test_pihole_image }}"
+        network: "{{ dns_nebula_sync__test_network.name }}"
+        ip: "{{ item.ip }}"
+        env: >-
+          {{ {'FTLCONF_webserver_api_password': dns_nebula_sync__test_pihole_password, 'FTLCONF_dns_listeningMode': 'all'}
+             | combine(item.environment) }}
+        restart_policy: 'always'
+        state: 'started'
+      loop: "{{ dns_nebula_sync__test_piholes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 'Wait for the API of the Pi-hole instances'
+      ansible.builtin.uri:
+        url: "http://{{ item.ip }}/api/auth"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          password: "{{ dns_nebula_sync__test_pihole_password }}"
+      register: 'dns_nebula_sync__test_pihole_ready'
+      until: dns_nebula_sync__test_pihole_ready.status == 200
+      retries: 30
+      delay: 3
+      loop: "{{ dns_nebula_sync__test_piholes }}"
+      loop_control:
+        label: "{{ item.name }}"
