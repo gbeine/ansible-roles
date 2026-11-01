@@ -1,0 +1,157 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_plugins__test_case: "{{ monitoring_plugins__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_plugins__test_expect: "{{ monitoring_plugins__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Find the files of the local plugin and configuration directories'
+      ansible.builtin.find:
+        paths: [ "{{ monitoring_plugins__test_local_dir }}", "{{ monitoring_plugins__test_etc_dir }}" ]
+        file_type: 'any'
+      register: 'monitoring_plugins__test_found'
+
+    - name: 'Find the sudoers entries of the plugins'
+      ansible.builtin.find:
+        paths: [ '/etc/sudoers.d' ]
+        patterns: [ 'icinga-run-*' ]
+      register: 'monitoring_plugins__test_sudoers'
+
+    - name: 'Assert exactly the expected plugins, links, configurations and sudoers entries exist'
+      ansible.builtin.assert:
+        that:
+          - monitoring_plugins__test_found.files | map(attribute='path') | sort == monitoring_plugins__test_paths | sort
+          - monitoring_plugins__test_sudoers.files | map(attribute='path') | map('basename') | sort == monitoring_plugins__test_expect.sudoers | sort
+        fail_msg: >-
+          found {{ monitoring_plugins__test_found.files | map(attribute='path') | sort | join(', ') }},
+          sudoers {{ monitoring_plugins__test_sudoers.files | map(attribute='path') | map('basename') | sort | join(', ') }}
+      vars:
+        monitoring_plugins__test_paths: >-
+          {{ (monitoring_plugins__test_expect.files + monitoring_plugins__test_expect.links)
+             | map('regex_replace', '^', monitoring_plugins__test_local_dir + '/') | list
+             + monitoring_plugins__test_expect.configs | map('regex_replace', '^', monitoring_plugins__test_etc_dir + '/') | list }}
+
+    - name: 'Read the state of the plugins'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: true
+      loop: >-
+        {{ (monitoring_plugins__test_expect.files + monitoring_plugins__test_expect.links)
+           | map('regex_replace', '^', monitoring_plugins__test_local_dir + '/') | list }}
+      register: 'monitoring_plugins__test_plugins'
+
+    - name: 'Assert the plugins and the targets of the links are executable'
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.executable
+        fail_msg: "{{ item.item }}"
+        quiet: true
+      loop: "{{ monitoring_plugins__test_plugins.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Read the state of the removed files'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ monitoring_plugins__test_expect.absent }}"
+      register: 'monitoring_plugins__test_absent'
+
+    - name: 'Assert the files of the removed plugins are gone'
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists
+        fail_msg: "{{ item.item }}"
+        quiet: true
+      loop: "{{ monitoring_plugins__test_absent.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Read the state of the credentials'
+      ansible.builtin.stat:
+        path: "{{ monitoring_plugins__test_home_dir }}/{{ item }}"
+      loop: [ '.my.cnf', '.pg_service.conf', '.pgpass' ]
+      register: 'monitoring_plugins__test_credentials'
+
+    - name: 'Assert the credentials belong to the Icinga user and are only readable by it'
+      ansible.builtin.assert:
+        that:
+          - >-
+            (item.item in monitoring_plugins__test_expect.credentials)
+            == item.stat.exists
+          - not item.stat.exists or (item.stat.pw_name == 'nagios' and item.stat.mode == '0400')
+        fail_msg: "{{ item.item }}: {{ item.stat.mode | default('absent') }} {{ item.stat.pw_name | default('') }}"
+        quiet: true
+      loop: "{{ monitoring_plugins__test_credentials.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Read the PostgreSQL password file'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_plugins__test_home_dir }}/.pgpass"
+      register: 'monitoring_plugins__test_pgpass'
+      when: "'.pgpass' in monitoring_plugins__test_expect.credentials"
+
+    - name: 'Assert the PostgreSQL password file'
+      ansible.builtin.assert:
+        that:
+          - (monitoring_plugins__test_pgpass.content | b64decode | trim) == 'localhost:5432:postgres:molecule:molecule-pg-password'
+        fail_msg: "{{ monitoring_plugins__test_pgpass.content | b64decode }}"
+      when: "'.pgpass' in monitoring_plugins__test_expect.credentials"
+
+    - name: 'Check the sudoers configuration'
+      ansible.builtin.command: 'visudo -c'
+      changed_when: false
+
+    - name: 'List the sudo commands of the Icinga user'
+      ansible.builtin.command:
+        argv: [ 'sudo', '-l', '-U', 'nagios' ]
+      register: 'monitoring_plugins__test_sudo'
+      changed_when: false
+      when: monitoring_plugins__test_expect.sudo_commands is defined
+
+    - name: 'Assert the sudo commands of the Icinga user'
+      ansible.builtin.assert:
+        that:
+          - item in monitoring_plugins__test_sudo.stdout
+        fail_msg: "{{ item }} missing: {{ monitoring_plugins__test_sudo.stdout }}"
+        quiet: true
+      loop: "{{ monitoring_plugins__test_expect.sudo_commands | default([]) }}"
+
+    - name: 'Check the syntax and the dependencies of the plugins'
+      ansible.builtin.command:
+        argv: "{{ item }}"
+        chdir: "{{ monitoring_plugins__test_local_dir }}"
+      loop: "{{ monitoring_plugins__test_expect.syntax | default([]) }}"
+      loop_control:
+        label: "{{ item | join(' ') }}"
+      changed_when: false
+
+    - name: 'Run checks as the Icinga user'
+      ansible.builtin.command:
+        argv: "{{ ['sudo', '-u', 'nagios', monitoring_plugins__test_local_dir + '/' + item[0]] + item[1:] }}"
+      loop: "{{ monitoring_plugins__test_expect.checks | default([]) }}"
+      loop_control:
+        label: "{{ item | join(' ') }}"
+      register: 'monitoring_plugins__test_checks'
+      changed_when: false
+      failed_when: monitoring_plugins__test_checks.rc not in [0, 1, 2]
+
+    - name: 'Validate the Icinga configuration including the CheckCommands of the plugins'
+      ansible.builtin.command: 'icinga2 daemon -C'
+      register: 'monitoring_plugins__test_icinga'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the Icinga configuration is valid'
+      ansible.builtin.assert:
+        that:
+          - monitoring_plugins__test_icinga.rc == 0
+        fail_msg: "{{ monitoring_plugins__test_icinga.stdout_lines | select('search', 'critical|Error') | list }}"

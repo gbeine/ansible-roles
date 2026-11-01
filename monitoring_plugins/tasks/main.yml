@@ -6,124 +6,167 @@
 
     - name: 'Include OS-specific variables'
       ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}.yml"
+      loop: "{{ query('ansible.builtin.first_found', monitoring_plugins__os_vars) }}"
+      vars:
+        monitoring_plugins__os_vars:
+          - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+          - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
 
-    - name: 'Create local monitoring plugins directory'
+    - name: 'Validate plugins and credentials'
+      ansible.builtin.assert:
+        that:
+          - monitoring_plugins__plugins is iterable and monitoring_plugins__plugins is not string and monitoring_plugins__plugins is not mapping
+          - monitoring_plugins__unknown | length == 0
+          - "'rocketchat' not in monitoring_plugins__plugins or monitoring_plugins__rocketchat_plugin | length > 0"
+          - >-
+            'pgactivity' not in monitoring_plugins__plugins
+            or (monitoring_plugins__postgresql_credentials.user | default('') | string | length > 0
+                and monitoring_plugins__postgresql_credentials.password | default('') | string | length > 0)
+          - >-
+            monitoring_plugins__mysql_credentials | length == 0
+            or (monitoring_plugins__mysql_credentials.user | default('') | string | length > 0
+                and monitoring_plugins__mysql_credentials.password | default('') | string | length > 0)
+        fail_msg: >-
+          monitoring_plugins must be a list of known plugins ({{ monitoring_plugins__catalog | map(attribute='name') | join(', ') }}),
+          unknown: {{ monitoring_plugins__unknown | join(', ') | default('none', true) }}.
+          rocketchat needs one of the architectures {{ monitoring_plugins__rocketchat_plugins.keys() | join(', ') }}.
+          pgactivity needs user and password in monitoring_plugins_postgresql_credentials,
+          monitoring_plugins_mysql_credentials needs user and password if set.
+        quiet: true
+      vars:
+        monitoring_plugins__unknown: >-
+          {{ (monitoring_plugins__plugins if monitoring_plugins__plugins is not string else [monitoring_plugins__plugins])
+             | reject('in', monitoring_plugins__catalog | map(attribute='name') | list) | list }}
+
+    - name: 'Install packages of the plugins'
+      ansible.builtin.apt:
+        pkg: >-
+          {{ (monitoring_plugins__base_packages
+              + (monitoring_plugins__packages | dict2items | selectattr('key', 'in', monitoring_plugins__plugins)
+                 | map(attribute='value') | flatten))
+             | unique }}
+        install_recommends: false
+        cache_valid_time: 3600
+      when: monitoring_plugins__plugins | length > 0
+
+    - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ monitoring_plugins__plugin_local_dir }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - dest: "{{ monitoring_plugins__plugin_local_dir }}"
+          owner: 'root'
+          group: 'root'
+        - dest: "{{ monitoring_plugins__plugin_etc_dir }}"
+          owner: "{{ monitoring_plugins__user }}"
+          group: "{{ monitoring_plugins__group }}"
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: 'Copy plugins'
+      ansible.builtin.copy:
+        src: "{{ monitoring_plugins__file_sources[item.1] | default(item.1) }}"
+        dest: "{{ monitoring_plugins__plugin_local_dir }}/{{ item.1 }}"
         owner: 'root'
         group: 'root'
-        mode: '755'
-        state: 'directory'
+        mode: '0755'
+      loop: "{{ monitoring_plugins__selected | subelements('files', skip_missing=true) }}"
+      loop_control:
+        label: "{{ item.0.name }}: {{ item.1 }}"
 
-    - name: 'Create Icinga monitoring plugins directory'
+    - name: 'Link plugins of the packages'
       ansible.builtin.file:
-        dest: "{{ monitoring_plugins__plugin_etc_dir }}"
+        src: "{{ monitoring_plugins__plugin_dir }}/{{ item.1 }}"
+        dest: "{{ monitoring_plugins__plugin_local_dir }}/{{ item.1 }}"
+        state: 'link'
+      loop: "{{ monitoring_plugins__selected | subelements('links', skip_missing=true) }}"
+      loop_control:
+        label: "{{ item.0.name }}: {{ item.1 }}"
+
+    - name: 'Generate Icinga configuration of the plugins'
+      ansible.builtin.template:
+        src: "{{ item.1 }}.j2"
+        dest: "{{ monitoring_plugins__plugin_etc_dir }}/{{ item.1 }}"
         owner: "{{ monitoring_plugins__user }}"
         group: "{{ monitoring_plugins__group }}"
-        mode: '755'
-        state: 'directory'
+        mode: '0644'
+      loop: "{{ monitoring_plugins__selected | subelements('configs', skip_missing=true) }}"
+      loop_control:
+        label: "{{ item.0.name }}: {{ item.1 }}"
 
-    - name: 'Install borg repository status monitoring plugin'
-      when: 'monitoring_plugins__check_borg_repository_status | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_borg_repository_status.yml'
+    - name: 'Add sudoers entries of the plugins'
+      community.general.sudoers:
+        name: "icinga-run-{{ item.name | replace('_', '-') }}"
+        user: "{{ monitoring_plugins__user }}"
+        commands: "{{ item.sudo }}"
+        sudoers_path: "{{ monitoring_plugins__sudoers_dir }}"
+        state: 'present'
+      loop: "{{ monitoring_plugins__selected | selectattr('sudo', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
 
-    - name: 'Install certexp monitoring plugin'
-      when: 'monitoring_plugins__check_certexp | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_certexp.yml'
-
-    - name: 'Install container stats (Docker) monitoring plugin'
-      when: 'monitoring_plugins__check_docker | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_docker.yml'
-
-    - name: 'Install IDE S.M.A.R.T. monitoring plugin'
-      when: 'monitoring_plugins__check_ide_smart | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_ide_smart.yml'
-
-    - name: 'Install logfiles monitoring plugin'
-      when: 'monitoring_plugins__check_logfiles | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_logfiles.yml'
-
-    - name: 'Install mem monitoring plugin'
-      when: 'monitoring_plugins__check_mem | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_mem.yml'
-
-    - name: 'Install nginx monitoring plugin'
-      when: 'monitoring_plugins__check_nginx | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_nginx.yml'
-
-    - name: 'Install phpfpm monitoring plugin'
-      when: 'monitoring_plugins__check_phpfpm | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_phpfpm.yml'
-
-    - name: 'Install container stats (podman) monitoring plugin'
-      when: 'monitoring_plugins__check_podman | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_podman.yml'
-
-    - name: 'Install RAID monitoring plugin'
-      when: 'monitoring_plugins__check_raid | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_raid.yml'
-
-    - name: 'Install reboot monitoring plugin'
-      when: 'monitoring_plugins__check_reboot | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_reboot.yml'
-
-    - name: 'Install running kernel monitoring plugin'
-      when: 'monitoring_plugins__check_running_kernel | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_running_kernel.yml'
-
-    - name: 'Install systemd monitoring plugin'
-      when: 'monitoring_plugins__check_systemd | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_systemd.yml'
-
-    - name: 'Install pgactivity monitoring plugin'
-      when: 'monitoring_plugins__check_pgactivity | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_pgactivity.yml'
-
-    - name: 'Install pass alive monitoring plugin'
-      when: 'monitoring_plugins__check_pass_alive | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_pass_alive.yml'
-
-    - name: 'Install pushover notification plugin'
-      when: 'monitoring_plugins__notification_pushover | bool'
-      ansible.builtin.include_tasks:
-        file: 'notification_pushover.yml'
-
-    - name: 'Install Rocket.Chat notification plugin'
-      when: 'monitoring_plugins__notification_rocketchat | bool'
-      ansible.builtin.include_tasks:
-        file: 'notification_rocketchat.yml'
-
-    - name: 'Store MariaDB credentials'
-      when: 'monitoring_plugins__credentials_mariadb | bool'
-      ansible.builtin.include_tasks:
-        file: 'credentials_mariadb.yml'
+    - name: 'Store PostgreSQL credentials'
+      no_log: true
+      ansible.builtin.copy:
+        dest: "{{ monitoring_plugins__home_dir }}/{{ item.name }}"
+        content: "{{ item.content }}"
+        owner: "{{ monitoring_plugins__user }}"
+        group: "{{ monitoring_plugins__group }}"
+        mode: '0400'
+      loop:
+        - name: '.pg_service.conf'
+          content: |
+            [nagios]
+            host={{ monitoring_plugins__postgresql_credentials.host }}
+            port={{ monitoring_plugins__postgresql_credentials.port }}
+            user={{ monitoring_plugins__postgresql_credentials.user }}
+        - name: '.pgpass'
+          content: |
+            {{ [monitoring_plugins__postgresql_credentials.host, monitoring_plugins__postgresql_credentials.port, 'postgres',
+                monitoring_plugins__postgresql_credentials.user, monitoring_plugins__postgresql_credentials.password] | join(':') }}
+      when: "'pgactivity' in monitoring_plugins__plugins"
 
     - name: 'Store MySQL credentials'
-      when: 'monitoring_plugins__credentials_mysql | bool'
-      ansible.builtin.include_tasks:
-        file: 'credentials_mysql.yml'
+      no_log: true
+      ansible.builtin.copy:
+        dest: "{{ monitoring_plugins__home_dir }}/.my.cnf"
+        content: |
+          [client]
+          user={{ monitoring_plugins__mysql_credentials.user }}
+          password={{ monitoring_plugins__mysql_credentials.password }}
+        owner: "{{ monitoring_plugins__user }}"
+        group: "{{ monitoring_plugins__group }}"
+        mode: '0400'
+      when: monitoring_plugins__mysql_credentials | length > 0
 
-    - name: 'Install TLS certificate monitoring plugin'
-      when: 'monitoring_plugins__check_tls_cert | bool'
-      ansible.builtin.include_tasks:
-        file: 'check_tls_cert.yml'
+    - name: 'Remove plugins that are not selected'
+      when: monitoring_plugins__prune | bool
+      block:
+
+        - name: 'Remove files of plugins that are not selected'
+          ansible.builtin.file:
+            dest: "{{ item }}"
+            state: 'absent'
+          loop: >-
+            {{ (monitoring_plugins__unselected | map(attribute='files', default=[]) | flatten
+                + monitoring_plugins__unselected | map(attribute='links', default=[]) | flatten)
+               | map('regex_replace', '^', monitoring_plugins__plugin_local_dir + '/') | list
+               + monitoring_plugins__unselected | map(attribute='configs', default=[]) | flatten
+               | map('regex_replace', '^', monitoring_plugins__plugin_etc_dir + '/') | list
+               + monitoring_plugins__legacy_files
+               + ([] if 'pgactivity' in monitoring_plugins__plugins
+                  else [monitoring_plugins__home_dir + '/.pg_service.conf', monitoring_plugins__home_dir + '/.pgpass'])
+               + ([] if monitoring_plugins__mysql_credentials | length > 0 else [monitoring_plugins__home_dir + '/.my.cnf']) }}
+
+        - name: 'Remove sudoers entries of plugins that are not selected'
+          community.general.sudoers:
+            name: "{{ item }}"
+            sudoers_path: "{{ monitoring_plugins__sudoers_dir }}"
+            state: 'absent'
+          loop: >-
+            {{ monitoring_plugins__unselected | selectattr('sudo', 'defined') | map(attribute='name')
+               | map('replace', '_', '-') | map('regex_replace', '^', 'icinga-run-') | list
+               + monitoring_plugins__legacy_sudoers }}
