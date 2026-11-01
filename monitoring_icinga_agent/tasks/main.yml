@@ -2,104 +2,181 @@
 
 - name: 'Install and configure Icinga 2 agent'
   tags: [ 'monitoring_icinga_agent' ]
+  vars:
+    monitoring_icinga_agent__changed: >-
+      {{ monitoring_icinga_agent__config_result is changed
+         or monitoring_icinga_agent__certs_result is changed
+         or monitoring_icinga_agent__features_result is changed
+         or monitoring_icinga_agent__disabled_result is changed
+         or monitoring_icinga_agent__override_result is changed }}
   block:
 
     - name: 'Include OS-specific variables'
       ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
+      loop: "{{ query('ansible.builtin.first_found', monitoring_icinga_agent__os_vars) }}"
+      vars:
+        monitoring_icinga_agent__os_vars:
+          - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+          - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+
+    - name: 'Validate settings'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__missing | length == 0
+          - monitoring_icinga_agent__api_bind_port | string is match('^[0-9]+$')
+          - monitoring_icinga_agent__parent_port | string is match('^[0-9]+$')
+        fail_msg: >-
+          The Icinga 2 agent needs icinga_node_name, icinga_zone_name, icinga_parent_name, icinga_ticket_salt and icinga_cert_source_dir,
+          missing: {{ monitoring_icinga_agent__missing | join(', ') | default('none', true) }}.
+          icinga_api_bind_port and icinga_parent_port must be numbers.
+        quiet: true
+      vars:
+        monitoring_icinga_agent__missing: >-
+          {{ {'icinga_node_name': monitoring_icinga_agent__node_name,
+              'icinga_zone_name': monitoring_icinga_agent__zone_name,
+              'icinga_parent_name': monitoring_icinga_agent__parent_name,
+              'icinga_ticket_salt': monitoring_icinga_agent__ticket_salt,
+              'icinga_cert_source_dir': monitoring_icinga_agent__cert_source_dir}
+             | dict2items | selectattr('value', 'eq', '') | map(attribute='key') | list }}
 
     - name: 'Install packages'
       ansible.builtin.apt:
-        update_cache: yes
-        install_recommends: no
         pkg: "{{ monitoring_icinga_agent__packages }}"
+        install_recommends: false
+        cache_valid_time: 3600
 
     - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ item.name }}"
+        dest: "{{ item.dest }}"
         owner: "{{ item.owner | default(monitoring_icinga_agent__user) }}"
         group: "{{ item.group | default(monitoring_icinga_agent__group) }}"
         mode: "{{ item.mode | default('0750') }}"
         state: 'directory'
-      with_items:
-        - name: "{{ monitoring_icinga_agent__local_etc_dir }}"
+      loop:
+        - dest: "{{ monitoring_icinga_agent__local_etc_dir }}"
           mode: '0755'
-        - name: "{{ monitoring_icinga_agent__local_plugins_dir }}"
+        - dest: "{{ monitoring_icinga_agent__local_plugins_dir }}"
           owner: 'root'
           group: 'root'
           mode: '0755'
-        - name: "{{ monitoring_icinga_agent__cert_dir }}"
+        - dest: "{{ monitoring_icinga_agent__cert_dir }}"
+        - dest: "{{ monitoring_icinga_agent__systemd_override_dir }}"
+          owner: 'root'
+          group: 'root'
+          mode: '0755'
+      loop_control:
+        label: "{{ item.dest }}"
 
-    - name: 'Configuration'
+    - name: 'Generate configuration'
       ansible.builtin.template:
         src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
+        dest: "{{ monitoring_icinga_agent__etc_dir }}/{{ item.dest }}"
         owner: "{{ monitoring_icinga_agent__user }}"
         group: "{{ monitoring_icinga_agent__group }}"
         mode: '0400'
-      with_items:
+      loop:
         - src: 'constants.conf.j2'
-          dest: "{{ monitoring_icinga_agent__etc_dir }}/constants.conf"
+          dest: 'constants.conf'
         - src: 'icinga2.conf.j2'
-          dest: "{{ monitoring_icinga_agent__etc_dir }}/icinga2.conf"
+          dest: 'icinga2.conf'
         - src: 'zones.conf.j2'
-          dest: "{{ monitoring_icinga_agent__etc_dir }}/zones.conf"
+          dest: 'zones.conf'
         - src: 'features-api.conf.j2'
-          dest: "{{ monitoring_icinga_agent__etc_dir }}/features-available/api.conf"
+          dest: 'features-available/api.conf'
         - src: 'features-checker.conf.j2'
-          dest: "{{ monitoring_icinga_agent__etc_dir }}/features-available/checker.conf"
+          dest: 'features-available/checker.conf'
         - src: 'features-mainlog.conf.j2'
-          dest: "{{ monitoring_icinga_agent__etc_dir }}/features-available/mainlog.conf"
-      notify:
-        - 'Restart Icinga'
+          dest: 'features-available/mainlog.conf'
+      loop_control:
+        label: "{{ item.dest }}"
+      register: 'monitoring_icinga_agent__config_result'
 
-    - name: 'Disable features'
-      ansible.builtin.file:
-        path: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled/{{ item }}"
-        state: 'absent'
-      with_items:
-        - 'command.conf'
-        - 'compatlog.conf'
-        - 'debuglog.conf'
-        - 'elasticsearch.conf'
-        - 'gelf.conf'
-        - 'graphite.conf'
-        - 'icingadb.conf'
-        - 'influxdb.conf'
-        - 'influxdb2.conf'
-        - 'journald.conf'
-        - 'livestatus.conf'
-        - 'notification.conf'
-        - 'opentsdb.conf'
-        - 'perfdata.conf'
-        - 'syslog.conf'
-      notify:
-        - 'Restart Icinga'
+    # The systemd override copies the certificates on every start, e.g. after a renewal,
+    # the role copies them as well to check the configuration before the first start
+    - name: 'Copy certificates'
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ monitoring_icinga_agent__cert_dir }}/{{ item.dest }}"
+        remote_src: true
+        owner: "{{ monitoring_icinga_agent__user }}"
+        group: "{{ monitoring_icinga_agent__group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - src: "{{ monitoring_icinga_agent__cert_source_ca_file }}"
+          dest: 'ca.crt'
+          mode: '0644'
+        - src: "{{ monitoring_icinga_agent__cert_source_cert_file }}"
+          dest: "{{ monitoring_icinga_agent__node_name }}.crt"
+          mode: '0644'
+        - src: "{{ monitoring_icinga_agent__cert_source_key_file }}"
+          dest: "{{ monitoring_icinga_agent__node_name }}.key"
+          mode: '0400'
+      loop_control:
+        label: "{{ item.dest }}"
+      register: 'monitoring_icinga_agent__certs_result'
 
     - name: 'Enable features'
       ansible.builtin.file:
-        path: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled/{{ item }}"
-        src: "../features-available/{{ item }}"
+        path: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled/{{ item }}.conf"
+        src: "../features-available/{{ item }}.conf"
         state: 'link'
-      with_items:
-        - 'api.conf'
-        - 'checker.conf'
-        - 'mainlog.conf'
-      notify:
-        - 'Restart Icinga'
+      loop: "{{ monitoring_icinga_agent__features }}"
+      register: 'monitoring_icinga_agent__features_result'
 
-    - name: 'Create systemd service override directory'
+    - name: 'Find enabled features'
+      ansible.builtin.find:
+        paths: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled"
+        file_type: 'any'
+      register: 'monitoring_icinga_agent__enabled_features'
+
+    - name: 'Disable features not managed by the role'
       ansible.builtin.file:
-        path: "{{ monitoring_icinga_agent__systemd_override_dir }}"
-        state: 'directory'
-      when: 'monitoring_icinga_agent__cert_source_dir | length > 0'
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ monitoring_icinga_agent__enabled_features.files | map(attribute='path')
+           | reject('in', monitoring_icinga_agent__features
+                          | map('regex_replace', '^', monitoring_icinga_agent__etc_dir + '/features-enabled/')
+                          | map('regex_replace', '$', '.conf') | list)
+           | list }}
+      register: 'monitoring_icinga_agent__disabled_result'
 
-    - name: 'Modify systemd service to copy certificates'
+    - name: 'Install systemd override to copy the certificates'
       ansible.builtin.template:
         src: 'override.conf.j2'
         dest: "{{ monitoring_icinga_agent__systemd_override_dir }}/override.conf"
-      when: 'monitoring_icinga_agent__cert_source_dir | length > 0'
-      notify:
-        - 'Restart Icinga'
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'monitoring_icinga_agent__override_result'
+
+    - name: 'Check the Icinga 2 configuration'
+      ansible.builtin.command: 'icinga2 daemon -C'
+      register: 'monitoring_icinga_agent__check_result'
+      changed_when: false
+      failed_when: false
+      when: monitoring_icinga_agent__changed | bool
+
+    - name: 'Assert the Icinga 2 configuration is valid'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__check_result.rc == 0
+        fail_msg: "{{ monitoring_icinga_agent__check_result.stdout_lines | select('search', 'critical/|Error') | list | join(' ') }}"
+        quiet: true
+      when: monitoring_icinga_agent__changed | bool
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Start and enable Icinga 2'
+      ansible.builtin.systemd_service:
+        name: 'icinga2'
+        daemon_reload: "{{ monitoring_icinga_agent__override_result is changed }}"
+        state: "{{ 'restarted' if monitoring_icinga_agent__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        monitoring_icinga_agent__running: >-
+          {{ (ansible_facts.services['icinga2.service'].state | default('')) == 'running' }}
+        monitoring_icinga_agent__restart: >-
+          {{ monitoring_icinga_agent__running | bool and monitoring_icinga_agent__changed | bool }}
+      when: 'not ansible_check_mode'

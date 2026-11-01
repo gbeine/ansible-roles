@@ -1,0 +1,118 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icinga_agent__test_node: "{{ monitoring_icinga_agent__test_vars.icinga_node_name }}"
+
+  tasks:
+
+    - name: 'Read the state of the Icinga 2 service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'icinga2' ]
+      register: 'monitoring_icinga_agent__test_active'
+      changed_when: false
+      failed_when: false
+      until: monitoring_icinga_agent__test_active.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read whether the Icinga 2 service is enabled'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-enabled', 'icinga2' ]
+      register: 'monitoring_icinga_agent__test_enabled'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the journal of the Icinga 2 service'
+      ansible.builtin.command: 'journalctl -u icinga2 --no-pager -n 40'
+      register: 'monitoring_icinga_agent__test_journal'
+      changed_when: false
+      when: monitoring_icinga_agent__test_active.stdout != 'active'
+
+    - name: 'Assert the Icinga 2 service is active and enabled'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__test_active.stdout == 'active'
+          - monitoring_icinga_agent__test_enabled.stdout == 'enabled'
+        fail_msg: >-
+          {{ monitoring_icinga_agent__test_active.stdout }}/{{ monitoring_icinga_agent__test_enabled.stdout }}:
+          {{ monitoring_icinga_agent__test_journal.stdout_lines | default([]) }}
+
+    - name: 'Validate the Icinga 2 configuration'
+      ansible.builtin.command: 'icinga2 daemon -C'
+      changed_when: false
+
+    - name: 'Find the enabled features'
+      ansible.builtin.find:
+        paths: '/etc/icinga2/features-enabled'
+        file_type: 'any'
+      register: 'monitoring_icinga_agent__test_features'
+
+    - name: 'Assert only the features of the role are enabled, notification of the package is disabled'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__test_features.files | map(attribute='path') | map('basename') | sort == [ 'api.conf', 'checker.conf', 'mainlog.conf' ]
+        fail_msg: "{{ monitoring_icinga_agent__test_features.files | map(attribute='path') | map('basename') | sort }}"
+
+    - name: 'Read the zones configuration'
+      ansible.builtin.slurp:
+        src: '/etc/icinga2/zones.conf'
+      register: 'monitoring_icinga_agent__test_zones'
+
+    - name: 'Assert the agent does not connect to the parent without icinga_parent_host'
+      ansible.builtin.assert:
+        that:
+          - ('object Endpoint "' + monitoring_icinga_agent__test_vars.icinga_parent_name + '"') in monitoring_icinga_agent__test_zones_content
+          - ('parent = "' + monitoring_icinga_agent__test_vars.icinga_zone_name + '"') in monitoring_icinga_agent__test_zones_content
+          - monitoring_icinga_agent__test_zones_content is not search('host =')
+        fail_msg: "{{ monitoring_icinga_agent__test_zones_content }}"
+      vars:
+        monitoring_icinga_agent__test_zones_content: "{{ monitoring_icinga_agent__test_zones.content | b64decode }}"
+
+    - name: 'Read the state of the certificates'
+      ansible.builtin.stat:
+        path: "/var/lib/icinga2/certs/{{ item }}"
+      loop: [ 'ca.crt', "{{ monitoring_icinga_agent__test_node }}.crt", "{{ monitoring_icinga_agent__test_node }}.key" ]
+      register: 'monitoring_icinga_agent__test_certs'
+
+    - name: 'Assert the certificates belong to the Icinga user and the key is only readable by it'
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == 'nagios'
+          - not item.item.endswith('.key') or item.stat.mode == '0400'
+        fail_msg: "{{ item.item }}: {{ item.stat.pw_name | default('') }} {{ item.stat.mode | default('absent') }}"
+        quiet: true
+      loop: "{{ monitoring_icinga_agent__test_certs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Wait for the API port of Icinga 2'
+      ansible.builtin.wait_for:
+        host: '127.0.0.1'
+        port: 5665
+        timeout: 60
+
+    - name: 'Connect to the API of Icinga 2 with TLS'
+      ansible.builtin.command:
+        argv: [ 'openssl', 's_client', '-connect', '127.0.0.1:5665', '-CAfile', "{{ monitoring_icinga_agent__test_ca_dir }}/ca.crt", '-brief' ]
+        stdin: ''
+      register: 'monitoring_icinga_agent__test_tls'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the API presents the certificate of the agent signed by the CA'
+      ansible.builtin.assert:
+        that:
+          - >-
+            monitoring_icinga_agent__test_tls_output is search('CN ?= ?' + monitoring_icinga_agent__test_node)
+          - >-
+            monitoring_icinga_agent__test_tls_output is search('Verification: OK')
+        fail_msg: "{{ monitoring_icinga_agent__test_tls_output }}"
+      vars:
+        monitoring_icinga_agent__test_tls_output: "{{ monitoring_icinga_agent__test_tls.stdout + monitoring_icinga_agent__test_tls.stderr }}"

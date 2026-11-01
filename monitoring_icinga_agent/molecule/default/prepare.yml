@@ -1,0 +1,57 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icinga_agent__test_node: "{{ monitoring_icinga_agent__test_vars.icinga_node_name }}"
+    monitoring_icinga_agent__test_node_dir: "{{ monitoring_icinga_agent__test_cert_source_dir }}/{{ monitoring_icinga_agent__test_node }}"
+
+  tasks:
+
+    # The package enables the feature notification and starts Icinga 2,
+    # the role has to disable the feature and restart Icinga 2
+    - name: 'Install Icinga 2 with the defaults of the package'
+      ansible.builtin.apt:
+        pkg: [ 'icinga2', 'openssl' ]
+        install_recommends: false
+        update_cache: true
+
+    - name: 'Create the directories of the CA and the certificates'
+      ansible.builtin.file:
+        dest: "{{ item }}"
+        mode: '0700'
+        state: 'directory'
+      loop:
+        - "{{ monitoring_icinga_agent__test_ca_dir }}"
+        - "{{ monitoring_icinga_agent__test_node_dir }}"
+
+    - name: 'Create the CA'
+      ansible.builtin.command:
+        argv: [ 'openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '30', '-subj', '/CN=Molecule Icinga CA',
+                '-keyout', "{{ monitoring_icinga_agent__test_ca_dir }}/ca.key", '-out', "{{ monitoring_icinga_agent__test_ca_dir }}/ca.crt" ]
+        creates: "{{ monitoring_icinga_agent__test_ca_dir }}/ca.crt"
+
+    - name: 'Create the key and the certificate request of the agent'
+      ansible.builtin.command:
+        argv: [ 'openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-subj', "/CN={{ monitoring_icinga_agent__test_node }}",
+                '-keyout', "{{ monitoring_icinga_agent__test_node_dir }}/privkey.pem", '-out', "{{ monitoring_icinga_agent__test_ca_dir }}/agent.csr" ]
+        creates: "{{ monitoring_icinga_agent__test_node_dir }}/privkey.pem"
+
+    - name: 'Sign the certificate of the agent'
+      ansible.builtin.command:
+        argv: [ 'openssl', 'x509', '-req', '-days', '30', '-in', "{{ monitoring_icinga_agent__test_ca_dir }}/agent.csr",
+                '-CA', "{{ monitoring_icinga_agent__test_ca_dir }}/ca.crt", '-CAkey', "{{ monitoring_icinga_agent__test_ca_dir }}/ca.key",
+                '-CAcreateserial', '-out', "{{ monitoring_icinga_agent__test_node_dir }}/cert.pem" ]
+        creates: "{{ monitoring_icinga_agent__test_node_dir }}/cert.pem"
+
+    - name: 'Create chain.pem and fullchain.pem like certbot'
+      ansible.builtin.shell:
+        cmd: >-
+          cp {{ monitoring_icinga_agent__test_ca_dir }}/ca.crt chain.pem
+          && cat cert.pem chain.pem > fullchain.pem
+        chdir: "{{ monitoring_icinga_agent__test_node_dir }}"
+        creates: "{{ monitoring_icinga_agent__test_node_dir }}/fullchain.pem"

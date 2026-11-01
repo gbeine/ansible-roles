@@ -1,0 +1,48 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the main PID of Icinga 2 before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value icinga2'
+      register: 'monitoring_icinga_agent__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with a changed log severity'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ monitoring_icinga_agent__test_vars
+           | combine({'icinga_main_log_severity': monitoring_icinga_agent__test_side_effect_severity})
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_icinga_agent with changed log severity'
+      ansible.builtin.include_role:
+        name: 'monitoring_icinga_agent'
+
+    - name: 'Read the main PID of Icinga 2 after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value icinga2'
+      register: 'monitoring_icinga_agent__test_pid_after'
+      changed_when: false
+
+    - name: 'Read the feature mainlog'
+      ansible.builtin.slurp:
+        src: '/etc/icinga2/features-available/mainlog.conf'
+      register: 'monitoring_icinga_agent__test_mainlog'
+
+    - name: 'Assert Icinga 2 was restarted with the changed configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__test_pid_after.stdout != '0'
+          - monitoring_icinga_agent__test_pid_after.stdout != monitoring_icinga_agent__test_pid_before.stdout
+          - ('severity = "' + monitoring_icinga_agent__test_side_effect_severity + '"') in (monitoring_icinga_agent__test_mainlog.content | b64decode)
+        fail_msg: >-
+          PID {{ monitoring_icinga_agent__test_pid_before.stdout }} -> {{ monitoring_icinga_agent__test_pid_after.stdout }},
+          {{ monitoring_icinga_agent__test_mainlog.content | b64decode }}
