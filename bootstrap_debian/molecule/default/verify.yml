@@ -94,6 +94,32 @@
             that:
               - bootstrap_debian__test_repositories.results | map(attribute='stat.exists') | min
 
+        - name: 'Check the repository files that are not configured'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ bootstrap_debian__test_stale_sources }}"
+          register: 'bootstrap_debian__test_stale'
+
+        - name: 'Find all repository files'
+          ansible.builtin.find:
+            paths: '/etc/apt/sources.list.d'
+            patterns: [ '*.sources', '*.list' ]
+          register: 'bootstrap_debian__test_sources'
+
+        - name: 'Assert the repository files that are not configured are removed or kept'
+          ansible.builtin.assert:
+            that:
+              - >-
+                bootstrap_debian__test_stale.results | selectattr('stat.exists') | list | length
+                == (0 if bootstrap_debian__expect.stale_sources_removed else bootstrap_debian__test_stale_sources | length)
+              - >-
+                not bootstrap_debian__expect.stale_sources_removed
+                or (bootstrap_debian__test_sources.files | map(attribute='path') | map('basename') | sort)
+                   == (bootstrap_debian__expect.repositories | map('regex_replace', '$', '.sources') | sort)
+            fail_msg: >-
+              Existing: {{ bootstrap_debian__test_stale.results | selectattr('stat.exists') | map(attribute='item') | join(', ') }},
+              files: {{ bootstrap_debian__test_sources.files | map(attribute='path') | map('basename') | sort | join(', ') }}
+
     - name: 'Verify packages'
       block:
 

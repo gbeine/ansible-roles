@@ -1,6 +1,6 @@
 ---
 
-- name: Add repositories
+- name: 'Add repositories'
   ansible.builtin.deb822_repository:
     name: "{{ item.name }}"
     types: "{{ item.types | default('deb') }}"
@@ -10,13 +10,46 @@
     signed_by: "{{ item.signed_by | default(omit) }}"
     architectures: "{{ item.architectures | default(omit) }}"
     enabled: "{{ item.enabled | default(true) }}"
-    state: present
+    state: 'present'
   loop: "{{ bootstrap_debian__repositories }}"
   loop_control:
     label: "{{ item.name }}"
-  register: bootstrap_debian__repositories_result
+  register: 'bootstrap_debian__repositories_result'
 
-- name: Update package cache
+- name: 'Remove repositories that are not configured'
+  when: bootstrap_debian__repositories_prune | bool
+  block:
+
+    - name: 'Find repository files'
+      ansible.builtin.find:
+        paths: "{{ bootstrap_debian__apt_sources_dir }}"
+        patterns: [ '*.sources', '*.list' ]
+      register: 'bootstrap_debian__repository_files'
+
+    # deb822_repository removes the key it stored for the repository as well
+    - name: 'Remove deb822 repositories that are not configured'
+      ansible.builtin.deb822_repository:
+        name: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ bootstrap_debian__repository_files.files | map(attribute='path') | select('match', '.*\.sources$')
+           | map('basename') | map('regex_replace', '\.sources$', '')
+           | reject('in', bootstrap_debian__repositories | map(attribute='name') | list) | list }}
+      register: 'bootstrap_debian__repositories_removed'
+
+    - name: 'Remove one-line style repository files'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ bootstrap_debian__repository_files.files | map(attribute='path') | select('match', '.*\.list$') | list
+           + [bootstrap_debian__apt_sources_list] }}
+      register: 'bootstrap_debian__repository_lists_removed'
+
+- name: 'Update package cache'
   ansible.builtin.apt:
     update_cache: true
-  when: bootstrap_debian__repositories_result is changed
+  when: >-
+    bootstrap_debian__repositories_result is changed
+    or (bootstrap_debian__repositories_removed | default({})) is changed
+    or (bootstrap_debian__repository_lists_removed | default({})) is changed

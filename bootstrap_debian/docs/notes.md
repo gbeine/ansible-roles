@@ -29,7 +29,7 @@ debian_repositories:
     signed_by: 'https://repo.example.org/key.asc'
 ```
 
-- On Debian 12 the installer writes `/etc/apt/sources.list`, which is not removed. Remove it manually to avoid duplicate sources.
+- Repositories that are not configured are removed: `*.sources` in `/etc/apt/sources.list.d` without an entry in `debian_repositories` (including keys stored by the role for them), all `*.list` files in `/etc/apt/sources.list.d` and `/etc/apt/sources.list`. Additional repositories therefore belong to `debian_repositories`. With `debian_repositories_prune: false` the role keeps them.
 - Bind mounts in `debian_mounts` default to `fs: none` and `options: rw,bind`.
 - This role replaces the former roles `bootstrap_hosts`, `bootstrap_logrotate`, `bootstrap_networking`, `bootstrap_packages`, `bootstrap_repositories`, `bootstrap_storage`, `bootstrap_timezone`, `bootstrap_accounts`, `apt_common` and `apt_unattended_upgrades`. The inventory variables were renamed:
 
@@ -94,8 +94,8 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 
 | Platform | Tested |
 |---|---|
-| `molecule-bootstrap-debian-minimal` | repositories, packages, timezone, hostname and hosts with defaults |
-| `molecule-bootstrap-debian-full` | `/etc/hosts` managed by cloud-init (not generated), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults |
+| `molecule-bootstrap-debian-full` | `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 
