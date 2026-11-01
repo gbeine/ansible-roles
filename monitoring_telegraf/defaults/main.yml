@@ -5,18 +5,26 @@
 # https://ansible-roles.org/roles/monitoring-telegraf
 #
 
-monitoring_telegraf__use_podman: "{{ telegraf_use_podman | default(true) }}"
-
 monitoring_telegraf__home: "{{ telegraf_home | mandatory }}"
 monitoring_telegraf__ip: "{{ telegraf_ip | mandatory }}"
 monitoring_telegraf__ipv6: "{{ telegraf_ipv6 }}"
 monitoring_telegraf__network: "{{ telegraf_network | mandatory }}"
 monitoring_telegraf__hostname: "{{ telegraf_hostname | mandatory }}"
 monitoring_telegraf__timezone: "{{ telegraf_timezone | mandatory }}"
+monitoring_telegraf__labels: "{{ telegraf_labels | default({}) }}"
 
 monitoring_telegraf__version: "{{ telegraf_version | default('alpine') }}"
 
+monitoring_telegraf__publish: "{{ telegraf_publish | default([]) }}"
+monitoring_telegraf__volumes: "{{ telegraf_volumes | default([]) }}"
+
+monitoring_telegraf__environment: "{{ monitoring_telegraf__environment_default | combine(telegraf_environment | default({})) }}"
+monitoring_telegraf__secrets: "{{ telegraf_secrets | default([]) }}"
+
 monitoring_telegraf__container: "{{ monitoring_telegraf__podman_container_default | combine(telegraf_container | default({})) }}"
+
+monitoring_telegraf__autoupdate_enabled: "{{ telegraf_autoupdate_enabled | default(false) }}"
+monitoring_telegraf__autoupdate_schedule: "{{ telegraf_autoupdate_schedule | default('*-*-* 04:00:00') }}"
 
 monitoring_telegraf__agent_interval: "{{ telegraf_agent_interval | default('10s') }}"
 monitoring_telegraf__agent_round_interval: "{{ telegraf_agent_round_interval | default(true) }}"
@@ -27,17 +35,23 @@ monitoring_telegraf__agent_flush_interval: "{{ telegraf_agent_flush_interval | d
 monitoring_telegraf__agent_flush_jitter: "{{ telegraf_agent_flush_jitter | default('0s') }}"
 monitoring_telegraf__agent_precision: "{{ telegraf_agent_precision | default('0s') }}"
 monitoring_telegraf__agent_omit_hostname: "{{ telegraf_agent_omit_hostname | default(true) }}"
+monitoring_telegraf__agent: >-
+  {{ {'interval': monitoring_telegraf__agent_interval,
+      'round_interval': monitoring_telegraf__agent_round_interval | bool,
+      'metric_batch_size': monitoring_telegraf__agent_metric_batch_size | int,
+      'metric_buffer_limit': monitoring_telegraf__agent_metric_buffer_limit | int,
+      'collection_jitter': monitoring_telegraf__agent_collection_jitter,
+      'flush_interval': monitoring_telegraf__agent_flush_interval,
+      'flush_jitter': monitoring_telegraf__agent_flush_jitter,
+      'precision': monitoring_telegraf__agent_precision,
+      'omit_hostname': monitoring_telegraf__agent_omit_hostname | bool}
+     | combine(telegraf_agent | default({})) }}
 
 monitoring_telegraf__global_tags: "{{ telegraf_global_tags | default({}) }}"
-monitoring_telegraf__outputs: "{{ telegraf_outputs | mandatory }}"
-monitoring_telegraf__inputs: "{{ telegraf_inputs | mandatory }}"
+monitoring_telegraf__outputs: "{{ telegraf_outputs | default([]) }}"
+monitoring_telegraf__inputs: "{{ telegraf_inputs | default([]) }}"
 monitoring_telegraf__processors: "{{ telegraf_processors | default([]) }}"
 monitoring_telegraf__aggregators: "{{ telegraf_aggregators | default([]) }}"
-
-monitoring_telegraf__sudoers: "{{ telegraf_sudoers | default([]) }}"
-
-monitoring_telegraf__systemd_override_unit: "{{ telegraf_systemd_override_unit | default([]) }}"
-monitoring_telegraf__systemd_override_service: "{{ telegraf_systemd_override_service | default([]) }}"
 
 #
 # Defaults - do not change
@@ -45,11 +59,37 @@ monitoring_telegraf__systemd_override_service: "{{ telegraf_systemd_override_ser
 
 monitoring_telegraf__etc_dir: '/etc/telegraf'
 
+# User and group of telegraf in the Alpine image
+monitoring_telegraf__uid: 100
+monitoring_telegraf__gid: 101
+
+monitoring_telegraf__environment_default:
+  TZ: "{{ monitoring_telegraf__timezone }}"
+
+# The configuration rendered with community.general.to_toml,
+# lists of plugins are grouped by plugin and become arrays of tables, e.g. [[inputs.cpu]]
+monitoring_telegraf__config:
+  global_tags: "{{ monitoring_telegraf__global_tags }}"
+  agent: "{{ monitoring_telegraf__agent }}"
+  outputs: >-
+    {{ dict(monitoring_telegraf__outputs | groupby('plugin') | map('first')
+       | zip(monitoring_telegraf__outputs | groupby('plugin') | map('last') | map('community.general.remove_keys', target=['plugin']))) }}
+  inputs: >-
+    {{ dict(monitoring_telegraf__inputs | groupby('plugin') | map('first')
+       | zip(monitoring_telegraf__inputs | groupby('plugin') | map('last') | map('community.general.remove_keys', target=['plugin']))) }}
+  processors: >-
+    {{ dict(monitoring_telegraf__processors | groupby('type') | map('first')
+       | zip(monitoring_telegraf__processors | groupby('type') | map('last') | map('community.general.remove_keys', target=['type']))) }}
+  aggregators: >-
+    {{ dict(monitoring_telegraf__aggregators | groupby('type') | map('first')
+       | zip(monitoring_telegraf__aggregators | groupby('type') | map('last') | map('community.general.remove_keys', target=['type']))) }}
+
 monitoring_telegraf__podman_name: 'telegraf'
 monitoring_telegraf__podman_image: 'docker.io/telegraf'
 monitoring_telegraf__podman_tag: "{{ monitoring_telegraf__version }}"
 
 monitoring_telegraf__podman_home: "{{ monitoring_telegraf__home }}"
+monitoring_telegraf__podman_config_file: "{{ monitoring_telegraf__podman_home }}/telegraf.conf"
 
 monitoring_telegraf__podman_container_default:
   name: "{{ monitoring_telegraf__podman_name }}"
@@ -59,7 +99,16 @@ monitoring_telegraf__podman_container_default:
   ipv6: "{{ monitoring_telegraf__ipv6 | default(omit) }}"
   network: "{{ monitoring_telegraf__network }}"
   timezone: "{{ monitoring_telegraf__timezone }}"
-  volumes:
-    - "/etc/localtime:/etc/localtime:ro"
-    - "/etc/timezone:/etc/timezone:ro"
-    - "{{ monitoring_telegraf__podman_home }}/telegraf.conf:{{ monitoring_telegraf__etc_dir }}/telegraf.conf"
+  environment: "{{ monitoring_telegraf__environment }}"
+  labels: "{{ monitoring_telegraf__labels }}"
+  publish: "{{ monitoring_telegraf__publish }}"
+  secrets: >-
+    {{ (monitoring_telegraf__secrets | map(attribute='name') | zip(monitoring_telegraf__secrets | map(attribute='target'))
+        | map('join', ',type=env,target=') | list)
+      if (monitoring_telegraf__secrets | default([]) | length > 0)
+      else omit }}
+  volumes: >-
+    {{ ['/etc/localtime:/etc/localtime:ro',
+        '/etc/timezone:/etc/timezone:ro',
+        monitoring_telegraf__podman_config_file + ':' + monitoring_telegraf__etc_dir + '/telegraf.conf:ro']
+       + monitoring_telegraf__volumes }}

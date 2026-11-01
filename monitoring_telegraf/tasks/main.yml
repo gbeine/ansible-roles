@@ -1,15 +1,119 @@
 ---
 
 - name: 'Install Telegraf'
-  tags: [ 'monitoring_telegraf'  ]
+  tags: [ 'monitoring_telegraf' ]
   block:
 
-    - name: 'Deploy Telegraf container'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'monitoring_telegraf__use_podman'
+    - name: 'Validate plugins and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__outputs | length > 0
+          - monitoring_telegraf__inputs | length > 0
+          - (monitoring_telegraf__outputs + monitoring_telegraf__inputs) | rejectattr('plugin', 'defined') | list | length == 0
+          - (monitoring_telegraf__processors + monitoring_telegraf__aggregators) | rejectattr('type', 'defined') | list | length == 0
+          - monitoring_telegraf__secrets | rejectattr('name', 'defined') | list | length == 0
+          - monitoring_telegraf__secrets | rejectattr('data', 'defined') | list | length == 0
+          - monitoring_telegraf__secrets | rejectattr('target', 'defined') | list | length == 0
+          - monitoring_telegraf__secrets_in_environment | length == 0
+        fail_msg: >-
+          Telegraf needs at least one output in telegraf_outputs and one input in telegraf_inputs,
+          every output and input needs plugin, every processor and aggregator needs type.
+          Every secret needs name, data and target, secrets must not be set in telegraf_environment:
+          {{ monitoring_telegraf__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        monitoring_telegraf__secrets_in_environment: >-
+          {{ monitoring_telegraf__secrets | selectattr('target', 'defined') | map(attribute='target')
+             | select('in', monitoring_telegraf__environment.keys() | list) | list }}
 
-    - name: 'Install Telegraf package'
-      ansible.builtin.include_tasks:
-        file: 'apt.yml'
-      when: 'not monitoring_telegraf__use_podman'
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ monitoring_telegraf__podman_home }}"
+        mode: '0755'
+        state: 'directory'
+
+    - name: 'Generate configuration'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          {{ monitoring_telegraf__config | dict2items | rejectattr('value', 'eq', {}) | items2dict | community.general.to_toml }}
+        dest: "{{ monitoring_telegraf__podman_config_file }}"
+        owner: "{{ monitoring_telegraf__uid }}"
+        group: "{{ monitoring_telegraf__gid }}"
+        mode: '0400'
+      register: 'monitoring_telegraf__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_telegraf__secrets }}"
+      register: 'monitoring_telegraf__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_telegraf__container.name }}"
+        hostname: "{{ monitoring_telegraf__container.hostname }}"
+        image: "{{ monitoring_telegraf__container.image }}"
+        ip: "{{ monitoring_telegraf__container.ip }}"
+        ip6: "{{ monitoring_telegraf__container.ipv6 | default(omit) }}"
+        network: "{{ monitoring_telegraf__container.network }}"
+        timezone: "{{ monitoring_telegraf__container.timezone }}"
+        env: "{{ monitoring_telegraf__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_telegraf__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_telegraf__container.expose | default(omit) }}"
+        label: "{{ monitoring_telegraf__container.labels | default(omit) }}"
+        publish: "{{ monitoring_telegraf__container.publish | default(omit) }}"
+        secrets: "{{ monitoring_telegraf__container.secrets | default(omit) }}"
+        volume: "{{ monitoring_telegraf__container.volumes | default(omit) }}"
+        cap_add:
+          - 'cap_net_raw'
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if monitoring_telegraf__container.requires is defined %}
+          Requires={{ monitoring_telegraf__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'monitoring_telegraf__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_telegraf__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if monitoring_telegraf__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        monitoring_telegraf__running: >-
+          {{ (ansible_facts.services[monitoring_telegraf__container.name + '.service'].state | default('')) == 'running' }}
+        monitoring_telegraf__restart: >-
+          {{ monitoring_telegraf__running | bool
+             and (monitoring_telegraf__config_result is changed
+                  or monitoring_telegraf__secrets_result is changed
+                  or monitoring_telegraf__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_telegraf__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_telegraf__container.name }}"
+        container_image: "{{ monitoring_telegraf__container.image }}"
+        container_schedule: "{{ monitoring_telegraf__autoupdate_schedule }}"

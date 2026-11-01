@@ -1,0 +1,111 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_telegraf__test_config_file: "{{ monitoring_telegraf__test_vars.telegraf_home }}/telegraf.conf"
+    monitoring_telegraf__test_metrics_file: "{{ monitoring_telegraf__test_metrics_dir }}/metrics.out"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/telegraf.container'
+      register: 'monitoring_telegraf__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + monitoring_telegraf__test_vars.telegraf_ip) in monitoring_telegraf__test_lines
+          - "'Secret=telegraf_molecule_secret,type=env,target=MOLECULE_SECRET' in monitoring_telegraf__test_lines"
+          - monitoring_telegraf__test_lines | select('match', 'Environment=.*MOLECULE_ENV=' + monitoring_telegraf__test_side_effect_env) | list | length == 1
+          - monitoring_telegraf__test_lines | select('search', monitoring_telegraf__test_secret) | list | length == 0
+          - monitoring_telegraf__test_lines | select('match', 'Volume=' + monitoring_telegraf__test_metrics_dir + ':/metrics') | list | length == 1
+        fail_msg: "Quadlet: {{ monitoring_telegraf__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_telegraf__test_lines: "{{ (monitoring_telegraf__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Check the podman secret'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'telegraf_molecule_secret' ]
+      changed_when: false
+
+    - name: 'Read the state of the configuration'
+      ansible.builtin.stat:
+        path: "{{ monitoring_telegraf__test_config_file }}"
+      register: 'monitoring_telegraf__test_config_stat'
+
+    - name: 'Parse the configuration as TOML'
+      ansible.builtin.command:
+        argv:
+          - 'python3'
+          - '-c'
+          - |
+            import json, sys, tomllib
+            with open(sys.argv[1], 'rb') as f:
+                print(json.dumps(tomllib.load(f)))
+          - "{{ monitoring_telegraf__test_config_file }}"
+      register: 'monitoring_telegraf__test_config'
+      changed_when: false
+
+    - name: 'Assert the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__test_config_stat.stat.mode == '0400'
+          - monitoring_telegraf__test_config_stat.stat.uid == 100
+          - monitoring_telegraf__test_toml.global_tags.secret == '${MOLECULE_SECRET}'
+          - monitoring_telegraf__test_toml.agent.interval == '2s'
+          - monitoring_telegraf__test_toml.outputs.file | length == 1
+          - monitoring_telegraf__test_toml.outputs.file[0].files == [ '/metrics/metrics.out' ]
+          - monitoring_telegraf__test_toml.inputs.keys() | sort == [ 'cpu', 'mem' ]
+          - not monitoring_telegraf__test_toml.inputs.cpu[0].percpu
+          - "'processors' not in monitoring_telegraf__test_toml"
+        fail_msg: "Configuration: {{ monitoring_telegraf__test_config.stdout }}"
+      vars:
+        monitoring_telegraf__test_toml: "{{ monitoring_telegraf__test_config.stdout | from_json }}"
+
+    - name: 'Read the state of the telegraf service'
+      ansible.builtin.command: 'systemctl is-active telegraf'
+      register: 'monitoring_telegraf__test_service'
+      changed_when: false
+      failed_when: false
+      until: monitoring_telegraf__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the telegraf service'
+      ansible.builtin.command: 'journalctl -u telegraf --no-pager -n 40'
+      register: 'monitoring_telegraf__test_journal'
+      changed_when: false
+
+    - name: 'Assert the telegraf service is active'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__test_service.stdout == 'active'
+        fail_msg: "{{ monitoring_telegraf__test_service.stdout }}: {{ monitoring_telegraf__test_journal.stdout_lines }}"
+
+    - name: 'Read the metrics written by telegraf after the side effect'
+      ansible.builtin.command:
+        argv: [ 'grep', '-F', "env={{ monitoring_telegraf__test_side_effect_env }}", "{{ monitoring_telegraf__test_metrics_file }}" ]
+      register: 'monitoring_telegraf__test_metrics'
+      changed_when: false
+      failed_when: false
+      until: >-
+        monitoring_telegraf__test_metrics.stdout_lines | select('match', '^cpu,') | list | length > 0
+        and monitoring_telegraf__test_metrics.stdout_lines | select('match', '^mem,') | list | length > 0
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the metrics carry the tags of the environment and the secret'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__test_metrics.stdout_lines | select('match', '^cpu,') | list | length > 0
+          - monitoring_telegraf__test_metrics.stdout_lines | select('match', '^mem,') | list | length > 0
+          - monitoring_telegraf__test_metrics.stdout_lines | select('search', 'secret=' + monitoring_telegraf__test_secret) | list | length > 0
+        fail_msg: >-
+          {{ monitoring_telegraf__test_metrics.stdout_lines[-5:] | default([]) }}
+          {{ monitoring_telegraf__test_journal.stdout_lines }}

@@ -1,0 +1,40 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the main PID of telegraf before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value telegraf'
+      register: 'monitoring_telegraf__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with a changed environment'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ monitoring_telegraf__test_vars
+           | combine({'telegraf_environment': {'MOLECULE_ENV': monitoring_telegraf__test_side_effect_env}})
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_telegraf with changed environment'
+      ansible.builtin.include_role:
+        name: 'monitoring_telegraf'
+
+    - name: 'Read the main PID of telegraf after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value telegraf'
+      register: 'monitoring_telegraf__test_pid_after'
+      changed_when: false
+
+    - name: 'Assert telegraf was restarted'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__test_pid_after.stdout != '0'
+          - monitoring_telegraf__test_pid_after.stdout != monitoring_telegraf__test_pid_before.stdout
+        fail_msg: "PID {{ monitoring_telegraf__test_pid_before.stdout }} -> {{ monitoring_telegraf__test_pid_after.stdout }}"
