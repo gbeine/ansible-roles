@@ -1,0 +1,82 @@
+---
+- name: 'Side effect'
+  hosts: 'molecule-postgresql'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_postgresql__test_case: "{{ database_postgresql__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_postgresql__test_vars: "{{ database_postgresql__test_common | combine(database_postgresql__test_case.role_vars) }}"
+
+  tasks:
+
+    - name: 'Read the main PID of PostgreSQL before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value postgresql'
+      register: 'database_postgresql__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with changed max_connections'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ database_postgresql__test_vars
+           | combine({'postgresql_settings': {'max_connections': database_postgresql__test_side_effect_max_connections}}, recursive=true)
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run database_postgresql with changed max_connections'
+      ansible.builtin.include_role:
+        name: 'database_postgresql'
+
+    - name: 'Read the main PID of PostgreSQL after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value postgresql'
+      register: 'database_postgresql__test_pid_after'
+      changed_when: false
+
+    - name: 'Assert PostgreSQL was restarted'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__test_pid_after.stdout != '0'
+          - database_postgresql__test_pid_after.stdout != database_postgresql__test_pid_before.stdout
+        fail_msg: "PID {{ database_postgresql__test_pid_before.stdout }} -> {{ database_postgresql__test_pid_after.stdout }}"
+
+    - name: 'Negative test: another version must fail before changing anything'
+      block:
+
+        - name: 'Set the role variables with PostgreSQL 19'
+          ansible.builtin.set_fact:
+            postgresql_version: 19
+
+        - name: 'Run database_postgresql with PostgreSQL 19, EXPECTED TO FAIL because of the data of PostgreSQL 18'
+          ansible.builtin.include_role:
+            name: 'database_postgresql'
+
+        - name: 'Fail, the version change was not detected'
+          ansible.builtin.fail:
+            msg: 'The role did not detect the data of PostgreSQL 18'
+
+      rescue:
+
+        - name: 'Assert the expected failure because of the data of PostgreSQL 18'
+          ansible.builtin.assert:
+            that:
+              - "'contains data of PostgreSQL 18' in (ansible_failed_result.msg | default(''))"
+            fail_msg: "Unexpected failure: {{ ansible_failed_result.msg | default('') }}"
+
+    - name: 'Set the role variables back to PostgreSQL 18'
+      ansible.builtin.set_fact:
+        postgresql_version: 18
+
+    - name: 'Read the state of the quadlet unit after the failed run'
+      ansible.builtin.command: 'grep -c "postgres:18-alpine" /etc/containers/systemd/postgresql.container'
+      register: 'database_postgresql__test_image_after'
+      changed_when: false
+
+    - name: 'Assert the failed run did not change the container'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__test_image_after.stdout == '1'
+        fail_msg: "Image line count {{ database_postgresql__test_image_after.stdout }}"

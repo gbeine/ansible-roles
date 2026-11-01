@@ -1,0 +1,133 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_postgresql__test_case: "{{ database_postgresql__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_postgresql__test_expect: "{{ database_postgresql__test_case.expect }}"
+    database_postgresql__test_data_dir: >-
+      {{ database_postgresql__test_common.postgresql_home }}/data/{{ database_postgresql__test_expect.version }}/docker
+    database_postgresql__test_ip: "{{ database_postgresql__test_common.postgresql_ip }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/postgresql.container'
+      register: 'database_postgresql__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + database_postgresql__test_ip) in database_postgresql__test_lines
+          - "'Secret=postgres_password,type=env,target=POSTGRES_PASSWORD' in database_postgresql__test_lines"
+          - ('Image=' + database_postgresql__test_case.image) in database_postgresql__test_lines
+          - database_postgresql__test_lines | select('search', database_postgresql__test_password) | list | length == 0
+        fail_msg: "Quadlet: {{ database_postgresql__test_quadlet.content | b64decode }}"
+      vars:
+        database_postgresql__test_lines: "{{ (database_postgresql__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the PostgreSQL service'
+      ansible.builtin.command: 'systemctl is-active postgresql'
+      register: 'database_postgresql__test_service'
+      changed_when: false
+      failed_when: false
+      until: database_postgresql__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the PostgreSQL service'
+      ansible.builtin.command: 'journalctl -u postgresql --no-pager -n 40'
+      register: 'database_postgresql__test_journal'
+      changed_when: false
+      when: database_postgresql__test_service.stdout != 'active'
+
+    - name: 'Assert the PostgreSQL service is active'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__test_service.stdout == 'active'
+        fail_msg: "{{ database_postgresql__test_service.stdout }}: {{ database_postgresql__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read PG_VERSION and postgresql.conf'
+      ansible.builtin.slurp:
+        src: "{{ database_postgresql__test_data_dir }}/{{ item }}"
+      loop: [ 'PG_VERSION', 'postgresql.conf' ]
+      register: 'database_postgresql__test_files'
+
+    - name: 'Assert the data directory and the configuration of the version'
+      ansible.builtin.assert:
+        that:
+          - (database_postgresql__test_files.results[0].content | b64decode | trim) == database_postgresql__test_expect.version
+          - >-
+            ('max_connections = ' + database_postgresql__test_expect.max_connections)
+            in database_postgresql__test_config_lines | map('regex_replace', '\s+#.*$', '') | list
+          - database_postgresql__test_config_lines | select('match', '^wal_level = .logical.') | list | length == 1
+          - database_postgresql__test_config_lines | select('match', '^' + database_postgresql__test_expect.default_setting) | list | length == 1
+          - database_postgresql__test_config_lines | select('match', '^#bonjour = off') | list | length == 1
+        fail_msg: "Configuration: {{ database_postgresql__test_config_lines | select('match', '^[a-z]') | list | join(', ') }}"
+      vars:
+        database_postgresql__test_config_lines: "{{ (database_postgresql__test_files.results[1].content | b64decode).splitlines() }}"
+
+    - name: 'Wait for PostgreSQL'
+      ansible.builtin.wait_for:
+        host: "{{ database_postgresql__test_ip }}"
+        port: 5432
+        timeout: 60
+
+    - name: 'Read the settings of the running server'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'postgresql', 'psql', '-U', 'postgres', '-tAc', "SHOW {{ item }}" ]
+      loop: [ 'server_version', 'max_connections', 'wal_level', 'log_min_duration_statement', 'TimeZone' ]
+      register: 'database_postgresql__test_show'
+      changed_when: false
+
+    - name: 'Assert the settings of the running server'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__test_values[0] is match(database_postgresql__test_expect.version)
+          - database_postgresql__test_values[1] == database_postgresql__test_expect.max_connections
+          - database_postgresql__test_values[2] == 'logical'
+          - database_postgresql__test_values[3] == '250ms'
+          - database_postgresql__test_values[4] == 'Europe/Berlin'
+        fail_msg: "Settings: {{ database_postgresql__test_values | join(', ') }}"
+      vars:
+        database_postgresql__test_values: "{{ database_postgresql__test_show.results | map(attribute='stdout') | list }}"
+
+    - name: 'Log in as molecule_app with the password over TCP'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '-e', "PGPASSWORD={{ item.password }}", 'postgresql',
+                'psql', '-h', "{{ database_postgresql__test_ip }}", '-U', 'molecule_app', '-d', 'molecule_db', '-tAc', 'SELECT current_user' ]
+      loop:
+        - password: "{{ database_postgresql__test_app_password }}"
+          success: true
+        - password: 'wrong-password'
+          success: false
+      loop_control:
+        label: "{{ 'correct' if item.success else 'wrong' }} password"
+      register: 'database_postgresql__test_login'
+      changed_when: false
+      failed_when: (database_postgresql__test_login.rc == 0) != item.success
+
+    - name: 'Read the owner of the database and the replication slots'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'postgresql', 'psql', '-U', 'postgres', '-tAc', "{{ item }}" ]
+      loop:
+        - "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'molecule_db'"
+        - "SELECT slot_type FROM pg_replication_slots WHERE slot_name = 'molecule_slot'"
+        - "SELECT has_database_privilege('molecule_app', 'molecule_db', 'CONNECT')"
+      register: 'database_postgresql__test_objects'
+      changed_when: false
+
+    - name: 'Assert the database, the replication slot and the privileges'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__test_values[0] == 'molecule_app'
+          - database_postgresql__test_values[1] == 'logical'
+          - database_postgresql__test_values[2] == 't'
+        fail_msg: "Objects: {{ database_postgresql__test_values | join(', ') }}"
+      vars:
+        database_postgresql__test_values: "{{ database_postgresql__test_objects.results | map(attribute='stdout') | list }}"

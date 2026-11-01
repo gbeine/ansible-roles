@@ -1,49 +1,341 @@
 ---
 
 - name: 'Install PostgreSQL'
-  tags: [ 'database_postgresql'  ]
+  tags: [ 'database_postgresql' ]
   block:
 
-    - name: 'Include OS-specific variables (podman)'
+    - name: 'Include OS-specific variables'
       ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}-podman.yml"
-        - "{{ ansible_facts['distribution'] }}-podman.yml"
-      when: 'database_postgresql__use_podman'
+      loop: "{{ query('ansible.builtin.first_found', database_postgresql__os_vars) }}"
+      vars:
+        database_postgresql__os_vars:
+          - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+          - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
 
-    - name: 'Include OS-specific variables (native)'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}.yml"
-      when: 'not database_postgresql__use_podman'
+    - name: 'Validate the version'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__version | string is match('^[0-9]+$')
+          - database_postgresql__version | int in database_postgresql__versions
+        fail_msg: >-
+          PostgreSQL {{ database_postgresql__version }} is not supported,
+          supported versions: {{ database_postgresql__versions.keys() | join(', ') }}.
+          Versions before 18 use another data directory in the image and are not supported anymore.
+        quiet: true
 
-    - name: 'Install PostgreSQL packages'
+    - name: 'Include settings of the version'
+      ansible.builtin.include_vars:
+        file: "settings-{{ database_postgresql__version | int }}.yml"
+
+    - name: 'Validate settings, accounts and access rules'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__password | length > 0
+          - database_postgresql__unknown_settings | length == 0
+          - database_postgresql__accounts | rejectattr('name', 'defined') | list | length == 0
+          - database_postgresql__accounts_without_password | length == 0
+          - database_postgresql__databases | rejectattr('name', 'defined') | list | length == 0
+          - database_postgresql__slots | rejectattr('name', 'defined') | list | length == 0
+          - database_postgresql__server_hba | rejectattr('type', 'defined') | list | length == 0
+          - database_postgresql__server_hba | rejectattr('database', 'defined') | list | length == 0
+          - database_postgresql__server_hba | rejectattr('user', 'defined') | list | length == 0
+          - database_postgresql__server_hba | rejectattr('method', 'defined') | list | length == 0
+        fail_msg: >-
+          PostgreSQL needs postgresql_password for the user postgres.
+          Unknown settings for PostgreSQL {{ database_postgresql__version }}:
+          {{ database_postgresql__unknown_settings | join(', ') | default('none', true) }},
+          settings of extensions need a dot in the name, e.g. pg_stat_statements.track.
+          Accounts without password in postgresql_passwords: {{ database_postgresql__accounts_without_password | join(', ') | default('none', true) }}.
+          Every account, database and slot needs name, every entry of postgresql_hba needs type, database, user and method.
+        quiet: true
+      vars:
+        database_postgresql__unknown_settings: >-
+          {{ database_postgresql__settings.keys()
+             | reject('in', database_postgresql__release_settings | map(attribute='name') | list)
+             | reject('search', '\.') | sort }}
+        database_postgresql__accounts_without_password: >-
+          {{ database_postgresql__accounts | selectattr('name', 'defined') | map(attribute='name')
+             | reject('in', database_postgresql__passwords.keys() | list) | list }}
+
+    - name: 'WARNING: pre-release of PostgreSQL'
+      ansible.builtin.debug:
+        msg: >-
+          PostgreSQL {{ database_postgresql__version }} is a pre-release ({{ database_postgresql__tag }}),
+          do not use it in production. An upgrade to the final release may need pg_upgrade or a dump.
+      when: database_postgresql__versions[database_postgresql__version | int].prerelease | bool
+
+    - name: 'Find the data directories of all versions'
+      ansible.builtin.find:
+        paths: "{{ database_postgresql__podman_data_root }}"
+        patterns: [ 'PG_VERSION' ]
+        recurse: true
+        depth: 3
+      register: 'database_postgresql__data_dirs'
+
+    - name: 'Validate the data directory of the version'
+      ansible.builtin.assert:
+        that:
+          - >-
+            database_postgresql__found_versions | length == 0
+            or (database_postgresql__version | string) in database_postgresql__found_versions
+        fail_msg: >-
+          {{ database_postgresql__podman_data_root }} contains data of PostgreSQL {{ database_postgresql__found_versions | join(', ') }},
+          but none of PostgreSQL {{ database_postgresql__version }}.
+          Upgrade the data with pg_upgrade to {{ database_postgresql__podman_data_dir }},
+          set postgresql_version back or move the old data away, see docs/notes.md of the role.
+        quiet: true
+      vars:
+        database_postgresql__found_versions: >-
+          {{ database_postgresql__data_dirs.files | map(attribute='path')
+             | select('match', '^' + database_postgresql__podman_data_root + '/[0-9]+/docker/PG_VERSION$')
+             | map('dirname') | map('dirname') | map('basename') | list }}
+
+    - name: 'Install packages'
       ansible.builtin.apt:
-        update_cache: 'yes'
-        install_recommends: 'no'
         pkg: "{{ database_postgresql__packages }}"
-      register: 'database_postgresql_packages_installation_result'
+        install_recommends: false
+        cache_valid_time: 3600
 
-    - name: 'Install PostgreSQL using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'database_postgresql__use_podman'
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
+        state: 'directory'
+      loop:
+        - dest: "{{ database_postgresql__podman_data_root }}"
+        - dest: "{{ database_postgresql__podman_backup_dir }}"
+      loop_control:
+        label: "{{ item.dest }}"
 
-    - name: 'Initialize PostgreSQL'
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: 'postgres_password'
+        data: "{{ database_postgresql__password }}"
+      register: 'database_postgresql__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_postgresql__container.name }}"
+        hostname: "{{ database_postgresql__container.hostname }}"
+        image: "{{ database_postgresql__container.image }}"
+        ip: "{{ database_postgresql__container.ip }}"
+        ip6: "{{ database_postgresql__container.ipv6 | default(omit) }}"
+        network: "{{ database_postgresql__container.network }}"
+        timezone: "{{ database_postgresql__container.timezone }}"
+        env: "{{ database_postgresql__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_postgresql__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_postgresql__container.expose | default(omit) }}"
+        label: "{{ database_postgresql__container.labels | default(omit) }}"
+        publish: "{{ database_postgresql__container.publish | default(omit) }}"
+        secrets: "{{ database_postgresql__container.secrets | default(omit) }}"
+        volume: "{{ database_postgresql__container.volumes | default(omit) }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% if database_postgresql__container.exec_start_pre is defined %}
+          {% for command in database_postgresql__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if database_postgresql__container.requires is defined %}
+          Requires={{ database_postgresql__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'database_postgresql__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_postgresql__container.name }}"
+        daemon_reload: true
+        state: 'started'
+        enabled: true
+      when: 'not ansible_check_mode'
+
+    # On the first start initdb creates the cluster and the configuration files of the image
+    - name: 'Wait for PostgreSQL'
+      ansible.builtin.wait_for:
+        host: "{{ database_postgresql__container.ip }}"
+        port: "{{ database_postgresql__port }}"
+        timeout: 120
+      when: 'not ansible_check_mode'
+
+    - name: 'Generate postgresql.conf'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          # PostgreSQL {{ database_postgresql__version }} configuration file,
+          # all parameters of the version, the commented-out settings show the default values.
+          #
+          {% macro pgvalue(v) -%}
+          {%   if v is boolean %}{{ v | ternary('on', 'off') }}
+          {%-  elif v is number %}{{ v }}
+          {%-  else %}'{{ v | string | replace("'", "''") }}'{% endif %}
+          {%- endmacro %}
+          {% set ns = namespace(section='', subsection='') %}
+          {% for setting in database_postgresql__release_settings %}
+          {%   if setting.section != ns.section %}
+          {%     set ns.section = setting.section %}
+          {%     set ns.subsection = '' %}
+
+          #------------------------------------------------------------------------------
+          # {{ setting.section }}
+          #------------------------------------------------------------------------------
+          {%   endif %}
+          {%   if setting.subsection | default('') != ns.subsection %}
+          {%     set ns.subsection = setting.subsection | default('') %}
+
+          # - {{ ns.subsection }} -
+          {%   endif %}
+          {%   if setting.intro is defined %}
+
+          {%     for line in setting.intro.splitlines() %}
+          #{{ (' ' ~ line) if line | length > 0 else '' }}
+          {%     endfor %}
+          {%   endif %}
+          {%   set line = (setting.name ~ ' = ' ~ pgvalue(database_postgresql__settings[setting.name]))
+                          if setting.name in database_postgresql__settings
+                          else ('#' ~ setting.name ~ ' = ' ~ setting.default) %}
+          {%   set description = setting.description.splitlines() %}
+          {%   if description | length > 0 %}
+          {{ line | fill_up_to(39) }} # {{ description | first }}
+          {%     for text in description[1:] %}
+          {{ '' | fill_up_to(39) }} # {{ text }}
+          {%     endfor %}
+          {%   else %}
+          {{ line }}
+          {%   endif %}
+          {% endfor %}
+
+          #------------------------------------------------------------------------------
+          # CUSTOMIZED OPTIONS
+          #------------------------------------------------------------------------------
+
+          {% for name, value in database_postgresql__settings.items()
+                if name not in (database_postgresql__release_settings | map(attribute='name')) %}
+          {{ name }} = {{ pgvalue(value) }}
+          {% endfor %}
+        dest: "{{ database_postgresql__podman_data_dir }}/postgresql.conf"
+        owner: "{{ database_postgresql__uid }}"
+        group: "{{ database_postgresql__gid }}"
+        mode: '0600'
+      register: 'database_postgresql__config_result'
+      when: 'not database_postgresql__configure_from_primary | bool'
+
+    - name: 'Generate access configuration'
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ database_postgresql__podman_data_dir }}/{{ item }}"
+        owner: "{{ database_postgresql__uid }}"
+        group: "{{ database_postgresql__gid }}"
+        mode: '0600'
+      loop: [ 'pg_hba.conf', 'pg_ident.conf' ]
+      register: 'database_postgresql__access_result'
+      when: 'not database_postgresql__configure_from_primary | bool'
+
+    - name: 'Restart container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_postgresql__container.name }}"
+        state: 'restarted'
+      when:
+        - not ansible_check_mode
+        - >-
+          database_postgresql__config_result is changed
+          or database_postgresql__access_result is changed
+          or (database_postgresql__running | bool
+              and (database_postgresql__secrets_result is changed or database_postgresql__quadlet_result is changed))
+      vars:
+        database_postgresql__running: >-
+          {{ (ansible_facts.services[database_postgresql__container.name + '.service'].state | default('')) == 'running' }}
+      register: 'database_postgresql__restart_result'
+
+    - name: 'Wait for PostgreSQL after the restart'
+      ansible.builtin.wait_for:
+        host: "{{ database_postgresql__container.ip }}"
+        port: "{{ database_postgresql__port }}"
+        timeout: 120
+      when: database_postgresql__restart_result is changed
+
+    - name: 'Create accounts, databases, privileges and replication slots'
+      when:
+        - not ansible_check_mode
+        - not database_postgresql__configure_from_primary | bool
+      module_defaults:
+        group/community.postgresql.all:
+          login_user: 'postgres'
+          login_password: "{{ database_postgresql__password }}"
+          login_host: "{{ database_postgresql__container.ip }}"
+          login_port: "{{ database_postgresql__port }}"
       block:
-        - name: 'Initialize PostgreSQL roles'
-          ansible.builtin.include_tasks:
-            file: 'roles.yml'
-        - name: 'Initialize PostgreSQL databases'
-          ansible.builtin.include_tasks:
-            file: 'databases.yml'
-        - name: 'Initialize PostgreSQL privileges'
-          ansible.builtin.include_tasks:
-            file: 'privileges.yml'
-        - name: 'Initialize PostgreSQL slots'
-          ansible.builtin.include_tasks:
-            file: 'slots.yml'
-      when: 'not ansible_check_mode and not podman___update_mode | bool and not database_postgresql__configure_from_primary'
+
+        - name: 'Create accounts'
+          no_log: true
+          community.postgresql.postgresql_user:
+            login_db: 'postgres'
+            name: "{{ item.name }}"
+            comment: "{{ item.comment | default(omit) }}"
+            password: "{{ database_postgresql__passwords[item.name] }}"
+            role_attr_flags: "{{ item.attributes | default(omit) }}"
+          loop: "{{ database_postgresql__accounts }}"
+
+        - name: 'Create databases'
+          community.postgresql.postgresql_db:
+            name: "{{ item.name }}"
+            comment: "{{ item.comment | default(omit) }}"
+            owner: "{{ item.owner | default(omit) }}"
+            encoding: "{{ item.encoding | default(omit) }}"
+            lc_collate: "{{ item.lc_collate | default(omit) }}"
+            lc_ctype: "{{ item.lc_ctype | default(omit) }}"
+            locale_provider: "{{ item.locale_provider | default(omit) }}"
+            icu_locale: "{{ item.icu_locale | default(omit) }}"
+            template: "{{ item.template | default(omit) }}"
+            state: 'present'
+          loop: "{{ database_postgresql__databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: 'Grant privileges'
+          community.postgresql.postgresql_privs:
+            login_db: "{{ item.database }}"
+            type: "{{ item.type | default('table') }}"
+            objs: "{{ item.objects | default(omit) }}"
+            privs: "{{ item.privs | default(omit) }}"
+            roles: "{{ item.roles }}"
+            schema: "{{ item.schema | default(omit) }}"
+          loop: "{{ database_postgresql__privileges }}"
+          loop_control:
+            label: "{{ item.database }}: {{ item.roles }}"
+
+        - name: 'Create replication slots'
+          community.postgresql.postgresql_slot:
+            login_db: 'postgres'
+            name: "{{ item.name }}"
+            slot_type: "{{ item.type | default(omit) }}"
+          loop: "{{ database_postgresql__slots }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_postgresql__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_postgresql__container.name }}"
+        container_image: "{{ database_postgresql__container.image }}"
+        container_schedule: "{{ database_postgresql__autoupdate_schedule }}"
