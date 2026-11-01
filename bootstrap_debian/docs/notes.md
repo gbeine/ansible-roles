@@ -11,6 +11,7 @@
 
 - The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by the repositories and storage, so packages can rely on mounted directories.
 - Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files completely.
+- With `debian_cloud_manage_etc_hosts: true` (default `false`) cloud-init manages `/etc/hosts` (`manage_etc_hosts: True` in `/etc/cloud/cloud.cfg.d/99-manage_etc_hosts.cfg`) and the role does not generate it.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
 
@@ -39,7 +40,7 @@ debian_repositories:
 | `timezone` | `debian_timezone` |
 | `dns_hostname` | `debian_hostname` |
 | `hosts` | `debian_hosts` |
-| `cloud_manage_etc_hosts` | `debian_cloud_manage_etc_hosts` |
+| `cloud_manage_etc_hosts` | `debian_cloud_manage_etc_hosts`, default is now `false` |
 | `storage` | `debian_storage` |
 | `mount` | `debian_mounts` |
 | `bootstrap_networking_interfaces` | `debian_network_interfaces` |
@@ -94,7 +95,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Tested |
 |---|---|
 | `molecule-bootstrap-debian-minimal` | repositories, packages, timezone, hostname and hosts with defaults |
-| `molecule-bootstrap-debian-full` | additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-full` | `/etc/hosts` managed by cloud-init (not generated), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 

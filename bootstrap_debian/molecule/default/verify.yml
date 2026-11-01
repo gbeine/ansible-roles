@@ -27,8 +27,38 @@
           ansible.builtin.assert:
             that:
               - (bootstrap_debian__test_hosts.results[0].content | b64decode | trim) == bootstrap_debian__expect.hostname_short
-              - ('127.0.1.1 ' + bootstrap_debian__expect.hostname) in (bootstrap_debian__test_hosts.results[1].content | b64decode)
-              - ('127.0.1.1 ' + bootstrap_debian__expect.hostname_short) in (bootstrap_debian__test_hosts.results[1].content | b64decode)
+              - >-
+                not bootstrap_debian__expect.etc_hosts_managed
+                or ('127.0.1.1 ' + bootstrap_debian__expect.hostname) in bootstrap_debian__test_etc_hosts
+              - >-
+                not bootstrap_debian__expect.etc_hosts_managed
+                or ('127.0.1.1 ' + bootstrap_debian__expect.hostname_short) in bootstrap_debian__test_etc_hosts
+              - >-
+                bootstrap_debian__expect.etc_hosts_managed
+                or lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') not in bootstrap_debian__test_etc_hosts
+            fail_msg: "/etc/hosts: {{ bootstrap_debian__test_etc_hosts }}"
+          vars:
+            bootstrap_debian__test_etc_hosts: "{{ bootstrap_debian__test_hosts.results[1].content | b64decode }}"
+
+        - name: 'Check if cloud config is used'
+          ansible.builtin.stat:
+            path: '/etc/cloud/cloud.cfg'
+          register: 'bootstrap_debian__test_cloud_cfg'
+
+        - name: 'Read the cloud-init hosts configuration'
+          ansible.builtin.slurp:
+            src: '/etc/cloud/cloud.cfg.d/99-manage_etc_hosts.cfg'
+          register: 'bootstrap_debian__test_cloud_hosts'
+          when: bootstrap_debian__test_cloud_cfg.stat.exists
+
+        - name: 'Assert the cloud-init hosts configuration'
+          ansible.builtin.assert:
+            that:
+              - >-
+                ('manage_etc_hosts: ' + ('False' if bootstrap_debian__expect.etc_hosts_managed else 'True'))
+                in (bootstrap_debian__test_cloud_hosts.content | b64decode)
+            fail_msg: "cloud-init: {{ bootstrap_debian__test_cloud_hosts.content | b64decode }}"
+          when: bootstrap_debian__test_cloud_cfg.stat.exists
 
     - name: 'Verify timezone'
       block:
