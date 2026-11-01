@@ -1,0 +1,102 @@
+---
+
+- name: Validate mail accounts
+  ansible.builtin.assert:
+    that:
+      - bootstrap_debian__mail_accounts | length > 0
+      - bootstrap_debian__mail_accounts | rejectattr('name', 'defined') | list | length == 0
+      - bootstrap_debian__mail_accounts | rejectattr('smtp_host', 'defined') | list | length == 0
+      - bootstrap_debian__mail_accounts_auth_incomplete | length == 0
+      - bootstrap_debian__mail_default_account in (bootstrap_debian__mail_accounts | map(attribute='name') | list)
+    fail_msg: >-
+      debian_mail_accounts needs at least one account, every account needs name and smtp_host,
+      accounts with auth need user and password: {{ bootstrap_debian__mail_accounts_auth_incomplete | join(', ') | default('none', true) }},
+      debian_mail_default_account must name one of the accounts: {{ bootstrap_debian__mail_default_account | default('', true) }}
+    quiet: true
+  vars:
+    bootstrap_debian__mail_accounts_auth_incomplete: >-
+      {{ bootstrap_debian__mail_accounts | selectattr('auth', 'defined') | selectattr('auth')
+         | rejectattr('user', 'defined') | map(attribute='name') | list
+         + bootstrap_debian__mail_accounts | selectattr('auth', 'defined') | selectattr('auth')
+         | rejectattr('password', 'defined') | map(attribute='name') | list }}
+
+- name: Install mail packages
+  ansible.builtin.apt:
+    cache_valid_time: "{{ bootstrap_debian__apt_cache_valid_time }}"
+    install_recommends: false
+    pkg: "{{ bootstrap_debian__mail_packages }}"
+
+- name: Generate msmtp configuration
+  ansible.builtin.copy:
+    content: |
+      #
+      # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+      #
+
+      defaults
+      # Construct envelope-from addresses of the form "user@maildomain"
+      auto_from {{ bootstrap_debian__mail_auto_from | bool | ternary('on', 'off') }}
+      maildomain {{ bootstrap_debian__mail_maildomain }}
+      syslog {{ bootstrap_debian__mail_syslog }}
+      {% if bootstrap_debian__mail_aliases | length > 0 %}
+      aliases {{ bootstrap_debian__mail_aliases_file }}
+      {% endif %}
+      {% for account in bootstrap_debian__mail_accounts %}
+
+      account {{ account.name }}
+      host {{ account.smtp_host }}
+      {% if account.smtp_port is defined %}
+      port {{ account.smtp_port }}
+      {% endif %}
+      {% if account.from is defined %}
+      from {{ account.from }}
+      {% endif %}
+      {% if account.tls is defined %}
+      tls {{ account.tls | bool | ternary('on', 'off') }}
+      {% endif %}
+      {% if account.starttls is defined %}
+      tls_starttls {{ account.starttls | bool | ternary('on', 'off') }}
+      {% endif %}
+      {% if account.tls_certcheck is defined %}
+      tls_certcheck {{ account.tls_certcheck | bool | ternary('on', 'off') }}
+      {% endif %}
+      {% if account.auth | default(false) | bool %}
+      auth on
+      user {{ account.user }}
+      password {{ account.password }}
+      {% endif %}
+      {% endfor %}
+
+      account default : {{ bootstrap_debian__mail_default_account }}
+    dest: "{{ bootstrap_debian__mail_config_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: "{{ '0600' if bootstrap_debian__mail_accounts | selectattr('password', 'defined') | list | length > 0 else '0644' }}"
+  diff: false
+
+- name: Generate mail aliases
+  ansible.builtin.copy:
+    content: |
+      #
+      # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+      #
+      {% for name, address in bootstrap_debian__mail_aliases.items() %}
+      {{ name }}: {{ address }}
+      {% endfor %}
+    dest: "{{ bootstrap_debian__mail_aliases_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  when: bootstrap_debian__mail_aliases | length > 0
+
+- name: Gather service facts for msmtpd
+  ansible.builtin.service_facts:
+
+- name: Stop and disable msmtpd on the host, it runs as container with the role mail_msmtp
+  ansible.builtin.systemd_service:
+    name: 'msmtpd'
+    state: 'stopped'
+    enabled: false
+  when:
+    - not ansible_check_mode
+    - ansible_facts.services['msmtpd.service'] is defined

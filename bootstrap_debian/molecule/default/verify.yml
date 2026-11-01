@@ -173,3 +173,89 @@
             that:
               - ('APT::Periodic::Unattended-Upgrade "1";') in bootstrap_debian__test_apt_config.stdout_lines
               - ('Unattended-Upgrade::Mail "' + bootstrap_debian__expect.unattended_upgrades.mail + '";') in bootstrap_debian__test_apt_config.stdout_lines
+
+    - name: 'Verify mail'
+      when: bootstrap_debian__expect.mail is defined
+      block:
+
+        - name: 'Read the msmtp configuration and the aliases'
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop:
+            - '/etc/msmtprc'
+            - '/etc/aliases'
+          register: 'bootstrap_debian__test_mail_files'
+
+        - name: 'Read the mode of the msmtp configuration'
+          ansible.builtin.stat:
+            path: '/etc/msmtprc'
+          register: 'bootstrap_debian__test_msmtprc'
+
+        - name: 'Assert the msmtp configuration and the aliases'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_msmtprc.stat.mode == bootstrap_debian__expect.mail.config_mode
+              - bootstrap_debian__test_msmtprc.stat.pw_name == 'root'
+              - >-
+                ('account default : ' + bootstrap_debian__expect.mail.default_account) in bootstrap_debian__test_msmtprc_lines
+              - >-
+                bootstrap_debian__test_msmtprc_lines | select('match', '^account [^d]') | map('regex_replace', '^account ', '') | list
+                == bootstrap_debian__expect.mail.accounts
+              - "'aliases /etc/aliases' in bootstrap_debian__test_msmtprc_lines"
+              - >-
+                ('root: ' + bootstrap_debian__expect.mail.alias_root) in bootstrap_debian__test_aliases_lines
+            quiet: true
+          vars:
+            bootstrap_debian__test_msmtprc_lines: "{{ (bootstrap_debian__test_mail_files.results[0].content | b64decode).splitlines() }}"
+            bootstrap_debian__test_aliases_lines: "{{ (bootstrap_debian__test_mail_files.results[1].content | b64decode).splitlines() }}"
+
+        - name: 'Read the sendmail binary'
+          ansible.builtin.command: 'readlink -f /usr/sbin/sendmail'
+          register: 'bootstrap_debian__test_sendmail'
+          changed_when: false
+
+        - name: 'Assert sendmail is msmtp'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_sendmail.stdout is search('msmtp')
+            fail_msg: "{{ bootstrap_debian__test_sendmail.stdout }}"
+
+        - name: 'Choose a unique subject for the test mail'
+          ansible.builtin.set_fact:
+            bootstrap_debian__test_mail_subject: "molecule-mail-{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}"
+
+        - name: 'Send a mail to root'
+          ansible.builtin.shell: "echo 'molecule test' | mail -s '{{ bootstrap_debian__test_mail_subject }}' root"
+          changed_when: false
+
+        - name: 'Read the journal of the SMTP sink'
+          ansible.builtin.command: 'journalctl -u molecule-smtp-sink --no-pager'
+          register: 'bootstrap_debian__test_sink_journal'
+          changed_when: false
+          until: bootstrap_debian__test_mail_subject in bootstrap_debian__test_sink_journal.stdout
+          retries: 10
+          delay: 2
+
+        - name: 'Assert the mail was delivered to the SMTP sink'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_mail_subject in bootstrap_debian__test_sink_journal.stdout
+            fail_msg: "{{ bootstrap_debian__test_sink_journal.stdout_lines[-40:] }}"
+
+        # The sink does not log envelope recipients, the SMTP dialog of msmtp shows the alias
+        - name: 'Send a mail to root with msmtp in verbose mode'
+          ansible.builtin.shell: >-
+            printf 'Subject: {{ bootstrap_debian__test_mail_subject }}-alias\n\nmolecule alias test\n'
+            | msmtp -v root
+          register: 'bootstrap_debian__test_msmtp_verbose'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert msmtp delivered the mail to the alias of root'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_msmtp_verbose.rc == 0
+              - >-
+                ('RCPT TO:<' + bootstrap_debian__expect.mail.alias_root + '>')
+                in (bootstrap_debian__test_msmtp_verbose.stdout + bootstrap_debian__test_msmtp_verbose.stderr)
+            fail_msg: "{{ (bootstrap_debian__test_msmtp_verbose.stdout_lines + bootstrap_debian__test_msmtp_verbose.stderr_lines)[-30:] }}"

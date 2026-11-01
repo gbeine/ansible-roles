@@ -40,3 +40,32 @@
           ansible.builtin.command: "mkfs.{{ bootstrap_debian__test_case.expect.storage.fs }} -q '{{ bootstrap_debian__test_case.expect.storage.disk }}'"
           when: bootstrap_debian__test_blkid.stdout | trim | length == 0
           changed_when: true
+
+    - name: 'Start an SMTP sink logging every mail to the journal'
+      when: bootstrap_debian__test_case.expect.mail is defined
+      block:
+
+        - name: 'Install aiosmtpd'
+          ansible.builtin.apt:
+            name: 'python3-aiosmtpd'
+            install_recommends: false
+            update_cache: true
+
+        - name: 'Check for the SMTP sink'
+          ansible.builtin.command: 'systemctl is-active molecule-smtp-sink'
+          register: 'bootstrap_debian__test_sink'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Start the SMTP sink'
+          ansible.builtin.command: >-
+            systemd-run --unit=molecule-smtp-sink
+            python3 -u -m aiosmtpd -n -l 127.0.0.1:{{ bootstrap_debian__test_case.expect.mail.sink_port }}
+          when: bootstrap_debian__test_sink.stdout != 'active'
+          changed_when: true
+
+        - name: 'Wait for the SMTP sink'
+          ansible.builtin.wait_for:
+            host: '127.0.0.1'
+            port: "{{ bootstrap_debian__test_case.expect.mail.sink_port }}"
+            timeout: 30

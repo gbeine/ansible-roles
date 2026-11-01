@@ -10,7 +10,7 @@
 ```
 
 - The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by the repositories and storage, so packages can rely on mounted directories.
-- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, logrotate and unattended upgrades have to be enabled with `debian_networking_enable`, `debian_logrotate_enable` and `debian_unattended_upgrades_enable`, because they overwrite system configuration files completely.
+- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files completely.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
 
@@ -49,6 +49,42 @@ debian_repositories:
 | `unattended_upgrades_*` | `debian_unattended_upgrades_*` |
 | `bootstrap_<area>_enable` (role `bootstrap`) | `debian_networking_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` |
 
+### Mail
+
+With `debian_mail_enable` the role installs [msmtp](https://marlam.de/msmtp/) as sendmail replacement (`msmtp`, `msmtp-mta`, `bsd-mailx`), writes `/etc/msmtprc` and `/etc/aliases`,
+so mails of cron, unattended upgrades and other local services are delivered to a smarthost.
+The service `msmtpd` of the package `msmtp-mta` is stopped and disabled, the SMTP relay runs as container with the role `mail_msmtp`.
+
+```yaml
+debian_mail_enable: true
+debian_mail_accounts:
+  # msmtpd container of the role mail_msmtp, no TLS and authentication
+  - name: 'relay'
+    smtp_host: '192.168.99.25'
+    smtp_port: 2500
+  - name: 'provider'
+    smtp_host: 'smtp.example.org'
+    smtp_port: 587
+    tls: true
+    starttls: true
+    auth: true
+    user: 'host42@example.org'
+    password: "{{ vault_smtp_password }}"
+    from: 'host42@example.org'
+debian_mail_default_account: 'relay'
+debian_mail_aliases:
+  root: 'admin@example.org'
+  default: 'admin@example.org'
+```
+
+- Every account needs `name` and `smtp_host`, accounts with `auth` need `user` and `password`. Optional keys are `smtp_port`, `from`, `tls`, `starttls` and `tls_certcheck`.
+- `debian_mail_default_account` defaults to the first account.
+- Envelope-from addresses are built as `user@debian_mail_maildomain` (`debian_mail_auto_from`, default `debian_hostname`), msmtp logs with the syslog facility `debian_mail_syslog` (`LOG_MAIL`).
+- `debian_mail_aliases` maps local recipients to addresses, `default` applies to all recipients without own alias.
+- `/etc/msmtprc` is readable for root only as soon as an account has a password, otherwise for all users. With passwords only root and services running as root can send mails.
+- This replaces the client part of the former role `mail_msmtp`: `msmtp_accounts` is now `debian_mail_accounts` with the same keys,
+  `msmtp_aliases` is now `debian_mail_aliases` (a mapping, written to `/etc/aliases`), `msmtp_auto_from`, `msmtp_maildomain` and `msmtp_syslog` are now `debian_mail_auto_from`, `debian_mail_maildomain` and `debian_mail_syslog`.
+
 ### Tests
 
 The molecule scenario `default` runs the role in [tart](https://tart.run) VMs on a macOS controller.
@@ -58,7 +94,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Tested |
 |---|---|
 | `molecule-bootstrap-debian-minimal` | repositories, packages, timezone, hostname and hosts with defaults |
-| `molecule-bootstrap-debian-full` | additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate and unattended upgrades |
+| `molecule-bootstrap-debian-full` | additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 
@@ -72,6 +108,8 @@ Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/ssh
 cd bootstrap_debian
 MOLECULE_TART_IMAGE='debian' molecule test
 ```
+
+For mail, `prepare` starts an SMTP sink (`python3-aiosmtpd`) on `127.0.0.1:2525` as transient unit `molecule-smtp-sink`, `verify` sends a mail to `root` with `mail` and checks in the journal of the sink that it was delivered, then sends a mail with `msmtp -v` and checks in the SMTP dialog that the alias of `root` is used as recipient.
 
 The test cases and expectations are defined in `molecule/default/test_cases.yml`.
 If the additional disk does not appear as `/dev/vdb` in the VM, adjust the device there.
