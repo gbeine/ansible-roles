@@ -1,0 +1,53 @@
+---
+- name: 'Side effect'
+  hosts: 'molecule-fail2ban'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_fail2ban__test_case: "{{ security_fail2ban__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Read the main PID of fail2ban before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value fail2ban'
+      register: 'security_fail2ban__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with a changed findtime of the jail molecule'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ security_fail2ban__test_case.role_vars
+           | combine({'fail2ban_jails': security_fail2ban__test_case.role_vars.fail2ban_jails | rejectattr('name', 'eq', 'molecule') | list
+                      + [ security_fail2ban__test_case.role_vars.fail2ban_jails | selectattr('name', 'eq', 'molecule') | first
+                          | combine({'settings': {'findtime': security_fail2ban__test_side_effect_findtime}}, recursive=true) ]})
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run security_fail2ban with changed findtime'
+      ansible.builtin.include_role:
+        name: 'security_fail2ban'
+
+    - name: 'Read the main PID of fail2ban after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value fail2ban'
+      register: 'security_fail2ban__test_pid_after'
+      changed_when: false
+
+    - name: 'Read the findtime of the jail molecule'
+      ansible.builtin.command: 'fail2ban-client get molecule findtime'
+      register: 'security_fail2ban__test_findtime'
+      changed_when: false
+
+    - name: 'Assert fail2ban was reloaded, not restarted'
+      ansible.builtin.assert:
+        that:
+          - security_fail2ban__jails_result is changed
+          - security_fail2ban__test_pid_after.stdout == security_fail2ban__test_pid_before.stdout
+          - security_fail2ban__test_findtime.stdout | trim == '1200'
+        fail_msg: >-
+          PID {{ security_fail2ban__test_pid_before.stdout }} -> {{ security_fail2ban__test_pid_after.stdout }},
+          findtime {{ security_fail2ban__test_findtime.stdout }}

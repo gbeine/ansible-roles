@@ -1,0 +1,99 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_fail2ban__test_case: "{{ security_fail2ban__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_fail2ban__test_expect: "{{ security_fail2ban__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Check the Debian defaults'
+      ansible.builtin.stat:
+        path: '/etc/fail2ban/jail.d/defaults-debian.conf'
+      register: 'security_fail2ban__test_debian_defaults'
+
+    - name: 'Read the generated configuration'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - '/etc/fail2ban/fail2ban.local'
+        - '/etc/fail2ban/jail.local'
+      register: 'security_fail2ban__test_files'
+
+    - name: 'Assert the generated configuration'
+      ansible.builtin.assert:
+        that:
+          - not security_fail2ban__test_debian_defaults.stat.exists
+          - ('loglevel = ' + security_fail2ban__test_expect.loglevel) in security_fail2ban__test_daemon_lines
+          - "'#allowipv6 = auto' in security_fail2ban__test_daemon_lines"
+          - "'banaction = nftables' in security_fail2ban__test_jail_lines"
+          - "'#bantime.increment = true' in security_fail2ban__test_jail_lines"
+          - "'#ignorecommand = ' in security_fail2ban__test_jail_lines"
+        quiet: true
+      vars:
+        security_fail2ban__test_daemon_lines: "{{ (security_fail2ban__test_files.results[0].content | b64decode).splitlines() }}"
+        security_fail2ban__test_jail_lines: "{{ (security_fail2ban__test_files.results[1].content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of fail2ban'
+      ansible.builtin.command: 'fail2ban-client status'
+      register: 'security_fail2ban__test_status'
+      changed_when: false
+
+    - name: 'Assert the jails'
+      ansible.builtin.assert:
+        that:
+          - >-
+            security_fail2ban__test_status.stdout_lines | select('search', 'Jail list:') | first
+            | regex_replace('^.*Jail list:\\s*', '') | split(',') | map('trim') | sort
+            == security_fail2ban__test_expect.jails
+        fail_msg: "{{ security_fail2ban__test_status.stdout }}"
+
+    - name: 'Read the settings of the jail sshd'
+      ansible.builtin.command: "fail2ban-client get sshd {{ item }}"
+      loop: [ 'actions', 'bantime', 'findtime', 'maxretry', 'journalmatch' ]
+      register: 'security_fail2ban__test_sshd'
+      changed_when: false
+
+    - name: 'Assert the settings of the jail sshd'
+      ansible.builtin.assert:
+        that:
+          - (item.stdout_lines | last | trim) == (security_fail2ban__test_expect.sshd[item.item] | string)
+        fail_msg: "{{ item.item }}: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ security_fail2ban__test_sshd.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Ban an address in the jail molecule'
+      when: security_fail2ban__test_expect.ban | default(false)
+      block:
+
+        - name: 'Write failed logins to the log file'
+          ansible.builtin.shell: >-
+            for i in 1 2 3 4; do echo 'Failed login from {{ security_fail2ban__test_ip }}' >> {{ security_fail2ban__test_logfile }}; done
+          changed_when: true
+
+        - name: 'Read the state of the jail molecule'
+          ansible.builtin.command: 'fail2ban-client status molecule'
+          register: 'security_fail2ban__test_molecule'
+          changed_when: false
+          until: security_fail2ban__test_ip in security_fail2ban__test_molecule.stdout
+          retries: 15
+          delay: 2
+
+        - name: 'Read the nftables ruleset'
+          ansible.builtin.command: 'nft list ruleset'
+          register: 'security_fail2ban__test_nft'
+          changed_when: false
+
+        - name: 'Assert the address is banned'
+          ansible.builtin.assert:
+            that:
+              - security_fail2ban__test_ip in security_fail2ban__test_molecule.stdout
+              - security_fail2ban__test_ip in security_fail2ban__test_nft.stdout
+            fail_msg: "{{ security_fail2ban__test_molecule.stdout }} {{ security_fail2ban__test_nft.stdout }}"

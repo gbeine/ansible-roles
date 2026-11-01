@@ -1,7 +1,15 @@
 ---
 
-- name: 'Install fail2ban'
+- name: 'Install and configure fail2ban'
   tags: [ 'security_fail2ban' ]
+  vars:
+    security_fail2ban__changed: >-
+      {{ security_fail2ban__daemon_result is changed
+         or security_fail2ban__jail_defaults_result is changed
+         or security_fail2ban__jails_result is changed
+         or security_fail2ban__filters_result is changed
+         or security_fail2ban__debian_defaults_result is changed
+         or (security_fail2ban__pruned_result | default({})) is changed }}
   block:
 
     - name: 'Include OS-specific variables'
@@ -12,44 +20,219 @@
         - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
         - "{{ ansible_facts['os_family'] }}.yml"
 
+    - name: 'Include settings of the fail2ban release'
+      ansible.builtin.include_vars:
+        file: "settings-{{ security_fail2ban__release }}.yml"
+
+    - name: 'Validate settings, jails and filters'
+      ansible.builtin.assert:
+        that:
+          - security_fail2ban__unknown_settings | length == 0
+          - security_fail2ban__jails | rejectattr('name', 'defined') | list | length == 0
+          - security_fail2ban__filters | rejectattr('name', 'defined') | list | length == 0
+          - security_fail2ban__filters | rejectattr('definition', 'defined') | list | length == 0
+          - security_fail2ban__filters | map(attribute='definition') | rejectattr('failregex', 'defined') | list | length == 0
+        fail_msg: >-
+          Unknown settings in fail2ban_settings for fail2ban {{ security_fail2ban__release }}:
+          {{ security_fail2ban__unknown_settings | join(', ') | default('none', true) }}.
+          Every jail needs name, every filter needs name and definition.failregex.
+        quiet: true
+      vars:
+        security_fail2ban__unknown_settings: >-
+          {{ security_fail2ban__settings.keys()
+             | difference(security_fail2ban__release_daemon_sections | map(attribute='settings') | flatten | map(attribute='name'))
+             | sort }}
+
     - name: 'Install fail2ban packages'
       ansible.builtin.apt:
-        update_cache: 'yes'
-        install_recommends: 'no'
+        update_cache: true
+        install_recommends: false
         pkg: "{{ security_fail2ban__packages }}"
 
-    - name: 'Configure fail2ban'
-      ansible.builtin.template:
-        src: 'jail.local.j2'
-        dest: '/etc/fail2ban/jail.local'
-        owner: 'root'
-        group: 'root'
-        mode: '644'
-      notify:
-        - 'Restart fail2ban'
+    - name: 'Generate fail2ban.local'
+      ansible.builtin.copy:
+        content: |
+          {% macro value(name, v) -%}
+          {%   if v is boolean %}{{ v | ternary('true', 'false') }}
+          {%-  elif v is iterable and v is not string and v is not mapping %}{{ v | first }}{% for line in v[1:] %}{{ '' }}
+          {{ ' ' * (name | length + 3) }}{{ line }}{% endfor %}
+          {%-  else %}{{ v }}{% endif %}
+          {%- endmacro %}
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          # fail2ban {{ security_fail2ban__release }}
+          #
+          {% for section in security_fail2ban__release_daemon_sections %}
 
-    - name: 'Configure fail2ban filters'
-      ansible.builtin.template:
-        src: 'filter.conf.j2'
-        dest: "/etc/fail2ban/filter.d/{{ item.name }}.conf"
-        owner: 'root'
-        group: 'root'
-        mode: '644'
-      with_items: "{{ security_fail2ban__filter }}"
-      vars:
-        filter: "{{ item }}"
-      notify:
-        - 'Restart fail2ban'
+          [{{ section.name }}]
+          {%   for setting in section.settings %}
+          {%     set set_value = security_fail2ban__settings.get(setting.name) %}
+          {%     set v = value(setting.name, setting.default if set_value is none else set_value) %}
 
-    - name: 'Configure fail2ban jails'
-      ansible.builtin.template:
-        src: 'jail.conf.j2'
-        dest: "/etc/fail2ban/jail.d/{{ item.name }}.conf"
+          {% for line in setting.description.splitlines() %}
+          # {{ line }}
+          {% endfor %}
+          {{ '#' if v | string | length == 0 or (set_value is none and setting.commented | default(false)) }}{{ setting.name }} = {{ v }}
+          {%   endfor %}
+          {% endfor %}
+        dest: "{{ security_fail2ban__etc_dir }}/fail2ban.local"
         owner: 'root'
         group: 'root'
-        mode: '644'
-      with_items: "{{ security_fail2ban__jails }}"
+        mode: '0644'
+      register: 'security_fail2ban__daemon_result'
+
+    - name: 'Generate jail.local'
+      ansible.builtin.copy:
+        content: |
+          {% macro value(name, v) -%}
+          {%   if v is boolean %}{{ v | ternary('true', 'false') }}
+          {%-  elif v is iterable and v is not string and v is not mapping %}{{ v | first }}{% for line in v[1:] %}{{ '' }}
+          {{ ' ' * (name | length + 3) }}{{ line }}{% endfor %}
+          {%-  else %}{{ v }}{% endif %}
+          {%- endmacro %}
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          # fail2ban {{ security_fail2ban__release }}
+          #
+
+          [DEFAULT]
+          {% for setting in security_fail2ban__release_jail_defaults %}
+          {%   set set_value = security_fail2ban__jail_defaults.get(setting.name) %}
+          {%   set v = value(setting.name, setting.default if set_value is none else set_value) %}
+
+          {% for line in setting.description.splitlines() %}
+          # {{ line }}
+          {% endfor %}
+          {{ '#' if v | string | length == 0 or (set_value is none and setting.commented | default(false)) }}{{ setting.name }} = {{ v }}
+          {% endfor %}
+          {% set known = security_fail2ban__release_jail_defaults | map(attribute='name') | list %}
+          {% set additional = security_fail2ban__jail_defaults.keys() | reject('in', known) | sort %}
+          {% if additional | length > 0 %}
+
+          # Additional settings, e.g. parameters of actions
+          {%   for name in additional %}
+          {{ name }} = {{ value(name, security_fail2ban__jail_defaults[name]) }}
+          {%   endfor %}
+          {% endif %}
+        dest: "{{ security_fail2ban__etc_dir }}/jail.local"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'security_fail2ban__jail_defaults_result'
+
+    - name: 'Generate jails'
+      ansible.builtin.copy:
+        content: |
+          {% macro value(name, v) -%}
+          {%   if v is boolean %}{{ v | ternary('true', 'false') }}
+          {%-  elif v is iterable and v is not string and v is not mapping %}{{ v | first }}{% for line in v[1:] %}{{ '' }}
+          {{ ' ' * (name | length + 3) }}{{ line }}{% endfor %}
+          {%-  else %}{{ v }}{% endif %}
+          {%- endmacro %}
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          [{{ item.name }}]
+          enabled = {{ item.enabled | default(true) | bool | ternary('true', 'false') }}
+          {% for name, v in (item.settings | default({})).items() %}
+          {{ name }} = {{ value(name, v) }}
+          {% endfor %}
+        dest: "{{ security_fail2ban__etc_dir }}/jail.d/{{ item.name }}.local"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      loop: "{{ security_fail2ban__jails }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'security_fail2ban__jails_result'
+
+    - name: 'Generate filters'
+      ansible.builtin.copy:
+        content: |
+          {% macro value(name, v) -%}
+          {%   if v is boolean %}{{ v | ternary('true', 'false') }}
+          {%-  elif v is iterable and v is not string and v is not mapping %}{{ v | first }}{% for line in v[1:] %}{{ '' }}
+          {{ ' ' * (name | length + 3) }}{{ line }}{% endfor %}
+          {%-  else %}{{ v }}{% endif %}
+          {%- endmacro %}
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+          {% for section, settings in security_fail2ban__filter_sections if settings | length > 0 %}
+
+          [{{ section }}]
+          {%   for name, v in settings.items() %}
+          {{ name }} = {{ value(name, v) }}
+          {%   endfor %}
+          {% endfor %}
+        dest: "{{ security_fail2ban__etc_dir }}/filter.d/{{ item.name }}.local"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      loop: "{{ security_fail2ban__filters }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'security_fail2ban__filters_result'
       vars:
-        jail: "{{ item }}"
-      notify:
-        - 'Restart fail2ban'
+        security_fail2ban__filter_sections:
+          - [ 'INCLUDES', "{{ item.includes | default({}) }}" ]
+          - [ 'Definition', "{{ item.definition }}" ]
+          - [ 'Init', "{{ item.init | default({}) }}" ]
+
+    - name: 'Remove the Debian defaults, they are part of the defaults of the role'
+      ansible.builtin.file:
+        path: "{{ security_fail2ban__debian_defaults_file }}"
+        state: 'absent'
+      register: 'security_fail2ban__debian_defaults_result'
+
+    - name: 'Remove unmanaged jails and filters'
+      when: 'security_fail2ban__prune | bool'
+      block:
+
+        - name: 'Find jails and filters'
+          ansible.builtin.find:
+            paths:
+              - "{{ security_fail2ban__etc_dir }}/jail.d"
+              - "{{ security_fail2ban__etc_dir }}/filter.d"
+            patterns: '*.local'
+          register: 'security_fail2ban__local_files'
+
+        - name: 'Remove unmanaged jails and filters'
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: 'absent'
+          loop: >-
+            {{ security_fail2ban__local_files.files | map(attribute='path')
+               | reject('in', security_fail2ban__jails | map(attribute='name')
+                              | map('regex_replace', '^', security_fail2ban__etc_dir + '/jail.d/')
+                              | map('regex_replace', '$', '.local') | list)
+               | reject('in', security_fail2ban__filters | map(attribute='name')
+                              | map('regex_replace', '^', security_fail2ban__etc_dir + '/filter.d/')
+                              | map('regex_replace', '$', '.local') | list)
+               | list }}
+          register: 'security_fail2ban__pruned_result'
+
+    - name: 'Test the fail2ban configuration'
+      ansible.builtin.command: 'fail2ban-client --test'
+      changed_when: false
+      when: 'security_fail2ban__changed | bool'
+
+    - name: 'Start and enable fail2ban'
+      ansible.builtin.systemd_service:
+        name: 'fail2ban'
+        state: 'started'
+        enabled: true
+      register: 'security_fail2ban__service_result'
+      when: 'not ansible_check_mode'
+
+    # Reload keeps the current bans, a restart would restore them from the database only
+    - name: 'Reload fail2ban'
+      ansible.builtin.command: 'fail2ban-client reload'
+      changed_when: true
+      when:
+        - not ansible_check_mode
+        - security_fail2ban__changed | bool
+        - security_fail2ban__service_result is not changed

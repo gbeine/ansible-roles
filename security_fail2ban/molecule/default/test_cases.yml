@@ -1,0 +1,56 @@
+---
+security_fail2ban__test_logfile: '/var/log/molecule-auth.log'
+security_fail2ban__test_ip: '192.0.2.10'
+
+security_fail2ban__test_cases:
+
+  # Without variables the role creates the same configuration as a fresh installation of Debian 13
+  - name: 'molecule-fail2ban-default'
+    role_vars: {}
+    expect:
+      jails: [ 'sshd' ]
+      sshd:
+        actions: 'nftables'
+        bantime: '600'
+        findtime: '600'
+        maxretry: '5'
+        journalmatch: '_SYSTEMD_UNIT=ssh.service + _COMM=sshd'
+      loglevel: 'INFO'
+
+  - name: 'molecule-fail2ban'
+    role_vars:
+      fail2ban_settings:
+        loglevel: 'NOTICE'
+      fail2ban_jail_defaults:
+        bantime: '1h'
+        ignoreip: [ '127.0.0.1/8', '::1' ]
+      fail2ban_jails:
+        - name: 'sshd'
+          settings:
+            backend: 'systemd'
+            journalmatch: '_SYSTEMD_UNIT=ssh.service + _COMM=sshd'
+        - name: 'molecule'
+          settings:
+            backend: 'polling'
+            logpath: '/var/log/molecule-auth.log'
+            maxretry: 3
+      fail2ban_filters:
+        - name: 'molecule'
+          definition:
+            datepattern: '{NONE}'
+            failregex:
+              - '^Failed login from <HOST>$'
+              - '^Invalid user \S+ from <HOST>$'
+    expect:
+      jails: [ 'molecule', 'sshd' ]
+      sshd:
+        actions: 'nftables'
+        bantime: '3600'
+        findtime: '600'
+        maxretry: '5'
+        journalmatch: '_SYSTEMD_UNIT=ssh.service + _COMM=sshd'
+      loglevel: 'NOTICE'
+      ban: true
+
+# Changed in side_effect.yml on molecule-fail2ban, fail2ban must be reloaded
+security_fail2ban__test_side_effect_findtime: '20m'
