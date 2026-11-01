@@ -15,9 +15,12 @@ dns_pihole__labels: "{{ pihole_labels | default({}) }}"
 
 dns_pihole__version: "{{ pihole_version | default('latest') }}"
 
-dns_pihole__container: "{{ dns_pihole__podman_container_default | combine(pihole_container | default({})) }}"
+dns_pihole__publish: "{{ pihole_publish | default([]) }}"
 
-dns_pihole__password: "{{ pihole_password | mandatory }}"
+dns_pihole__environment: "{{ dns_pihole__environment_default | combine(pihole_environment | default({})) }}"
+dns_pihole__secrets: "{{ pihole_secrets | default([]) }}"
+
+dns_pihole__container: "{{ dns_pihole__podman_container_default | combine(pihole_container | default({})) }}"
 
 dns_pihole__autoupdate_enabled: "{{ pihole_autoupdate_enabled | default(false) }}"
 dns_pihole__autoupdate_schedule: "{{ pihole_autoupdate_schedule | default('*-*-* 04:00:00') }}"
@@ -26,8 +29,16 @@ dns_pihole__autoupdate_schedule: "{{ pihole_autoupdate_schedule | default('*-*-*
 # Defaults - do not change
 #
 
-dns_pihole__dns_port: 53
-dns_pihole__http_port: 80
+dns_pihole__environment_default:
+  TZ: "{{ dns_pihole__timezone }}"
+  FTLCONF_dns_listeningMode: 'all'
+
+dns_pihole__secrets_required:
+  - 'FTLCONF_webserver_api_password'
+
+# Variables carrying secrets, they must be passed with pihole_secrets
+dns_pihole__secret_variables:
+  - 'FTLCONF_webserver_api_password'
 
 dns_pihole__podman_name: 'pihole'
 dns_pihole__podman_image: 'docker.io/pihole/pihole'
@@ -46,16 +57,13 @@ dns_pihole__podman_container_default:
   ipv6: "{{ dns_pihole__ipv6 | default(omit) }}"
   network: "{{ dns_pihole__network }}"
   timezone: "{{ dns_pihole__timezone }}"
-  environment:
-    FTLCONF_dns_listeningMode: 'all'
-    TZ: "{{ dns_pihole__timezone }}"
+  environment: "{{ dns_pihole__environment }}"
   labels: "{{ dns_pihole__labels }}"
-  publish:
-    - "{{ dns_pihole__dns_port }}:53/tcp"
-    - "{{ dns_pihole__dns_port }}:53/udp"
-    - "{{ dns_pihole__http_port }}:80/tcp"
-  secrets:
-    - "webserver_api_password,type=env,target=FTLCONF_webserver_api_password"
+  publish: "{{ dns_pihole__publish }}"
+  secrets: >-
+    {{ (dns_pihole__secrets | map(attribute='name') | zip(dns_pihole__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
+      if (dns_pihole__secrets | default([]) | length > 0)
+      else omit }}
   volumes:
     - '/etc/localtime:/etc/localtime:ro'
     - '/etc/timezone:/etc/timezone:ro'

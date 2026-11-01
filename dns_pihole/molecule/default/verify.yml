@@ -1,0 +1,113 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_pihole__test_case: "{{ dns_pihole__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_pihole__test_expect: "{{ dns_pihole__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/pihole.container'
+      register: 'dns_pihole__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + dns_pihole__test_expect.ip) in dns_pihole__test_lines
+          - dns_pihole__test_expect.ip6 is none or ('IP6=' + dns_pihole__test_expect.ip6) in dns_pihole__test_lines
+          - dns_pihole__test_expect.ip6 is not none or dns_pihole__test_lines | select('match', 'IP6=') | list | length == 0
+          - "'Secret=pihole_web_password,type=env,target=FTLCONF_webserver_api_password' in dns_pihole__test_lines"
+          - dns_pihole__test_lines | select('match', 'Environment=.*FTLCONF_dns_upstreams=149\\.112\\.112\\.112') | list | length == 1
+          - dns_pihole__test_lines | select('match', 'Environment=.*FTLCONF_dns_listeningMode=all') | list | length == 1
+          - dns_pihole__test_lines | select('search', 'FTLCONF_webserver_api_password=') | list | length == 0
+          - dns_pihole__test_lines | select('match', 'PublishPort=') | list | length == 0
+        fail_msg: "{{ dns_pihole__test_quadlet.content | b64decode }}"
+      vars:
+        dns_pihole__test_lines: "{{ (dns_pihole__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Check the podman secret'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'pihole_web_password' ]
+      changed_when: false
+
+    - name: 'Read the state of the pihole service'
+      ansible.builtin.command: 'systemctl is-active pihole'
+      register: 'dns_pihole__test_service'
+      changed_when: false
+      failed_when: false
+      until: dns_pihole__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the pihole service'
+      ansible.builtin.command: 'journalctl -u pihole --no-pager -n 60'
+      register: 'dns_pihole__test_journal'
+      changed_when: false
+      when: dns_pihole__test_service.stdout != 'active'
+
+    - name: 'Assert the pihole service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_pihole__test_service.stdout == 'active'
+        fail_msg: "{{ dns_pihole__test_service.stdout }}: {{ dns_pihole__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Inspect the pihole container'
+      ansible.builtin.command: 'podman inspect pihole'
+      register: 'dns_pihole__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - dns_pihole__test_net.IPAddress == dns_pihole__test_expect.ip
+          - dns_pihole__test_expect.ip6 is none or dns_pihole__test_net.GlobalIPv6Address == dns_pihole__test_expect.ip6
+        fail_msg: "IPv4 {{ dns_pihole__test_net.IPAddress }}, IPv6 {{ dns_pihole__test_net.GlobalIPv6Address }}"
+      vars:
+        dns_pihole__test_net: >-
+          {{ (dns_pihole__test_inspect.stdout | from_json)[0].NetworkSettings.Networks[dns_pihole__test_common.pihole_network] }}
+
+    - name: 'Resolve example.org with Pi-hole'
+      ansible.builtin.command: "dig @{{ dns_pihole__test_expect.ip }} example.org A +time=3 +tries=1"
+      register: 'dns_pihole__test_dig'
+      changed_when: false
+      failed_when: false
+      until: >-
+        dns_pihole__test_dig.rc == 0
+        and 'status: NOERROR' in dns_pihole__test_dig.stdout
+        and dns_pihole__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+      retries: 30
+      delay: 3
+
+    - name: 'Assert the answer of Pi-hole'
+      ansible.builtin.assert:
+        that:
+          - dns_pihole__test_dig.rc == 0
+          - "'status: NOERROR' in dns_pihole__test_dig.stdout"
+          - dns_pihole__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+        fail_msg: "{{ dns_pihole__test_dig.stdout | default(dns_pihole__test_dig.stderr) }}"
+
+    - name: 'Log in to the API with the password of the secret'
+      ansible.builtin.uri:
+        url: "http://{{ dns_pihole__test_expect.ip }}/api/auth"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          password: "{{ dns_pihole__test_password }}"
+        return_content: true
+      register: 'dns_pihole__test_auth'
+      until: dns_pihole__test_auth.status == 200
+      retries: 20
+      delay: 3
+
+    - name: 'Assert the login was successful'
+      ansible.builtin.assert:
+        that:
+          - dns_pihole__test_auth.json.session.valid
+        fail_msg: "{{ dns_pihole__test_auth.content | default('') | string }}"

@@ -4,37 +4,55 @@
   tags: [ 'dns_pihole' ]
   block:
 
+    - name: 'Validate secrets'
+      ansible.builtin.assert:
+        that:
+          - dns_pihole__secrets | rejectattr('name', 'defined') | list | length == 0
+          - dns_pihole__secrets | rejectattr('data', 'defined') | list | length == 0
+          - dns_pihole__secrets | rejectattr('target', 'defined') | list | length == 0
+          - dns_pihole__secrets_missing | length == 0
+          - dns_pihole__secrets_in_environment | length == 0
+        fail_msg: >-
+          Pi-hole needs the secrets {{ dns_pihole__secrets_required | join(', ') }},
+          missing: {{ dns_pihole__secrets_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secrets must not be set in pihole_environment:
+          {{ dns_pihole__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        dns_pihole__secrets_missing: >-
+          {{ dns_pihole__secrets_required
+             | reject('in', dns_pihole__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        dns_pihole__secrets_in_environment: >-
+          {{ (dns_pihole__secrets | selectattr('target', 'defined') | map(attribute='target') | list
+              + dns_pihole__secret_variables)
+             | select('in', dns_pihole__environment.keys() | list) | unique | list }}
+
+    # The container sets owner and mode of /etc/pihole and /var/log/pihole itself on every start
+    - name: 'Create directories'  # noqa: risky-file-permissions
+      ansible.builtin.file:
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode | default(omit) }}"
+        state: 'directory'
+      loop:
+        - dest: "{{ dns_pihole__podman_etc_dir }}"
+        - dest: "{{ dns_pihole__podman_dnsmasq_dir }}"
+          mode: '0750'
+        - dest: "{{ dns_pihole__podman_log_dir }}"
+      loop_control:
+        label: "{{ item.dest }}"
+
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'webserver_api_password'
-        data: "{{ dns_pihole__password }}"
-
-    - name: 'Create directories'
-      ansible.builtin.file:
-        dest: "{{ item }}"
-        mode: '750'
-        state: 'directory'
-      with_items:
-        - "{{ dns_pihole__podman_etc_dir }}"
-        - "{{ dns_pihole__podman_dnsmasq_dir }}"
-        - "{{ dns_pihole__podman_log_dir }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ dns_pihole__secrets }}"
+      register: 'dns_pihole__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ dns_pihole__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[dns_pihole__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ dns_pihole__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -58,23 +76,39 @@
           WantedBy=default.target
 
           [Service]
+          {% if dns_pihole__container.exec_start_pre is defined %}
+          {% for command in dns_pihole__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if dns_pihole__container.requires is defined %}
+          Requires={{ dns_pihole__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'dns_pihole__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ dns_pihole__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
+        state: "{{ 'restarted' if dns_pihole__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        dns_pihole__running: >-
+          {{ (ansible_facts.services[dns_pihole__container.name + '.service'].state | default('')) == 'running' }}
+        dns_pihole__restart: >-
+          {{ dns_pihole__running | bool
+             and (dns_pihole__secrets_result is changed or dns_pihole__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'dns_pihole__autoupdate_enabled'
-      include_role:
+      when: 'dns_pihole__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ dns_pihole__container.name }}"
