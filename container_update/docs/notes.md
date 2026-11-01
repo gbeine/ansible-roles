@@ -11,13 +11,6 @@ It is usually included by the container roles, e.g. with `traefik_autoupdate_ena
     container_schedule: '*-*-* 03:30:00'
 ```
 
-| Variable | Default | Description |
-|---|---|---|
-| `container_name` | – | Name of the systemd unit of the container, without the timer only the templates are installed |
-| `container_image` | – | Image of the container, required |
-| `container_schedule` | `*-*-* 00/4:00:00` | `OnCalendar` of the timer, replaces the default schedule |
-| `container_pushover_key`, `container_pushover_token` | – | Pushover user key and app token for notifications |
-
 ### How the update works
 
 The timer starts `container-update@<container_name>.service` with a random delay of up to 30 minutes.
