@@ -1,0 +1,117 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_poweradmin__test_case: "{{ dns_poweradmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_poweradmin__test_expect: "{{ dns_poweradmin__test_case.expect }}"
+    dns_poweradmin__test_home: "{{ dns_poweradmin__test_common.poweradmin_home }}"
+    dns_poweradmin__test_title: "{{ dns_poweradmin__test_side_effect_environment.PA_APP_TITLE }}"
+    dns_poweradmin__test_urls: >-
+      {{ ['http://' + dns_poweradmin__test_expect.ip + '/']
+         + ([] if dns_poweradmin__test_expect.ip6 is none else ['http://[' + dns_poweradmin__test_expect.ip6 + ']/']) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/poweradmin.container'
+      register: 'dns_poweradmin__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_lines | select('match', 'Image=.*poweradmin/poweradmin:stable$') | list | length == 1
+          - ('IP=' + dns_poweradmin__test_expect.ip) in dns_poweradmin__test_lines
+          - dns_poweradmin__test_expect.ip6 is none or ('IP6=' + dns_poweradmin__test_expect.ip6) in dns_poweradmin__test_lines
+          - dns_poweradmin__test_expect.ip6 is not none or dns_poweradmin__test_lines | select('match', 'IP6=') | list | length == 0
+          - "'Secret=poweradmin_session_key,type=env,target=PA_SESSION_KEY' in dns_poweradmin__test_lines"
+          - dns_poweradmin__test_lines | select('match', 'Environment=.*DB_TYPE=sqlite') | list | length == 1
+          - dns_poweradmin__test_lines | select('match', 'Environment=.*DNS_NS1=ns1\\.example\\.test') | list | length == 1
+          - dns_poweradmin__test_lines | select('search', 'PA_SESSION_KEY=') | list | length == 0
+          - dns_poweradmin__test_lines | select('search', 'custom\\.php|PA_CONFIG_PATH') | list | length == 0
+        fail_msg: "{{ dns_poweradmin__test_quadlet.content | b64decode }}"
+      vars:
+        dns_poweradmin__test_lines: "{{ (dns_poweradmin__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the podman secret'
+      ansible.builtin.command: 'podman secret inspect poweradmin_session_key'
+      register: 'dns_poweradmin__test_secret'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the podman secret exists'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_secret.rc == 0
+
+    - name: 'Read the state of the poweradmin service'
+      ansible.builtin.command: 'systemctl is-active poweradmin'
+      register: 'dns_poweradmin__test_service'
+      changed_when: false
+      failed_when: false
+      until: dns_poweradmin__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the poweradmin service'
+      ansible.builtin.command: 'journalctl -u poweradmin --no-pager -n 60'
+      register: 'dns_poweradmin__test_journal'
+      changed_when: false
+      when: dns_poweradmin__test_service.stdout != 'active'
+
+    - name: 'Assert the poweradmin service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_service.stdout == 'active'
+        fail_msg: "{{ dns_poweradmin__test_service.stdout }}: {{ dns_poweradmin__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Inspect the poweradmin container'
+      ansible.builtin.command: 'podman inspect poweradmin'
+      register: 'dns_poweradmin__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_net.IPAddress == dns_poweradmin__test_expect.ip
+          - dns_poweradmin__test_expect.ip6 is none or dns_poweradmin__test_net.GlobalIPv6Address == dns_poweradmin__test_expect.ip6
+        fail_msg: "IPv4 {{ dns_poweradmin__test_net.IPAddress }}, IPv6 {{ dns_poweradmin__test_net.GlobalIPv6Address }}"
+      vars:
+        dns_poweradmin__test_net: >-
+          {{ (dns_poweradmin__test_inspect.stdout | from_json)[0].NetworkSettings.Networks[dns_poweradmin__test_common.poweradmin_network] }}
+
+    - name: 'Request the login page'
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        return_content: true
+      loop: "{{ dns_poweradmin__test_urls }}"
+      register: 'dns_poweradmin__test_pages'
+      until: dns_poweradmin__test_pages.status == 200
+      retries: 20
+      delay: 3
+
+    - name: 'Assert the login page shows the title of the side effect'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_title in item.content
+        fail_msg: "{{ item.url }}: {{ item.content | truncate(500) }}"
+        quiet: true
+      loop: "{{ dns_poweradmin__test_pages.results }}"
+      loop_control:
+        label: "{{ item.url }}"
+
+    - name: 'Read the SQLite database'
+      ansible.builtin.stat:
+        path: "{{ dns_poweradmin__test_home }}/db/pdns.db"
+      register: 'dns_poweradmin__test_db'
+
+    - name: 'Assert the SQLite database exists'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_db.stat.exists
+          - dns_poweradmin__test_db.stat.size > 0

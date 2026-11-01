@@ -4,41 +4,72 @@
   tags: [ 'dns_poweradmin' ]
   block:
 
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__environment_missing | length == 0
+          - dns_poweradmin__secrets | rejectattr('name', 'defined') | list | length == 0
+          - dns_poweradmin__secrets | rejectattr('data', 'defined') | list | length == 0
+          - dns_poweradmin__secrets | rejectattr('target', 'defined') | list | length == 0
+          - dns_poweradmin__secrets_missing | length == 0
+          - dns_poweradmin__secrets_in_environment | length == 0
+        fail_msg: >-
+          Poweradmin needs the environment variables {{ dns_poweradmin__environment_required_all | join(', ') }},
+          missing or empty: {{ dns_poweradmin__environment_missing | join(', ') | default('none', true) }}.
+          Poweradmin needs the secrets {{ dns_poweradmin__secrets_required_all | join(', ') | default('none', true) }},
+          missing: {{ dns_poweradmin__secrets_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secrets must not be set in poweradmin_environment:
+          {{ dns_poweradmin__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        dns_poweradmin__db_server: "{{ dns_poweradmin__environment.DB_TYPE | default('') in ['mysql', 'pgsql'] }}"
+        dns_poweradmin__environment_required_all: >-
+          {{ dns_poweradmin__environment_required
+             + (dns_poweradmin__environment_required_db if dns_poweradmin__db_server | bool else []) }}
+        dns_poweradmin__secrets_required_all: >-
+          {{ dns_poweradmin__secrets_required_db if dns_poweradmin__db_server | bool else [] }}
+        dns_poweradmin__environment_missing: >-
+          {{ dns_poweradmin__environment_required_all
+             | reject('in', dns_poweradmin__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        dns_poweradmin__secrets_missing: >-
+          {{ dns_poweradmin__secrets_required_all
+             | reject('in', dns_poweradmin__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        dns_poweradmin__secrets_in_environment: >-
+          {{ (dns_poweradmin__secrets | selectattr('target', 'defined') | map(attribute='target') | list
+              + dns_poweradmin__secret_variables)
+             | select('in', dns_poweradmin__environment.keys() | list) | unique | list }}
+
     - name: 'Create Poweradmin directories'
       ansible.builtin.file:
         dest: "{{ item.dest }}"
         owner: "{{ item.owner | default('root') }}"
         group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
         state: 'directory'
-      with_items:
+      loop:
         - dest: "{{ dns_poweradmin__podman_home }}"
         - dest: "{{ dns_poweradmin__podman_db_dir }}"
-          owner: '82'
-          group: '82'
+          owner: "{{ dns_poweradmin__uid }}"
+          group: "{{ dns_poweradmin__gid }}"
+          mode: '0750'
+      loop_control:
+        label: "{{ item.dest }}"
 
-    - name: 'Generate Poweradmin configuration'
-      ansible.builtin.template:
-        src: 'settings.php.j2'
-        dest: "{{ dns_poweradmin__podman_config_file }}"
-      when: 'not podman___update_mode | bool'
-      notify: 'Restart Poweradmin container'
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ dns_poweradmin__secrets }}"
+      register: 'dns_poweradmin__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ dns_poweradmin__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[dns_poweradmin__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ dns_poweradmin__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Create Poweradmin container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ dns_poweradmin__container.name }}"
         hostname: "{{ dns_poweradmin__container.hostname }}"
@@ -60,6 +91,11 @@
           WantedBy=default.target
 
           [Service]
+          {% if dns_poweradmin__container.exec_start_pre is defined %}
+          {% for command in dns_poweradmin__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
           RestartSec=5
           Restart=always
 
@@ -69,19 +105,25 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'dns_poweradmin__quadlet_result'
 
-    - name: 'Started and enable container'
-      ansible.builtin.systemd:
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
         name: "{{ dns_poweradmin__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if dns_poweradmin__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        dns_poweradmin__running: >-
+          {{ (ansible_facts.services[dns_poweradmin__container.name + '.service'].state | default('')) == 'running' }}
+        dns_poweradmin__restart: >-
+          {{ dns_poweradmin__running | bool
+             and (dns_poweradmin__secrets_result is changed or dns_poweradmin__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'dns_poweradmin__autoupdate_enabled'
-      include_role:
+      when: 'dns_poweradmin__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ dns_poweradmin__container.name }}"
