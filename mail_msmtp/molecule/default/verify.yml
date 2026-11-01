@@ -1,0 +1,115 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Choose a unique subject for the test mail'
+      ansible.builtin.set_fact:
+        mail_msmtp__test_subject: "molecule-msmtpd-{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}"
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/msmtpd.container'
+      register: 'mail_msmtp__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + mail_msmtp__test_vars.msmtp_ip) in mail_msmtp__test_lines
+          - ('IP6=' + mail_msmtp__test_vars.msmtp_ipv6) in mail_msmtp__test_lines
+          - "'Secret=msmtpd_smtp_password,type=env,target=SMTP_PASSWORD' in mail_msmtp__test_lines"
+          - mail_msmtp__test_lines | select('match', 'Environment=.*SMTP_HOST=10\\.89\\.0\\.20') | list | length == 1
+          - mail_msmtp__test_lines | select('match', 'Environment=.*SMTP_DOMAIN=msmtpd-molecule\\.example\\.test') | list | length == 1
+          - mail_msmtp__test_lines | select('search', 'SMTP_PASSWORD=') | list | length == 0
+        fail_msg: "{{ mail_msmtp__test_quadlet.content | b64decode }}"
+      vars:
+        mail_msmtp__test_lines: "{{ (mail_msmtp__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Check the podman secret'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'msmtpd_smtp_password' ]
+      changed_when: false
+
+    - name: 'Read the state of the msmtpd service'
+      ansible.builtin.command: 'systemctl is-active msmtpd'
+      register: 'mail_msmtp__test_service'
+      changed_when: false
+      failed_when: false
+      until: mail_msmtp__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Read the journal of the msmtpd service'
+      ansible.builtin.command: 'journalctl -u msmtpd --no-pager -n 60'
+      register: 'mail_msmtp__test_journal'
+      changed_when: false
+      when: mail_msmtp__test_service.stdout != 'active'
+
+    - name: 'Assert the msmtpd service is active'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__test_service.stdout == 'active'
+        fail_msg: "{{ mail_msmtp__test_service.stdout }}: {{ mail_msmtp__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Wait for the SMTP port of msmtpd'
+      ansible.builtin.wait_for:
+        host: "{{ mail_msmtp__test_vars.msmtp_ip }}"
+        port: 2500
+        timeout: 60
+
+    - name: 'Send a mail through msmtpd'
+      ansible.builtin.command:
+        argv:
+          - 'python3'
+          - '-c'
+          - |
+            import smtplib, sys
+            from email.message import EmailMessage
+            msg = EmailMessage()
+            msg['From'] = 'sender@example.test'
+            msg['To'] = 'recipient@example.test'
+            msg['Subject'] = sys.argv[1]
+            msg.set_content('Relayed by msmtpd')
+            with smtplib.SMTP(sys.argv[2], 2500, timeout=30) as smtp:
+                smtp.send_message(msg)
+          - "{{ mail_msmtp__test_subject }}"
+          - "{{ mail_msmtp__test_vars.msmtp_ip }}"
+      register: 'mail_msmtp__test_send'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the journal of the msmtpd service'
+      ansible.builtin.command: 'journalctl -u msmtpd --no-pager -n 40'
+      register: 'mail_msmtp__test_send_journal'
+      changed_when: false
+      when: mail_msmtp__test_send.rc != 0
+
+    - name: 'Assert the mail was accepted by msmtpd'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__test_send.rc == 0
+        fail_msg: >-
+          rc {{ mail_msmtp__test_send.rc }}: {{ mail_msmtp__test_send.stderr_lines | default([''], true) | last }}
+          {{ mail_msmtp__test_send_journal.stdout_lines | default([]) }}
+
+    - name: 'Read the mails received by mailpit'
+      ansible.builtin.uri:
+        url: "http://{{ mail_msmtp__test_mailpit.ip }}:8025/api/v1/messages"
+        return_content: true
+      register: 'mail_msmtp__test_messages'
+      until: >-
+        mail_msmtp__test_messages.status == 200
+        and mail_msmtp__test_subject in (mail_msmtp__test_messages.json.messages | default([]) | map(attribute='Subject') | list)
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the mail was relayed to mailpit'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__test_subject in (mail_msmtp__test_messages.json.messages | map(attribute='Subject') | list)
+        fail_msg: "{{ mail_msmtp__test_messages.json.messages | default([]) | map(attribute='Subject') | list }}"

@@ -5,11 +5,62 @@
 # https://ansible-roles.org/roles/mail-msmtp
 #
 
-mail_msmtp__auto_from: "{{ msmtp_auto_from | default(true) }}"
-mail_msmtp__maildomain: "{{ msmtp_maildomain | default(mail_common__domain) }}"
-mail_msmtp__syslog: "{{ msmtp_syslog | default('LOG_MAIL') }}"
+mail_msmtp__ip: "{{ msmtp_ip | mandatory }}"
+mail_msmtp__ipv6: "{{ msmtp_ipv6 }}"
+mail_msmtp__network: "{{ msmtp_network | mandatory }}"
+mail_msmtp__hostname: "{{ msmtp_hostname | mandatory }}"
+mail_msmtp__timezone: "{{ msmtp_timezone | mandatory }}"
+mail_msmtp__labels: "{{ msmtp_labels | default({}) }}"
 
-mail_msmtp__accounts: "{{ msmtp_accounts | default([]) }}"
-mail_msmtp__password: "{{ vault__msmtp_password | default({}) }}"
+mail_msmtp__version: "{{ msmtp_version | default('latest') }}"
 
-mail_msmtp__aliases: "{{ msmtp_aliases | default([]) }}"
+mail_msmtp__publish: "{{ msmtp_publish | default([]) }}"
+
+mail_msmtp__environment: "{{ mail_msmtp__environment_default | combine(msmtp_environment | default({})) }}"
+mail_msmtp__secrets: "{{ msmtp_secrets | default([]) }}"
+
+mail_msmtp__container: "{{ mail_msmtp__podman_container_default | combine(msmtp_container | default({})) }}"
+
+mail_msmtp__autoupdate_enabled: "{{ msmtp_autoupdate_enabled | default(false) }}"
+
+#
+# Defaults - do not change
+#
+
+mail_msmtp__environment_default:
+  TZ: "{{ mail_msmtp__timezone }}"
+
+mail_msmtp__environment_required:
+  - 'SMTP_HOST'
+
+# Required when SMTP_AUTH is set and not off
+mail_msmtp__environment_required_auth:
+  - 'SMTP_USER'
+mail_msmtp__secrets_required_auth:
+  - 'SMTP_PASSWORD'
+
+# Variables carrying secrets, they must be passed with msmtp_secrets
+mail_msmtp__secret_variables:
+  - 'SMTP_PASSWORD'
+
+mail_msmtp__podman_name: 'msmtpd'
+mail_msmtp__podman_image: 'ghcr.io/crazy-max/msmtpd'
+
+mail_msmtp__podman_container_default:
+  name: "{{ mail_msmtp__podman_name }}"
+  hostname: "{{ mail_msmtp__hostname }}"
+  image: "{{ mail_msmtp__podman_image }}:{{ mail_msmtp__version }}"
+  ip: "{{ mail_msmtp__ip }}"
+  ipv6: "{{ mail_msmtp__ipv6 | default(omit) }}"
+  network: "{{ mail_msmtp__network }}"
+  timezone: "{{ mail_msmtp__timezone }}"
+  environment: "{{ mail_msmtp__environment }}"
+  labels: "{{ mail_msmtp__labels }}"
+  secrets: >-
+    {{ (mail_msmtp__secrets | map(attribute='name') | zip(mail_msmtp__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
+      if (mail_msmtp__secrets | default([]) | length > 0)
+      else omit }}
+  volumes:
+    - '/etc/localtime:/etc/localtime:ro'
+    - '/etc/timezone:/etc/timezone:ro'
+  publish: "{{ mail_msmtp__publish }}"

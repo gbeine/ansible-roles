@@ -1,0 +1,53 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ mail_msmtp__test_network }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ mail_msmtp__test_image }}"
+        - "{{ mail_msmtp__test_mailpit.image }}"
+
+    - name: 'Start mailpit as smarthost accepting any authentication'
+      containers.podman.podman_container:
+        name: "{{ mail_msmtp__test_mailpit.name }}"
+        image: "{{ mail_msmtp__test_mailpit.image }}"
+        network: "{{ mail_msmtp__test_network.name }}"
+        ip: "{{ mail_msmtp__test_mailpit.ip }}"
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: '1'
+          MP_SMTP_AUTH_ALLOW_INSECURE: '1'
+        state: 'started'
+
+    - name: 'Wait for the mailpit API'
+      ansible.builtin.uri:
+        url: "http://{{ mail_msmtp__test_mailpit.ip }}:8025/api/v1/messages"
+      register: 'mail_msmtp__test_mailpit_ready'
+      until: mail_msmtp__test_mailpit_ready.status == 200
+      retries: 30
+      delay: 2

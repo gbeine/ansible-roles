@@ -1,0 +1,40 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value msmtpd'
+      register: 'mail_msmtp__test_started_before'
+      changed_when: false
+
+    - name: 'Set the role variables with changed environment'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ mail_msmtp__test_vars
+           | combine({'msmtp_environment': mail_msmtp__test_vars.msmtp_environment | combine(mail_msmtp__test_side_effect_environment)})
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run mail_msmtp with changed environment'
+      ansible.builtin.include_role:
+        name: 'mail_msmtp'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value msmtpd'
+      register: 'mail_msmtp__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the quadlet changed and the service was restarted'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__quadlet_result is changed
+          - mail_msmtp__test_started_after.stdout | int > mail_msmtp__test_started_before.stdout | int
+        fail_msg: "before {{ mail_msmtp__test_started_before.stdout }}, after {{ mail_msmtp__test_started_after.stdout }}"

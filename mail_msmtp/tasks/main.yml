@@ -1,34 +1,114 @@
 ---
 
-- name: 'Install and configure msmtp'
+- name: 'Install msmtpd'
   tags: [ 'mail', 'mail_msmtp' ]
   block:
 
-    - name: 'Include OS-specific variables (native)'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}.yml"
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__environment_missing | length == 0
+          - mail_msmtp__secrets | rejectattr('name', 'defined') | list | length == 0
+          - mail_msmtp__secrets | rejectattr('data', 'defined') | list | length == 0
+          - mail_msmtp__secrets | rejectattr('target', 'defined') | list | length == 0
+          - mail_msmtp__secrets_missing | length == 0
+          - mail_msmtp__secrets_in_environment | length == 0
+        fail_msg: >-
+          msmtpd needs the environment variables {{ mail_msmtp__environment_required_all | join(', ') }},
+          missing or empty: {{ mail_msmtp__environment_missing | join(', ') | default('none', true) }}.
+          msmtpd needs the secrets {{ mail_msmtp__secrets_required_all | join(', ') | default('none', true) }},
+          missing: {{ mail_msmtp__secrets_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secrets must not be set in msmtp_environment:
+          {{ mail_msmtp__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        mail_msmtp__auth: "{{ (mail_msmtp__environment.SMTP_AUTH | default('off', true) | string | lower) not in ['off', 'false'] }}"
+        mail_msmtp__environment_required_all: >-
+          {{ mail_msmtp__environment_required
+             + (mail_msmtp__environment_required_auth if mail_msmtp__auth | bool else []) }}
+        mail_msmtp__secrets_required_all: >-
+          {{ mail_msmtp__secrets_required_auth if mail_msmtp__auth | bool else [] }}
+        mail_msmtp__environment_missing: >-
+          {{ mail_msmtp__environment_required_all
+             | reject('in', mail_msmtp__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        mail_msmtp__secrets_missing: >-
+          {{ mail_msmtp__secrets_required_all
+             | reject('in', mail_msmtp__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        mail_msmtp__secrets_in_environment: >-
+          {{ (mail_msmtp__secrets | selectattr('target', 'defined') | map(attribute='target') | list
+              + mail_msmtp__secret_variables)
+             | select('in', mail_msmtp__environment.keys() | list) | unique | list }}
 
-    - name: 'Install msmtp packages'
-      ansible.builtin.apt:
-        update_cache: 'yes'
-        install_recommends: 'no'
-        pkg: "{{ mail_msmtp__packages }}"
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ mail_msmtp__secrets }}"
+      register: 'mail_msmtp__secrets_result'
 
-    - name: 'Generate configuration file'
-      ansible.builtin.template:
-        src: 'msmtprc.j2'
-        dest: '/etc/msmtprc'
-        owner: 'root'
-        group: 'root'
-        mode: '444'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
-    - name: 'Enable msmtpd service'
-      ansible.builtin.service:
-        name: 'msmtpd'
-        state: 'started'
-        enabled: 'yes'
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ mail_msmtp__container.name }}"
+        hostname: "{{ mail_msmtp__container.hostname }}"
+        image: "{{ mail_msmtp__container.image }}"
+        ip: "{{ mail_msmtp__container.ip }}"
+        ip6: "{{ mail_msmtp__container.ipv6 | default(omit) }}"
+        network: "{{ mail_msmtp__container.network }}"
+        timezone: "{{ mail_msmtp__container.timezone }}"
+        env: "{{ mail_msmtp__container.environment | default(omit) }}"
+        etc_hosts: "{{ mail_msmtp__container.etc_hosts | default(omit) }}"
+        expose: "{{ mail_msmtp__container.expose | default(omit) }}"
+        label: "{{ mail_msmtp__container.labels | default(omit) }}"
+        publish: "{{ mail_msmtp__container.publish | default(omit) }}"
+        secrets: "{{ mail_msmtp__container.secrets | default(omit) }}"
+        volume: "{{ mail_msmtp__container.volumes | default(omit) }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% if mail_msmtp__container.exec_start_pre is defined %}
+          {% for command in mail_msmtp__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if mail_msmtp__container.requires is defined %}
+          Requires={{ mail_msmtp__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'mail_msmtp__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ mail_msmtp__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if mail_msmtp__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        mail_msmtp__running: >-
+          {{ (ansible_facts.services[mail_msmtp__container.name + '.service'].state | default('')) == 'running' }}
+        mail_msmtp__restart: >-
+          {{ mail_msmtp__running | bool
+             and (mail_msmtp__secrets_result is changed or mail_msmtp__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'mail_msmtp__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ mail_msmtp__container.name }}"
+        container_image: "{{ mail_msmtp__container.image }}"
