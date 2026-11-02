@@ -10,7 +10,7 @@
 ```
 
 - The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by the repositories and storage, so packages can rely on mounted directories.
-- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files completely.
+- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, PKI, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files completely.
 - With `debian_cloud_manage_etc_hosts: true` (default `false`) cloud-init manages `/etc/hosts` (`manage_etc_hosts: True` in `/etc/cloud/cloud.cfg.d/99-manage_etc_hosts.cfg`) and the role does not generate it.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
@@ -49,6 +49,21 @@ debian_repositories:
 | `logrotate_files` | `debian_logrotate_files` |
 | `unattended_upgrades_*` | `debian_unattended_upgrades_*` |
 | `bootstrap_<area>_enable` (role `bootstrap`) | `debian_networking_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` |
+
+### Site settings
+
+The role depends on `common_globals`, which provides the settings of the site (`site_*`), and does the Debian specific parts, which were done by the roles `pki_common` and `mail_common` before.
+
+With `debian_pki_enable: true` the role installs the PKI packages `acl`, `ca-certificates`, `openssl` and `ssl-cert`
+and copies the CA certificates in `site_pki_ca_certificates` from `<site_pki_secrets_dir>/ca-certificates` (default `<inventory_dir>/secrets/ca-certificates`) to `/usr/local/share/ca-certificates`,
+`update-ca-certificates` runs if one changed.
+
+With `debian_mail_enable: true` the site settings are the defaults of the mail configuration:
+
+- `site_mail_root_forward` is the alias of `root`, `debian_mail_aliases` overrides it,
+- with `debian_mail_root_forward_enable: true` the role writes `site_mail_root_forward` to `/root/.forward` as well, the role fails if `site_mail_root_forward` is not set,
+- `site_mail_domain` is the `maildomain`, `debian_mail_maildomain` overrides it, without both it is `localdomain`,
+- if `debian_mail_accounts` is not set, the role creates the account `site` from `site_mail_smtp_host`, `site_mail_smtp_port`, `site_mail_from`, `site_mail_smtp_user` and `site_mail_smtp_password`, without them it sends to `localhost:25`.
 
 ### Mail
 
@@ -95,7 +110,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Tested |
 |---|---|
 | `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults |
-| `molecule-bootstrap-debian-full` | `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 

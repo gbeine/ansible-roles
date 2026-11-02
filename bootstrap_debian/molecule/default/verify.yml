@@ -60,6 +60,71 @@
             fail_msg: "cloud-init: {{ bootstrap_debian__test_cloud_hosts.content | b64decode }}"
           when: bootstrap_debian__test_cloud_cfg.stat.exists
 
+    - name: 'Verify PKI and the root forward'
+      block:
+
+        - name: 'Read the fingerprints of the CA certificates of the site'
+          ansible.builtin.command:
+            argv: [ 'openssl', 'x509', '-noout', '-fingerprint', '-sha256', '-in', "/usr/local/share/ca-certificates/{{ item }}" ]
+          loop: "{{ bootstrap_debian__expect.ca_certificates }}"
+          register: 'bootstrap_debian__test_ca_fingerprints'
+          changed_when: false
+
+        - name: 'Read the fingerprints of the CA bundle'
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail;
+              tmp=$(mktemp -d)
+              && awk -v d="$tmp" '/BEGIN CERTIFICATE/{c++} {print > (d "/" c ".pem")}' /etc/ssl/certs/ca-certificates.crt
+              && for f in "$tmp"/*.pem; do openssl x509 -noout -fingerprint -sha256 -in "$f"; done;
+              rm -rf "$tmp"
+            executable: '/bin/bash'
+          register: 'bootstrap_debian__test_bundle'
+          changed_when: false
+          when: bootstrap_debian__expect.ca_certificates | length > 0
+
+        - name: 'Assert the CA certificates of the site are trusted'
+          ansible.builtin.assert:
+            that:
+              - item.stdout in bootstrap_debian__test_bundle.stdout_lines
+            fail_msg: "{{ item.item }} is not in /etc/ssl/certs/ca-certificates.crt"
+            quiet: true
+          loop: "{{ bootstrap_debian__test_ca_fingerprints.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: 'Read the state of /root/.forward'
+          ansible.builtin.stat:
+            path: '/root/.forward'
+          register: 'bootstrap_debian__test_forward_stat'
+
+        - name: 'Read /root/.forward'
+          ansible.builtin.slurp:
+            src: '/root/.forward'
+          register: 'bootstrap_debian__test_forward'
+          when: bootstrap_debian__test_forward_stat.stat.exists
+
+        - name: 'Assert /root/.forward'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_forward_stat.stat.exists == (bootstrap_debian__expect.root_forward | length > 0)
+              - >-
+                not bootstrap_debian__test_forward_stat.stat.exists
+                or (bootstrap_debian__test_forward.content | b64decode | trim) == bootstrap_debian__expect.root_forward
+            fail_msg: "/root/.forward exists: {{ bootstrap_debian__test_forward_stat.stat.exists }}"
+
+        - name: 'Gather the package facts for the PKI packages'
+          ansible.builtin.package_facts:
+          when: bootstrap_debian__expect.ca_certificates | length > 0
+
+        - name: 'Assert the PKI packages are installed'
+          ansible.builtin.assert:
+            that:
+              - "'ca-certificates' in ansible_facts.packages"
+              - "'ssl-cert' in ansible_facts.packages"
+              - "'openssl' in ansible_facts.packages"
+          when: bootstrap_debian__expect.ca_certificates | length > 0
+
     - name: 'Verify timezone'
       block:
 
