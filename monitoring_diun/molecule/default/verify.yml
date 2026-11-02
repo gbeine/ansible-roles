@@ -1,0 +1,105 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/diun.container'
+      register: 'monitoring_diun__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + monitoring_diun__test_vars.diun_ip) in monitoring_diun__test_lines
+          - "'Secret=diun_mail_password,type=env,target=DIUN_NOTIF_MAIL_PASSWORD' in monitoring_diun__test_lines"
+          - "'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro' in monitoring_diun__test_lines"
+          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_PROVIDERS_DOCKER=true') | list | length == 1
+          - >-
+            monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_WATCH_WORKERS=' + monitoring_diun__test_side_effect_workers)
+            | list | length == 1
+          - monitoring_diun__test_lines | select('search', monitoring_diun__test_secret) | list | length == 0
+          - monitoring_diun__test_lines | select('search', '/etc/diun') | list | length == 0
+        fail_msg: "Quadlet: {{ monitoring_diun__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_diun__test_lines: "{{ (monitoring_diun__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the Diun service'
+      ansible.builtin.command: 'systemctl is-active diun'
+      register: 'monitoring_diun__test_service'
+      changed_when: false
+      failed_when: false
+      until: monitoring_diun__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the Diun service is active'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__test_service.stdout == 'active'
+        fail_msg: "Service: {{ monitoring_diun__test_service.stdout }}"
+
+    - name: 'Read the secret in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'diun', 'printenv', 'DIUN_NOTIF_MAIL_PASSWORD' ]
+      register: 'monitoring_diun__test_env'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert the secret is passed as environment variable'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__test_env.stdout == monitoring_diun__test_secret
+        fail_msg: 'DIUN_NOTIF_MAIL_PASSWORD has not the value of the secret'
+
+    - name: 'Read the journal of Diun until the watched container was found'
+      ansible.builtin.command: 'journalctl -u diun --no-pager -n 200'
+      register: 'monitoring_diun__test_journal'
+      changed_when: false
+      until: monitoring_diun__test_journal.stdout is search('Found 1 image')
+      retries: 20
+      delay: 3
+      failed_when: false
+
+    - name: 'Assert the docker provider found the watched container through the podman socket'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__test_journal.stdout is search('Found 1 image')
+        fail_msg: "Journal: {{ monitoring_diun__test_journal.stdout_lines[-20:] | join(' | ') }}"
+
+    - name: 'Send a test notification'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'diun', 'diun', 'notif', 'test' ]
+      register: 'monitoring_diun__test_notif'
+      changed_when: false
+      until: monitoring_diun__test_notif.rc == 0
+      retries: 10
+      delay: 3
+
+    - name: 'Read the mails received by mailpit'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_diun__test_mailpit.ip }}:8025/api/v1/messages"
+        return_content: true
+      register: 'monitoring_diun__test_messages'
+      until: >-
+        monitoring_diun__test_messages.status == 200
+        and monitoring_diun__test_from in (monitoring_diun__test_messages.json.messages | default([])
+                                           | map(attribute='From') | map(attribute='Address') | list)
+      retries: 15
+      delay: 2
+      failed_when: false
+
+    - name: 'Assert the notification arrived at mailpit'
+      ansible.builtin.assert:
+        that:
+          - >-
+            monitoring_diun__test_from in (monitoring_diun__test_messages.json.messages | default([])
+                                           | map(attribute='From') | map(attribute='Address') | list)
+        fail_msg: >-
+          Mails: {{ monitoring_diun__test_messages.json.messages | default([]) | map(attribute='Subject') | join(', ') }},
+          notif test: {{ monitoring_diun__test_notif.stdout | default('') }} {{ monitoring_diun__test_notif.stderr | default('') }}

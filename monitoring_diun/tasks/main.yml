@@ -4,43 +4,55 @@
   tags: [ 'monitoring_diun' ]
   block:
 
-    - name: 'Create Diun user directories'
-      ansible.builtin.file:
-        mode: '750'
-        path: "{{ item }}"
-        state: 'directory'
-      with_items:
-        - "{{ monitoring_diun__podman_etc_dir }}"
-        - "{{ monitoring_diun__podman_data_dir }}"
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__secrets | rejectattr('name', 'defined') | list | length == 0
+          - monitoring_diun__secrets | rejectattr('data', 'defined') | list | length == 0
+          - monitoring_diun__secrets | rejectattr('target', 'defined') | list | length == 0
+          - monitoring_diun__secrets_in_environment | length == 0
+        fail_msg: >-
+          Every secret needs name, data and target. Secrets must be passed with diun_secrets, not in diun_environment:
+          {{ monitoring_diun__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        monitoring_diun__secrets_in_environment: >-
+          {{ (monitoring_diun__environment.keys() | select('search', monitoring_diun__secret_pattern) | list
+              + monitoring_diun__secrets | selectattr('target', 'defined') | map(attribute='target')
+                | select('in', monitoring_diun__environment.keys() | list) | list)
+             | unique | list }}
 
-    - name: 'Generate configuration files'
-      ansible.builtin.template:
-        src: 'diun.yml.j2'
-        dest: "{{ monitoring_diun__podman_etc_dir }}/diun.yml"
-        mode: '640'
+    - name: 'Create directories'
+      ansible.builtin.file:
+        path: "{{ monitoring_diun__podman_data_dir }}"
+        mode: '0750'
+        state: 'directory'
+
+    # The configuration is passed with environment variables, the file of earlier versions of the role is not used anymore
+    - name: 'Remove the configuration file of earlier versions'
+      ansible.builtin.file:
+        path: "{{ monitoring_diun__podman_etc_dir }}/diun.yml"
+        state: 'absent'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_diun__secrets }}"
+      register: 'monitoring_diun__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ monitoring_diun__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[monitoring_diun__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ monitoring_diun__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Install Diun container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ monitoring_diun__container.name }}"
         hostname: "{{ monitoring_diun__container.hostname }}"
         image: "{{ monitoring_diun__container.image }}"
         ip: "{{ monitoring_diun__container.ip }}"
-        ip6: "{{ monitoring_diun__container.ipv6 | default(omit, true) }}"
+        ip6: "{{ monitoring_diun__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_diun__container.network }}"
         timezone: "{{ monitoring_diun__container.timezone }}"
         env: "{{ monitoring_diun__container.environment | default(omit) }}"
@@ -58,22 +70,34 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if monitoring_diun__container.requires is defined %}
+          Requires={{ monitoring_diun__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'monitoring_diun__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ monitoring_diun__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if monitoring_diun__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        monitoring_diun__running: >-
+          {{ (ansible_facts.services[monitoring_diun__container.name + '.service'].state | default('')) == 'running' }}
+        monitoring_diun__restart: >-
+          {{ monitoring_diun__running | bool
+             and (monitoring_diun__secrets_result is changed or monitoring_diun__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'monitoring_diun__autoupdate_enabled'
-      include_role:
+      when: 'monitoring_diun__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ monitoring_diun__container.name }}"
         container_image: "{{ monitoring_diun__container.image }}"
+        container_schedule: "{{ monitoring_diun__autoupdate_schedule }}"

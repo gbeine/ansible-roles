@@ -1,0 +1,60 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ monitoring_diun__test_network }}"
+    podman_socket_enabled: true
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '0644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_diun__test_image }}"
+        - "{{ monitoring_diun__test_mailpit.image }}"
+        - "{{ monitoring_diun__test_watched.image }}"
+
+    - name: 'Start mailpit'
+      containers.podman.podman_container:
+        name: "{{ monitoring_diun__test_mailpit.name }}"
+        image: "{{ monitoring_diun__test_mailpit.image }}"
+        network: "{{ monitoring_diun__test_network.name }}"
+        ip: "{{ monitoring_diun__test_mailpit.ip }}"
+        state: 'started'
+
+    - name: 'Start the container watched by Diun'
+      containers.podman.podman_container:
+        name: "{{ monitoring_diun__test_watched.name }}"
+        image: "{{ monitoring_diun__test_watched.image }}"
+        command: [ 'sleep', 'infinity' ]
+        label:
+          diun.enable: 'true'
+        state: 'started'
+
+    - name: 'Wait for the mailpit API'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_diun__test_mailpit.ip }}:8025/api/v1/messages"
+      register: 'monitoring_diun__test_mailpit_ready'
+      until: monitoring_diun__test_mailpit_ready.status == 200
+      retries: 30
+      delay: 2

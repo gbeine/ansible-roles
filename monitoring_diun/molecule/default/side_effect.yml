@@ -1,0 +1,40 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the main PID of Diun before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value diun'
+      register: 'monitoring_diun__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with a changed environment'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ monitoring_diun__test_vars
+           | combine({'diun_environment': {'DIUN_WATCH_WORKERS': monitoring_diun__test_side_effect_workers}}, recursive=true)
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_diun with changed environment'
+      ansible.builtin.include_role:
+        name: 'monitoring_diun'
+
+    - name: 'Read the main PID of Diun after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value diun'
+      register: 'monitoring_diun__test_pid_after'
+      changed_when: false
+
+    - name: 'Assert Diun was restarted'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__test_pid_after.stdout != '0'
+          - monitoring_diun__test_pid_after.stdout != monitoring_diun__test_pid_before.stdout
+        fail_msg: "PID {{ monitoring_diun__test_pid_before.stdout }} -> {{ monitoring_diun__test_pid_after.stdout }}"
