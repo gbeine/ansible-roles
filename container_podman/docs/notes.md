@@ -61,6 +61,27 @@ podman_networks:
     ipv6_prefixlength: 112
 ```
 
+### Default network
+
+`podman_default_network` names the default network for the containers of the host, it is provided as `container_podman__default_network`.
+It is required and has to be declared in `podman_networks`, otherwise the role fails before it changes anything.
+The default network is always protected, it is never removed.
+
+```yaml
+podman_default_network: 'podman99'
+podman_networks:
+  - name: 'podman99'
+    address: '192.168.99.0'
+    gateway: '192.168.99.1'
+    netmask: 24
+```
+
+Container roles reference it in the inventory, `container_podman` has to be part of the same play:
+
+```yaml
+diun_network: "{{ container_podman__default_network }}"
+```
+
 ### Changing network addresses
 
 The role compares the declared networks with the existing ones (subnets, gateways, driver, interface name, IPv6, internal and DNS).
@@ -77,7 +98,7 @@ The role reports them; run their roles again with addresses from the new subnet.
 ### Removing networks
 
 Networks not declared in `podman_networks` are removed, together with their quadlet files.
-Networks listed in `podman_networks_protected` are kept, the default is `['podman']`.
+Networks listed in `podman_networks_protected` are kept, the default is `['podman']`, the default network is always added.
 Networks still used by containers are not removed, the role reports them instead.
 Removing networks can be disabled with `podman_networks_prune: false`.
 
@@ -96,7 +117,8 @@ Setting `podman_cleanup_enabled` to `false` removes the timer.
 ### Migration from `bootstrap_podman`
 
 - The role was renamed from `bootstrap_podman` to `container_podman`, the tags are `container` and `container_podman`.
-- `podman_network`, `podman_environment` and `podman_containers` are no longer used.
+- `podman_network` is replaced by `podman_default_network`, the default network is provided as `container_podman__default_network` instead of `bootstrap_podman__default_network`.
+- `podman_environment` and `podman_containers` are no longer used.
 - `podman___update_mode` is no longer evaluated by this role.
 
 ### Tests
@@ -111,7 +133,7 @@ The scenario runs the role twice:
 |---|---|
 | `prepare` | installs podman and creates the networks `molstale` (unused) and `molbusy` (used by a container) and the orphaned quadlet `molghost.network` |
 | `converge`, `idempotence` | creates `molnet-a` (IPv4 and IPv6) and `molnet-b` (without DNS), enables socket, TCP service and image cleanup, prunes `molstale` and `molghost`, keeps `molbusy` |
-| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled |
+| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, runs the role with the undeclared default network `molnet-b`, which has to fail before any change, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled |
 | `verify` | checks the state after the second run, `molapp` has to run with an address from the new subnet |
 
 The containers use `docker.io/library/alpine:3`, so the VM needs access to Docker Hub. The image can be changed in `molecule/default/test_cases.yml`.

@@ -70,6 +70,41 @@
               {{ r.stderr | default('') }}
               {% endfor %}
 
+    - name: 'Run container_podman with an undeclared default network'
+      block:
+
+        - name: 'Set the role variables with the undeclared default network'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ container_podman__test_case.side_effect.role_vars
+                    | combine({'podman_default_network': container_podman__test_case.invalid_default_network}) | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run container_podman, it has to fail'
+          ansible.builtin.include_role:
+            name: 'container_podman'
+
+        - name: 'Fail because the undeclared default network was accepted'
+          ansible.builtin.fail:
+            msg: "The default network {{ container_podman__test_case.invalid_default_network }} was accepted"
+
+      rescue:
+
+        - name: 'Read the networks after the failed run'
+          ansible.builtin.command: 'podman network ls --format json'
+          register: 'container_podman__test_networks_failed'
+          changed_when: false
+
+        - name: 'Assert the run failed at the validation of the default network before any change'
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('Default network')
+              - >-
+                container_podman__test_case.invalid_default_network
+                in (container_podman__test_networks_failed.stdout | from_json | map(attribute='name') | list)
+            fail_msg: "Failure: {{ ansible_failed_result.msg | default('') }}"
+
     - name: 'Set the role variables of the second run'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
