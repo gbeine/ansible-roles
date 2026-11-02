@@ -67,7 +67,7 @@ Earlier versions of the role generated `<diun_home>/etc/diun.yml`, the role remo
 
 | Before | Now |
 |---|---|
-| `diun_net` | `diun_network` (`diun_net` still works) |
+| `diun_net` | `diun_network` |
 | `diun_workers`, `diun_schedule`, `diun_jitter`, `diun_first_check_notif`, `diun_run_on_startup`, `diun_compare_digest` | `DIUN_WATCH_WORKERS`, `DIUN_WATCH_SCHEDULE`, `DIUN_WATCH_JITTER`, `DIUN_WATCH_FIRSTCHECKNOTIF`, `DIUN_WATCH_RUNONSTARTUP`, `DIUN_WATCH_COMPAREDIGEST` |
 | `diun_healthchecks` | `DIUN_WATCH_HEALTHCHECKS_BASEURL`, `DIUN_WATCH_HEALTHCHECKS_UUID` |
 | `diun_watch_repo`, `diun_notify_on`, `diun_max_tags`, `diun_sort_tags`, `diun_include_tags`, `diun_exclude_tags`, `diun_metadata` | `DIUN_DEFAULTS_WATCHREPO`, `DIUN_DEFAULTS_NOTIFYON` (comma separated), `DIUN_DEFAULTS_MAXTAGS`, `DIUN_DEFAULTS_SORTTAGS`, `DIUN_DEFAULTS_INCLUDETAGS`, `DIUN_DEFAULTS_EXCLUDETAGS`, `DIUN_DEFAULTS_METADATA_<KEY>` |
