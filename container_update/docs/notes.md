@@ -11,6 +11,9 @@ It is usually included by the container roles, e.g. with `traefik_autoupdate_ena
     container_schedule: '*-*-* 03:30:00'
 ```
 
+Without `container_schedule` the timer uses its default schedule, the directory `container-update@<container_name>.timer.d` with an override of an earlier schedule is removed.
+Callers pass the variable of their role without a default, e.g. `container_schedule: "{{ monitoring_diun__autoupdate_schedule }}"`, an undefined value counts as not set.
+
 ### How the update works
 
 The timer starts `container-update@<container_name>.service` with a random delay of up to 30 minutes.
