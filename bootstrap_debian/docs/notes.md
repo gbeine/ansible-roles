@@ -37,7 +37,7 @@ debian_repositories:
 |---|---|
 | `packages` | `debian_packages` |
 | `local_packages` | `debian_local_packages` |
-| `timezone` | `debian_timezone` |
+| `timezone` | `site_timezone` of `common_globals`, `debian_timezone` overrides it for a host |
 | `dns_hostname` | `debian_hostname` |
 | `hosts` | `debian_hosts` |
 | `cloud_manage_etc_hosts` | `debian_cloud_manage_etc_hosts`, default is now `false` |
@@ -53,6 +53,8 @@ debian_repositories:
 ### Site settings
 
 The role depends on `common_globals`, which provides the settings of the site (`site_*`), and does the Debian specific parts, which were done by the roles `pki_common` and `mail_common` before.
+
+The time zone is `site_timezone` (default `Etc/UTC`), `debian_timezone` overrides it for a host.
 
 With `debian_pki_enable: true` the role installs the PKI packages `acl`, `ca-certificates`, `openssl` and `ssl-cert`
 and copies the CA certificates in `site_pki_ca_certificates` from `<site_pki_secrets_dir>/ca-certificates` (default `<inventory_dir>/secrets/ca-certificates`) to `/usr/local/share/ca-certificates`,

@@ -24,6 +24,7 @@ dependencies:
 Site settings are set once in the inventory, e.g. in `group_vars/all`:
 
 ```yaml
+site_timezone: 'Europe/Berlin'
 site_pki_ca_certificates: [ 'example-ca.crt' ]
 site_mail_domain: 'example.org'
 site_mail_root_forward: 'admin@example.org'
@@ -38,6 +39,7 @@ The role replaces the roles `pki_common` and `mail_common`, their tasks moved to
 
 | Before | Now |
 |---|---|
+| `bootstrap_timezone__timezone`, `timezone` of the former role `bootstrap_timezone` | `site_timezone` (IANA name, e.g. `Europe/Berlin`) |
 | `pki_realms` | `site_pki_realms` |
 | `pki_ca_certificates` | `site_pki_ca_certificates` |
 | `pki_dhparams_size` | removed, it was not used |

@@ -1,3 +1,18 @@
+### Time zone
+
+The role depends on `common_globals` and takes the time zone of the site from `site_timezone` (IANA name, default `Etc/UTC`), `openwrt_timezone` overrides it for a host.
+OpenWrt needs the time zone as POSIX string as well (option `timezone`, `zonename` is the IANA name),
+the role knows the POSIX strings of `Etc/UTC` (`GMT0`, zonename `UTC`), the time zones of Central, Western and Eastern Europe
+(e.g. `Europe/Berlin`, `Europe/London`, `Europe/Lisbon`, `Europe/Helsinki`), `America/New_York`, `America/Chicago`, `America/Denver`, `America/Los_Angeles`, `Asia/Tokyo` and `Australia/Sydney`, see `vars/main.yml`.
+For other time zones set the POSIX string with `openwrt_timezone_posix`, e.g. the last line of `/usr/share/zoneinfo/<zone>`, the role fails before it changes anything otherwise.
+
+```yaml
+site_timezone: 'America/Sao_Paulo'
+openwrt_timezone_posix: '<-03>3'
+```
+
+Without `site_timezone` the system section gets `timezone: 'GMT0'` and `zonename: 'UTC'` as before.
+
 ### Default for `openwrt_system`
 
 ```yaml
@@ -6,8 +21,8 @@ bootstrap_openwrt__system_default:
     find: { compat_version: '1.1' }
     options:
       hostname: 'OpenWrt'
-      timezone: 'GMT0'
-      zonename: 'UTC'
+      timezone: "{{ bootstrap_openwrt__timezone_posix }}"
+      zonename: "{{ bootstrap_openwrt__timezone_zonename }}"
       ttylogin: '0'
       log_size: '128'
       urandom_seed: '0'
