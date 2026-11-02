@@ -1,0 +1,58 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the credentials of the DNS plugin created by converge'
+      ansible.builtin.stat:
+        path: "{{ pki_certbot__test_vars.certbot_home }}/etc/dns-hetzner"
+      register: 'pki_certbot__test_plugin'
+
+    - name: 'Read the content of the credentials'
+      ansible.builtin.slurp:
+        src: "{{ pki_certbot__test_vars.certbot_home }}/etc/dns-hetzner"
+      register: 'pki_certbot__test_plugin_content'
+      when: pki_certbot__test_plugin.stat.exists
+
+    - name: 'Assert the credentials of the DNS plugin'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_plugin.stat.exists
+          - pki_certbot__test_plugin.stat.mode == '0600'
+          - >-
+            (pki_certbot__test_plugin_content.content | b64decode | trim)
+            == 'dns_hetzner_api_token = ' + pki_certbot__test_vars.certbot_plugins['dns-hetzner'].dns_hetzner_api_token
+        fail_msg: "Plugin file: exists={{ pki_certbot__test_plugin.stat.exists }} mode={{ pki_certbot__test_plugin.stat.mode | default('-') }}"
+
+    - name: 'Read the main PID of Certbot before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value certbot'
+      register: 'pki_certbot__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with the podman socket and without plugins'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ pki_certbot__test_vars | combine(pki_certbot__test_side_effect_vars) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run pki_certbot with the podman socket'
+      ansible.builtin.include_role:
+        name: 'pki_certbot'
+
+    - name: 'Read the main PID of Certbot after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value certbot'
+      register: 'pki_certbot__test_pid_after'
+      changed_when: false
+
+    - name: 'Assert Certbot was restarted'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_pid_after.stdout != '0'
+          - pki_certbot__test_pid_after.stdout != pki_certbot__test_pid_before.stdout
+        fail_msg: "PID {{ pki_certbot__test_pid_before.stdout }} -> {{ pki_certbot__test_pid_after.stdout }}"

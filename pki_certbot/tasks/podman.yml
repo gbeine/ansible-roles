@@ -2,43 +2,51 @@
 
 - name: 'Create directories'
   ansible.builtin.file:
-    mode: '755'
     path: "{{ item }}"
+    mode: '0755'
     state: 'directory'
-  with_items:
+  loop:
     - "{{ pki_certbot__podman_etc_dir }}"
     - "{{ pki_certbot__podman_lib_dir }}"
     - "{{ pki_certbot__podman_log_dir }}"
 
-- name: 'Copy CA certificates bundle'
-  ansible.builtin.copy:
-    src: '/etc/ssl/certs/ca-certificates.crt'
-    dest: "{{ pki_certbot__podman_etc_dir }}/ca-bundle.pem"
-    remote_src: true
-  when: 'not podman___update_mode | bool'
+# Earlier versions of the role copied the bundle, it is mounted from the host now
+- name: 'Remove the copy of the CA certificates of earlier versions'
+  ansible.builtin.file:
+    path: "{{ pki_certbot__podman_etc_dir }}/ca-bundle.pem"
+    state: 'absent'
 
-- name: 'Create configuration files for plugins'
-  ansible.builtin.template:
-    src: "{{ item }}.j2"
-    dest: "{{ pki_certbot__podman_etc_dir }}/{{ item }}"
-    mode: '400'
-  with_items: "{{ pki_certbot__plugins }}"
-  when: 'not podman___update_mode | bool'
+- name: 'Create the credentials of the DNS plugins'
+  ansible.builtin.copy:
+    dest: "{{ pki_certbot__podman_etc_dir }}/{{ item.key }}"
+    content: |
+      {% for option in item.value | dict2items %}
+      {{ option.key }} = {{ option.value }}
+      {% endfor %}
+    mode: '0600'
+  loop: "{{ pki_certbot__plugins | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: 'Find the credentials of DNS plugins'
+  ansible.builtin.find:
+    paths: "{{ pki_certbot__podman_etc_dir }}"
+    patterns: 'dns-*'
+    file_type: 'file'
+  register: 'pki_certbot__plugins_found'
+
+- name: 'Remove the credentials of DNS plugins that are not configured'
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: 'absent'
+  loop: >-
+    {{ pki_certbot__plugins_found.files | map(attribute='path')
+       | reject('in', pki_certbot__plugins.keys() | map('regex_replace', '^', pki_certbot__podman_etc_dir + '/') | list)
+       | list }}
 
 - name: 'Gathering facts about services...'
   ansible.builtin.service_facts:
-
-- name: 'Stop container when it is running'
-  ansible.builtin.systemd:
-    name: "{{ pki_certbot__container.name }}.service"
-    state: 'stopped'
-  when: 'ansible_facts.services[pki_certbot__container.name + ".service"] is defined'
-
-- name: 'Pull image'
-  containers.podman.podman_image:
-    name: "{{ pki_certbot__container.image }}"
-    force: true
-  when: 'podman___update_mode | bool'
 
 - name: 'Install container'
   containers.podman.podman_container:
@@ -54,8 +62,8 @@
     expose: "{{ pki_certbot__container.expose | default(omit) }}"
     label: "{{ pki_certbot__container.labels | default(omit) }}"
     publish: "{{ pki_certbot__container.publish | default(omit) }}"
-    secrets: "{{ pki_certbot__container.secrets | default(omit) }}"
     volume: "{{ pki_certbot__container.volumes | default(omit) }}"
+    entrypoint: "{{ pki_certbot__podman_command }}"
     quadlet_options: |
 
       [Install]
@@ -64,43 +72,27 @@
       [Service]
       RestartSec=5
       Restart=on-failure
-    entrypoint: "{{ pki_certbot__podman_command | default(omit) }}"
     restart_policy: 'no'
     state: 'quadlet'
-    recreate: "{{ podman___update_mode | bool }}"
+  register: 'pki_certbot__quadlet_result'
 
 - name: 'Start and enable container'
-  ansible.builtin.systemd:
+  ansible.builtin.systemd_service:
     name: "{{ pki_certbot__container.name }}"
     daemon_reload: true
-    state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+    state: "{{ 'restarted' if pki_certbot__restart | bool else 'started' }}"
     enabled: true
+  vars:
+    pki_certbot__running: >-
+      {{ (ansible_facts.services[pki_certbot__container.name + '.service'].state | default('')) == 'running' }}
+    pki_certbot__restart: "{{ pki_certbot__running | bool and pki_certbot__quadlet_result is changed }}"
   when: 'not ansible_check_mode'
 
-- name: 'Create systemd renew service'
-  ansible.builtin.import_role:
-    name: 'systemd_services'
+- name: 'Enable autoupdate on container'
+  when: 'pki_certbot__autoupdate_enabled | bool'
+  ansible.builtin.include_role:
+    name: 'container_update'
   vars:
-    systemd_services:
-      - name: 'certbot-podman-renew'
-        description: 'podman container: Certbot renew'
-        wants:
-          - 'certbot-podman-renew.timer'
-        type: 'simple'
-        user: 'root'
-        exec_start: "{{ pki_certbot__command }} renew"
-        environment:
-          PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-
-- name: 'Create systemd renew timer'
-  ansible.builtin.import_role:
-    name: 'systemd_timers'
-  vars:
-    systemd_timers:
-      - name: 'certbot-podman-renew'
-        description: 'podman container: Certbot renew timer'
-        on_calendar: 'daily'
-        persistent: 'true'
-        wanted_by:
-          - 'timers.target'
-        enabled: true
+    container_name: "{{ pki_certbot__container.name }}"
+    container_image: "{{ pki_certbot__container.image }}"
+    container_schedule: "{{ pki_certbot__autoupdate_schedule }}"

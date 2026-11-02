@@ -1,16 +1,25 @@
 ---
 
-- name: "Create certificates"
-  ansible.builtin.shell: |
-    [ -f '{{ pki_certbot__podman_etc_dir }}/renewal/{{ item.realm }}.conf' ] || \
-    {{ pki_certbot__command}} certonly \
-      --server {{ item.server | default(pki_certbot__provider_server[pki_certbot__provider]) }} \
-      --authenticator {{ item.authenticator | default('standalone') }} {{ item.authenticator_options | default('') }} \
-      --key-type {{ item.key_type | default('ecdsa') }} \
-      {{ '--elliptic-curve ' + item.elliptic_curve if item.elliptic_curve is defined and ( item.key_type is not defined or item.key_type == 'ecdsa') }} \
-      {{ '--rsa-key-size ' + item.key_size | default('2048') if item.key_type is defined and item.key_type == 'rsa' }} \
-      --cert-name {{ item.realm }} \
-      --domain {{ item.realm }} \
-      {{ '--domains ' + item.domains | join (',') if item.domains is defined }} \
-      {{ '--post-hook "' + item.post_hook + '"' if item.post_hook is defined }}
-  with_items: "{{ pki_certbot__realms }}"
+- name: 'Create certificates'
+  ansible.builtin.command:
+    argv: "{{ pki_certbot__command + pki_certbot__realm_args }}"
+    creates: "{{ pki_certbot__podman_etc_dir }}/renewal/{{ item.realm }}.conf"
+  loop: "{{ pki_certbot__realms }}"
+  loop_control:
+    label: "{{ item.realm }}"
+  vars:
+    pki_certbot__realm_authenticator: "{{ item.authenticator | default('standalone') }}"
+    pki_certbot__realm_key_type: "{{ item.key_type | default('ecdsa') }}"
+    pki_certbot__realm_args: >-
+      {{ ['certonly', '--non-interactive',
+           '--server', item.server | default(pki_certbot__provider_server[pki_certbot__provider]),
+           '--authenticator', pki_certbot__realm_authenticator]
+         + (['--' + pki_certbot__realm_authenticator + '-credentials', '/etc/letsencrypt/' + pki_certbot__realm_authenticator]
+            if pki_certbot__realm_authenticator is match('dns-') else [])
+         + (item.authenticator_options | default('')).split()
+         + ['--key-type', pki_certbot__realm_key_type]
+         + (['--elliptic-curve', item.elliptic_curve] if item.elliptic_curve is defined and pki_certbot__realm_key_type == 'ecdsa' else [])
+         + (['--rsa-key-size', item.key_size | default(2048) | string] if pki_certbot__realm_key_type == 'rsa' else [])
+         + ['--cert-name', item.realm, '--domain', item.realm]
+         + (['--domains', item.domains | join(',')] if item.domains | default([]) | length > 0 else [])
+         + (['--post-hook', item.post_hook] if item.post_hook is defined else []) }}

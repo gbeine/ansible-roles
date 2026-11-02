@@ -1,0 +1,65 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ pki_certbot__test_network }}"
+    podman_default_network: "{{ pki_certbot__test_network.name }}"
+    podman_socket_enabled: true
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '0644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ pki_certbot__test_image }}"
+        - "{{ pki_certbot__test_pebble.image }}"
+
+    - name: 'Start pebble'
+      containers.podman.podman_container:
+        name: "{{ pki_certbot__test_pebble.name }}"
+        image: "{{ pki_certbot__test_pebble.image }}"
+        network: "{{ pki_certbot__test_network.name }}"
+        ip: "{{ pki_certbot__test_pebble.ip }}"
+        env:
+          PEBBLE_VA_ALWAYS_VALID: '1'
+          PEBBLE_VA_NOSLEEP: '1'
+        state: 'started'
+
+    - name: 'Copy the TLS root of pebble to the CA certificates of the host'
+      ansible.builtin.command:
+        argv: [ 'podman', 'cp', "{{ pki_certbot__test_pebble.name }}:{{ pki_certbot__test_pebble.root }}",
+                '/usr/local/share/ca-certificates/pebble-minica.crt' ]
+        creates: '/usr/local/share/ca-certificates/pebble-minica.crt'
+
+    - name: 'Update the CA certificates of the host'
+      ansible.builtin.command: 'update-ca-certificates'
+      changed_when: true
+
+    - name: 'Wait for the ACME directory of pebble'
+      ansible.builtin.uri:
+        url: "https://{{ pki_certbot__test_pebble.ip }}:14000/dir"
+        validate_certs: false
+      register: 'pki_certbot__test_pebble_ready'
+      until: pki_certbot__test_pebble_ready.status == 200
+      retries: 30
+      delay: 2

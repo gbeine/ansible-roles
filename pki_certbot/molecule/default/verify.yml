@@ -1,0 +1,121 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_certbot__test_etc_dir: "{{ pki_certbot__test_vars.certbot_home }}/etc"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/certbot.container'
+      register: 'pki_certbot__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + pki_certbot__test_vars.certbot_ip) in pki_certbot__test_lines
+          - ('Network=' + pki_certbot__test_vars.certbot_network) in pki_certbot__test_lines
+          - ('Volume=' + pki_certbot__test_etc_dir + ':/etc/letsencrypt') in pki_certbot__test_lines
+          - "'Volume=/etc/ssl/certs:/etc/ssl/host-certs:ro' in pki_certbot__test_lines"
+          - "'Volume=/run/podman/podman.sock:/run/podman/podman.sock' in pki_certbot__test_lines"
+          - >-
+            pki_certbot__test_lines | select('match', 'Environment=.*REQUESTS_CA_BUNDLE=/etc/ssl/host-certs/ca-certificates.crt')
+            | list | length == 1
+          - pki_certbot__test_lines | select('match', 'Environment=.*CONTAINER_HOST=unix:///run/podman/podman.sock') | list | length == 1
+          - pki_certbot__test_lines | select('match', 'Label=') | list | length == 0
+          - pki_certbot__test_lines | select('match', 'IP6=') | list | length == 0
+        fail_msg: "Quadlet: {{ pki_certbot__test_quadlet.content | b64decode }}"
+      vars:
+        pki_certbot__test_lines: "{{ (pki_certbot__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the Certbot service'
+      ansible.builtin.command: 'systemctl is-active certbot'
+      register: 'pki_certbot__test_service'
+      changed_when: false
+      failed_when: false
+      until: pki_certbot__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the Certbot service is active'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_service.stdout == 'active'
+        fail_msg: "Service: {{ pki_certbot__test_service.stdout }}"
+
+    - name: 'List the containers of the host through the podman socket'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'certbot', 'podman', 'ps', '--format', '{{ "{{" }}.Names{{ "}}" }}' ]
+      register: 'pki_certbot__test_remote_ps'
+      changed_when: false
+
+    - name: 'Assert the podman socket of the host is used in the container'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_pebble.name in pki_certbot__test_remote_ps.stdout_lines
+        fail_msg: "Containers: {{ pki_certbot__test_remote_ps.stdout_lines }} {{ pki_certbot__test_remote_ps.stderr }}"
+
+    - name: 'Read the issuer of the certificate'
+      ansible.builtin.command:
+        argv: [ 'openssl', 'x509', '-noout', '-issuer', '-in', "{{ pki_certbot__test_etc_dir }}/live/{{ pki_certbot__test_realm }}/fullchain.pem" ]
+      register: 'pki_certbot__test_issuer'
+      changed_when: false
+
+    - name: 'Assert the certificate was issued by pebble'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_issuer.stdout is search('Pebble')
+        fail_msg: "Issuer: {{ pki_certbot__test_issuer.stdout }}"
+
+    - name: 'Read the files in the configuration directory'
+      ansible.builtin.stat:
+        path: "{{ pki_certbot__test_etc_dir }}/{{ item }}"
+      loop:
+        - 'dns-hetzner'
+        - 'ca-bundle.pem'
+        - "renewal/{{ pki_certbot__test_realm }}.conf"
+      register: 'pki_certbot__test_files'
+
+    - name: 'Assert the removed plugin and the renewal configuration'
+      ansible.builtin.assert:
+        that:
+          - not pki_certbot__test_files.results[0].stat.exists
+          - not pki_certbot__test_files.results[1].stat.exists
+          - pki_certbot__test_files.results[2].stat.exists
+        fail_msg: >-
+          {{ pki_certbot__test_files.results
+             | map(attribute='item') | zip(pki_certbot__test_files.results | map(attribute='stat.exists'))
+             | map('join', ': exists=') | join(', ') }}
+
+    - name: 'Read the state of the renew timer'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-enabled', 'certbot-podman-renew.timer' ]
+      register: 'pki_certbot__test_timer'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Run the renew service once'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'start', 'certbot-podman-renew.service' ]
+      register: 'pki_certbot__test_renew'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the journal of the renew service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'certbot-podman-renew.service', '--no-pager', '-n', '30' ]
+      register: 'pki_certbot__test_renew_journal'
+      changed_when: false
+
+    - name: 'Assert the renew timer is enabled and the renew service succeeds'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_timer.stdout == 'enabled'
+          - pki_certbot__test_renew.rc == 0
+        fail_msg: "Timer: {{ pki_certbot__test_timer.stdout }}, renew: {{ pki_certbot__test_renew_journal.stdout_lines | join(' | ') }}"

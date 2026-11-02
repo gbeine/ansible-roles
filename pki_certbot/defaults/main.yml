@@ -5,46 +5,67 @@
 # https://ansible-roles.org/roles/pki-certbot
 #
 
-pki_certbot__use_podman: "{{ certbot_use_podman | default(true) }}"
-
 pki_certbot__home: "{{ certbot_home | mandatory }}"
 pki_certbot__ip: "{{ certbot_ip | mandatory }}"
 pki_certbot__ipv6: "{{ certbot_ipv6 }}"
 pki_certbot__network: "{{ certbot_network | mandatory }}"
 pki_certbot__hostname: "{{ certbot_hostname | mandatory }}"
 pki_certbot__timezone: "{{ certbot_timezone | mandatory }}"
+pki_certbot__labels: "{{ certbot_labels }}"
+
+pki_certbot__version: "{{ certbot_version | default('latest') }}"
+
+pki_certbot__publish: "{{ certbot_publish | default([]) }}"
+pki_certbot__volumes: "{{ certbot_volumes | default([]) }}"
+
+# Mount the podman socket of the host, e.g. to restart containers with podman in a post_hook
+pki_certbot__podman_socket: "{{ certbot_podman_socket | default(false) }}"
+
+pki_certbot__environment: >-
+  {{ pki_certbot__environment_default
+     | combine(pki_certbot__podman_socket_environment if pki_certbot__podman_socket | bool else {})
+     | combine(certbot_environment | default({})) }}
 
 pki_certbot__email: "{{ certbot_email | default('') }}"
 pki_certbot__provider: "{{ certbot_provider | default('letsencrypt-staging') }}"
-pki_certbot__plugins: "{{ certbot_plugins | default([]) }}"
-pki_certbot__realms: "{{ certbot_realms | default([])}}"
+pki_certbot__provider_server: "{{ pki_certbot__provider_server_default | combine(certbot_provider_server | default({})) }}"
 
-pki_certbot__provider_server: "{{ pki_certbot__provider_server_default  | combine(certbot_provider_server | default({})) }}"
+# Credentials of the DNS plugins, every plugin is written as /etc/letsencrypt/<plugin> with 'key = value' lines
+pki_certbot__plugins: "{{ certbot_plugins | default({}) }}"
+pki_certbot__realms: "{{ certbot_realms | default([]) }}"
 
 pki_certbot__container: "{{ pki_certbot__podman_container_default | combine(certbot_container | default({})) }}"
 
-pki_certbot__dns_hetzner_api_token: "{{ certbot_dns_hetzner_api_token | mandatory }}"
-pki_certbot__dns_powerdns_api_url: "{{ certbot_dns_powerdns_api_url | mandatory }}"
-pki_certbot__dns_powerdns_api_key: "{{ certbot_dns_powerdns_api_key | mandatory }}"
-
-# Variables to be overridden via --extra-vars on in playbooks
-
-pki_certbot___certificates_only: false
+pki_certbot__autoupdate_enabled: "{{ certbot_autoupdate_enabled | default(false) }}"
+pki_certbot__autoupdate_schedule: "{{ certbot_autoupdate_schedule }}"
 
 #
-# Do not change from here
+# Defaults - do not change
 #
 
 pki_certbot__podman_name: 'certbot'
 pki_certbot__podman_image: 'c0d3.sh/container/certbot'
-pki_certbot__podman_tag: 'latest'
+pki_certbot__podman_tag: "{{ pki_certbot__version }}"
 
+# The container idles, certbot is run with podman exec
 pki_certbot__podman_command: '["sh", "-c", "while true; do sleep 314; done"]'
 
 pki_certbot__podman_home: "{{ pki_certbot__home }}"
 pki_certbot__podman_etc_dir: "{{ pki_certbot__podman_home }}/etc"
 pki_certbot__podman_lib_dir: "{{ pki_certbot__podman_home }}/lib"
 pki_certbot__podman_log_dir: "{{ pki_certbot__podman_home }}/log"
+
+pki_certbot__podman_socket_path: '/run/podman/podman.sock'
+
+# The certificates of the host, mounted as directory, so a rewritten bundle is visible in the container
+pki_certbot__ca_certificates_dir: '/etc/ssl/certs'
+pki_certbot__ca_certificates_mount: '/etc/ssl/host-certs'
+
+pki_certbot__environment_default:
+  REQUESTS_CA_BUNDLE: "{{ pki_certbot__ca_certificates_mount }}/ca-certificates.crt"
+
+pki_certbot__podman_socket_environment:
+  CONTAINER_HOST: "unix://{{ pki_certbot__podman_socket_path }}"
 
 pki_certbot__podman_container_default:
   name: "{{ pki_certbot__podman_name }}"
@@ -54,24 +75,30 @@ pki_certbot__podman_container_default:
   ipv6: "{{ pki_certbot__ipv6 | default(omit) }}"
   network: "{{ pki_certbot__network }}"
   timezone: "{{ pki_certbot__timezone }}"
-  volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
-    - "/etc/ssl/certs/ca-certificates.crt:{{ pki_certbot__podman_etc_dir }}/ca-bundle.pem:ro"
-    - "{{ pki_certbot__podman_etc_dir }}:/etc/letsencrypt"
-    - "{{ pki_certbot__podman_lib_dir }}:/var/lib/letsencrypt"
-    - "{{ pki_certbot__podman_log_dir }}:/var/log/letsencrypt"
+  environment: "{{ pki_certbot__environment }}"
+  labels: "{{ pki_certbot__labels | default(omit) }}"
+  publish: "{{ pki_certbot__publish }}"
+  volumes: >-
+    {{ ['/etc/localtime:/etc/localtime:ro',
+         '/etc/timezone:/etc/timezone:ro',
+         pki_certbot__ca_certificates_dir + ':' + pki_certbot__ca_certificates_mount + ':ro',
+         pki_certbot__podman_etc_dir + ':/etc/letsencrypt',
+         pki_certbot__podman_lib_dir + ':/var/lib/letsencrypt',
+         pki_certbot__podman_log_dir + ':/var/log/letsencrypt']
+       + ([pki_certbot__podman_socket_path + ':' + pki_certbot__podman_socket_path] if pki_certbot__podman_socket | bool else [])
+       + pki_certbot__volumes }}
 
 pki_certbot__provider_server_default:
   letsencrypt: 'https://acme-v02.api.letsencrypt.org/directory'
   letsencrypt-staging: 'https://acme-staging-v02.api.letsencrypt.org/directory'
 
-pki_certbot__command: "{{
-  'podman exec ' + pki_certbot__command_ca_bundle + ' ' + pki_certbot__container.name + ' certbot' if pki_certbot__use_podman
-  else 'REQUESTS_CA_BUNDLE=/etc/letsencrypt/ca-bundle.pem certbot' }}"
-pki_certbot__command_ca_bundle: '--env REQUESTS_CA_BUNDLE=/etc/letsencrypt/ca-bundle.pem'
-pki_certbot__command_register_options: "--email {{ pki_certbot__email }} --agree-tos --no-eff-email"
+# Servers with an ACME account: the server of the default provider and the servers of the realms
+pki_certbot__account_servers: >-
+  {{ ([pki_certbot__provider_server[pki_certbot__provider] | default('')]
+      + pki_certbot__realms | selectattr('server', 'defined') | map(attribute='server') | list)
+     | select | unique | list }}
 
-pki_certbot__authenticator:
-  dns-hetzner: '--dns-hetzner-credentials /etc/letsencrypt/dns-hetzner'
-  dns-powerdns: '--dns-powerdns-credentials /etc/letsencrypt/dns-powerdns'
+pki_certbot__command: ['podman', 'exec', "{{ pki_certbot__container.name }}", 'certbot']
+
+pki_certbot__renew_name: 'certbot-podman-renew'
+pki_certbot__systemd_dir: '/etc/systemd/system'

@@ -1,0 +1,21 @@
+---
+
+- name: 'Validate plugins, provider and realms'
+  ansible.builtin.assert:
+    that:
+      - pki_certbot__plugins is mapping
+      - pki_certbot__plugins | dict2items | rejectattr('key', 'match', 'dns-') | list | length == 0
+      - pki_certbot__plugins | dict2items | rejectattr('value', 'mapping') | list | length == 0
+      - pki_certbot__plugins | dict2items | map(attribute='value') | map('length') | select('eq', 0) | list | length == 0
+      - pki_certbot__provider in pki_certbot__provider_server
+      - pki_certbot__realms | rejectattr('realm', 'defined') | list | length == 0
+      - pki_certbot__plugins_missing | length == 0
+    fail_msg: >-
+      Configuration: certbot_plugins has to be a dict of DNS plugins (dns-<name>) with their credentials,
+      certbot_provider '{{ pki_certbot__provider }}' has to be one of {{ pki_certbot__provider_server.keys() | join(', ') }},
+      every realm needs 'realm', plugins used by realms but not configured: {{ pki_certbot__plugins_missing | join(', ') | default('none', true) }}.
+    quiet: true
+  vars:
+    pki_certbot__plugins_missing: >-
+      {{ pki_certbot__realms | map(attribute='authenticator', default='standalone') | select('match', 'dns-')
+         | reject('in', (pki_certbot__plugins.keys() | list) if pki_certbot__plugins is mapping else []) | unique | list }}

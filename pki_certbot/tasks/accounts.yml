@@ -1,11 +1,20 @@
 ---
 
-- name: 'Register or update ACME account'
-  ansible.builtin.shell: |
-    {{ pki_certbot__command}} show_account \
-      --server {{ item.value }} \ 
-    || \
-    {{ pki_certbot__command}} register \
-      --server {{ item.value }} {{ pki_certbot__command_register_options }}
-  with_dict: "{{ pki_certbot__provider_server }}"
-  when: 'pki_certbot__email | length > 0'
+- name: 'Read the ACME accounts'
+  ansible.builtin.command:
+    argv: "{{ pki_certbot__command + ['show_account', '--non-interactive', '--server', item] }}"
+  loop: "{{ pki_certbot__account_servers }}"
+  register: 'pki_certbot__accounts'
+  changed_when: false
+  failed_when: false
+
+- name: 'Register missing ACME accounts'
+  ansible.builtin.command:
+    argv: >-
+      {{ pki_certbot__command
+         + ['register', '--non-interactive', '--agree-tos', '--no-eff-email', '--server', item.item]
+         + (['--email', pki_certbot__email] if pki_certbot__email | length > 0 else ['--register-unsafely-without-email']) }}
+  loop: "{{ pki_certbot__accounts.results | rejectattr('rc', 'eq', 0) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
