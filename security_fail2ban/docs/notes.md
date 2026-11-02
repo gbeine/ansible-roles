@@ -28,6 +28,8 @@ fail2ban_jail_defaults:
   action: '%(action_mwl)s'
 ```
 
+Settings with a dot in the name, e.g. `bantime.increment`, are plain YAML keys and are written exactly as in `jail.conf`.
+
 The settings of the daemon and the release are in `vars/settings-<release>.yml`, generated from `fail2ban.conf` and `jail.conf` of fail2ban.
 The role fails before it changes anything if `fail2ban_settings` contains a setting unknown to the release.
 `fail2ban_jail_defaults` may contain additional settings, e.g. `blocklist_de_apikey` or other parameters of actions, they are written to the end of `jail.local`.
