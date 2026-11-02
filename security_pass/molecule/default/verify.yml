@@ -1,0 +1,82 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/pass.container'
+      register: 'security_pass__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - "'Network=none' in security_pass__test_lines"
+          - ('Volume=' + security_pass__test_vars.pass_home + ':/config') in security_pass__test_lines
+          - security_pass__test_lines | select('match', 'Environment=.*PUID=911') | list | length == 1
+          - security_pass__test_lines | select('match', 'Environment=.*PGID=911') | list | length == 1
+          - >-
+            security_pass__test_lines | select('match', 'Environment=.*GNUPAGENT_MAX_CACHE_TTL=' + security_pass__test_side_effect_ttl)
+            | list | length == 1
+          - security_pass__test_lines | select('match', 'Label=') | list | length == 0
+          - security_pass__test_lines | select('match', 'Secret=') | list | length == 0
+          - security_pass__test_lines | select('match', 'IP6?=') | list | length == 0
+        fail_msg: "Quadlet: {{ security_pass__test_quadlet.content | b64decode }}"
+      vars:
+        security_pass__test_lines: "{{ (security_pass__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the pass service'
+      ansible.builtin.command: 'systemctl is-active pass'
+      register: 'security_pass__test_service'
+      changed_when: false
+      failed_when: false
+      until: security_pass__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the pass service is active'
+      ansible.builtin.assert:
+        that:
+          - security_pass__test_service.stdout == 'active'
+        fail_msg: "Service: {{ security_pass__test_service.stdout }}"
+
+    - name: 'Inspect the networks of the pass container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }}json .NetworkSettings.Networks{{ "}}" }}', 'pass' ]
+      register: 'security_pass__test_networks'
+      changed_when: false
+
+    - name: 'Assert the pass container has no network'
+      ansible.builtin.assert:
+        that:
+          - security_pass__test_container_networks.keys() | list == ['none']
+          - security_pass__test_container_networks.none.IPAddress == ''
+          - security_pass__test_container_networks.none.GlobalIPv6Address == ''
+        fail_msg: "Networks: {{ security_pass__test_networks.stdout }}"
+      vars:
+        security_pass__test_container_networks: "{{ security_pass__test_networks.stdout | from_json }}"
+
+    - name: 'Read the environment and the version of pass in the container'
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [ 'podman', 'exec', 'pass', 'printenv', 'PASSWORD_STORE_DIR' ]
+        - [ 'podman', 'exec', 'pass', 'printenv', 'GNUPAGENT_MAX_CACHE_TTL' ]
+        - [ 'podman', 'exec', 'pass', 'pass', 'version' ]
+      loop_control:
+        label: "{{ item | join(' ') }}"
+      register: 'security_pass__test_exec'
+      changed_when: false
+
+    - name: 'Assert the environment and pass in the container'
+      ansible.builtin.assert:
+        that:
+          - security_pass__test_exec.results[0].stdout == '/config/.password-store'
+          - security_pass__test_exec.results[1].stdout == security_pass__test_side_effect_ttl
+          - security_pass__test_exec.results[2].stdout is search('password manager')
+        fail_msg: "{{ security_pass__test_exec.results | map(attribute='stdout') | list }}"

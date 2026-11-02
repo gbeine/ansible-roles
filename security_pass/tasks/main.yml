@@ -6,47 +6,52 @@
 
     - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ item }}"
+        path: "{{ security_pass__podman_home }}"
         mode: '0700'
         state: 'directory'
-      with_items:
-        - "{{ security_pass__podman_home }}"
 
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ security_pass__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
     - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ security_pass__container.name }}"
         hostname: "{{ security_pass__container.hostname }}"
         image: "{{ security_pass__container.image }}"
+        network: "{{ security_pass__container.network }}"
         timezone: "{{ security_pass__container.timezone }}"
         env: "{{ security_pass__container.environment | default(omit) }}"
         etc_hosts: "{{ security_pass__container.etc_hosts | default(omit) }}"
-        label: "{{ security_pass__container.labels | default(omit) }}"
-        publish: "{{ security_pass__container.publish | default(omit) }}"
-        expose: "{{ security_pass__container.expose | default(omit) }}"
-        secrets: "{{ security_pass__container.secrets | default(omit) }}"
         volume: "{{ security_pass__container.volumes | default(omit) }}"
         quadlet_options: |
 
           [Install]
           WantedBy=default.target
-          
+
           [Service]
           RestartSec=5
           Restart=always
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'security_pass__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ security_pass__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if security_pass__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        security_pass__running: >-
+          {{ (ansible_facts.services[security_pass__container.name + '.service'].state | default('')) == 'running' }}
+        security_pass__restart: "{{ security_pass__running | bool and security_pass__quadlet_result is changed }}"
       when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'security_pass__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ security_pass__container.name }}"
+        container_image: "{{ security_pass__container.image }}"
+        container_schedule: "{{ security_pass__autoupdate_schedule }}"

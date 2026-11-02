@@ -1,0 +1,40 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Read the main PID of pass before the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value pass'
+      register: 'security_pass__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with a changed environment'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: >-
+        {{ security_pass__test_vars
+           | combine({'pass_environment': {'GNUPAGENT_MAX_CACHE_TTL': security_pass__test_side_effect_ttl}}, recursive=true)
+           | dict2items }}
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run security_pass with changed environment'
+      ansible.builtin.include_role:
+        name: 'security_pass'
+
+    - name: 'Read the main PID of pass after the change'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value pass'
+      register: 'security_pass__test_pid_after'
+      changed_when: false
+
+    - name: 'Assert pass was restarted'
+      ansible.builtin.assert:
+        that:
+          - security_pass__test_pid_after.stdout != '0'
+          - security_pass__test_pid_after.stdout != security_pass__test_pid_before.stdout
+        fail_msg: "PID {{ security_pass__test_pid_before.stdout }} -> {{ security_pass__test_pid_after.stdout }}"
