@@ -101,7 +101,7 @@ The role fails before it changes anything if an account has no password in `post
 ### Restart and updates
 
 PostgreSQL is restarted if the configuration or the access configuration changed, or if it was running and the secret or the quadlet unit changed.
-Updates of the image within the major version are done by `container_update` with `postgresql_autoupdate_enabled: true` and `postgresql_autoupdate_schedule`.
+Updates of the image within the major version are done by `container_update` with `postgresql_autoupdate_enabled: true` and `postgresql_autoupdate_schedule`, without `postgresql_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
 

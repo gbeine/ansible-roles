@@ -106,7 +106,7 @@ telegraf_secrets:
 ### Restart and updates
 
 Telegraf is restarted if it was running and the configuration, a secret or the quadlet unit changed, otherwise it is started and enabled.
-Updates of the image are done by `container_update` with `telegraf_autoupdate_enabled: true` and `telegraf_autoupdate_schedule`.
+Updates of the image are done by `container_update` with `telegraf_autoupdate_enabled: true` and `telegraf_autoupdate_schedule`, without `telegraf_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
 

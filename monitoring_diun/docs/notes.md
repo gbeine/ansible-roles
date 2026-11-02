@@ -59,7 +59,7 @@ With `diun_provider_podman: false` the role sets no provider, configure e.g. the
 ### Restart and updates
 
 Diun is restarted if it was running and a secret or the quadlet unit changed, e.g. by a changed environment variable.
-Updates of the image are done by `container_update` with `diun_autoupdate_enabled: true` and `diun_autoupdate_schedule`.
+Updates of the image are done by `container_update` with `diun_autoupdate_enabled: true` and `diun_autoupdate_schedule`, without `diun_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
 
