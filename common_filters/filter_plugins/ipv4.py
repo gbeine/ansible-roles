@@ -30,15 +30,28 @@ def netaddress(context, address, netmask):
 
 
 @jinja2.pass_context
-def map2ipv6(context, address):
+def map2ipv6(context, address, site):
     """
 
     :param context: Jinja2 context.
-    :param address: The address
-    :returns: Converts an IPv4 address to an IPv4-mapped IPv6 address in hex notation, e.g. ::ffff:a00:1
+    :param address: The IPv4 address
+    :param site: The first three groups of the IPv6 address (the /48 of the site), e.g. fde9:f508:05c6
+    :returns: Maps an IPv4 address into the site, the second and third octet become the fourth group
+              and the last octet the last group, all in hex, e.g. fde9:f508:5c6:a863::1 for 192.168.99.1
     """
-    value = int(ipaddress.IPv4Address(address))
-    result = "::ffff:{0:x}:{1:x}".format(value >> 16, value & 0xffff)
+    octets = ipaddress.IPv4Address(address).packed
+    groups = str(site).strip(':').split(':')
+    if len(groups) != 3:
+        raise ValueError("site must consist of three groups, e.g. fde9:f508:05c6: {0}".format(site))
+
+    prefix = 0
+    for group in groups:
+        if not 1 <= len(group) <= 4 or any(c not in '0123456789abcdefABCDEF' for c in group):
+            raise ValueError("site must consist of three groups of up to four hex digits: {0}".format(site))
+        prefix = (prefix << 16) | int(group, 16)
+
+    value = (prefix << 80) | (octets[1] << 72) | (octets[2] << 64) | octets[3]
+    result = str(ipaddress.IPv6Address(value))
 
     return result
 
