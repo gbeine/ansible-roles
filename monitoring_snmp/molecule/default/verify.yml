@@ -1,0 +1,256 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_snmp__test_case: "{{ monitoring_snmp__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_snmp__test_expect: "{{ monitoring_snmp__test_case.expect }}"
+    monitoring_snmp__test_snmp_options: [ '-t', '1', '-r', '0', '-On', '-Oqv' ]
+
+  tasks:
+
+    - name: 'Read the state of snmpd'
+      ansible.builtin.command:
+        argv: [ 'systemctl', "{{ item }}", 'snmpd' ]
+      loop: [ 'is-active', 'is-enabled' ]
+      register: 'monitoring_snmp__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert snmpd is active and enabled'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_service.results[0].stdout == 'active'
+          - monitoring_snmp__test_service.results[1].stdout == 'enabled'
+        fail_msg: "{{ monitoring_snmp__test_service.results | map(attribute='stdout') | join(', ') }}"
+
+    - name: 'Read snmpd.conf'
+      ansible.builtin.slurp:
+        src: '/etc/snmp/snmpd.conf'
+      register: 'monitoring_snmp__test_config'
+
+    - name: 'Find the configs'
+      ansible.builtin.find:
+        paths: '/etc/snmp/snmpd.conf.d'
+        file_type: 'any'
+      register: 'monitoring_snmp__test_configs'
+
+    - name: 'Read the state of the configuration files'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ ['/etc/snmp/snmpd.conf'] + (monitoring_snmp__test_configs.files | map(attribute='path') | sort) }}"
+      register: 'monitoring_snmp__test_files'
+
+    - name: 'Assert snmpd.conf and the configs'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_expect.lines | difference(monitoring_snmp__test_lines) | length == 0
+          - >-
+            monitoring_snmp__test_configs.files | map(attribute='path') | map('basename') | sort
+            == monitoring_snmp__test_expect.configs | map('regex_replace', '$', '.conf') | sort
+          - monitoring_snmp__test_files.results | map(attribute='stat.mode') | unique == ['0640']
+          - monitoring_snmp__test_files.results | map(attribute='stat.pw_name') | unique == ['root']
+          - monitoring_snmp__test_files.results | map(attribute='stat.gr_name') | unique == ['Debian-snmp']
+        fail_msg: >-
+          missing lines: {{ monitoring_snmp__test_expect.lines | difference(monitoring_snmp__test_lines) | join(' | ') | default('none', true) }},
+          configs: {{ monitoring_snmp__test_configs.files | map(attribute='path') | map('basename') | sort | join(', ') }},
+          modes: {{ monitoring_snmp__test_files.results | map(attribute='stat.mode') | join(', ') }}
+      vars:
+        # Lines without comments and with single spaces, commented directives are kept as #<directive>
+        monitoring_snmp__test_lines: >-
+          {{ (monitoring_snmp__test_config.content | b64decode).splitlines()
+             | reject('match', '^# ') | reject('match', '^#$') | reject('match', '^\s*$')
+             | map('regex_replace', '\s+', ' ') | map('trim') | list }}
+
+    - name: 'Check the drop-in with the dependencies of snmpd'
+      ansible.builtin.stat:
+        path: "{{ monitoring_snmp__test_dropin }}"
+      register: 'monitoring_snmp__test_dropin_stat'
+
+    - name: 'Read the dependencies of snmpd'
+      ansible.builtin.command:
+        argv: "{{ [ 'systemctl', 'show', 'snmpd' ] + (monitoring_snmp__test_expect.unit.keys() | map('regex_replace', '^', '--property=') | list) }}"
+      register: 'monitoring_snmp__test_dependencies'
+      changed_when: false
+      when: monitoring_snmp__test_expect.unit | length > 0
+
+    - name: 'Assert the dependencies of snmpd'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_dropin_stat.stat.exists == (monitoring_snmp__test_expect.unit | length > 0)
+          - not monitoring_snmp__test_dropin_stat.stat.exists or monitoring_snmp__test_dropin_stat.stat.mode == '0644'
+          - monitoring_snmp__test_missing | length == 0
+        fail_msg: >-
+          drop-in exists: {{ monitoring_snmp__test_dropin_stat.stat.exists }},
+          missing: {{ monitoring_snmp__test_missing | join(', ') | default('none', true) }},
+          systemctl show: {{ monitoring_snmp__test_dependencies.stdout_lines | default([]) | join(', ') }}
+      vars:
+        # Units expected in the properties of systemctl show, as <property>=<unit>
+        monitoring_snmp__test_missing: "{{ monitoring_snmp__test_missing_json | trim | from_json }}"
+        monitoring_snmp__test_missing_json: >-
+          {% set shown = {} %}
+          {% for line in monitoring_snmp__test_dependencies.stdout_lines | default([]) %}
+          {%   set _ = shown.update({line.split('=', 1)[0]: line.split('=', 1)[1].split()}) %}
+          {% endfor %}
+          {% set result = [] %}
+          {% for property, units in monitoring_snmp__test_expect.unit.items() %}
+          {%   for unit in units if unit not in shown.get(property, []) %}
+          {%     set _ = result.append(property ~ '=' ~ unit) %}
+          {%   endfor %}
+          {% endfor %}
+          {{ result | to_json }}
+
+    - name: 'Read the UDP sockets on port 161'
+      ansible.builtin.command: 'ss -Hulnp sport = :161'
+      register: 'monitoring_snmp__test_ss'
+      changed_when: false
+
+    - name: 'Assert snmpd listens on the expected addresses'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_ss.stdout_lines | reject('search', 'snmpd') | list | length == 0
+          - monitoring_snmp__test_ss.stdout_lines | map('split') | map(attribute=3) | sort == monitoring_snmp__test_expect.listen | sort
+        fail_msg: "{{ monitoring_snmp__test_ss.stdout_lines }}"
+
+    - name: 'Check the AgentX socket'
+      ansible.builtin.stat:
+        path: '/var/agentx/master'
+      register: 'monitoring_snmp__test_agentx'
+
+    - name: 'Assert the AgentX socket'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_agentx.stat.exists == monitoring_snmp__test_expect.agentx
+          - not monitoring_snmp__test_expect.agentx or monitoring_snmp__test_agentx.stat.issock
+        fail_msg: >-
+          exists: {{ monitoring_snmp__test_agentx.stat.exists }},
+          socket: {{ monitoring_snmp__test_agentx.stat.issock | default('-') }}
+
+    - name: 'Read sysLocation'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'snmpget', '-v', '2c', '-c', monitoring_snmp__test_expect.readable[0].community ] + monitoring_snmp__test_snmp_options
+             + [ 'udp:127.0.0.1:161', monitoring_snmp__test_oids.sys_location ] }}
+      register: 'monitoring_snmp__test_sys_location'
+      changed_when: false
+
+    - name: 'Assert sysLocation'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_sys_location.stdout | trim | regex_replace('^"|"$', '') == monitoring_snmp__test_expect.sys_location
+        fail_msg: "{{ monitoring_snmp__test_sys_location.stdout }}"
+
+    - name: 'Read objects with the communities that can read'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'snmpget', '-v', '2c', '-c', item.community ] + monitoring_snmp__test_snmp_options
+             + [ item.agent, monitoring_snmp__test_oids[item.oid] ] }}
+      loop: "{{ monitoring_snmp__test_expect.readable }}"
+      loop_control:
+        label: "{{ item.community }} {{ item.agent }} {{ item.oid }}"
+      register: 'monitoring_snmp__test_readable'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the communities can read'
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout is not search('No Such')
+        fail_msg: "{{ item.item.community }} {{ item.item.agent }} {{ item.item.oid }}: {{ item.stdout }} {{ item.stderr }}"
+        quiet: true
+      loop: "{{ monitoring_snmp__test_readable.results }}"
+      loop_control:
+        label: "{{ item.item.community }} {{ item.item.agent }} {{ item.item.oid }}"
+
+    - name: 'Read objects with the communities that can not read'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'snmpget', '-v', '2c', '-c', item.community ] + monitoring_snmp__test_snmp_options
+             + [ item.agent, monitoring_snmp__test_oids[item.oid] ] }}
+      loop: "{{ monitoring_snmp__test_expect.unreadable }}"
+      loop_control:
+        label: "{{ item.community }} {{ item.agent }}"
+      register: 'monitoring_snmp__test_unreadable'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the communities can not read'
+      ansible.builtin.assert:
+        that:
+          - item.rc != 0
+          - (item.stdout + item.stderr) is search('Timeout')
+        fail_msg: "{{ item.item.community }} {{ item.item.agent }}: {{ item.stdout }} {{ item.stderr }}"
+        quiet: true
+      loop: "{{ monitoring_snmp__test_unreadable.results }}"
+      loop_control:
+        label: "{{ item.item.community }} {{ item.item.agent }}"
+
+    - name: 'Verify the view systemonly of the default configuration'
+      when: monitoring_snmp__test_expect.outside_view is defined
+      block:
+
+        - name: 'Read an object outside of the view systemonly'
+          ansible.builtin.command:
+            argv: >-
+              {{ [ 'snmpget', '-v', '2c', '-c', monitoring_snmp__test_expect.outside_view.community ] + monitoring_snmp__test_snmp_options
+                 + [ 'udp:127.0.0.1:161', monitoring_snmp__test_oids[monitoring_snmp__test_expect.outside_view.oid] ] }}
+          register: 'monitoring_snmp__test_outside_view'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the object outside of the view is not readable'
+          ansible.builtin.assert:
+            that:
+              - monitoring_snmp__test_outside_view.stdout is search('No Such Object')
+            fail_msg: "{{ monitoring_snmp__test_outside_view.stdout }} {{ monitoring_snmp__test_outside_view.stderr }}"
+
+    - name: 'Verify the SNMPv3 user and the extend command'
+      when: monitoring_snmp__test_expect.user is defined
+      vars:
+        monitoring_snmp__test_user: "{{ monitoring_snmp__test_expect.user }}"
+      block:
+
+        - name: 'Read sysLocation and the extend output as SNMPv3 user with the current and the former passwords'
+          ansible.builtin.command:
+            argv: >-
+              {{ [ item.command, '-v', '3', '-l', 'authPriv', '-u', monitoring_snmp__test_user.name,
+                   '-a', monitoring_snmp__test_user.auth_type, '-A', item.auth_pass,
+                   '-x', monitoring_snmp__test_user.priv_type, '-X', item.priv_pass ]
+                 + monitoring_snmp__test_snmp_options + [ 'udp:127.0.0.1:161', monitoring_snmp__test_oids[item.oid] ] }}
+          loop:
+            - command: 'snmpget'
+              oid: 'sys_location'
+              auth_pass: "{{ monitoring_snmp__test_user.auth_pass }}"
+              priv_pass: "{{ monitoring_snmp__test_user.priv_pass }}"
+            - command: 'snmpwalk'
+              oid: 'extend_output'
+              auth_pass: "{{ monitoring_snmp__test_user.auth_pass }}"
+              priv_pass: "{{ monitoring_snmp__test_user.priv_pass }}"
+            - command: 'snmpget'
+              oid: 'sys_location'
+              auth_pass: "{{ monitoring_snmp__test_user.old_auth_pass }}"
+              priv_pass: "{{ monitoring_snmp__test_user.old_priv_pass }}"
+          loop_control:
+            label: "{{ item.command }} {{ item.oid }}"
+          register: 'monitoring_snmp__test_v3'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the SNMPv3 user and the extend command'
+          ansible.builtin.assert:
+            that:
+              - monitoring_snmp__test_v3.results[0].rc == 0
+              - monitoring_snmp__test_v3.results[0].stdout | trim | regex_replace('^"|"$', '') == monitoring_snmp__test_expect.sys_location
+              - monitoring_snmp__test_v3.results[1].rc == 0
+              - >-
+                monitoring_snmp__test_expect.extend_output
+                in (monitoring_snmp__test_v3.results[1].stdout_lines | map('trim') | map('regex_replace', '^"|"$', '') | list)
+              - monitoring_snmp__test_v3.results[2].rc != 0
+            fail_msg: >-
+              {{ monitoring_snmp__test_v3.results | map(attribute='stdout') | join(' | ') }}
+              {{ monitoring_snmp__test_v3.results | map(attribute='stderr') | join(' | ') }}

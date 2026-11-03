@@ -1,0 +1,46 @@
+---
+# Runs monitoring_snmp with the invalid variables in monitoring_snmp__test_invalid.role_vars,
+# the role has to fail at the validation before it changes anything
+
+- name: "Run monitoring_snmp with invalid variables (expect ERROR): {{ monitoring_snmp__test_invalid.message }}"
+  block:
+
+    - name: 'Set the invalid role variables (expect ERROR)'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_snmp__test_invalid.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_snmp, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ monitoring_snmp__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Find the configuration files after the invalid run'
+      ansible.builtin.find:
+        paths: [ '/etc/snmp', '/etc/snmp/snmpd.conf.d', '/etc/systemd/system/snmpd.service.d' ]
+        patterns: '*.conf'
+        get_checksum: true
+      register: 'monitoring_snmp__test_files_after'
+
+    - name: 'Assert the run failed at the validation before any change'
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(monitoring_snmp__test_invalid.search, ignorecase=false)
+          - >-
+            monitoring_snmp__test_files_after.files | map(attribute='checksum') | sort
+            == monitoring_snmp__test_files_before.files | map(attribute='checksum') | sort
+        fail_msg: "Failure: {{ ansible_failed_result.msg | default('') }}"
+
+  always:
+
+    - name: 'Restore the role variables of the test case'
+      ansible.builtin.set_fact:
+        snmpd_settings: "{{ monitoring_snmp__test_case.role_vars.snmpd_settings }}"
+        snmpd_unit: "{{ monitoring_snmp__test_case.role_vars.snmpd_unit }}"

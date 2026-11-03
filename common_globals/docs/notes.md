@@ -42,6 +42,8 @@ site_mail_smtp_host: 'smtp.example.org'
 Every entry has `type` (`server` or `pool`, like the directives of chrony and ntpsec), `address` (hostname or IP address) and optional `options` (e.g. `iburst`).
 Without `site_ntp_sources` the servers of the PTB (`ptbtime1.ptb.de` to `ptbtime3.ptb.de`) and the German pool (`0.de.pool.ntp.org` to `3.de.pool.ntp.org`) are used.
 
+`common_globals__systemd_unit_types` lists the types of systemd units (`service`, `socket`, `target`, …), roles use it to validate unit names, e.g. dependencies of a service. `common_globals__systemd_unit_directives` maps the keys for dependencies on other units (`after`, `wants`, `requires`, `binds_to`, `part_of`) to their directives in the section `[Unit]`. Both do not depend on the site and have no `site_*` variable.
+
 The operating system specific parts are done by the bootstrap roles, e.g. `bootstrap_debian` installs the PKI packages, the CA certificates from `<site_pki_secrets_dir>/ca-certificates` and writes `/root/.forward`.
 
 ### Migration

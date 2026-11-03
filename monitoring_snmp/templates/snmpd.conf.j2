@@ -1,93 +1,43 @@
-###
-### {{ ansible_managed }}
-###
+{% macro directive(name, v) -%}
+{%   set values = v if (v is iterable and v is not string and v is not mapping) else [v] %}
+{%   for value in values if value | string | length > 0 %}
+{{ name }} {{ value }}
+{%   else %}
+#{{ name }}
+{%   endfor %}
+{%- endmacro %}
+#
+# {{ ansible_managed }}
+#
+# snmpd of Net-SNMP {{ monitoring_snmp__release }}, see snmpd.conf(5)
+#
+{% for section in monitoring_snmp__release_sections %}
 
 ###########################################################################
+# SECTION: {{ section.name }}
 #
-# snmpd.conf
-# An example configuration file for configuring the Net-SNMP agent ('snmpd')
-# See snmpd.conf(5) man page for details
-#
-###########################################################################
-# SECTION: System Information Setup
-#
+{%   for line in section.description.splitlines() %}
+#   {{ line }}
+{%   endfor %}
+{%   for setting in section.settings %}
 
-# syslocation: The [typically physical] location of the system.
-#   Note that setting this value here means that when trying to
-#   perform an snmp SET operation to the sysLocation.0 variable will make
-#   the agent return the "notWritable" error code.  IE, including
-#   this token in the snmpd.conf file will disable write access to
-#   the variable.
-#   arguments:  location_string
-sysLocation    {{ monitoring_snmp__snmpd_sys_location }}
-sysContact     {{ monitoring_snmp__snmpd_sys_contact }}
-
-# sysservices: The proper value for the sysServices object.
-#   arguments:  sysservices_number
-sysServices    {{ monitoring_snmp__snmpd_sys_services }}
-
-
+{%     for line in setting.description.splitlines() %}
+# {{ line }}
+{%     endfor %}
+{{ directive(setting.name, monitoring_snmp__settings.get(setting.name, setting.default)) }}
+{%-   endfor %}
+{% endfor %}
+{% set known = monitoring_snmp__release_sections | map(attribute='settings') | flatten | map(attribute='name') | list %}
+{% set additional = monitoring_snmp__settings.keys() | reject('in', known) | list %}
+{% if additional | length > 0 %}
 
 ###########################################################################
-# SECTION: Agent Operating Mode
+# Additional settings
 #
-#   This section defines how the agent will operate when it
-#   is running.
-
-# master: Should the agent operate as a master agent or not.
-#   Currently, the only supported master agent type for this token
-#   is "agentx".
-#   
-#   arguments: (on|yes|agentx|all|off|no)
-
-master  {{ monitoring_snmp__snmpd_master }}
-
-# agentaddress: The IP address and port number that the agent will listen on.
-#   By default the agent listens to any and all traffic from any
-#   interface on the default SNMP port (161).  This allows you to
-#   specify which address, interface, transport type and port(s) that you
-#   want the agent to listen on.  Multiple definitions of this token
-#   are concatenated together (using ':'s).
-#   arguments: [transport:]port[@interface/address],...
-
-agentaddress  {{ monitoring_snmp__snmpd_agentaddress | join(',') }}
-
-
-
-###########################################################################
-# SECTION: Access Control Setup
-#
-#   This section defines who is allowed to talk to your running
-#   snmp agent.
-
-# Views 
-#   arguments viewname included [oid]
-
-#  system + hrSystem groups only
-view   systemonly  included   .1.3.6.1.2.1.1
-view   systemonly  included   .1.3.6.1.2.1.25.1
-
-
-# rocommunity: a SNMPv1/SNMPv2c read-only access community name
-#   arguments:  community [default|hostname|network/bits] [oid | -V view]
-
-# Read-only access to everyone to the systemonly view
-rocommunity  public default -V systemonly
-rocommunity6 public default -V systemonly
-
-# SNMPv3 doesn't use communities, but users with (optionally) an
-# authentication and encryption string. This user needs to be created
-# with what they can view with rouser/rwuser lines in this file.
-#
-# createUser username (MD5|SHA|SHA-512|SHA-384|SHA-256|SHA-224) authpassphrase [DES|AES] [privpassphrase]
-# e.g.
-# createuser authPrivUser SHA-512 myauthphrase AES myprivphrase
-#
-# This should be put into /var/lib/snmp/snmpd.conf 
-#
-# rouser: a SNMPv3 read-only access username
-#    arguments: username [noauth|auth|priv [OID | -V VIEW [CONTEXT]]]
-rouser authPrivUser authpriv -V systemonly
+{%   for name in additional %}
+{{ directive(name, monitoring_snmp__settings[name]) }}
+{%-  endfor %}
+{% endif %}
 
 # include a all *.conf files in a directory
-includeDir /etc/snmp/snmpd.conf.d
+includeDir {{ monitoring_snmp__conf_d_dir }}

@@ -1,0 +1,136 @@
+---
+- name: 'Side effect'
+  hosts: 'molecule-snmp'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_snmp__test_case: "{{ monitoring_snmp__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_snmp__test_side_effect: "{{ monitoring_snmp__test_case.side_effect }}"
+    # The configs of the test case with the changed community, then additionally with the changed users
+    monitoring_snmp__test_configs_community: >-
+      {{ monitoring_snmp__test_case.role_vars.snmpd_configs | rejectattr('name', 'eq', 'access') | list
+         + [ monitoring_snmp__test_side_effect.community ] }}
+    monitoring_snmp__test_configs_users: >-
+      {{ monitoring_snmp__test_configs_community | rejectattr('name', 'eq', 'users') | list
+         + [ monitoring_snmp__test_side_effect.users ] }}
+
+  tasks:
+
+    - name: 'Read the main PID of snmpd before the changed community'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value snmpd'
+      register: 'monitoring_snmp__test_pid_before'
+      changed_when: false
+
+    - name: 'Set the role variables with the changed community'
+      ansible.builtin.set_fact:
+        snmpd_settings: "{{ monitoring_snmp__test_case.role_vars.snmpd_settings }}"
+        snmpd_configs: "{{ monitoring_snmp__test_configs_community }}"
+        snmpd_unit: "{{ monitoring_snmp__test_case.role_vars.snmpd_unit }}"
+
+    - name: 'Run monitoring_snmp with the changed community'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+
+    - name: 'Read the main PID of snmpd after the changed community'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value snmpd'
+      register: 'monitoring_snmp__test_pid_community'
+      changed_when: false
+
+    - name: 'Assert snmpd was reloaded, not restarted'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__configs_result is changed
+          - monitoring_snmp__test_pid_community.stdout == monitoring_snmp__test_pid_before.stdout
+        fail_msg: >-
+          PID {{ monitoring_snmp__test_pid_before.stdout }} -> {{ monitoring_snmp__test_pid_community.stdout }}
+
+    - name: 'Set the role variables with the changed passwords of the user'
+      ansible.builtin.set_fact:
+        snmpd_configs: "{{ monitoring_snmp__test_configs_users }}"
+
+    - name: 'Run monitoring_snmp with the changed passwords of the user'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+
+    - name: 'Read the main PID of snmpd after the changed passwords'
+      ansible.builtin.command: 'systemctl show --property=MainPID --value snmpd'
+      register: 'monitoring_snmp__test_pid_users'
+      changed_when: false
+
+    - name: 'Assert snmpd was restarted'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__configs_result is changed
+          - monitoring_snmp__test_pid_users.stdout != monitoring_snmp__test_pid_community.stdout
+        fail_msg: >-
+          PID {{ monitoring_snmp__test_pid_community.stdout }} -> {{ monitoring_snmp__test_pid_users.stdout }}
+
+    - name: 'Restart the unit snmpd is part of'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_snmp__test_unit }}"
+        state: 'restarted'
+
+    # snmpd has Type=notify and is activating for a moment
+    - name: 'Read the state of snmpd after the restart of the unit'
+      ansible.builtin.command: 'systemctl show --property=MainPID --property=ActiveState snmpd'
+      register: 'monitoring_snmp__test_unit_restart'
+      changed_when: false
+      until: "'ActiveState=active' in monitoring_snmp__test_unit_restart.stdout_lines"
+      retries: 10
+      delay: 1
+
+    - name: 'Stop the unit snmpd requires'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_snmp__test_unit }}"
+        state: 'stopped'
+
+    - name: 'Read the state of snmpd after the stop of the unit'
+      ansible.builtin.command: 'systemctl is-active snmpd'
+      register: 'monitoring_snmp__test_unit_stop'
+      changed_when: false
+      failed_when: false
+      until: monitoring_snmp__test_unit_stop.stdout in ['inactive', 'failed']
+      retries: 10
+      delay: 1
+
+    - name: 'Start the unit and snmpd again'
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: 'started'
+      loop:
+        - "{{ monitoring_snmp__test_unit }}"
+        - 'snmpd'
+
+    - name: 'Assert snmpd follows the restart and the stop of the unit'
+      ansible.builtin.assert:
+        that:
+          - ('MainPID=' + monitoring_snmp__test_pid_users.stdout) not in monitoring_snmp__test_unit_restart.stdout_lines
+          - monitoring_snmp__test_unit_stop.stdout != 'active'
+        fail_msg: >-
+          After restart: {{ monitoring_snmp__test_unit_restart.stdout_lines | join(', ') }}
+          (PID before {{ monitoring_snmp__test_pid_users.stdout }}), after stop: {{ monitoring_snmp__test_unit_stop.stdout }}
+
+    - name: 'Find the configuration files before the invalid runs'
+      ansible.builtin.find:
+        paths: [ '/etc/snmp', '/etc/snmp/snmpd.conf.d', '/etc/systemd/system/snmpd.service.d' ]
+        patterns: '*.conf'
+        get_checksum: true
+      register: 'monitoring_snmp__test_files_before'
+
+    - name: 'Run monitoring_snmp with invalid variables (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      loop:
+        - message: 'Unknown directives in snmpd_settings: molecule_unknown'
+          search: 'molecule_unknown'
+          role_vars:
+            snmpd_settings: "{{ monitoring_snmp__test_case.role_vars.snmpd_settings | combine(monitoring_snmp__test_side_effect.invalid_settings) }}"
+        - message: 'Invalid snmpd_unit entries: podman99.network'
+          search: 'requires: podman99.network'
+          role_vars:
+            snmpd_unit: "{{ monitoring_snmp__test_side_effect.invalid_unit }}"
+      loop_control:
+        loop_var: 'monitoring_snmp__test_invalid'
+        label: "{{ monitoring_snmp__test_invalid.message }}"

@@ -1,0 +1,129 @@
+---
+# Numeric OIDs, the snmp packages come without MIB files
+monitoring_snmp__test_oids:
+  sys_location: '.1.3.6.1.2.1.1.6.0'
+  sys_name: '.1.3.6.1.2.1.1.5.0'
+  hr_system_uptime: '.1.3.6.1.2.1.25.1.1.0'
+  if_number: '.1.3.6.1.2.1.2.1.0'
+  # nsExtendOutput1Line of NET-SNMP-EXTEND-MIB
+  extend_output: '.1.3.6.1.4.1.8072.1.3.2.3.1.1'
+
+# Created in prepare.yml, snmpd of the test case molecule-snmp depends on it
+monitoring_snmp__test_unit: 'molecule-vpn.service'
+monitoring_snmp__test_dropin: '/etc/systemd/system/snmpd.service.d/50-monitoring-snmp.conf'
+
+# Created in prepare.yml, the role removes it
+monitoring_snmp__test_stale_file: '/etc/snmp/snmpd.conf.d/molecule-stale.conf'
+
+# The effective lines of snmpd.conf of the Debian 13 package
+monitoring_snmp__test_debian_lines:
+  - 'sysLocation Sitting on the Dock of the Bay'
+  - 'sysContact Me <me@example.org>'
+  - 'sysServices 72'
+  - 'master agentx'
+  - 'agentaddress 127.0.0.1,[::1]'
+  - 'view systemonly included .1.3.6.1.2.1.1'
+  - 'view systemonly included .1.3.6.1.2.1.25.1'
+  - 'rocommunity public default -V systemonly'
+  - 'rocommunity6 public default -V systemonly'
+  - 'rouser authPrivUser authpriv -V systemonly'
+  - 'includeDir /etc/snmp/snmpd.conf.d'
+
+monitoring_snmp__test_cases:
+
+  # Without variables the role creates the same configuration as a fresh installation of Debian 13
+  - name: 'molecule-snmp-default'
+    role_vars: {}
+    expect:
+      lines: "{{ monitoring_snmp__test_debian_lines }}"
+      configs: []
+      listen: [ '127.0.0.1:161', '[::1]:161' ]
+      agentx: true
+      sys_location: 'Sitting on the Dock of the Bay'
+      readable:
+        - { community: 'public', agent: 'udp:127.0.0.1:161', oid: 'hr_system_uptime' }
+        - { community: 'public', agent: 'udp6:[::1]:161', oid: 'sys_location' }
+      # Outside of the view systemonly
+      outside_view: { community: 'public', oid: 'if_number' }
+      unreadable: []
+      unit: {}
+
+  - name: 'molecule-snmp'
+    role_vars:
+      snmpd_settings:
+        sysLocation: 'molecule'
+        agentaddress: 'udp:127.0.0.1:161,udp6:[::1]:161'
+        view:
+          - 'systemonly included .1.3.6.1.2.1.1'
+          - 'systemonly included .1.3.6.1.2.1.25.1'
+          - 'all included .1'
+        rocommunity: []
+        rocommunity6: []
+        rouser: []
+      snmpd_configs:
+        - name: 'access'
+          settings:
+            rocommunity: 'molecule-ro 127.0.0.1 -V all'
+            rocommunity6: 'molecule-ro ::1 -V all'
+        - name: 'users'
+          settings:
+            createUser: 'molecule SHA-512 "molecule-auth-pass" AES "molecule-priv-pass"'
+            rouser: 'molecule priv -V all'
+        - name: 'extend'
+          settings:
+            extend: 'molecule /bin/echo molecule'
+      snmpd_unit:
+        requires: [ 'molecule-vpn.service' ]
+        part_of: [ 'molecule-vpn.service' ]
+    side_effect:
+      # Reload, the community is no directive applied on a restart only
+      community:
+        name: 'access'
+        settings:
+          rocommunity: 'molecule-ro-changed 127.0.0.1 -V all'
+          rocommunity6: 'molecule-ro-changed ::1 -V all'
+      # Restart, createUser is applied on a restart only
+      users:
+        name: 'users'
+        settings:
+          createUser: 'molecule SHA-512 "molecule-auth-changed" AES "molecule-priv-changed"'
+          rouser: 'molecule priv -V all'
+      # Fail the validation
+      invalid_settings:
+        molecule_unknown: 'molecule'
+      # The name of a quadlet file instead of the unit of the podman network
+      invalid_unit:
+        requires: [ 'podman99.network' ]
+    # State after side_effect
+    expect:
+      lines:
+        - 'sysLocation molecule'
+        - 'agentaddress udp:127.0.0.1:161,udp6:[::1]:161'
+        - 'view all included .1'
+        - '#rocommunity'
+        - '#rocommunity6'
+        - '#rouser'
+        - 'includeDir /etc/snmp/snmpd.conf.d'
+      configs: [ 'access', 'extend', 'users' ]
+      listen: [ '127.0.0.1:161', '[::1]:161' ]
+      agentx: true
+      sys_location: 'molecule'
+      readable:
+        - { community: 'molecule-ro-changed', agent: 'udp:127.0.0.1:161', oid: 'if_number' }
+        - { community: 'molecule-ro-changed', agent: 'udp6:[::1]:161', oid: 'sys_location' }
+      unreadable:
+        - { community: 'molecule-ro', agent: 'udp:127.0.0.1:161', oid: 'sys_location' }
+        - { community: 'public', agent: 'udp:127.0.0.1:161', oid: 'sys_location' }
+      user:
+        name: 'molecule'
+        auth_type: 'SHA-512'
+        auth_pass: 'molecule-auth-changed'
+        priv_type: 'AES'
+        priv_pass: 'molecule-priv-changed'
+        old_auth_pass: 'molecule-auth-pass'
+        old_priv_pass: 'molecule-priv-pass'
+      extend_output: 'molecule'
+      unit:
+        Requires: [ 'molecule-vpn.service' ]
+        PartOf: [ 'molecule-vpn.service' ]
+        After: [ 'molecule-vpn.service' ]
