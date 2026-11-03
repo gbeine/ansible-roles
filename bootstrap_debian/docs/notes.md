@@ -10,7 +10,7 @@
 ```
 
 - The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by the repositories and storage, so packages can rely on mounted directories.
-- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, PKI, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files completely.
+- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, PKI, NTP, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_ntp_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files or replace installed services.
 - With `debian_cloud_manage_etc_hosts: true` (default `false`) cloud-init manages `/etc/hosts` (`manage_etc_hosts: True` in `/etc/cloud/cloud.cfg.d/99-manage_etc_hosts.cfg`) and the role does not generate it.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
@@ -31,7 +31,7 @@ debian_repositories:
 
 - Repositories that are not configured are removed: `*.sources` in `/etc/apt/sources.list.d` without an entry in `debian_repositories` (including keys stored by the role for them), all `*.list` files in `/etc/apt/sources.list.d` and `/etc/apt/sources.list`. Additional repositories therefore belong to `debian_repositories`. With `debian_repositories_prune: false` the role keeps them.
 - Bind mounts in `debian_mounts` default to `fs: none` and `options: rw,bind`.
-- This role replaces the former roles `bootstrap_hosts`, `bootstrap_logrotate`, `bootstrap_networking`, `bootstrap_packages`, `bootstrap_repositories`, `bootstrap_storage`, `bootstrap_timezone`, `bootstrap_accounts`, `apt_common` and `apt_unattended_upgrades`. The inventory variables were renamed:
+- This role replaces the former roles `bootstrap_hosts`, `bootstrap_logrotate`, `bootstrap_networking`, `bootstrap_packages`, `bootstrap_repositories`, `bootstrap_storage`, `bootstrap_timezone`, `bootstrap_accounts`, `apt_common`, `apt_unattended_upgrades`, `ntp_common`, `ntp_timesyncd` and `systemd_timesyncd`. The inventory variables were renamed:
 
 | Former variable | New variable |
 |---|---|
@@ -48,6 +48,9 @@ debian_repositories:
 | `bootstrap_users` | `debian_users` |
 | `logrotate_files` | `debian_logrotate_files` |
 | `unattended_upgrades_*` | `debian_unattended_upgrades_*` |
+| `timesyncd_ntp` (role `systemd_timesyncd`), `ntp_server` (role `ntp_common`) | `site_ntp_sources` of `common_globals` with `type: 'server'`, `debian_ntp_sources` overrides it for a host |
+| `timesyncd_fallback_ntp`, `ntp_pool` | entries with `type: 'pool'` in `site_ntp_sources` or `debian_ntp_sources` |
+| `timesyncd_root_distance_max_sec`, `timesyncd_poll_interval_min_sec`, `timesyncd_poll_interval_max_sec`, `timesyncd_connection_retry_sec`, `timesyncd_save_interval_sec` | `debian_ntp_root_distance_max_sec`, `debian_ntp_poll_interval_min_sec`, `debian_ntp_poll_interval_max_sec`, `debian_ntp_connection_retry_sec`, `debian_ntp_save_interval_sec` |
 | `bootstrap_<area>_enable` (role `bootstrap`) | `debian_networking_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` |
 
 ### Site settings
@@ -66,6 +69,35 @@ With `debian_mail_enable: true` the site settings are the defaults of the mail c
 - with `debian_mail_root_forward_enable: true` the role writes `site_mail_root_forward` to `/root/.forward` as well, the role fails if `site_mail_root_forward` is not set,
 - `site_mail_domain` is the `maildomain`, `debian_mail_maildomain` overrides it, without both it is `localdomain`,
 - if `debian_mail_accounts` is not set, the role creates the account `site` from `site_mail_smtp_host`, `site_mail_smtp_port`, `site_mail_from`, `site_mail_smtp_user` and `site_mail_smtp_password`, without them it sends to `localhost:25`.
+
+### NTP
+
+With `debian_ntp_enable: true` the role installs `systemd-timesyncd` as NTP client, the default of Debian and of the Debian images of Hetzner.
+`chrony` and `ntpsec` conflict with `systemd-timesyncd`, apt removes them if they are installed.
+
+The sources are `site_ntp_sources` of `common_globals`, `debian_ntp_sources` overrides them for a host.
+Every entry needs `type` (`server` or `pool`) and `address`, `options` (e.g. `iburst`) are used by NTP servers, but not by `systemd-timesyncd`.
+The role writes the drop-in `/etc/systemd/timesyncd.conf.d/50-bootstrap-debian.conf`, the `/etc/systemd/timesyncd.conf` of the package or of the provider (e.g. Hetzner) stays unchanged, the drop-in overrides it:
+
+- the addresses of the entries with `type: 'server'` become `NTP=`,
+- the addresses of the entries with `type: 'pool'` become `FallbackNTP=`, `systemd-timesyncd` has no pools and uses them only if no server is reachable,
+- without entries of a type the setting is empty, without pools `systemd-timesyncd` has no fallback.
+
+```yaml
+debian_ntp_enable: true
+site_ntp_sources:
+  - type: 'server'
+    address: 'ntp1.example.org'
+    options: [ 'iburst' ]
+  - type: 'pool'
+    address: '0.de.pool.ntp.org'
+debian_ntp_poll_interval_min_sec: 64
+```
+
+- `debian_ntp_root_distance_max_sec`, `debian_ntp_poll_interval_min_sec`, `debian_ntp_poll_interval_max_sec`, `debian_ntp_connection_retry_sec` and `debian_ntp_save_interval_sec` are seconds and only written if set, otherwise the defaults of systemd apply.
+  The former role `systemd_timesyncd` always wrote them, with `ConnectionRetrySec=20` instead of the systemd default 30.
+- The role validates the sources and the seconds before any change, `debian_ntp_poll_interval_min_sec` must not be greater than `debian_ntp_poll_interval_max_sec`.
+- `systemd-timesyncd` is restarted if the drop-in changed.
 
 ### Mail
 
@@ -111,8 +143,8 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 
 | Platform | Tested |
 |---|---|
-| `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults |
-| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults, no NTP drop-in without `debian_ntp_enable` |
+| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 

@@ -145,6 +145,57 @@
               - bootstrap_debian__test_localtime.stat.islnk
               - bootstrap_debian__test_localtime.stat.lnk_target == '/usr/share/zoneinfo/' + bootstrap_debian__expect.timezone
 
+    - name: 'Verify NTP client'
+      block:
+
+        - name: 'Check the NTP client configuration'
+          ansible.builtin.stat:
+            path: '/etc/systemd/timesyncd.conf.d/50-bootstrap-debian.conf'
+          register: 'bootstrap_debian__test_ntp_conf_stat'
+
+        - name: 'Assert the NTP client configuration exists only when enabled'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_ntp_conf_stat.stat.exists == (bootstrap_debian__expect.ntp | length > 0)
+
+        - name: 'Verify the NTP client'
+          when: bootstrap_debian__expect.ntp | length > 0
+          block:
+
+            - name: 'Read the NTP client configuration'
+              ansible.builtin.slurp:
+                src: '/etc/systemd/timesyncd.conf.d/50-bootstrap-debian.conf'
+              register: 'bootstrap_debian__test_ntp_conf'
+
+            - name: 'Assert the NTP client configuration'
+              ansible.builtin.assert:
+                that:
+                  - ('NTP=' + bootstrap_debian__expect.ntp.servers) in bootstrap_debian__test_ntp_lines
+                  - ('FallbackNTP=' + bootstrap_debian__expect.ntp.fallback) in bootstrap_debian__test_ntp_lines
+                  - ('PollIntervalMinSec=' + (bootstrap_debian__expect.ntp.poll_interval_min_sec | string)) in bootstrap_debian__test_ntp_lines
+                  - bootstrap_debian__test_ntp_lines | select('match', 'ConnectionRetrySec=') | list | length == 0
+                fail_msg: "{{ bootstrap_debian__test_ntp_conf.content | b64decode }}"
+              vars:
+                bootstrap_debian__test_ntp_lines: "{{ (bootstrap_debian__test_ntp_conf.content | b64decode).splitlines() }}"
+
+            - name: 'Read the state of systemd-timesyncd'
+              ansible.builtin.command: 'systemctl is-active systemd-timesyncd'
+              register: 'bootstrap_debian__test_ntp_service'
+              changed_when: false
+              failed_when: false
+
+            - name: 'Read the NTP servers used by systemd-timesyncd'
+              ansible.builtin.command: 'timedatectl show-timesync --property=SystemNTPServers --value'
+              register: 'bootstrap_debian__test_ntp_servers'
+              changed_when: false
+
+            - name: 'Assert systemd-timesyncd is active and uses the NTP servers'
+              ansible.builtin.assert:
+                that:
+                  - bootstrap_debian__test_ntp_service.stdout == 'active'
+                  - bootstrap_debian__test_ntp_servers.stdout | trim == bootstrap_debian__expect.ntp.servers
+                fail_msg: "Service: {{ bootstrap_debian__test_ntp_service.stdout }}, servers: {{ bootstrap_debian__test_ntp_servers.stdout }}"
+
     - name: 'Verify repositories'
       block:
 

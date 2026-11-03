@@ -25,17 +25,28 @@ Site settings are set once in the inventory, e.g. in `group_vars/all`:
 
 ```yaml
 site_timezone: 'Europe/Berlin'
+site_ntp_sources:
+  - type: 'server'
+    address: 'ntp1.example.org'
+    options: [ 'iburst' ]
+  - type: 'pool'
+    address: '0.de.pool.ntp.org'
+    options: [ 'iburst' ]
 site_pki_ca_certificates: [ 'example-ca.crt' ]
 site_mail_domain: 'example.org'
 site_mail_root_forward: 'admin@example.org'
 site_mail_smtp_host: 'smtp.example.org'
 ```
 
+`site_ntp_sources` are the time sources of the site, NTP clients and servers use them.
+Every entry has `type` (`server` or `pool`, like the directives of chrony and ntpsec), `address` (hostname or IP address) and optional `options` (e.g. `iburst`).
+Without `site_ntp_sources` the servers of the PTB (`ptbtime1.ptb.de` to `ptbtime3.ptb.de`) and the German pool (`0.de.pool.ntp.org` to `3.de.pool.ntp.org`) are used.
+
 The operating system specific parts are done by the bootstrap roles, e.g. `bootstrap_debian` installs the PKI packages, the CA certificates from `<site_pki_secrets_dir>/ca-certificates` and writes `/root/.forward`.
 
 ### Migration
 
-The role replaces the roles `pki_common` and `mail_common`, their tasks moved to `bootstrap_debian`.
+The role replaces the roles `pki_common`, `mail_common` and `ntp_common`, the tasks of `pki_common` and `mail_common` moved to `bootstrap_debian`.
 
 | Before | Now |
 |---|---|
@@ -48,3 +59,8 @@ The role replaces the roles `pki_common` and `mail_common`, their tasks moved to
 | `pki_common__*` in other roles | `common_globals__pki_*` |
 | `mail_common__*` in other roles | `common_globals__mail_*` |
 | dependency on `pki_common` or `mail_common` | dependency on `common_globals` |
+| `ntp_server`, `ntp_pool` with `hostname` and `options` | `site_ntp_sources` with `type` (`server` or `pool`), `address` and `options` |
+| `ntp_use_pool` | removed, pools are used if `site_ntp_sources` contains entries with `type: 'pool'` |
+| `ntp_hwclockfile`, `ntp_ntpsigndsocket` | removed, they were not used |
+| `ntp_common__*` in other roles | `common_globals__ntp_sources` |
+| dependency on `ntp_common` | dependency on `common_globals` |

@@ -1,0 +1,63 @@
+---
+
+- name: Validate NTP client settings
+  ansible.builtin.assert:
+    that:
+      - bootstrap_debian__ntp_sources is sequence and bootstrap_debian__ntp_sources is not string
+      - bootstrap_debian__ntp_sources | length > 0
+      - bootstrap_debian__ntp_sources | rejectattr('address', 'defined') | list | length == 0
+      - bootstrap_debian__ntp_sources | rejectattr('type', 'defined') | list | length == 0
+      - bootstrap_debian__ntp_sources | map(attribute='type') | reject('in', ['server', 'pool']) | list | length == 0
+      - bootstrap_debian__ntp_seconds | reject('match', '^[0-9]+$') | list | length == 0
+      - >-
+        bootstrap_debian__ntp_poll_interval_min_sec is not defined
+        or bootstrap_debian__ntp_poll_interval_max_sec is not defined
+        or (bootstrap_debian__ntp_poll_interval_min_sec | int) <= (bootstrap_debian__ntp_poll_interval_max_sec | int)
+    fail_msg: >-
+      debian_ntp_sources (default site_ntp_sources) needs at least one entry,
+      every entry needs address and type server or pool: {{ bootstrap_debian__ntp_sources }},
+      debian_ntp_*_sec must be seconds: {{ bootstrap_debian__ntp_seconds | reject('match', '^[0-9]+$') | join(', ') | default('none', true) }},
+      debian_ntp_poll_interval_min_sec must not be greater than debian_ntp_poll_interval_max_sec
+  vars:
+    bootstrap_debian__ntp_seconds: >-
+      {{ [bootstrap_debian__ntp_root_distance_max_sec | default(omit),
+          bootstrap_debian__ntp_poll_interval_min_sec | default(omit),
+          bootstrap_debian__ntp_poll_interval_max_sec | default(omit),
+          bootstrap_debian__ntp_connection_retry_sec | default(omit),
+          bootstrap_debian__ntp_save_interval_sec | default(omit)]
+         | reject('eq', omit) | map('string') | list }}
+
+- name: Install NTP client packages
+  ansible.builtin.apt:
+    cache_valid_time: "{{ bootstrap_debian__apt_cache_valid_time }}"
+    install_recommends: false
+    pkg: "{{ bootstrap_debian__ntp_packages }}"
+
+- name: Create NTP client configuration directory
+  ansible.builtin.file:
+    path: "{{ bootstrap_debian__ntp_conf_dir }}"
+    state: directory
+    owner: 'root'
+    group: 'root'
+    mode: '0755'
+
+- name: Generate NTP client configuration
+  ansible.builtin.template:
+    src: 'timesyncd.conf.j2'
+    dest: "{{ bootstrap_debian__ntp_conf_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  register: 'bootstrap_debian__ntp_conf_result'
+
+- name: Enable and start NTP client
+  ansible.builtin.systemd_service:
+    name: "{{ bootstrap_debian__ntp_service }}"
+    enabled: true
+    state: started
+
+- name: Restart NTP client
+  ansible.builtin.systemd_service:
+    name: "{{ bootstrap_debian__ntp_service }}"
+    state: restarted
+  when: bootstrap_debian__ntp_conf_result is changed
