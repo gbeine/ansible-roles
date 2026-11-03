@@ -1,0 +1,99 @@
+---
+# Network of the tart VM openwrt-base, br-lan gets its address via DHCP.
+# The ports of br-lan are read from the clone in converge.yml.
+bootstrap_openwrt__test_network:
+  - type: 'interface'
+    name: 'loopback'
+    find: { device: 'lo' }
+    options:
+      device: 'lo'
+      proto: 'static'
+      ipaddr: ['127.0.0.1/8']
+  - type: 'device'
+    find: { name: 'br-lan' }
+    options:
+      name: 'br-lan'
+      type: 'bridge'
+      ports: "{{ bootstrap_openwrt__test_lan_ports }}"
+  - type: 'interface'
+    name: 'lan'
+    find: { device: 'br-lan' }
+    options:
+      device: 'br-lan'
+      proto: 'dhcp'
+
+# Created in prepare.yml, the role removes it
+bootstrap_openwrt__test_stale_section: 'molecule_stale'
+
+bootstrap_openwrt__test_ntp_sources:
+  - type: 'server'
+    address: 'ntp1.example.org'
+  - type: 'pool'
+    address: '0.de.pool.ntp.org'
+  - type: 'server'
+    address: '192.0.2.123'
+
+bootstrap_openwrt__test_cases:
+
+  - name: 'molecule-openwrt-minimal'
+    role_vars:
+      openwrt_network: "{{ bootstrap_openwrt__test_network }}"
+      # Site settings of common_globals
+      site_timezone: 'Europe/Berlin'
+      site_ntp_sources: "{{ bootstrap_openwrt__test_ntp_sources }}"
+    expect:
+      hostname: 'OpenWrt'
+      zonename: 'Europe/Berlin'
+      timezone: 'CET-1CEST,M3.5.0,M10.5.0/3'
+      # Servers first, then pools
+      ntp_servers: [ 'ntp1.example.org', '192.0.2.123', '0.de.pool.ntp.org' ]
+      attendedsysupgrade_url: 'https://sysupgrade.openwrt.org'
+      packages: []
+      services_disabled: []
+
+  - name: 'molecule-openwrt-full'
+    prepare_uhttpd: true
+    role_vars:
+      openwrt_network: "{{ bootstrap_openwrt__test_network }}"
+      openwrt_timezone: 'Etc/UTC'
+      openwrt_ntp_sources:
+        - type: 'pool'
+          address: '0.openwrt.pool.ntp.org'
+      openwrt_system:
+        - type: 'system'
+          find: { compat_version: '1.1' }
+          options:
+            hostname: 'molecule-full'
+            timezone: 'GMT0'
+            zonename: 'UTC'
+            ttylogin: '0'
+            log_size: '128'
+            urandom_seed: '0'
+            compat_version: '1.1'
+        - type: 'timeserver'
+          name: 'ntp'
+          find: { enabled: '1' }
+          options:
+            enabled: '1'
+            enable_server: '0'
+            server: [ '0.openwrt.pool.ntp.org' ]
+      openwrt_packages:
+        - 'htop'
+      # The DHCP server is disabled in openwrt-base anyway
+      openwrt_services_disabled:
+        - 'dnsmasq'
+      openwrt_uhttpd_enable: true
+      openwrt_snmpd_enable: true
+    expect:
+      hostname: 'molecule-full'
+      zonename: 'UTC'
+      timezone: 'GMT0'
+      ntp_servers: [ '0.openwrt.pool.ntp.org' ]
+      attendedsysupgrade_url: 'https://sysupgrade.openwrt.org'
+      packages: [ 'htop', 'snmpd-nossl', 'snmp-utils-nossl' ]
+      services_disabled: [ 'dnsmasq' ]
+      uhttpd: true
+      # Default configuration of snmpd of the role
+      snmpd:
+        community: 'public'
+        sys_name: 'HeartOfGold'

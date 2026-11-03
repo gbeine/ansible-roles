@@ -60,29 +60,10 @@
 - name: Configure ACME
   when: bootstrap_openwrt__acme_config_stat.stat.exists
   block:
-    - name: Create backup directory on the controller
-      ansible.builtin.file:
-        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
-        state: directory
-        mode: '0700'
-      delegate_to: localhost
-      check_mode: false
-
     - name: Read current ACME configuration
       community.openwrt.slurp:
         src: /etc/config/acme
       register: bootstrap_openwrt__acme_current
-      no_log: true
-      check_mode: false
-
-    - name: Store backup on the controller (secrets redacted)
-      ansible.builtin.copy:
-        content: >-
-          {{ bootstrap_openwrt__acme_current.content | b64decode
-             | regex_replace('(?mi)^(\s*(?:option|list)\s+(?!key_type\b)\S*(?:key|pass|secret|psk|token|credentials)\S*\s+).*$', "\g<1>'REDACTED'") }}
-        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/acme"
-        mode: '0600'
-      delegate_to: localhost
       no_log: true
       check_mode: false
 
@@ -152,6 +133,28 @@
         config: acme
       register: bootstrap_openwrt__acme_pending
       check_mode: false
+
+    # The backup contains the configuration before this change, it is only written before a commit
+    - name: Create backup directory on the controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      check_mode: false
+      when: bootstrap_openwrt__acme_pending.changes | default({}) | length > 0
+
+    - name: Store backup on the controller (secrets redacted)
+      ansible.builtin.copy:
+        content: >-
+          {{ bootstrap_openwrt__acme_current.content | b64decode
+             | regex_replace('(?mi)^(\s*(?:option|list)\s+(?!key_type\b)\S*(?:key|pass|secret|psk|token|credentials)\S*\s+).*$', "\g<1>'REDACTED'") }}
+        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/acme"
+        mode: '0600'
+      delegate_to: localhost
+      no_log: true
+      check_mode: false
+      when: bootstrap_openwrt__acme_pending.changes | default({}) | length > 0
 
     - name: Commit changes
       community.openwrt.uci:

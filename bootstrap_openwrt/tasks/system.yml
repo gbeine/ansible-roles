@@ -35,26 +35,10 @@
   loop_control:
     label: "{{ item.name | default(item.find | default(item.type | default('?'))) }}"
 
-- name: Create backup directory on the controller
-  ansible.builtin.file:
-    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
-    state: directory
-    mode: '0700'
-  delegate_to: localhost
-  check_mode: false
-
 - name: Read current system configuration
   community.openwrt.slurp:
     src: /etc/config/system
   register: bootstrap_openwrt__system_current
-  check_mode: false
-
-- name: Store backup on the controller
-  ansible.builtin.copy:
-    content: "{{ bootstrap_openwrt__system_current.content | b64decode }}"
-    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/system"
-    mode: '0600'
-  delegate_to: localhost
   check_mode: false
 
 - name: Set declared sections
@@ -121,6 +105,25 @@
     config: system
   register: bootstrap_openwrt__system_pending
   check_mode: false
+
+# The backup contains the configuration before this change, it is only written before a commit
+- name: Create backup directory on the controller
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  check_mode: false
+  when: bootstrap_openwrt__system_pending.changes | default({}) | length > 0
+
+- name: Store backup on the controller
+  ansible.builtin.copy:
+    content: "{{ bootstrap_openwrt__system_current.content | b64decode }}"
+    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/system"
+    mode: '0600'
+  delegate_to: localhost
+  check_mode: false
+  when: bootstrap_openwrt__system_pending.changes | default({}) | length > 0
 
 - name: Commit changes
   community.openwrt.uci:

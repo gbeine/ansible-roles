@@ -31,8 +31,9 @@
       changed_when: tart_delete.rc == 0
       failed_when: false
 
+    # The base VM is only read, every platform gets its own clone
     - name: 'Clone the base VM'
-      ansible.builtin.command: "tart clone '{{ tart_image }}' '{{ item.name }}'"
+      ansible.builtin.command: "tart clone '{{ item.image | default(tart_image) }}' '{{ item.name }}'"
       loop: "{{ molecule_yml.platforms }}"
       loop_control:
         label: "{{ item.name }}"
@@ -81,14 +82,33 @@
     - name: 'Install the SSH key'
       ansible.builtin.command: >-
         sshpass -e ssh-copy-id {{ tart_ssh_options }}
-        -i '{{ tart_ssh_key }}.pub' '{{ tart_user }}@{{ item.stdout | trim }}'
+        -i '{{ tart_ssh_key }}.pub' '{{ item.item.user | default(tart_user) }}@{{ item.stdout | trim }}'
       environment:
-        SSHPASS: "{{ tart_password }}"
-      loop: "{{ tart_ip.results }}"
+        SSHPASS: "{{ item.item.password | default(tart_password) }}"
+      loop: "{{ tart_ip.results | rejectattr('item.authorized_keys', 'defined') }}"
       loop_control:
         label: "{{ item.item.name }}"
       register: 'tart_ssh_copy_id'
       until: tart_ssh_copy_id.rc == 0
+      retries: 10
+      delay: 5
+      changed_when: true
+
+    # e.g. dropbear on OpenWrt reads /etc/dropbear/authorized_keys
+    - name: 'Install the SSH key into the authorized_keys file of the platform'
+      ansible.builtin.shell: >-
+        sshpass -e ssh {{ tart_ssh_options }} '{{ item.item.user | default(tart_user) }}@{{ item.stdout | trim }}'
+        'mkdir -p "$(dirname {{ item.item.authorized_keys }})"
+        && cat >> {{ item.item.authorized_keys }}
+        && chmod 600 {{ item.item.authorized_keys }}'
+        < '{{ tart_ssh_key }}.pub'
+      environment:
+        SSHPASS: "{{ item.item.password | default(tart_password) }}"
+      loop: "{{ tart_ip.results | selectattr('item.authorized_keys', 'defined') }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      register: 'tart_authorized_keys'
+      until: tart_authorized_keys.rc == 0
       retries: 10
       delay: 5
       changed_when: true
@@ -99,7 +119,7 @@
           {{ tart_instances | default([]) + [ {
                'instance': item.item.name,
                'address': item.stdout | trim,
-               'user': tart_user,
+               'user': item.item.user | default(tart_user),
                'port': 22,
                'identity_file': tart_ssh_key
              } ] }}

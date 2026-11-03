@@ -1,0 +1,105 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    bootstrap_openwrt__test_case: "{{ bootstrap_openwrt__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    bootstrap_openwrt__test_expect: "{{ bootstrap_openwrt__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the network, system and attendedsysupgrade configuration'
+      ansible.builtin.raw: >-
+        echo "lan_proto=$(uci -q get network.lan.proto)";
+        echo "lan_device=$(uci -q get network.lan.device)";
+        echo "stale=$(uci -q get network.{{ bootstrap_openwrt__test_stale_section }} || echo absent)";
+        echo "hostname=$(uci -q get system.@system[0].hostname)";
+        echo "zonename=$(uci -q get system.@system[0].zonename)";
+        echo "timezone=$(uci -q get system.@system[0].timezone)";
+        echo "ntp=$(uci -q get system.ntp.server)";
+        echo "asu_url=$(uci -q get attendedsysupgrade.server.url)"
+      register: 'bootstrap_openwrt__test_uci'
+      changed_when: false
+
+    - name: 'Assert the network, system and attendedsysupgrade configuration'
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__test_values.lan_proto == 'dhcp'
+          - bootstrap_openwrt__test_values.lan_device == 'br-lan'
+          - bootstrap_openwrt__test_values.stale == 'absent'
+          - bootstrap_openwrt__test_values.hostname == bootstrap_openwrt__test_expect.hostname
+          - bootstrap_openwrt__test_values.zonename == bootstrap_openwrt__test_expect.zonename
+          - bootstrap_openwrt__test_values.timezone == bootstrap_openwrt__test_expect.timezone
+          - bootstrap_openwrt__test_values.ntp.split() == bootstrap_openwrt__test_expect.ntp_servers
+          - bootstrap_openwrt__test_values.asu_url == bootstrap_openwrt__test_expect.attendedsysupgrade_url
+        fail_msg: "{{ bootstrap_openwrt__test_uci.stdout_lines | map('trim') | join(', ') }}"
+      vars:
+        bootstrap_openwrt__test_values: >-
+          {{ dict(bootstrap_openwrt__test_uci.stdout_lines | map('trim') | select('search', '=')
+                  | map('split', '=', 1) | list) }}
+
+    - name: 'Read the installed packages'
+      ansible.builtin.raw: "for p in {{ bootstrap_openwrt__test_expect.packages | join(' ') }}; do apk info -e \"$p\" >/dev/null && echo \"$p\"; done; true"
+      register: 'bootstrap_openwrt__test_packages'
+      changed_when: false
+      when: bootstrap_openwrt__test_expect.packages | length > 0
+
+    - name: 'Read the disabled services'
+      ansible.builtin.raw: "for s in {{ bootstrap_openwrt__test_expect.services_disabled | join(' ') }}; do /etc/init.d/$s enabled || echo \"$s\"; done; true"
+      register: 'bootstrap_openwrt__test_services'
+      changed_when: false
+      when: bootstrap_openwrt__test_expect.services_disabled | length > 0
+
+    - name: 'Assert the packages and services'
+      ansible.builtin.assert:
+        that:
+          - >-
+            bootstrap_openwrt__test_expect.packages
+            | difference(bootstrap_openwrt__test_packages.stdout_lines | default([]) | map('trim') | list) | length == 0
+          - >-
+            bootstrap_openwrt__test_expect.services_disabled
+            | difference(bootstrap_openwrt__test_services.stdout_lines | default([]) | map('trim') | list) | length == 0
+        fail_msg: >-
+          installed: {{ bootstrap_openwrt__test_packages.stdout_lines | default([]) | map('trim') | join(', ') }},
+          disabled: {{ bootstrap_openwrt__test_services.stdout_lines | default([]) | map('trim') | join(', ') }}
+
+    - name: 'Verify uhttpd'
+      when: bootstrap_openwrt__test_expect.uhttpd | default(false)
+      block:
+
+        - name: 'Read the state and the HTTPS listeners of uhttpd'
+          ansible.builtin.raw: >-
+            pidof uhttpd >/dev/null && echo 'running=yes' || echo 'running=no';
+            echo "https=$(uci -q get uhttpd.main.listen_https)"
+          register: 'bootstrap_openwrt__test_uhttpd'
+          changed_when: false
+
+        - name: 'Assert uhttpd runs with HTTPS'
+          ansible.builtin.assert:
+            that:
+              - "'running=yes' in bootstrap_openwrt__test_uhttpd.stdout_lines | map('trim')"
+              - bootstrap_openwrt__test_uhttpd.stdout is search('https=0\.0\.0\.0:443')
+            fail_msg: "{{ bootstrap_openwrt__test_uhttpd.stdout_lines | map('trim') | join(', ') }}"
+
+    - name: 'Verify snmpd'
+      when: bootstrap_openwrt__test_expect.snmpd is defined
+      block:
+
+        - name: 'Read sysName via SNMP'
+          ansible.builtin.raw: >-
+            snmpget -v 2c -c {{ bootstrap_openwrt__test_expect.snmpd.community }} -t 1 -r 2 -On -Oqv 127.0.0.1 .1.3.6.1.2.1.1.5.0
+          register: 'bootstrap_openwrt__test_snmp'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert snmpd answers'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_openwrt__test_snmp.rc == 0
+              - bootstrap_openwrt__test_snmp.stdout | trim | regex_replace('^"|"$', '') == bootstrap_openwrt__test_expect.snmpd.sys_name
+            fail_msg: "{{ bootstrap_openwrt__test_snmp.stdout }} {{ bootstrap_openwrt__test_snmp.stderr | default('') }}"

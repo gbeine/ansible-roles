@@ -1,0 +1,57 @@
+---
+# OpenWrt has no Python, all tasks use raw
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    bootstrap_openwrt__test_case: "{{ bootstrap_openwrt__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Read the release and the network of the clone'
+      ansible.builtin.raw: >-
+        . /etc/openwrt_release && echo "release=${DISTRIB_RELEASE}";
+        echo "lan=$(uci -q get network.lan.proto)";
+        echo "apk=$(command -v apk)"
+      register: 'bootstrap_openwrt__test_image'
+      changed_when: false
+
+    - name: 'Assert the clone matches openwrt-base'
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__test_image.stdout is search('release=\S+')
+          - "'lan=dhcp' in bootstrap_openwrt__test_image.stdout_lines | map('trim')"
+          - bootstrap_openwrt__test_image.stdout is search('apk=/')
+        fail_msg: >-
+          The base VM needs OpenWrt with apk and network.lan.proto=dhcp:
+          {{ bootstrap_openwrt__test_image.stdout_lines | map('trim') | join(', ') }}
+
+    - name: 'Update the package lists'
+      ansible.builtin.raw: 'apk update'
+      changed_when: false
+
+    - name: 'Create a network section that is not declared, the role removes it'
+      ansible.builtin.raw: >-
+        uci set network.{{ bootstrap_openwrt__test_stale_section }}=interface
+        && uci set network.{{ bootstrap_openwrt__test_stale_section }}.proto=none
+        && uci commit network
+      changed_when: true
+
+    # The role does not install uhttpd and fails without certificate and key
+    - name: 'Install uhttpd, its init script generates certificate and key with px5g'
+      when: bootstrap_openwrt__test_case.prepare_uhttpd | default(false)
+      block:
+
+        - name: 'Install uhttpd and px5g'
+          ansible.builtin.raw: 'apk add uhttpd px5g-mbedtls && /etc/init.d/uhttpd enable && /etc/init.d/uhttpd restart'
+          changed_when: true
+
+        - name: 'Wait for the certificate and the key of uhttpd'
+          ansible.builtin.raw: >-
+            i=0; while [ $i -lt 60 ]; do [ -s /etc/uhttpd.crt ] && [ -s /etc/uhttpd.key ] && exit 0; i=$((i+1)); sleep 1; done;
+            echo 'no /etc/uhttpd.crt or /etc/uhttpd.key'; exit 1
+          changed_when: false

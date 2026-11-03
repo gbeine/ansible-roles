@@ -244,3 +244,41 @@ bootstrap_openwrt__snmpd_default:
     find: { enabled: '1' }
     options: { enabled: '1' }
 ```
+
+### Backups
+
+Before the role commits a change of a UCI configuration (`system`, `network`, `wireless`, `attendedsysupgrade`, `acme`, `uhttpd`, `snmpd`),
+it stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/<config>`,
+secrets of `wireless`, `acme` and `snmpd` are redacted. A run without changes writes no backup, the backup always contains the state before the last change.
+
+### Tests
+
+The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs with OpenWrt on a macOS controller.
+Every platform is a clone of the base VM `openwrt-base`, the clones are deleted afterwards, the base VM itself is never started or changed.
+The playbooks creating and destroying the VMs are shared by all tart scenarios and live in `.molecule/tart/` in the repository root,
+the platforms of this scenario set `image`, `user`, `password` and `authorized_keys` (`/etc/dropbear/authorized_keys`, dropbear does not read `~/.ssh`).
+
+| Platform | Tested |
+|---|---|
+| `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults |
+| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), uhttpd with HTTPS and snmpd with the defaults of the role, read via SNMP |
+
+ACME is not tested, it needs a real DNS zone and CA, wireless is not tested, the VM has no radios.
+
+The base VM needs OpenWrt with `apk`, `network.lan.proto` `dhcp` on `br-lan`, the DHCP server disabled and SSH login as `root` with password.
+The tests use the network of the base VM, the default of `openwrt_network` (lan static `192.168.1.1/24`) would cut the connection to the VM.
+`prepare` checks the base VM, updates the package lists, creates the network section `molecule_stale` and installs uhttpd and `px5g-mbedtls` on `molecule-openwrt-full`,
+the init script of uhttpd generates certificate and key, the role does not install uhttpd and fails without them.
+`converge` reads the ports of `br-lan` from the clone. The backups of the role are written to `molecule/default/backups/`, which is ignored by git.
+
+Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `community.openwrt`.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `MOLECULE_TART_OPENWRT_IMAGE` | `openwrt-base` | Base VM that is cloned |
+| `MOLECULE_TART_OPENWRT_PASSWORD` | `OpenWRT` | Password of `root`, used to install the SSH key |
+
+```shell
+cd bootstrap_openwrt
+molecule test
+```

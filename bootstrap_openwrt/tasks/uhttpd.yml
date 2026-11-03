@@ -44,26 +44,10 @@
     - not item.stat.exists
     - not ansible_check_mode
 
-- name: Create backup directory on the controller
-  ansible.builtin.file:
-    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
-    state: directory
-    mode: '0700'
-  delegate_to: localhost
-  check_mode: false
-
 - name: Read current uhttpd configuration
   community.openwrt.slurp:
     src: /etc/config/uhttpd
   register: bootstrap_openwrt__uhttpd_current
-  check_mode: false
-
-- name: Store backup on the controller
-  ansible.builtin.copy:
-    content: "{{ bootstrap_openwrt__uhttpd_current.content | b64decode }}"
-    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/uhttpd"
-    mode: '0600'
-  delegate_to: localhost
   check_mode: false
 
 - name: Set declared sections
@@ -130,6 +114,25 @@
     config: uhttpd
   register: bootstrap_openwrt__uhttpd_pending
   check_mode: false
+
+# The backup contains the configuration before this change, it is only written before a commit
+- name: Create backup directory on the controller
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  check_mode: false
+  when: bootstrap_openwrt__uhttpd_pending.changes | default({}) | length > 0
+
+- name: Store backup on the controller
+  ansible.builtin.copy:
+    content: "{{ bootstrap_openwrt__uhttpd_current.content | b64decode }}"
+    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/uhttpd"
+    mode: '0600'
+  delegate_to: localhost
+  check_mode: false
+  when: bootstrap_openwrt__uhttpd_pending.changes | default({}) | length > 0
 
 - name: Commit changes
   community.openwrt.uci:
