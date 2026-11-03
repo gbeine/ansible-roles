@@ -38,7 +38,7 @@ site_mail_root_forward: 'admin@example.org'
 site_mail_smtp_host: 'smtp.example.org'
 ```
 
-`site_ntp_sources` are the time sources of the site, NTP clients and servers use them.
+`site_ntp_sources` are the time sources of the site, NTP clients and servers use them, e.g. `bootstrap_debian` (`systemd-timesyncd`) and `bootstrap_openwrt` (`sysntpd`).
 Every entry has `type` (`server` or `pool`, like the directives of chrony and ntpsec), `address` (hostname or IP address) and optional `options` (e.g. `iburst`).
 Without `site_ntp_sources` the servers of the PTB (`ptbtime1.ptb.de` to `ptbtime3.ptb.de`) and the German pool (`0.de.pool.ntp.org` to `3.de.pool.ntp.org`) are used.
 

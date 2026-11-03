@@ -13,6 +13,24 @@ openwrt_timezone_posix: '<-03>3'
 
 Without `site_timezone` the system section gets `timezone: 'GMT0'` and `zonename: 'UTC'` as before.
 
+### NTP
+
+The time sources are `site_ntp_sources` of `common_globals`, `openwrt_ntp_sources` overrides them for a device.
+They become the list `server` of the section `timeserver` `ntp` of the default of `openwrt_system`.
+`sysntpd` knows no pools, so the list contains the addresses of the entries with `type: 'server'` first, then those with `type: 'pool'`, `options` are not used.
+The role validates the sources before it changes anything, every entry needs `type` (`server` or `pool`) and `address`.
+
+```yaml
+openwrt_ntp_sources:
+  - type: 'server'
+    address: '192.168.1.1'
+  - type: 'pool'
+    address: '0.openwrt.pool.ntp.org'
+```
+
+Without `site_ntp_sources` the defaults of the site are used (`ptbtime1.ptb.de` to `ptbtime3.ptb.de`, then `0.de.pool.ntp.org` to `3.de.pool.ntp.org`), before the role used `0.openwrt.pool.ntp.org` to `3.openwrt.pool.ntp.org`.
+With `openwrt_system` the sections are taken as they are, the sources are not used then.
+
 ### Default for `openwrt_system`
 
 ```yaml
@@ -34,11 +52,7 @@ bootstrap_openwrt__system_default:
     options:
       enabled: '1'
       enable_server: '0'
-      server:
-        - '0.openwrt.pool.ntp.org'
-        - '1.openwrt.pool.ntp.org'
-        - '2.openwrt.pool.ntp.org'
-        - '3.openwrt.pool.ntp.org'
+      server: "{{ bootstrap_openwrt__ntp_servers }}"
 ```
 
 ### Default for `openwrt_network`
