@@ -1,0 +1,80 @@
+---
+# Numeric OIDs, the snmp packages come without MIB files
+monitoring_snmp__test_oids:
+  sys_location: '.1.3.6.1.2.1.1.6.0'
+  sys_name: '.1.3.6.1.2.1.1.5.0'
+  ext_names: '.1.3.6.1.4.1.2021.8.1.2'
+  # nsExtendOutput1Line of NET-SNMP-EXTEND-MIB
+  extend_output: '.1.3.6.1.4.1.8072.1.3.2.3.1.1'
+
+monitoring_snmp__test_cases:
+
+  # Without variables the role creates the former default of bootstrap_openwrt
+  - name: 'molecule-snmp-openwrt-default'
+    role_vars: {}
+    expect:
+      sys_name: 'HeartOfGold'
+      sys_location: 'office'
+      readable: [ 'public', 'private' ]
+      unreadable: [ 'molecule-wrong' ]
+      ext_names: [ 'filedescriptors' ]
+      packages: [ 'snmpd-nossl', 'snmp-utils-nossl' ]
+      packages_absent: [ 'snmpd-ssl', 'snmp-utils-ssl' ]
+      uci:
+        - 'snmpd.agent.agentaddress=UDP:161,UDP6:161'
+        - 'snmpd.agentx.agentxsocket=/var/run/agentx.sock'
+        - 'snmpd.com2sec_0.community=public'
+        - 'snmpd.com2sec_1.source=localhost'
+        - 'snmpd.view_0.oid=.1'
+        - 'snmpd.engineid.engineidtype=3'
+        - 'snmpd.general.enabled=1'
+
+  - name: 'molecule-snmp-openwrt'
+    role_vars:
+      # SHA-512 and AES need the ssl variant
+      snmpd_ssl: true
+      snmpd_settings:
+        sysLocation: 'molecule'
+        com2sec: [ 'ro localhost molecule-ro' ]
+        com2sec6: []
+        group: [ 'molecule v2c ro' ]
+        access: [ 'molecule "" any noauth exact all none none' ]
+      snmpd_configs:
+        - name: 'users'
+          settings:
+            createUser: 'molecule SHA-512 "molecule-auth-pass" AES "molecule-priv-pass"'
+            rouser: 'molecule priv'
+        - name: 'extend'
+          settings:
+            extend: 'molecule /bin/echo molecule'
+    side_effect:
+      invalid:
+        # proc can not be configured via UCI
+        - message: 'proc is not supported on OpenWrt'
+          role_vars:
+            snmpd_settings:
+              proc: 'sshd'
+          search: 'proc \(not supported on OpenWrt\)'
+        # The nossl variant is built without OpenSSL
+        - message: 'SHA-512 and AES need snmpd_ssl'
+          role_vars:
+            snmpd_ssl: false
+          search: 'auth type SHA-512 needs snmpd_ssl: true.*privacy type AES needs snmpd_ssl: true'
+    expect:
+      sys_name: 'HeartOfGold'
+      sys_location: 'molecule'
+      readable: [ 'molecule-ro' ]
+      unreadable: [ 'public', 'private' ]
+      uci:
+        - 'snmpd.general.snmp_version=v1/v2c/v3'
+        - 'snmpd.v3_molecule.username=molecule'
+        - 'snmpd.extend_0.name=molecule'
+      user:
+        name: 'molecule'
+        auth_type: 'SHA-512'
+        auth_pass: 'molecule-auth-pass'
+        priv_type: 'AES'
+        priv_pass: 'molecule-priv-pass'
+      extend_output: 'molecule'
+      packages: [ 'snmpd-ssl', 'snmp-utils-ssl' ]
+      packages_absent: [ 'snmpd-nossl', 'snmp-utils-nossl' ]

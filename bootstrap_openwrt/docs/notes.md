@@ -101,6 +101,12 @@ bootstrap_openwrt__attendedsysupgrade_default:
       upgrade_packages: '1'
       auto_search: '0'
       advanced_mode: '0'
+
+  # Section of owut without options
+  - type: 'owut'
+    name: 'owut'
+    find: {}
+    options: {}
 ```
 
 ### Default for `openwrt_uhttpd`
@@ -142,114 +148,25 @@ bootstrap_openwrt__uhttpd_default:
       commonname: 'OpenWrt'
 ```
 
-### Default for `openwrt_snmpd`
-
-```yaml
-bootstrap_openwrt__snmpd_default:
-  - type: 'agent'
-    find: { agentaddress: 'UDP:161,UDP6:161' }
-    options: { agentaddress: 'UDP:161,UDP6:161' }
-
-  - type: 'agentx'
-    find: { agentxsocket: '/var/run/agentx.sock' }
-    options: { agentxsocket: '/var/run/agentx.sock' }
-
-  - type: 'com2sec'
-    name: 'public'
-    find: { secname: 'ro' }
-    options: { secname: 'ro', source: 'default', community: 'public' }
-  - type: 'com2sec'
-    name: 'private'
-    find: { secname: 'rw' }
-    options: { secname: 'rw', source: 'localhost', community: 'private' }
-
-  - type: 'com2sec6'
-    name: 'public6'
-    find: { secname: 'ro' }
-    options: { secname: 'ro', source: 'default', community: 'public' }
-  - type: 'com2sec6'
-    name: 'private6'
-    find: { secname: 'rw' }
-    options: { secname: 'rw', source: 'localhost', community: 'private' }
-
-  - type: 'group'
-    name: 'public_v1'
-    find: { group: 'public', version: 'v1' }
-    options: { group: 'public', version: 'v1', secname: 'ro' }
-  - type: 'group'
-    name: 'public_v2c'
-    find: { group: 'public', version: 'v2c' }
-    options: { group: 'public', version: 'v2c', secname: 'ro' }
-  - type: 'group'
-    name: 'public_usm'
-    find: { group: 'public', version: 'usm' }
-    options: { group: 'public', version: 'usm', secname: 'ro' }
-  - type: 'group'
-    name: 'private_v1'
-    find: { group: 'private', version: 'v1' }
-    options: { group: 'private', version: 'v1', secname: 'rw' }
-  - type: 'group'
-    name: 'private_v2c'
-    find: { group: 'private', version: 'v2c' }
-    options: { group: 'private', version: 'v2c', secname: 'rw' }
-  - type: 'group'
-    name: 'private_usm'
-    find: { group: 'private', version: 'usm' }
-    options: { group: 'private', version: 'usm', secname: 'rw' }
-
-  - type: 'view'
-    name: 'all'
-    find: { viewname: 'all' }
-    options: { viewname: 'all', type: 'included', oid: '.1' }
-
-  - type: 'access'
-    name: 'public_access'
-    find: { group: 'public' }
-    options:
-      group: 'public'
-      context: 'none'
-      version: 'any'
-      level: 'noauth'
-      prefix: 'exact'
-      read: 'all'
-      write: 'none'
-      notify: 'none'
-  - type: 'access'
-    name: 'private_access'
-    find: { group: 'private' }
-    options:
-      group: 'private'
-      context: 'none'
-      version: 'any'
-      level: 'noauth'
-      prefix: 'exact'
-      read: 'all'
-      write: 'all'
-      notify: 'all'
-
-  - type: 'system'
-    find: { sysName: 'HeartOfGold' }
-    options: { sysLocation: 'office', sysContact: 'bofh@example.com', sysName: 'HeartOfGold' }
-
-  - type: 'exec'
-    find: { name: 'filedescriptors' }
-    options: { name: 'filedescriptors', prog: '/bin/cat', args: '/proc/sys/fs/file-nr' }
-
-  - type: 'engineid'
-    find: { engineidtype: '3' }
-    options: { engineidtype: '3', engineidnic: 'eth0' }
-
-  - type: 'snmpd'
-    name: 'general'
-    find: { enabled: '1' }
-    options: { enabled: '1' }
-```
-
 ### Backups
 
-Before the role commits a change of a UCI configuration (`system`, `network`, `wireless`, `attendedsysupgrade`, `acme`, `uhttpd`, `snmpd`),
+Before the role commits a change of a UCI configuration (`system`, `network`, `wireless`, `attendedsysupgrade`, `acme`, `uhttpd`),
 it stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/<config>`,
-secrets of `wireless`, `acme` and `snmpd` are redacted. A run without changes writes no backup, the backup always contains the state before the last change.
+secrets of `wireless` and `acme` are redacted. A run without changes writes no backup, the backup always contains the state before the last change.
+
+### SNMP
+
+The role does not configure snmpd any longer, the role `monitoring_snmp` configures snmpd on OpenWrt and Debian.
+
+| Former variable | Now (role `monitoring_snmp`) |
+|---|---|
+| `openwrt_snmpd_enable: true` | run the role `monitoring_snmp` on the device |
+| `openwrt_snmpd` (UCI sections) | `snmpd_settings` and `snmpd_configs` with directives of `snmpd.conf`, the role translates them to UCI |
+| `openwrt_snmpd_ssl` | `snmpd_ssl` |
+| `openwrt_snmpd_prune` | `snmpd_prune` |
+| `openwrt_snmpd_redact_keys` | removed, the secrets are always redacted |
+
+Without variables `monitoring_snmp` creates the same configuration as the former default of `openwrt_snmpd`.
 
 ### Tests
 
@@ -260,8 +177,8 @@ the platforms of this scenario set `image`, `user`, `password` and `authorized_k
 
 | Platform | Tested |
 |---|---|
-| `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults |
-| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), uhttpd with HTTPS and snmpd with the defaults of the role, read via SNMP |
+| `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults including the section `owut` |
+| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), an enabled service (`uhttpd`, disabled and stopped in `prepare`) and uhttpd with HTTPS |
 
 ACME is not tested, it needs a real DNS zone and CA, wireless is not tested, the VM has no radios.
 

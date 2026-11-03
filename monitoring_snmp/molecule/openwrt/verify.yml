@@ -1,0 +1,126 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_snmp__test_case: "{{ monitoring_snmp__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_snmp__test_expect: "{{ monitoring_snmp__test_case.expect }}"
+    monitoring_snmp__test_snmp: 'snmpget -t 1 -r 2 -On -Oqv'
+
+  tasks:
+
+    - name: 'Read the UCI configuration and the state of snmpd'
+      ansible.builtin.raw: "uci show snmpd; pidof snmpd >/dev/null && echo 'snmpd running'; /etc/init.d/snmpd enabled && echo 'snmpd enabled'; true"
+      register: 'monitoring_snmp__test_uci'
+      changed_when: false
+
+    - name: 'Assert the UCI configuration and the state of snmpd'
+      ansible.builtin.assert:
+        that:
+          - "'snmpd running' in monitoring_snmp__test_lines"
+          - "'snmpd enabled' in monitoring_snmp__test_lines"
+          - monitoring_snmp__test_expect.uci | difference(monitoring_snmp__test_lines) | length == 0
+        fail_msg: "missing: {{ monitoring_snmp__test_expect.uci | difference(monitoring_snmp__test_lines) | join(', ') | default('none', true) }}"
+      vars:
+        # uci show quotes the values
+        monitoring_snmp__test_lines: "{{ monitoring_snmp__test_uci.stdout_lines | map('trim') | map('regex_replace', \"'\", '') | list }}"
+
+    - name: 'Read the installed snmpd packages'
+      ansible.builtin.raw: >-
+        for p in {{ (monitoring_snmp__test_expect.packages + monitoring_snmp__test_expect.packages_absent) | join(' ') }};
+        do apk info -e "$p" >/dev/null 2>&1 && echo "$p"; done; true
+      register: 'monitoring_snmp__test_packages'
+      changed_when: false
+
+    - name: 'Assert the snmpd packages of the SSL variant'
+      ansible.builtin.assert:
+        that:
+          - (monitoring_snmp__test_packages.stdout_lines | map('trim') | select | sort) == (monitoring_snmp__test_expect.packages | sort)
+        fail_msg: "installed: {{ monitoring_snmp__test_packages.stdout_lines | map('trim') | select | join(', ') }}"
+
+    - name: 'Read sysName and sysLocation with the communities that can read'
+      ansible.builtin.raw: >-
+        {{ monitoring_snmp__test_snmp }} -v 2c -c {{ item }} 127.0.0.1
+        {{ monitoring_snmp__test_oids.sys_name }} {{ monitoring_snmp__test_oids.sys_location }}
+      loop: "{{ monitoring_snmp__test_expect.readable }}"
+      register: 'monitoring_snmp__test_readable'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the communities can read'
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - >-
+            item.stdout_lines | map('trim') | map('regex_replace', '^"|"$', '') | select | list
+            == [ monitoring_snmp__test_expect.sys_name, monitoring_snmp__test_expect.sys_location ]
+        fail_msg: "{{ item.item }}: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ monitoring_snmp__test_readable.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Read sysName with the communities that can not read'
+      ansible.builtin.raw: "{{ monitoring_snmp__test_snmp }} -v 2c -c {{ item }} 127.0.0.1 {{ monitoring_snmp__test_oids.sys_name }}"
+      loop: "{{ monitoring_snmp__test_expect.unreadable }}"
+      register: 'monitoring_snmp__test_unreadable'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the communities can not read'
+      ansible.builtin.assert:
+        that:
+          - item.rc != 0
+          - (item.stdout + (item.stderr | default(''))) is search('Timeout')
+        fail_msg: "{{ item.item }}: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ monitoring_snmp__test_unreadable.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Verify the exec entries of the default configuration'
+      when: monitoring_snmp__test_expect.ext_names is defined
+      block:
+
+        - name: 'Read the names of the exec entries'
+          ansible.builtin.raw: "snmpwalk -t 1 -r 2 -On -Oqv -v 2c -c public 127.0.0.1 {{ monitoring_snmp__test_oids.ext_names }}"
+          register: 'monitoring_snmp__test_ext'
+          changed_when: false
+
+        - name: 'Assert the exec entries'
+          ansible.builtin.assert:
+            that:
+              - >-
+                monitoring_snmp__test_ext.stdout_lines | map('trim') | map('regex_replace', '^"|"$', '') | select | list
+                == monitoring_snmp__test_expect.ext_names
+            fail_msg: "{{ monitoring_snmp__test_ext.stdout }}"
+
+    - name: 'Verify the SNMPv3 user and the extend command'
+      when: monitoring_snmp__test_expect.user is defined
+      vars:
+        monitoring_snmp__test_user: "{{ monitoring_snmp__test_expect.user }}"
+      block:
+
+        - name: 'Read the extend output as SNMPv3 user'
+          ansible.builtin.raw: >-
+            snmpwalk -t 1 -r 2 -On -Oqv -v 3 -l authPriv -u {{ monitoring_snmp__test_user.name }}
+            -a {{ monitoring_snmp__test_user.auth_type }} -A {{ monitoring_snmp__test_user.auth_pass }}
+            -x {{ monitoring_snmp__test_user.priv_type }} -X {{ monitoring_snmp__test_user.priv_pass }}
+            127.0.0.1 {{ monitoring_snmp__test_oids.extend_output }}
+          register: 'monitoring_snmp__test_v3'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the SNMPv3 user and the extend command'
+          ansible.builtin.assert:
+            that:
+              - monitoring_snmp__test_v3.rc == 0
+              - >-
+                monitoring_snmp__test_expect.extend_output
+                in (monitoring_snmp__test_v3.stdout_lines | map('trim') | map('regex_replace', '^"|"$', '') | list)
+            fail_msg: "{{ monitoring_snmp__test_v3.stdout }} {{ monitoring_snmp__test_v3.stderr | default('') }}"

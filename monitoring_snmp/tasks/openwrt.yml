@@ -1,0 +1,337 @@
+---
+
+- name: 'Install and configure Net-SNMP on OpenWrt'
+  vars:
+    monitoring_snmp__openwrt_changed: >-
+      {{ (monitoring_snmp__openwrt_packages_result | default({})) is changed
+         or (monitoring_snmp__openwrt_commit_result | default({})) is changed }}
+  block:
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Include OpenWrt specific variables'
+      ansible.builtin.include_vars:
+        file: 'OpenWrt.yml'
+
+    # The configs are merged into the settings, lists are appended
+    - name: 'Translate the settings to the UCI configuration of snmpd'
+      ansible.builtin.set_fact:
+        monitoring_snmp__openwrt_translation: "{{ monitoring_snmp__openwrt_translation_json | trim | from_json }}"
+      no_log: true
+      vars:
+        monitoring_snmp__openwrt_translation_json: >-
+          {% set ns = namespace(v3=false) %}
+          {% set merged = {} %}
+          {% set settings = monitoring_snmp__openwrt_settings_default | combine(monitoring_snmp__settings if monitoring_snmp__settings is mapping else {}) %}
+          {% for key, value in settings.items() %}
+          {%   set _ = merged.update({key: (value if value is iterable and value is not string and value is not mapping else [value])
+                                           | map('string') | select | list}) %}
+          {% endfor %}
+          {% for config in (monitoring_snmp__configs if monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string else []) %}
+          {%   for key, value in (config.settings if config is mapping and config.settings is mapping else {}).items() %}
+          {%     set values = (value if value is iterable and value is not string and value is not mapping else [value]) | map('string') | select | list %}
+          {%     set _ = merged.update({key: merged.get(key, []) + values}) %}
+          {%   endfor %}
+          {% endfor %}
+          {% set sections = [] %}
+          {% set errors = [] %}
+          {% set counters = {} %}
+          {% macro tokens(line) %}{{ line | regex_findall('"[^"]*"|[^ ]+') | map('regex_replace', '^"(.*)"$', '\1') | list | to_json }}{% endmacro %}
+          {% for key in merged.keys() | reject('in', monitoring_snmp__openwrt_directives) | sort %}
+          {%   set _ = errors.append(key ~ ' (not supported on OpenWrt)') %}
+          {% endfor %}
+          {% if merged.agentaddress | default([]) | length > 0 %}
+          {%   set _ = sections.append({'type': 'agent', 'name': 'agent', 'options': {'agentaddress': merged.agentaddress | join(',')}}) %}
+          {% endif %}
+          {% if (merged.master | default(['off']) | last) in ['agentx', 'on', 'yes', 'all'] %}
+          {%   set options = {} %}
+          {%   if merged.agentXSocket | default([]) | length > 0 %}
+          {%     set _ = options.update({'agentxsocket': merged.agentXSocket | last}) %}
+          {%   endif %}
+          {%   set _ = sections.append({'type': 'agentx', 'name': 'agentx', 'options': options}) %}
+          {% elif merged.agentXSocket | default([]) | length > 0 %}
+          {%   set _ = errors.append('agentXSocket (needs master agentx)') %}
+          {% endif %}
+          {% set system = {} %}
+          {% for key, option in [['sysLocation', 'sysLocation'], ['sysContact', 'sysContact'], ['sysName', 'sysName'],
+                                 ['sysServices', 'sysService'], ['sysDescr', 'sysDescr'], ['sysObjectID', 'sysObjectID']]
+                if merged[key] | default([]) | length > 0 %}
+          {%   set _ = system.update({option: merged[key] | last}) %}
+          {% endfor %}
+          {% if system | length > 0 %}
+          {%   set _ = sections.append({'type': 'system', 'name': 'system', 'options': system}) %}
+          {% endif %}
+          {% set engineid = {} %}
+          {% for key, option in [['engineID', 'engineid'], ['engineIDType', 'engineidtype'], ['engineIDNic', 'engineidnic']]
+                if merged[key] | default([]) | length > 0 %}
+          {%   set _ = engineid.update({option: merged[key] | last}) %}
+          {% endfor %}
+          {% if engineid | length > 0 %}
+          {%   set _ = sections.append({'type': 'engineid', 'name': 'engineid', 'options': engineid}) %}
+          {% endif %}
+          {% for key, value in merged.items() if key in monitoring_snmp__openwrt_directives %}
+          {%   for line in value %}
+          {%     set t = tokens(line) | from_json %}
+          {%     set type = {'pass_persist': 'pass', 'rwcommunity': 'access', 'rocommunity': 'access',
+                             'rwcommunity6': 'access', 'rocommunity6': 'access'}.get(key, key) %}
+          {%     set index = counters.get(type, 0) %}
+          {%     set _ = counters.update({type: index + 1}) %}
+          {%     set name = type ~ '_' ~ index %}
+          {#     Lines with communities or passwords are not shown #}
+          {%     set secret = key in ['createUser', 'com2sec', 'com2sec6', 'rocommunity', 'rwcommunity',
+                                      'rocommunity6', 'rwcommunity6', 'trapsess', 'trapcommunity'] %}
+          {%     set error = key ~ ' ' ~ ('...' if secret else line) %}
+          {%     if key in ['com2sec', 'com2sec6'] %}
+          {%       if t | length == 3 and not t[0].startswith('-') %}
+          {%         set _ = sections.append({'type': key, 'name': name, 'options': {'secname': t[0], 'source': t[1], 'community': t[2]}}) %}
+          {%       else %}
+          {%         set _ = errors.append(key ~ ' ' ~ loop.index0 ~ ' (needs secname, source and community, options are not supported on OpenWrt)') %}
+          {%       endif %}
+          {%     elif key == 'group' %}
+          {%       if t | length == 3 %}
+          {%         set _ = sections.append({'type': 'group', 'name': name, 'options': {'group': t[0], 'version': t[1], 'secname': t[2]}}) %}
+          {%       else %}
+          {%         set _ = errors.append(error ~ ' (needs group, version and secname)') %}
+          {%       endif %}
+          {%     elif key == 'view' %}
+          {%       if t | length in [3, 4] %}
+          {%         set options = {'viewname': t[0], 'type': t[1], 'oid': t[2]} %}
+          {%         if t | length == 4 %}{% set _ = options.update({'mask': t[3]}) %}{% endif %}
+          {%         set _ = sections.append({'type': 'view', 'name': name, 'options': options}) %}
+          {%       else %}
+          {%         set _ = errors.append(error ~ ' (needs viewname, type, oid and an optional mask)') %}
+          {%       endif %}
+          {%     elif key == 'access' %}
+          {%       if t | length == 8 %}
+          {%         set _ = sections.append({'type': 'access', 'name': name, 'options': {
+                       'group': t[0], 'context': t[1] if t[1] | length > 0 else 'none', 'version': t[2], 'level': t[3],
+                       'prefix': t[4], 'read': t[5], 'write': t[6], 'notify': t[7]}}) %}
+          {%       else %}
+          {%         set _ = errors.append(error ~ ' (needs group, context, version, level, prefix, read, write and notify)') %}
+          {%       endif %}
+          {%     elif key in ['rocommunity', 'rwcommunity', 'rocommunity6', 'rwcommunity6'] %}
+          {%       if t | length in [1, 2, 3] and t | select('match', '-') | list | length == 0 %}
+          {%         set source = t[1] if t | length > 1 else 'default' %}
+          {%         set options = {'Mode': key, 'CommunityName': t[0]} %}
+          {%         if t | length == 3 %}{% set _ = options.update({'RestrictOID': '1', 'RestrictedOID': t[2]}) %}{% endif %}
+          {%         if source == 'default' %}
+          {%           set _ = sections.append({'type': 'access_default', 'name': name, 'options': options}) %}
+          {%         elif source is match('^[0-9.]+/[0-9.]+$') %}
+          {%           set _ = options.update({'HostIP': source.split('/')[0], 'IPMask': source.split('/')[1]}) %}
+          {%           set _ = sections.append({'type': 'access_HostIP', 'name': name, 'options': options}) %}
+          {%         else %}
+          {%           set _ = options.update({'HostName': source}) %}
+          {%           set _ = sections.append({'type': 'access_HostName', 'name': name, 'options': options}) %}
+          {%         endif %}
+          {%       else %}
+          {%         set _ = errors.append(key ~ ' ' ~ loop.index0 ~ ' (needs community, an optional source and an optional OID,'
+                                        ~ ' options like -V are not supported on OpenWrt)') %}
+          {%       endif %}
+          {%     elif key in ['exec', 'extend'] %}
+          {%       set miboid = t | length > 0 and t[0] is match('^[.0-9]') %}
+          {%       set rest = t[1:] if miboid else t %}
+          {%       if rest | length >= 2 %}
+          {%         set options = {'name': rest[0], 'prog': rest[1]} %}
+          {%         if miboid %}{% set _ = options.update({'miboid': t[0]}) %}{% endif %}
+          {%         if rest | length > 2 %}{% set _ = options.update({'args': rest[2:] | join(' ')}) %}{% endif %}
+          {%         set _ = sections.append({'type': key, 'name': name, 'options': options}) %}
+          {%       else %}
+          {%         set _ = errors.append(error ~ ' (needs an optional MIB OID, name and program)') %}
+          {%       endif %}
+          {%     elif key in ['pass', 'pass_persist'] %}
+          {%       set priority = t | length > 1 and t[0] == '-p' %}
+          {%       set rest = t[2:] if priority else t %}
+          {%       if rest | length == 2 %}
+          {%         set options = {'miboid': rest[0], 'prog': rest[1], 'persist': '1' if key == 'pass_persist' else '0'} %}
+          {%         if priority %}{% set _ = options.update({'priority': t[1]}) %}{% endif %}
+          {%         set _ = sections.append({'type': 'pass', 'name': name, 'options': options}) %}
+          {%       else %}
+          {%         set _ = errors.append(error ~ ' (needs an optional -p priority, MIB OID and program)') %}
+          {%       endif %}
+          {%     elif key == 'disk' %}
+          {%       if t | length == 2 %}
+          {%         set _ = sections.append({'type': 'disk', 'name': name, 'options': {'partition': t[0], 'size': t[1]}}) %}
+          {%       else %}
+          {%         set _ = errors.append(error ~ ' (needs partition and size on OpenWrt)') %}
+          {%       endif %}
+          {%     elif key in ['trapsink', 'trap2sink', 'informsink'] %}
+          {%       if t | length in [1, 2] %}
+          {%         set options = {'host': t[0].split(':')[0]} %}
+          {%         if ':' in t[0] %}{% set _ = options.update({'port': t[0].split(':')[1]}) %}{% endif %}
+          {%         if t | length == 2 %}{% set _ = options.update({'community': t[1]}) %}{% endif %}
+          {%         set _ = sections.append({'type': key, 'name': name, 'options': options}) %}
+          {%       else %}
+          {%         set _ = errors.append(key ~ ' ' ~ loop.index0 ~ ' (needs host with an optional port and an optional community)') %}
+          {%       endif %}
+          {%     elif key in ['trapcommunity', 'authtrapenable', 'v1trapaddress', 'trapsess'] %}
+          {%       set option = {'trapcommunity': 'community', 'authtrapenable': 'enable', 'v1trapaddress': 'host', 'trapsess': 'trapsess'}[key] %}
+          {%       if loop.last %}
+          {%         set _ = sections.append({'type': key, 'name': key, 'options': {option: line}}) %}
+          {%       endif %}
+          {%     endif %}
+          {%   endfor %}
+          {% endfor %}
+          {% set users = {} %}
+          {% for line in merged.createUser | default([]) %}
+          {%   set t = tokens(line) | from_json %}
+          {%   if t | length in [1, 3, 5] and not t[0].startswith('-') %}
+          {%     set options = {'username': t[0]} %}
+          {%     if t | length >= 3 %}{% set _ = options.update({'auth_type': t[1], 'auth_pass': t[2]}) %}{% endif %}
+          {%     if t | length == 5 %}{% set _ = options.update({'privacy_type': t[3], 'privacy_pass': t[4]}) %}{% endif %}
+          {%     if (options.auth_pass | default('xxxxxxxx') | length < 8) or (options.privacy_pass | default('xxxxxxxx') | length < 8) %}
+          {%       set _ = errors.append('createUser ' ~ t[0] ~ ' (passwords need at least 8 characters)') %}
+          {%     endif %}
+          {%     if options.auth_type is defined and options.auth_type | upper not in monitoring_snmp__openwrt_auth_types %}
+          {%       set _ = errors.append('createUser ' ~ t[0] ~ ' (auth type ' ~ options.auth_type
+                                  ~ (' needs snmpd_ssl: true' if not monitoring_snmp__ssl | bool else ' is unknown')
+                                  ~ ', supported: ' ~ monitoring_snmp__openwrt_auth_types | join(', ') ~ ')') %}
+          {%     endif %}
+          {%     if options.privacy_type is defined and options.privacy_type | upper not in monitoring_snmp__openwrt_privacy_types %}
+          {%       set _ = errors.append('createUser ' ~ t[0] ~ ' (privacy type ' ~ options.privacy_type
+                                  ~ (' needs snmpd_ssl: true' if not monitoring_snmp__ssl | bool else ' is unknown, supported: '
+                                     ~ monitoring_snmp__openwrt_privacy_types | join(', ')) ~ ')') %}
+          {%     endif %}
+          {%     set _ = users.update({t[0]: options}) %}
+          {%   else %}
+          {%     set _ = errors.append('createUser ' ~ loop.index0 ~ ' (needs username and optional auth type, auth password,'
+                                  ~ ' privacy type and privacy password, -e is not supported on OpenWrt)') %}
+          {%   endif %}
+          {% endfor %}
+          {% set granted = [] %}
+          {% for key in ['rouser', 'rwuser'] %}
+          {%   for line in merged[key] | default([]) %}
+          {%     set t = tokens(line) | from_json %}
+          {%     if t | length in [1, 2, 3] and t | select('match', '-') | list | length == 0 and t[0] in users %}
+          {%       set options = users[t[0]] | combine({'allow_write': '1' if key == 'rwuser' else '0'}) %}
+          {%       if t | length == 3 %}{% set _ = options.update({'RestrictedOID': t[2]}) %}{% endif %}
+          {%       set _ = granted.append(t[0]) %}
+          {%       set ns.v3 = true %}
+          {%       set _ = sections.append({'type': 'v3', 'name': 'v3_' ~ (t[0] | regex_replace('[^A-Za-z0-9_]', '_')), 'options': options}) %}
+          {%     else %}
+          {%       set _ = errors.append(key ~ ' ' ~ line ~ ' (needs a user of createUser, an optional level and an optional OID,'
+                                      ~ ' options like -V are not supported on OpenWrt)') %}
+          {%     endif %}
+          {%   endfor %}
+          {% endfor %}
+          {% for user in users.keys() | reject('in', granted) | sort %}
+          {%   set _ = errors.append('createUser ' ~ user ~ ' (needs rouser or rwuser on OpenWrt)') %}
+          {% endfor %}
+          {% set general = {'enabled': '1'} %}
+          {% if ns.v3 %}{% set _ = general.update({'snmp_version': 'v1/v2c/v3'}) %}{% endif %}
+          {% set _ = sections.append({'type': 'snmpd', 'name': 'general', 'options': general}) %}
+          {{ {'sections': sections, 'errors': errors} | to_json }}
+
+    - name: 'Validate the settings for OpenWrt'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__settings is mapping
+          - monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string and monitoring_snmp__configs is not mapping
+          - monitoring_snmp__configs | rejectattr('settings', 'defined') | list | length == 0
+          - monitoring_snmp__unit | length == 0
+          - monitoring_snmp__openwrt_translation.errors | length == 0
+        fail_msg: >-
+          snmpd_settings has to be a mapping and snmpd_configs a list of configs with settings.
+          snmpd_unit is not supported on OpenWrt (procd instead of systemd): {{ monitoring_snmp__unit.keys() | join(', ') | default('none', true) }}.
+          Invalid or unsupported directives on OpenWrt: {{ monitoring_snmp__openwrt_translation.errors | join(', ') | default('none', true) }}.
+        quiet: true
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Install snmpd packages'
+      community.openwrt.apk:
+        name: "{{ monitoring_snmp__openwrt_packages | join(',') }}"
+        state: 'present'
+      register: 'monitoring_snmp__openwrt_packages_result'
+
+    - name: 'Remove the snmpd packages of the other SSL variant'
+      community.openwrt.apk:
+        name: "{{ monitoring_snmp__openwrt_packages_absent | join(',') }}"
+        state: 'absent'
+
+    - name: 'Read the current snmpd configuration'
+      community.openwrt.slurp:
+        src: "{{ monitoring_snmp__openwrt_config }}"
+      register: 'monitoring_snmp__openwrt_current'
+      no_log: true
+      check_mode: false
+
+    - name: 'Set the sections of the snmpd configuration'
+      community.openwrt.uci:
+        command: 'section'
+        config: 'snmpd'
+        type: "{{ item.type }}"
+        name: "{{ item.name }}"
+        find: "{{ item.options }}"
+        value: "{{ item.options }}"
+        replace: true
+        redact_keys: "{{ monitoring_snmp__openwrt_redact_keys }}"
+      loop: "{{ monitoring_snmp__openwrt_translation.sections }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 'Read the sections of the snmpd configuration'
+      community.openwrt.uci:
+        command: 'show'
+        config: 'snmpd'
+      register: 'monitoring_snmp__openwrt_show'
+      no_log: true
+      check_mode: false
+
+    - name: 'Remove sections that are not declared'
+      community.openwrt.uci:
+        command: 'delete'
+        key: "snmpd.{{ item }}"
+      loop: >-
+        {{ monitoring_snmp__openwrt_show.result
+           | regex_findall('(?m)^snmpd\.([^.=\n]+)=[A-Za-z0-9_-]+$')
+           | reverse
+           | reject('in', monitoring_snmp__openwrt_translation.sections | map(attribute='name') | list)
+           | list }}
+      when: monitoring_snmp__prune | bool
+
+    - name: 'Read the pending changes of the snmpd configuration'
+      community.openwrt.uci:
+        command: 'changes'
+        config: 'snmpd'
+      register: 'monitoring_snmp__openwrt_pending'
+      no_log: true
+      check_mode: false
+
+    # The backup contains the configuration before this change, it is only written before a commit
+    - name: 'Create the backup directory on the controller'
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+        state: 'directory'
+        mode: '0700'
+      delegate_to: 'localhost'
+      check_mode: false
+      when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+
+    - name: 'Store the backup on the controller (secrets redacted)'
+      ansible.builtin.copy:
+        content: >-
+          {{ monitoring_snmp__openwrt_current.content | b64decode
+             | regex_replace('(?mi)^(\s*(?:option|list)\s+\S*(?:community|secret|pass|key|priv|auth|trapsess)\S*\s+).*$', "\g<1>'REDACTED'") }}
+        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/snmpd"
+        mode: '0600'
+      delegate_to: 'localhost'
+      no_log: true
+      check_mode: false
+      when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+
+    - name: 'Commit the snmpd configuration'
+      community.openwrt.uci:
+        command: 'commit'
+        config: 'snmpd'
+      register: 'monitoring_snmp__openwrt_commit_result'
+      when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+
+    - name: 'Start and enable snmpd'
+      community.openwrt.service:
+        name: 'snmpd'
+        enabled: true
+        state: "{{ 'restarted' if monitoring_snmp__openwrt_changed | bool else 'started' }}"
+      when: not ansible_check_mode

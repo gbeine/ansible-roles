@@ -1,15 +1,21 @@
 ---
 
-- name: Enable services at boot
-  community.openwrt.service:
-    name: "{{ item }}"
-    enabled: false
-    state: started
-  loop: "{{ bootstrap_openwrt__services_enabled }}"
+- name: Validate the services
+  ansible.builtin.assert:
+    that:
+      - bootstrap_openwrt__services_enabled | intersect(bootstrap_openwrt__services_disabled) | length == 0
+    fail_msg: >-
+      Services can not be enabled and disabled at the same time:
+      {{ bootstrap_openwrt__services_enabled | intersect(bootstrap_openwrt__services_disabled) | join(', ') }}
+    quiet: true
 
-- name: Disable services at boot
+- name: Set the services at boot
   community.openwrt.service:
-    name: "{{ item }}"
-    enabled: false
-    state: stopped
-  loop: "{{ bootstrap_openwrt__services_disabled }}"
+    name: "{{ item.1 }}"
+    enabled: "{{ item.0.enabled }}"
+    state: "{{ 'started' if item.0.enabled else 'stopped' }}"
+  loop: >-
+    {{ [ {'enabled': true, 'services': bootstrap_openwrt__services_enabled},
+         {'enabled': false, 'services': bootstrap_openwrt__services_disabled} ] | subelements('services') }}
+  loop_control:
+    label: "{{ item.1 }}: {{ 'enabled' if item.0.enabled else 'disabled' }}"

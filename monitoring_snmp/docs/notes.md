@@ -1,5 +1,7 @@
-The role installs the [Net-SNMP](https://www.net-snmp.org/) agent `snmpd` and the SNMP tools from the Debian packages `snmpd` and `snmp` (Net-SNMP 5.9 on Debian 13).
-It writes the configuration of `snmpd` to these files:
+The role installs the [Net-SNMP](https://www.net-snmp.org/) agent `snmpd` and the SNMP tools from the Debian packages `snmpd` and `snmp` (Net-SNMP 5.9 on Debian 13) or on OpenWrt, see [OpenWrt](#openwrt).
+The role detects OpenWrt itself with `raw` (`/etc/openwrt_release`), OpenWrt has no Python, plays for OpenWrt need `gather_facts: false`. On other systems the role gathers the minimal facts if they are missing.
+
+On Debian the role writes the configuration of `snmpd` to these files:
 
 | File | Content |
 |---|---|
@@ -119,6 +121,61 @@ so changed passwords of `createUser` take effect. Users created with `snmpusm` a
 `snmpd` has no test of the configuration, after the reload or restart the role checks that `snmpd` is running
 and that the journal contains no errors or warnings about lines of the configuration files.
 
+### OpenWrt
+
+On OpenWrt the init script of snmpd creates its configuration from the UCI configuration `/etc/config/snmpd`.
+The role uses the same variables as on Debian, `snmpd_settings` and `snmpd_configs` with directives of `snmpd.conf`, and translates them to UCI sections.
+The settings of all configs are added to `snmpd_settings`, lists are appended, every setting replaces the default completely.
+
+Without variables the role creates the configuration of the former default of the role `bootstrap_openwrt`:
+
+- `snmpd` listens on `UDP:161,UDP6:161` and is AgentX master on `/var/run/agentx.sock`,
+- the communities `public` (read-only, everywhere) and `private` (read-write, localhost) via IPv4 and IPv6 with the view `all` (`.1`),
+- `sysLocation` is `office`, `sysContact` is `bofh@example.com`, `sysName` is `HeartOfGold`,
+- `exec filedescriptors /bin/cat /proc/sys/fs/file-nr`, `engineIDType 3` with `engineIDNic eth0`.
+
+| Directive | UCI section |
+|---|---|
+| `agentaddress` | `agent` `agent`, values are joined with `,` |
+| `master agentx`, `agentXSocket` | `agentx` `agentx`, without `master agentx` no AgentX |
+| `sysLocation`, `sysContact`, `sysName`, `sysServices`, `sysDescr`, `sysObjectID` | `system` `system` |
+| `com2sec`, `com2sec6`, `group`, `view`, `access` | `com2sec_<n>`, `com2sec6_<n>`, `group_<n>`, `view_<n>`, `access_<n>`, a context `""` becomes `none` |
+| `rocommunity`, `rwcommunity`, `rocommunity6`, `rwcommunity6` `<community> [<source> [<oid>]]` | `access_default`, `access_HostIP` (source `address/mask`) or `access_HostName` |
+| `createUser` with `rouser` or `rwuser` | `v3` `v3_<user>`, `snmp_version` `v1/v2c/v3` in `general` |
+| `exec`, `extend`, `pass`, `pass_persist`, `disk` | `exec_<n>`, `extend_<n>`, `pass_<n>`, `disk_<n>` |
+| `engineID`, `engineIDType`, `engineIDNic` | `engineid` `engineid` |
+| `trapsink`, `trap2sink`, `informsink` | `<type>_<n>` |
+| `trapcommunity`, `authtrapenable`, `v1trapaddress`, `trapsess` | sections with the same name |
+| | `snmpd` `general` with `enabled 1`, always |
+
+The init script of OpenWrt supports less than `snmpd.conf`, the role fails before it changes anything for other directives (e.g. `proc`, `load`, `includeDir`),
+for options of directives (e.g. `rocommunity … -V view`, `rouser … -V view`, `createUser -e`), for `disk` without size,
+for users of `createUser` without `rouser` or `rwuser` and the reverse, and for passwords with less than 8 characters.
+The default variant `nossl` is built without OpenSSL, it supports the auth types `MD5` and `SHA` without privacy (at most the level `auth`).
+The auth types `SHA-224` to `SHA-512` and the privacy types `DES`, `AES`, `AES-192` and `AES-256` need `snmpd_ssl: true`, the role fails for other types.
+`snmpd_unit` is not supported on OpenWrt, procd has no dependencies on other units.
+
+```yaml
+# SHA-512 and AES need the ssl variant
+snmpd_ssl: true
+snmpd_settings:
+  sysLocation: 'Rack 1'
+  com2sec: [ 'ro 192.168.99.0/24 monitoring' ]
+  com2sec6: []
+  group: [ 'monitoring v2c ro' ]
+  access: [ 'monitoring "" any noauth exact all none none' ]
+snmpd_configs:
+  - name: 'users'
+    settings:
+      createUser: "monitoring SHA-512 \"{{ vault_snmpd_auth_pass }}\" AES \"{{ vault_snmpd_priv_pass }}\""
+      rouser: 'monitoring priv'
+```
+
+- The role installs `snmp-mibs`, `snmpd-nossl` and `snmp-utils-nossl`, with `snmpd_ssl: true` `snmpd-ssl` and `snmp-utils-ssl`, and removes the other variant.
+- The UCI sections have fixed names, with `snmpd_prune` (default `true`) the role removes all other sections of `/etc/config/snmpd`.
+- Before a commit the role stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/snmpd`, secrets are redacted.
+- After a change of the configuration or the packages the role restarts snmpd.
+
 ### Migration
 
 | Former variable | Now |
@@ -128,6 +185,16 @@ and that the journal contains no errors or warnings about lines of the configura
 | `snmpd_agentaddress` (list) | `agentaddress` in `snmpd_settings`, a string like `127.0.0.1,[::1]` |
 
 The defaults of the former role are the defaults of Debian 13 as well.
+
+The role `bootstrap_openwrt` does not configure snmpd any longer:
+
+| Former variable of `bootstrap_openwrt` | Now |
+|---|---|
+| `openwrt_snmpd_enable: true` | run this role on the device |
+| `openwrt_snmpd` (UCI sections) | `snmpd_settings` and `snmpd_configs` with directives, see [OpenWrt](#openwrt) |
+| `openwrt_snmpd_ssl` | `snmpd_ssl` |
+| `openwrt_snmpd_prune` | `snmpd_prune` |
+| `openwrt_snmpd_redact_keys` | removed, the secrets are always redacted |
 
 ### Tests
 
@@ -158,4 +225,24 @@ Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/ssh
 ```shell
 cd monitoring_snmp
 MOLECULE_TART_IMAGE='debian' molecule test
+```
+
+The molecule scenario `openwrt` runs the role in two clones of the tart VM `openwrt-base` (OpenWrt with `apk`, SSH login as `root` with password), the base VM is never changed.
+
+| Platform | Test case |
+|---|---|
+| `molecule-snmp-openwrt-default` | No variables, the former default of `bootstrap_openwrt`: `public` and `private` read sysName and sysLocation, a wrong community gets no answer, the exec entry `filedescriptors`, the packages of the nossl variant |
+| `molecule-snmp-openwrt` | Own settings with the community `molecule-ro`, `public` and `private` are rejected, `snmpd_ssl: true` with the packages of the ssl variant, an SNMPv3 user with authPriv (SHA-512, AES) reads the output of an extend command |
+
+`side_effect` runs the role with `proc`, which OpenWrt does not support, and with SHA-512 and AES without `snmpd_ssl`, and checks that the role fails at the validation and `/etc/config/snmpd` is unchanged (tasks marked `expect ERROR`).
+The collection `community.openwrt` is required on the controller.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `MOLECULE_TART_OPENWRT_IMAGE` | `openwrt-base` | Base VM that is cloned |
+| `MOLECULE_TART_OPENWRT_PASSWORD` | `OpenWRT` | Password of `root`, used to install the SSH key |
+
+```shell
+cd monitoring_snmp
+molecule test -s openwrt
 ```

@@ -1,0 +1,277 @@
+---
+
+- name: 'Install and configure Net-SNMP on Debian'
+  vars:
+    monitoring_snmp__changed: >-
+      {{ monitoring_snmp__config_result is changed
+         or monitoring_snmp__configs_result is changed
+         or (monitoring_snmp__pruned_result | default({})) is changed }}
+    # Lines of the directives snmpd applies on a restart only
+    monitoring_snmp__restart_pattern: "^\\s*(?:{{ monitoring_snmp__restart_directives | join('|') }})\\s.*$"
+    monitoring_snmp__restart_lines_before: >-
+      {{ monitoring_snmp__files_before.results | default([]) | selectattr('content', 'defined')
+         | map(attribute='content') | map('b64decode')
+         | map('regex_findall', monitoring_snmp__restart_pattern, multiline=true, ignorecase=true) | flatten
+         | map('regex_replace', '\s+', ' ') | map('trim') | sort }}
+    monitoring_snmp__restart_lines_after: >-
+      {{ monitoring_snmp__files_after.results | default([]) | selectattr('content', 'defined')
+         | map(attribute='content') | map('b64decode')
+         | map('regex_findall', monitoring_snmp__restart_pattern, multiline=true, ignorecase=true) | flatten
+         | map('regex_replace', '\s+', ' ') | map('trim') | sort }}
+    monitoring_snmp__restart_needed: "{{ monitoring_snmp__restart_lines_before != monitoring_snmp__restart_lines_after }}"
+  block:
+
+    - name: 'Include OS-specific variables'
+      ansible.builtin.include_vars: "{{ item }}"
+      with_first_found:
+        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+        - "{{ ansible_facts['distribution'] }}.yml"
+        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+        - "{{ ansible_facts['os_family'] }}.yml"
+
+    - name: 'Include settings of the Net-SNMP release'
+      ansible.builtin.include_vars:
+        file: "settings-{{ monitoring_snmp__release }}.yml"
+
+    - name: 'Validate settings and configs'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__settings is mapping
+          - monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string and monitoring_snmp__configs is not mapping
+          - monitoring_snmp__unknown_settings | length == 0
+          - monitoring_snmp__invalid_configs | length == 0
+          - monitoring_snmp__unit is mapping
+          - monitoring_snmp__invalid_units | length == 0
+        fail_msg: >-
+          snmpd_settings and snmpd_unit have to be mappings and snmpd_configs a list.
+          Unknown directives in snmpd_settings for Net-SNMP {{ monitoring_snmp__release }}:
+          {{ monitoring_snmp__unknown_settings | join(', ') | default('none', true) }}.
+          Invalid configs (need name of letters, digits, '.', '_' or '-' and settings with known directives):
+          {{ monitoring_snmp__invalid_configs | join(', ') | default('none', true) }}.
+          Invalid snmpd_unit entries (keys {{ monitoring_snmp__unit_directives.keys() | join(', ') }} with lists of unit names
+          ending with .{{ monitoring_snmp__unit_types | join(', .') }}, the unit of a podman network <name>.network is <name>-network.service):
+          {{ monitoring_snmp__invalid_units | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        monitoring_snmp__unknown_settings: >-
+          {{ (monitoring_snmp__settings.keys() if monitoring_snmp__settings is mapping else [])
+             | difference(monitoring_snmp__release_directives) | sort }}
+        monitoring_snmp__invalid_configs: "{{ monitoring_snmp__invalid_configs_json | trim | from_json }}"
+        monitoring_snmp__invalid_configs_json: >-
+          {% set result = [] %}
+          {% for c in (monitoring_snmp__configs if monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string else []) %}
+          {%   if c is not mapping or c.name is not defined or c.name | string is not match('^[A-Za-z0-9._-]+$')
+                  or c.settings is not defined or c.settings is not mapping %}
+          {%     set _ = result.append('config ' ~ loop.index0) %}
+          {%   else %}
+          {%     for name in c.settings.keys() | difference(monitoring_snmp__release_directives) | sort %}
+          {%       set _ = result.append(c.name ~ ': ' ~ name) %}
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+          {{ result | to_json }}
+        monitoring_snmp__invalid_units: "{{ monitoring_snmp__invalid_units_json | trim | from_json }}"
+        monitoring_snmp__invalid_units_json: >-
+          {% set result = [] %}
+          {% set pattern = '^[^/ ]+[.](' ~ monitoring_snmp__unit_types | join('|') ~ ')$' %}
+          {% for key, units in (monitoring_snmp__unit.items() if monitoring_snmp__unit is mapping else []) %}
+          {%   if key not in monitoring_snmp__unit_directives or units is string or units is mapping or units is not iterable %}
+          {%     set _ = result.append(key) %}
+          {%   else %}
+          {%     for unit in units if unit is not string or unit is not match(pattern) %}
+          {%       set _ = result.append(key ~ ': ' ~ unit) %}
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+          {{ result | to_json }}
+
+    - name: 'Install Net-SNMP packages'
+      ansible.builtin.apt:
+        cache_valid_time: "{{ monitoring_snmp__apt_cache_valid_time }}"
+        install_recommends: false
+        pkg: "{{ monitoring_snmp__packages }}"
+
+    - name: 'Find the configs before the change'
+      ansible.builtin.find:
+        paths: "{{ monitoring_snmp__conf_d_dir }}"
+        patterns: '*.conf'
+      register: 'monitoring_snmp__conf_d_before'
+
+    # The configuration files contain communities and passwords
+    - name: 'Read the configuration files of snmpd before the change'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop: "{{ [monitoring_snmp__etc_dir + '/snmpd.conf'] + (monitoring_snmp__conf_d_before.files | map(attribute='path') | sort) }}"
+      register: 'monitoring_snmp__files_before'
+      failed_when: false
+      no_log: true
+
+    - name: 'Generate snmp.conf'
+      ansible.builtin.template:
+        src: 'snmp.conf.j2'
+        dest: "{{ monitoring_snmp__etc_dir }}/snmp.conf"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+
+    - name: 'Generate snmpd.conf'
+      ansible.builtin.template:
+        src: 'snmpd.conf.j2'
+        dest: "{{ monitoring_snmp__etc_dir }}/snmpd.conf"
+        owner: 'root'
+        group: "{{ monitoring_snmp__group }}"
+        mode: '0640'
+      register: 'monitoring_snmp__config_result'
+
+    - name: 'Generate configs'
+      ansible.builtin.template:
+        src: 'config.conf.j2'
+        dest: "{{ monitoring_snmp__conf_d_dir }}/{{ item.name }}.conf"
+        owner: 'root'
+        group: "{{ monitoring_snmp__group }}"
+        mode: '0640'
+      loop: "{{ monitoring_snmp__configs }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'monitoring_snmp__configs_result'
+
+    - name: 'Remove unmanaged configs'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ monitoring_snmp__conf_d_before.files | map(attribute='path')
+           | reject('in', monitoring_snmp__configs | map(attribute='name')
+                          | map('regex_replace', '^', monitoring_snmp__conf_d_dir + '/')
+                          | map('regex_replace', '$', '.conf') | list)
+           | list }}
+      register: 'monitoring_snmp__pruned_result'
+      when: 'monitoring_snmp__prune | bool'
+
+    - name: 'Create the drop-in directory of snmpd'
+      ansible.builtin.file:
+        path: "{{ monitoring_snmp__unit_dropin_dir }}"
+        state: 'directory'
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+      when: monitoring_snmp__unit.values() | flatten | length > 0
+
+    - name: 'Generate the dependencies of snmpd on other units'
+      ansible.builtin.template:
+        src: 'unit.conf.j2'
+        dest: "{{ monitoring_snmp__unit_dropin }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'monitoring_snmp__unit_result'
+      when: monitoring_snmp__unit.values() | flatten | length > 0
+
+    - name: 'Remove the dependencies of snmpd on other units'
+      ansible.builtin.file:
+        path: "{{ monitoring_snmp__unit_dropin }}"
+        state: 'absent'
+      register: 'monitoring_snmp__unit_removed_result'
+      when: monitoring_snmp__unit.values() | flatten | length == 0
+
+    # The dependencies take effect on the next start, snmpd is not restarted
+    - name: 'Reload the systemd configuration'
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: (monitoring_snmp__unit_result is changed) or (monitoring_snmp__unit_removed_result is changed)
+
+    - name: 'Find the configs after the change'
+      ansible.builtin.find:
+        paths: "{{ monitoring_snmp__conf_d_dir }}"
+        patterns: '*.conf'
+      register: 'monitoring_snmp__conf_d_after'
+      when: 'monitoring_snmp__changed | bool'
+
+    - name: 'Read the configuration files of snmpd after the change'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop: "{{ [monitoring_snmp__etc_dir + '/snmpd.conf'] + (monitoring_snmp__conf_d_after.files | map(attribute='path') | sort) }}"
+      register: 'monitoring_snmp__files_after'
+      no_log: true
+      when: 'monitoring_snmp__changed | bool'
+
+    - name: 'Read the time of the change'
+      ansible.builtin.command: "date '+%Y-%m-%d %H:%M:%S'"
+      register: 'monitoring_snmp__change_time'
+      changed_when: false
+      when: 'monitoring_snmp__changed | bool'
+
+    # snmpd writes the SNMPv3 users to the persistent file on shutdown,
+    # without removing them changed passwords of createUser do not take effect
+    - name: 'Restart snmpd, a directive changed that is applied on a restart only'
+      when:
+        - not ansible_check_mode
+        - monitoring_snmp__changed | bool
+        - monitoring_snmp__restart_needed | bool
+      block:
+
+        - name: 'Stop snmpd'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_snmp__service }}"
+            state: 'stopped'
+
+        - name: 'Remove the persisted SNMPv3 users, they are created from createUser'
+          ansible.builtin.lineinfile:
+            path: "{{ monitoring_snmp__persistent_file }}"
+            regexp: '^usmUser '
+            state: 'absent'
+
+    - name: 'Start and enable snmpd'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_snmp__service }}"
+        state: 'started'
+        enabled: true
+      register: 'monitoring_snmp__service_result'
+      when: 'not ansible_check_mode'
+
+    - name: 'Reload snmpd'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_snmp__service }}"
+        state: 'reloaded'
+      when:
+        - not ansible_check_mode
+        - monitoring_snmp__changed | bool
+        - not monitoring_snmp__restart_needed | bool
+        - monitoring_snmp__service_result is not changed
+
+    - name: 'Check snmpd after the change'
+      when:
+        - not ansible_check_mode
+        - monitoring_snmp__changed | bool
+      block:
+
+        - name: 'Read the state of snmpd'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'is-active', "{{ monitoring_snmp__service }}" ]
+          register: 'monitoring_snmp__active'
+          changed_when: false
+          failed_when: false
+          until: monitoring_snmp__active.stdout == 'active'
+          retries: 5
+          delay: 2
+
+        - name: 'Read the messages of snmpd since the change'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_snmp__service }}", '--since', "{{ monitoring_snmp__change_time.stdout }}", '--no-pager', '-o', 'cat' ]
+          register: 'monitoring_snmp__journal'
+          changed_when: false
+
+        - name: 'Assert snmpd runs and accepted the configuration'
+          ansible.builtin.assert:
+            that:
+              - monitoring_snmp__active.stdout == 'active'
+              - monitoring_snmp__config_messages | length == 0
+            fail_msg: >-
+              snmpd is {{ monitoring_snmp__active.stdout }},
+              messages about the configuration: {{ monitoring_snmp__config_messages | join(' | ') | default('none', true) }}
+            quiet: true
+          vars:
+            monitoring_snmp__config_messages: >-
+              {{ monitoring_snmp__journal.stdout_lines
+                 | select('search', '^' ~ (monitoring_snmp__etc_dir | regex_escape) ~ '/snmpd\.conf[^:]*: line [0-9]+: (Error|Warning)')
+                 | list }}
