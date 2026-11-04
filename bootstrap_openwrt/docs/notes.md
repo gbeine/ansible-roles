@@ -84,6 +84,26 @@ bootstrap_openwrt__network_default:
       ip6assign: '60'
 ```
 
+### Protected network sections
+
+`openwrt_network_protect` lists sections of `/etc/config/network` that are managed elsewhere, e.g. by another role or by hand.
+The role neither changes nor removes them, `openwrt_network_prune` skips them.
+An entry is a name or a pattern with the shell wildcards `*` and `?`, it matches a section by
+
+- its name, e.g. `wg0` for `config interface 'wg0'`,
+- its type, e.g. `wireguard_wg0` for the unnamed peers of the WireGuard interface `wg0`,
+- its option `name`, e.g. `br-guest` for an unnamed `config device` with `option name 'br-guest'`.
+
+```yaml
+openwrt_network_protect: [ 'wg*', 'wireguard_*' ]
+```
+
+protects all WireGuard interfaces starting with `wg` and all their peers.
+The role fails before any change if `openwrt_network_protect` is not a list of non-empty strings
+or if an entry of `openwrt_network` matches a pattern by `name`, `type`, `find.name` or `options.name`,
+a protected section must not be declared.
+The firewall zones of the protected interfaces are not affected, the role does not manage `/etc/config/firewall`.
+
 ### Default for `openwrt_attendedsysupgrade`
 
 ```yaml
@@ -177,16 +197,20 @@ the platforms of this scenario set `image`, `user`, `password` and `authorized_k
 
 | Platform | Tested |
 |---|---|
-| `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults including the section `owut` |
+| `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, protected network sections (interface by name, peer by type, device by option `name`), time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults including the section `owut` |
 | `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), an enabled service (`uhttpd`, disabled and stopped in `prepare`) and uhttpd with HTTPS |
 
 ACME is not tested, it needs a real DNS zone and CA, wireless is not tested, the VM has no radios.
 
 The base VM needs OpenWrt with `apk`, `network.lan.proto` `dhcp` on `br-lan`, the DHCP server disabled and SSH login as `root` with password.
 The tests use the network of the base VM, the default of `openwrt_network` (lan static `192.168.1.1/24`) would cut the connection to the VM.
-`prepare` checks the base VM, updates the package lists, creates the network section `molecule_stale` and installs uhttpd and `px5g-mbedtls` on `molecule-openwrt-full`,
+`prepare` checks the base VM, updates the package lists, creates the network section `molecule_stale`,
+the protected sections `wg_molecule`, a section of the type `wireguard_wg_molecule` and the device `molecule-dev0` on `molecule-openwrt-minimal` and installs uhttpd and `px5g-mbedtls` on `molecule-openwrt-full`,
 the init script of uhttpd generates certificate and key, the role does not install uhttpd and fails without them.
-`converge` reads the ports of `br-lan` from the clone. The backups of the role are written to `molecule/default/backups/`, which is ignored by git.
+`converge` reads the ports of `br-lan` from the clone.
+`side_effect` runs the role with a declared section that is protected and with a pattern instead of a list,
+and checks that the role fails with exactly the expected message and `/etc/config/network` is unchanged (tasks marked `expect ERROR`).
+`verify` checks that the protected sections still exist and `molecule_stale` is removed. The backups of the role are written to `molecule/default/backups/`, which is ignored by git.
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `community.openwrt`.
 

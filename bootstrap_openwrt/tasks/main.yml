@@ -4,6 +4,34 @@
   tags: [ bootstrap, bootstrap_openwrt ]
   block:
 
+    # Before any change, protected sections are managed elsewhere
+    - name: Validate openwrt_network_protect
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__network_protect_valid | bool
+          - bootstrap_openwrt__network_protect_conflicts | length == 0
+        # Only the failing checks are reported
+        fail_msg: >-
+          {{ [ ('openwrt_network_protect has to be a list of names or patterns: ' ~ bootstrap_openwrt__network_protect)
+                 if not bootstrap_openwrt__network_protect_valid | bool else '',
+               ('openwrt_network declares protected sections: ' ~ bootstrap_openwrt__network_protect_conflicts | join(', '))
+                 if bootstrap_openwrt__network_protect_conflicts | length > 0 else '' ]
+             | select | join('. ') }}
+        quiet: true
+      vars:
+        # Name, type and the option name (devices) of the declared sections
+        bootstrap_openwrt__network_protect_conflicts: >-
+          {%- set ns = namespace(conflicts=[]) -%}
+          {%- for item in bootstrap_openwrt__network -%}
+          {%-   set values = [ item.name | default(''), item.type | default(''),
+                               (item.find | default({})).name | default(''),
+                               (item.options | default({})).name | default('') ] -%}
+          {%-   if values | select('string') | reject('equalto', '') | select('match', bootstrap_openwrt__network_protect_regex) | list | length > 0 -%}
+          {%-     set ns.conflicts = ns.conflicts + [ item.name | default(item.type ~ ' ' ~ (item.find | default({}) | to_json)) ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.conflicts }}
+
     - name: Initialise OpenWRT
       ansible.builtin.import_role:
         name: community.openwrt.init

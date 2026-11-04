@@ -1,0 +1,36 @@
+---
+# Runs bootstrap_openwrt with the invalid variables passed as include parameters,
+# the role has to fail at the validation before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run bootstrap_openwrt with invalid variables (expect ERROR): {{ bootstrap_openwrt__test_invalid.message }}"
+  block:
+
+    - name: 'Run bootstrap_openwrt, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'bootstrap_openwrt'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ bootstrap_openwrt__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the network configuration after the invalid run'
+      ansible.builtin.raw: 'md5sum /etc/config/network'
+      register: 'bootstrap_openwrt__test_md5_after'
+      changed_when: false
+
+    - name: 'Assert the run failed at the validation before any change'
+      vars:
+        bootstrap_openwrt__test_md5_regex: '[0-9a-f]{32}'
+        bootstrap_openwrt__test_md5_before_sum: "{{ bootstrap_openwrt__test_md5_before.stdout | regex_search(bootstrap_openwrt__test_md5_regex) }}"
+        bootstrap_openwrt__test_md5_after_sum: "{{ bootstrap_openwrt__test_md5_after.stdout | regex_search(bootstrap_openwrt__test_md5_regex) }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(bootstrap_openwrt__test_invalid.search)
+          - bootstrap_openwrt__test_md5_before_sum | length == 32
+          - bootstrap_openwrt__test_md5_after_sum == bootstrap_openwrt__test_md5_before_sum
+        fail_msg: >-
+          Failure: {{ ansible_failed_result.msg | default('') }}
+          Checksum before: {{ bootstrap_openwrt__test_md5_before_sum }}, after: {{ bootstrap_openwrt__test_md5_after_sum }}.

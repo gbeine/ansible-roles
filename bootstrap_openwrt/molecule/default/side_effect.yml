@@ -1,0 +1,55 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    bootstrap_openwrt__test_case: "{{ bootstrap_openwrt__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Read the ports of br-lan of the clone'
+      ansible.builtin.raw: "uci -q get network.@device[0].ports"
+      register: 'bootstrap_openwrt__test_ports'
+      changed_when: false
+
+    - name: 'Set the ports of br-lan'
+      ansible.builtin.set_fact:
+        bootstrap_openwrt__test_lan_ports: "{{ bootstrap_openwrt__test_ports.stdout | trim | split }}"
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ bootstrap_openwrt__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the network configuration before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/network'
+      register: 'bootstrap_openwrt__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include,
+    # both cases pass all needed variables and work on every platform
+    - name: 'Run bootstrap_openwrt with a declared section that is protected (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_network_protect: "{{ bootstrap_openwrt__test_protect }}"
+        openwrt_network: >-
+          {{ bootstrap_openwrt__test_network
+             + [ { 'type': 'interface', 'name': 'wg_molecule', 'find': { 'proto': 'none' }, 'options': { 'proto': 'none' } } ] }}
+        bootstrap_openwrt__test_invalid:
+          message: 'a declared section that is protected'
+          search: '^openwrt_network declares protected sections: wg_molecule$'
+
+    - name: 'Run bootstrap_openwrt with a pattern instead of a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_network_protect: 'wg_*'
+        bootstrap_openwrt__test_invalid:
+          message: 'a pattern instead of a list'
+          search: '^openwrt_network_protect has to be a list of names or patterns: wg_\*$'
