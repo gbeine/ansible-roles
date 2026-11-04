@@ -15,6 +15,15 @@
       ansible.builtin.include_vars:
         file: 'OpenWrt.yml'
 
+    # A failing template in the settings (e.g. an unknown filter) disappears silently inside the translation,
+    # rendering the settings and configs completely shows the error before anything changes
+    - name: 'Render the settings and configs'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__settings | to_json | length > 0
+          - monitoring_snmp__configs | to_json | length > 0
+        quiet: true
+
     # The configs are merged into the settings, lists are appended
     - name: 'Translate the settings to the UCI configuration of snmpd'
       ansible.builtin.set_fact:
@@ -218,8 +227,19 @@
           {% for user in users.keys() | reject('in', granted) | sort %}
           {%   set _ = errors.append('createUser ' ~ user ~ ' (needs rouser or rwuser on OpenWrt)') %}
           {% endfor %}
-          {% set general = {'enabled': '1'} %}
-          {% if ns.v3 %}{% set _ = general.update({'snmp_version': 'v1/v2c/v3'}) %}{% endif %}
+          {#   The options of general follow the agent addresses and the versions of the groups #}
+          {% set addresses = merged.agentaddress | default([]) | join(',') | split(',') | map('trim') | select | list %}
+          {% set ipv6 = addresses | select('match', '(?i)^(udp6|tcp6|udpv6|tcpv6|udpipv6|tcpipv6):') | list | length > 0 %}
+          {% set ipv4 = addresses | reject('match', '(?i)^(udp6|tcp6|udpv6|tcpv6|udpipv6|tcpipv6):') | list | length > 0 %}
+          {% set port = (addresses | first | default('')).split(':') | last %}
+          {% set versions = merged.group | default([]) | map('regex_findall', '"[^"]*"|[^ ]+') | selectattr(1, 'defined')
+                            | map(attribute=1) | map('lower') | list %}
+          {% set v3 = ns.v3 or 'usm' in versions %}
+          {% set v12 = versions | select('in', ['v1', 'v2c']) | list | length > 0 %}
+          {% set general = {'enabled': '1',
+                            'ip_protocol': 'ipv4/ipv6' if (ipv4 and ipv6) or not (ipv4 or ipv6) else ('ipv6' if ipv6 else 'ipv4'),
+                            'snmp_port': port if port is match('^[0-9]+$') else '161',
+                            'snmp_version': ('v1/v2c/v3' if v12 or (ns.v3 and not versions) else 'v3') if v3 else 'v1/v2c'} %}
           {% set _ = sections.append({'type': 'snmpd', 'name': 'general', 'options': general}) %}
           {{ {'sections': sections, 'errors': errors} | to_json }}
 
@@ -235,6 +255,88 @@
           snmpd_settings has to be a mapping and snmpd_configs a list of configs with settings.
           snmpd_unit is not supported on OpenWrt (procd instead of systemd): {{ monitoring_snmp__unit.keys() | join(', ') | default('none', true) }}.
           Invalid or unsupported directives on OpenWrt: {{ monitoring_snmp__openwrt_translation.errors | join(', ') | default('none', true) }}.
+        quiet: true
+
+    # The same structure as bootstrap_openwrt__snmpd of bootstrap_openwrt: type, optional name, find and options,
+    # names and find follow the default configuration of OpenWrt, unnamed sections are found by find
+    - name: 'Build the UCI sections of snmpd'
+      ansible.builtin.set_fact:
+        monitoring_snmp__openwrt_snmpd: "{{ monitoring_snmp__openwrt_snmpd_json | trim | from_json }}"
+      no_log: true
+      vars:
+        monitoring_snmp__openwrt_snmpd_json: >-
+          {% set result = [] %}
+          {% set used = [] %}
+          {% for section in monitoring_snmp__openwrt_translation.sections %}
+          {%   set o = section.options %}
+          {%   set t = section.type %}
+          {%   set ns = namespace(name='', find=o) %}
+          {%   if t in ['com2sec', 'com2sec6'] %}
+          {%     set ns.name = o.community ~ ('6' if t == 'com2sec6' else '') %}
+          {%     set ns.find = {'secname': o.secname} %}
+          {%   elif t == 'group' %}
+          {%     set ns.name = o.group ~ '_' ~ o.version %}
+          {%     set ns.find = {'group': o.group, 'version': o.version} %}
+          {%   elif t == 'view' %}
+          {%     set ns.name = o.viewname %}
+          {%     set ns.find = {'viewname': o.viewname} %}
+          {%   elif t == 'access' %}
+          {%     set ns.name = o.group ~ '_access' %}
+          {%     set ns.find = {'group': o.group} %}
+          {%   elif t == 'snmpd' %}
+          {%     set ns.name = 'general' %}
+          {%     set ns.find = {'enabled': '1'} %}
+          {%   elif t == 'system' and o.sysName is defined %}
+          {%     set ns.find = {'sysName': o.sysName} %}
+          {%   elif t == 'engineid' and o.engineidtype is defined %}
+          {%     set ns.find = {'engineidtype': o.engineidtype} %}
+          {%   elif t in ['exec', 'extend'] %}
+          {%     set ns.find = {'name': o.name} %}
+          {%   elif t == 'v3' %}
+          {%     set ns.find = {'username': o.username} %}
+          {%   elif t == 'pass' %}
+          {%     set ns.find = {'miboid': o.miboid} %}
+          {%   elif t == 'disk' %}
+          {%     set ns.find = {'partition': o.partition} %}
+          {%   elif t in ['trapsink', 'trap2sink', 'informsink'] %}
+          {%     set ns.find = {'host': o.host} %}
+          {%   endif %}
+          {%   if ns.name | length > 0 and ns.name is match('^[A-Za-z0-9_]+$') and ns.name not in used %}
+          {%     set _ = used.append(ns.name) %}
+          {%     set _ = result.append({'type': t, 'name': ns.name, 'find': ns.find, 'options': o}) %}
+          {%   else %}
+          {#     A name that is taken or invalid leaves the section unnamed, all options find it #}
+          {%     set _ = result.append({'type': t, 'find': o if ns.name | length > 0 else ns.find, 'options': o}) %}
+          {%   endif %}
+          {% endfor %}
+          {{ result | to_json }}
+
+    # Only the keys are shown, the values can contain communities and passwords
+    - name: 'Show the UCI sections of snmpd'
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.type }} {{ item.name | default('(unnamed)') }}:
+          find {{ item.find.keys() | join(', ') }}; options {{ item.options.keys() | join(', ') }}
+      loop: "{{ monitoring_snmp__openwrt_snmpd }}"
+      loop_control:
+        label: "{{ item.name | default(item.type) }}"
+
+    - name: 'Validate the UCI sections of snmpd'
+      vars:
+        monitoring_snmp__openwrt_unnamed_finds: >-
+          {{ monitoring_snmp__openwrt_snmpd | rejectattr('name', 'defined')
+             | map(attribute='type') | zip(monitoring_snmp__openwrt_snmpd | rejectattr('name', 'defined') | map(attribute='find'))
+             | map('to_json') | list }}
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__openwrt_snmpd | length > 0
+          - monitoring_snmp__openwrt_snmpd | rejectattr('type', 'defined') | list | length == 0
+          - monitoring_snmp__openwrt_snmpd | rejectattr('find', 'defined') | list | length == 0
+          - monitoring_snmp__openwrt_snmpd | rejectattr('options', 'defined') | list | length == 0
+          - monitoring_snmp__openwrt_unnamed_finds | length == monitoring_snmp__openwrt_unnamed_finds | unique | length
+        fail_msg: >-
+          Every UCI section of snmpd needs type, find and options, unnamed sections of the same type need different values:
+          {{ monitoring_snmp__openwrt_snmpd | rejectattr('name', 'defined') | map(attribute='type') | join(', ') }}
         quiet: true
 
     - name: 'Check reachability'
@@ -263,14 +365,30 @@
         command: 'section'
         config: 'snmpd'
         type: "{{ item.type }}"
-        name: "{{ item.name }}"
-        find: "{{ item.options }}"
+        name: "{{ item.name | default(omit) }}"
+        find: "{{ item.find }}"
         value: "{{ item.options }}"
         replace: true
         redact_keys: "{{ monitoring_snmp__openwrt_redact_keys }}"
-      loop: "{{ monitoring_snmp__openwrt_translation.sections }}"
+      loop: "{{ monitoring_snmp__openwrt_snmpd }}"
       loop_control:
-        label: "{{ item.name }}"
+        label: "{{ item.name | default(item.type) }}"
+
+    - name: 'Look up the IDs of the unnamed sections'
+      community.openwrt.uci:
+        command: 'find'
+        config: 'snmpd'
+        type: "{{ item.type }}"
+        find: "{{ item.find }}"
+      loop: "{{ monitoring_snmp__openwrt_snmpd | rejectattr('name', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.type }}"
+      register: 'monitoring_snmp__openwrt_found'
+      no_log: true
+      check_mode: false
+      failed_when:
+        - monitoring_snmp__openwrt_found.failed | default(false)
+        - not ansible_check_mode
 
     - name: 'Read the sections of the snmpd configuration'
       community.openwrt.uci:
@@ -280,16 +398,27 @@
       no_log: true
       check_mode: false
 
-    - name: 'Remove sections that are not declared'
+    - name: 'Determine the sections to delete'
+      ansible.builtin.set_fact:
+        monitoring_snmp__openwrt_delete: >-
+          {{ monitoring_snmp__openwrt_show.result
+             | regex_findall('(?m)^snmpd\.([^.=\n]+)=([\w-]+)$')
+             | reverse
+             | map(attribute='0')
+             | reject('in',
+                 (monitoring_snmp__openwrt_snmpd | selectattr('name', 'defined') | map(attribute='name') | list)
+                 + (monitoring_snmp__openwrt_found.results | map(attribute='result') | list))
+             | list }}
+
+    - name: 'Show the sections to delete'
+      ansible.builtin.debug:
+        var: 'monitoring_snmp__openwrt_delete'
+
+    - name: 'Delete the undeclared sections'
       community.openwrt.uci:
         command: 'delete'
         key: "snmpd.{{ item }}"
-      loop: >-
-        {{ monitoring_snmp__openwrt_show.result
-           | regex_findall('(?m)^snmpd\.([^.=\n]+)=[A-Za-z0-9_-]+$')
-           | reverse
-           | reject('in', monitoring_snmp__openwrt_translation.sections | map(attribute='name') | list)
-           | list }}
+      loop: "{{ monitoring_snmp__openwrt_delete }}"
       when: monitoring_snmp__prune | bool
 
     - name: 'Read the pending changes of the snmpd configuration'

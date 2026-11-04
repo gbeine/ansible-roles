@@ -134,23 +134,42 @@ Without variables the role creates the configuration of the former default of th
 - `sysLocation` is `office`, `sysContact` is `bofh@example.com`, `sysName` is `HeartOfGold`,
 - `exec filedescriptors /bin/cat /proc/sys/fs/file-nr`, `engineIDType 3` with `engineIDNic eth0`.
 
-| Directive | UCI section |
-|---|---|
-| `agentaddress` | `agent` `agent`, values are joined with `,` |
-| `master agentx`, `agentXSocket` | `agentx` `agentx`, without `master agentx` no AgentX |
-| `sysLocation`, `sysContact`, `sysName`, `sysServices`, `sysDescr`, `sysObjectID` | `system` `system` |
-| `com2sec`, `com2sec6`, `group`, `view`, `access` | `com2sec_<n>`, `com2sec6_<n>`, `group_<n>`, `view_<n>`, `access_<n>`, a context `""` becomes `none` |
-| `rocommunity`, `rwcommunity`, `rocommunity6`, `rwcommunity6` `<community> [<source> [<oid>]]` | `access_default`, `access_HostIP` (source `address/mask`) or `access_HostName` |
-| `createUser` with `rouser` or `rwuser` | `v3` `v3_<user>`, `snmp_version` `v1/v2c/v3` in `general` |
-| `exec`, `extend`, `pass`, `pass_persist`, `disk` | `exec_<n>`, `extend_<n>`, `pass_<n>`, `disk_<n>` |
-| `engineID`, `engineIDType`, `engineIDNic` | `engineid` `engineid` |
-| `trapsink`, `trap2sink`, `informsink` | `<type>_<n>` |
-| `trapcommunity`, `authtrapenable`, `v1trapaddress`, `trapsess` | sections with the same name |
-| | `snmpd` `general` with `enabled 1`, always |
+The role transforms the settings into a list of UCI sections with the same structure as `bootstrap_openwrt__snmpd` of the role `bootstrap_openwrt`
+(`type`, optional `name`, `find` and `options`) and processes it like `bootstrap_openwrt` did.
+Names and `find` follow the default configuration of OpenWrt, without variables the list is identical to the former `bootstrap_openwrt__snmpd_default`.
+
+| Directive | UCI section | Name | find |
+|---|---|---|---|
+| `agentaddress` (values joined with `,`) | `agent` | unnamed | all options |
+| `master agentx`, `agentXSocket` (without `master agentx` no AgentX) | `agentx` | unnamed | all options |
+| `sysLocation`, `sysContact`, `sysName`, `sysServices`, `sysDescr`, `sysObjectID` | `system` | unnamed | `sysName`, without it all options |
+| `com2sec`, `com2sec6` | `com2sec`, `com2sec6` | community, with `6` for `com2sec6` | `secname` |
+| `group` | `group` | `<group>_<version>` | `group`, `version` |
+| `view` | `view` | viewname | `viewname` |
+| `access` (a context `""` becomes `none`) | `access` | `<group>_access` | `group` |
+| `rocommunity`, `rwcommunity`, `rocommunity6`, `rwcommunity6` `<community> [<source> [<oid>]]` | `access_default`, `access_HostIP` (source `address/mask`) or `access_HostName` | unnamed | all options |
+| `createUser` with `rouser` or `rwuser` | `v3` | unnamed | `username` |
+| `exec`, `extend` | `exec`, `extend` | unnamed | `name` |
+| `pass`, `pass_persist` | `pass` | unnamed | `miboid` |
+| `disk` | `disk` | unnamed | `partition` |
+| `engineID`, `engineIDType`, `engineIDNic` | `engineid` | unnamed | `engineidtype`, without it all options |
+| `trapsink`, `trap2sink`, `informsink` | same type | unnamed | `host` |
+| `trapcommunity`, `authtrapenable`, `v1trapaddress`, `trapsess` | same type | unnamed | all options |
+| always | `snmpd` | `general` | `enabled 1` |
+
+The section `general` gets `enabled 1` and three options derived from the settings:
+`ip_protocol` (`ipv4`, `ipv6` or `ipv4/ipv6` from the transports of `agentaddress`), `snmp_port` (the port of the first `agentaddress`, else `161`)
+and `snmp_version` (`v3` with only `usm` groups or only SNMPv3 users, `v1/v2c/v3` with `usm` groups or SNMPv3 users besides v1 or v2c groups, else `v1/v2c`).
+
+A name that is taken by an earlier section of the list or is no valid UCI name leaves the section unnamed, all its options find it
+(e.g. a second `com2sec` with the community `public`). Unnamed sections of the same type need different values for `find`.
 
 The init script of OpenWrt supports less than `snmpd.conf`, the role fails before it changes anything for other directives (e.g. `proc`, `load`, `includeDir`),
 for options of directives (e.g. `rocommunity … -V view`, `rouser … -V view`, `createUser -e`), for `disk` without size,
 for users of `createUser` without `rouser` or `rwuser` and the reverse, and for passwords with less than 8 characters.
+Templates in the settings and configs (e.g. `{{ netmask | ipv4_netmask2prefixlength }}` of `common_filters`) are rendered completely
+before the translation, a failing template (e.g. an unknown filter) stops the role at `Render the settings and configs`;
+inside the translation ansible-core would drop such a directive silently and prune would delete its sections.
 The default variant `nossl` is built without OpenSSL, it supports the auth types `MD5` and `SHA` without privacy (at most the level `auth`).
 The auth types `SHA-224` to `SHA-512` and the privacy types `DES`, `AES`, `AES-192` and `AES-256` need `snmpd_ssl: true`, the role fails for other types.
 `snmpd_unit` is not supported on OpenWrt, procd has no dependencies on other units.
@@ -172,7 +191,7 @@ snmpd_configs:
 ```
 
 - The role installs `snmp-mibs`, `snmpd-nossl` and `snmp-utils-nossl`, with `snmpd_ssl: true` `snmpd-ssl` and `snmp-utils-ssl`, and removes the other variant.
-- The UCI sections have fixed names, with `snmpd_prune` (default `true`) the role removes all other sections of `/etc/config/snmpd`.
+- With `snmpd_prune` (default `true`) the role removes all sections of `/etc/config/snmpd` that are neither declared by name nor found by `find`.
 - Before a commit the role stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/snmpd`, secrets are redacted.
 - After a change of the configuration or the packages the role restarts snmpd.
 
@@ -195,6 +214,19 @@ The role `bootstrap_openwrt` does not configure snmpd any longer:
 | `openwrt_snmpd_ssl` | `snmpd_ssl` |
 | `openwrt_snmpd_prune` | `snmpd_prune` |
 | `openwrt_snmpd_redact_keys` | removed, the secrets are always redacted |
+
+Example, these settings create the sections `@agent[0]`, `@agentx[0]`, `public` (`com2sec`), `@com2sec[1]` (localhost), `public_v1`, `public_v2c`,
+`all`, `public_access`, `@system[0]`, `@exec[0]`, `@engineid[0]` and `general` of a former `openwrt_snmpd`:
+
+```yaml
+snmpd_settings:
+  com2sec: [ 'ro 172.21.110.0/24 public', 'ro localhost public' ]
+  com2sec6: []
+  group: [ 'public v1 ro', 'public v2c ro' ]
+  access: [ 'public "" any noauth exact all none none' ]
+  sysContact: 'root@example.org'
+  sysName: "{{ inventory_hostname }}"
+```
 
 ### Tests
 
@@ -234,7 +266,7 @@ The molecule scenario `openwrt` runs the role in two clones of the tart VM `open
 | `molecule-snmp-openwrt-default` | No variables, the former default of `bootstrap_openwrt`: `public` and `private` read sysName and sysLocation, a wrong community gets no answer, the exec entry `filedescriptors`, the packages of the nossl variant |
 | `molecule-snmp-openwrt` | Own settings with the community `molecule-ro`, `public` and `private` are rejected, `snmpd_ssl: true` with the packages of the ssl variant, an SNMPv3 user with authPriv (SHA-512, AES) reads the output of an extend command |
 
-`side_effect` runs the role with `proc`, which OpenWrt does not support, and with SHA-512 and AES without `snmpd_ssl`, and checks that the role fails at the validation and `/etc/config/snmpd` is unchanged (tasks marked `expect ERROR`).
+`side_effect` runs the role with `proc`, which OpenWrt does not support, with SHA-512 and AES without `snmpd_ssl` and with an unknown filter in `com2sec`, and checks that the role fails at the validation and `/etc/config/snmpd` is unchanged (tasks marked `expect ERROR`).
 The collection `community.openwrt` is required on the controller.
 
 | Environment variable | Default | Description |
