@@ -1,0 +1,92 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_dnsmasq__test_case: "{{ dns_dnsmasq__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_dnsmasq__expect: "{{ dns_dnsmasq__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/dnsmasq.container'
+      register: 'dns_dnsmasq__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + dns_dnsmasq__test_image) in dns_dnsmasq__test_quadlet_lines
+          - ('IP=' + dns_dnsmasq__expect.ip) in dns_dnsmasq__test_quadlet_lines
+          - dns_dnsmasq__expect.ip6 is none or ('IP6=' + dns_dnsmasq__expect.ip6) in dns_dnsmasq__test_quadlet_lines
+          - dns_dnsmasq__expect.ip6 is not none or dns_dnsmasq__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Network=' + dns_dnsmasq__test_case.role_vars.dnsmasq_network) in dns_dnsmasq__test_quadlet_lines
+          - >-
+            dns_dnsmasq__test_quadlet_lines | select('match', 'AddCapability=') | list
+            == (['AddCapability=NET_ADMIN'] if dns_dnsmasq__expect.dhcp else [])
+          - >-
+            dns_dnsmasq__test_quadlet_lines | select('match', 'Label=') | list | sort
+            == (dns_dnsmasq__expect.labels | dict2items | map(attribute='key')
+                | zip(dns_dnsmasq__expect.labels | dict2items | map(attribute='value')) | map('join', '=')
+                | map('regex_replace', '^', 'Label=') | list | sort)
+        fail_msg: "{{ dns_dnsmasq__test_quadlet.content | b64decode }}"
+      vars:
+        dns_dnsmasq__test_quadlet_lines: "{{ (dns_dnsmasq__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the dnsmasq service'
+      ansible.builtin.command: 'systemctl is-active dnsmasq'
+      register: 'dns_dnsmasq__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the dnsmasq service is active'
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__test_service.stdout == 'active'
+
+    - name: 'Inspect the dnsmasq container'
+      ansible.builtin.command: 'podman inspect dnsmasq'
+      register: 'dns_dnsmasq__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses, capabilities and labels'
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__test_net.IPAddress == dns_dnsmasq__expect.ip
+          - dns_dnsmasq__expect.ip6 is none or dns_dnsmasq__test_net.GlobalIPv6Address == dns_dnsmasq__expect.ip6
+          - ('CAP_NET_ADMIN' in dns_dnsmasq__test_container.EffectiveCaps) == dns_dnsmasq__expect.dhcp
+          - >-
+            dns_dnsmasq__test_container.Config.Labels | default({}, true) | dict2items
+            | selectattr('key', 'in', dns_dnsmasq__expect.labels.keys() | list) | items2dict
+            == dns_dnsmasq__expect.labels
+        fail_msg: >-
+          IPv4 {{ dns_dnsmasq__test_net.IPAddress }}, IPv6 {{ dns_dnsmasq__test_net.GlobalIPv6Address }},
+          capabilities {{ dns_dnsmasq__test_container.EffectiveCaps | join(', ') }},
+          labels {{ dns_dnsmasq__test_container.Config.Labels | default({}, true) }}
+      vars:
+        dns_dnsmasq__test_container: "{{ (dns_dnsmasq__test_inspect.stdout | from_json)[0] }}"
+        dns_dnsmasq__test_net: "{{ dns_dnsmasq__test_container.NetworkSettings.Networks[dns_dnsmasq__test_case.role_vars.dnsmasq_network] }}"
+
+    - name: 'Resolve example.org with dnsmasq'
+      ansible.builtin.command: "dig @{{ dns_dnsmasq__expect.ip }} example.org A +time=3 +tries=1"
+      register: 'dns_dnsmasq__test_dig'
+      changed_when: false
+      failed_when: false
+      until: >-
+        dns_dnsmasq__test_dig.rc == 0
+        and 'status: NOERROR' in dns_dnsmasq__test_dig.stdout
+        and dns_dnsmasq__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the answer of dnsmasq'
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__test_dig.rc == 0
+          - "'status: NOERROR' in dns_dnsmasq__test_dig.stdout"
+          - dns_dnsmasq__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
+        fail_msg: "{{ dns_dnsmasq__test_dig.stdout | default(dns_dnsmasq__test_dig.stderr) }}"

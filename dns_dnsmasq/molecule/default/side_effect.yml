@@ -1,0 +1,83 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_dnsmasq__test_case: "{{ dns_dnsmasq__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_dnsmasq__test_quadlet_path: '/etc/containers/systemd/dnsmasq.container'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_dnsmasq__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ dns_dnsmasq__test_quadlet_path }}"
+        checksum_algorithm: 'md5'
+      register: 'dns_dnsmasq__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_dnsmasq with dnsmasq_enable_dhcp not a boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_enable_dhcp: 'maybe'
+        dns_dnsmasq__test_invalid:
+          message: 'dnsmasq_enable_dhcp is not a boolean'
+          search: '^dnsmasq_enable_dhcp has to be a boolean: maybe$'
+
+    - name: 'Run dns_dnsmasq with dnsmasq_publish not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_publish: '53:53/udp'
+        dns_dnsmasq__test_invalid:
+          message: 'dnsmasq_publish is not a list'
+          search: '^dnsmasq_publish has to be a list: 53:53/udp$'
+
+    - name: 'Run dns_dnsmasq with dnsmasq_labels not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_labels: [ 'molecule.test=dnsmasq' ]
+        dns_dnsmasq__test_invalid:
+          message: 'dnsmasq_labels is not a dictionary'
+          search: "^dnsmasq_labels has to be a dictionary if set: \\['molecule\\.test=dnsmasq'\\]$"
+
+    - name: 'Change the role variables of the test case'
+      when: dns_dnsmasq__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value dnsmasq'
+          register: 'dns_dnsmasq__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ dns_dnsmasq__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run dns_dnsmasq with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'dns_dnsmasq'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value dnsmasq'
+          register: 'dns_dnsmasq__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the quadlet changed and the service was restarted'
+          ansible.builtin.assert:
+            that:
+              - dns_dnsmasq__quadlet_result is changed
+              - dns_dnsmasq__test_started_after.stdout | int > dns_dnsmasq__test_started_before.stdout | int
+            fail_msg: "before {{ dns_dnsmasq__test_started_before.stdout }}, after {{ dns_dnsmasq__test_started_after.stdout }}"

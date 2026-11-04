@@ -1,0 +1,80 @@
+---
+
+- name: 'Install dnsmasq'
+  tags: [ 'dns_dnsmasq' ]
+  block:
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__enable_dhcp is boolean
+          - dns_dnsmasq__publish is sequence and dns_dnsmasq__publish is not string
+          - dns_dnsmasq__labels is not defined or dns_dnsmasq__labels is mapping
+        # Only the failing checks are reported
+        fail_msg: >-
+          {{ [ ('dnsmasq_enable_dhcp has to be a boolean: ' ~ dns_dnsmasq__enable_dhcp)
+                 if dns_dnsmasq__enable_dhcp is not boolean else '',
+               ('dnsmasq_publish has to be a list: ' ~ dns_dnsmasq__publish)
+                 if dns_dnsmasq__publish is string or dns_dnsmasq__publish is not sequence else '',
+               ('dnsmasq_labels has to be a dictionary if set: ' ~ dns_dnsmasq__labels)
+                 if dns_dnsmasq__labels is defined and dns_dnsmasq__labels is not mapping else '' ]
+             | select | join('. ') }}
+        quiet: true
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ dns_dnsmasq__container.name }}"
+        hostname: "{{ dns_dnsmasq__container.hostname }}"
+        image: "{{ dns_dnsmasq__container.image }}"
+        ip: "{{ dns_dnsmasq__container.ip }}"
+        ip6: "{{ dns_dnsmasq__container.ipv6 | default(omit) }}"
+        network: "{{ dns_dnsmasq__container.network }}"
+        timezone: "{{ dns_dnsmasq__container.timezone }}"
+        cap_add: "{{ dns_dnsmasq__container.cap_add | default(omit) }}"
+        env: "{{ dns_dnsmasq__container.environment | default(omit) }}"
+        etc_hosts: "{{ dns_dnsmasq__container.etc_hosts | default(omit) }}"
+        expose: "{{ dns_dnsmasq__container.expose | default(omit) }}"
+        label: "{{ dns_dnsmasq__container.labels | default(omit) }}"
+        publish: "{{ dns_dnsmasq__container.publish | default(omit) }}"
+        secrets: "{{ dns_dnsmasq__container.secrets | default(omit) }}"
+        volume: "{{ dns_dnsmasq__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if dns_dnsmasq__container.requires is defined %}
+          Requires={{ dns_dnsmasq__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'dns_dnsmasq__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ dns_dnsmasq__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if dns_dnsmasq__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        dns_dnsmasq__running: >-
+          {{ (ansible_facts.services[dns_dnsmasq__container.name + '.service'].state | default('')) == 'running' }}
+        dns_dnsmasq__restart: >-
+          {{ dns_dnsmasq__running | bool and dns_dnsmasq__quadlet_result is changed }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'dns_dnsmasq__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ dns_dnsmasq__container.name }}"
+        container_image: "{{ dns_dnsmasq__container.image }}"
+        container_schedule: "{{ dns_dnsmasq__autoupdate_schedule }}"
