@@ -25,9 +25,10 @@
           - dns_dnsmasq__expect.ip6 is none or ('IP6=' + dns_dnsmasq__expect.ip6) in dns_dnsmasq__test_quadlet_lines
           - dns_dnsmasq__expect.ip6 is not none or dns_dnsmasq__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - ('Network=' + dns_dnsmasq__test_case.role_vars.dnsmasq_network) in dns_dnsmasq__test_quadlet_lines
+          - ('Volume=' + dns_dnsmasq__test_config_file + ':/etc/dnsmasq.conf:ro') in dns_dnsmasq__test_quadlet_lines
           - >-
             dns_dnsmasq__test_quadlet_lines | select('match', 'AddCapability=') | list
-            == (['AddCapability=NET_ADMIN'] if dns_dnsmasq__expect.dhcp else [])
+            == (['AddCapability=NET_ADMIN NET_RAW'] if dns_dnsmasq__expect.dhcp else [])
           - >-
             dns_dnsmasq__test_quadlet_lines | select('match', 'Label=') | list | sort
             == (dns_dnsmasq__expect.labels | dict2items | map(attribute='key')
@@ -36,6 +37,20 @@
         fail_msg: "{{ dns_dnsmasq__test_quadlet.content | b64decode }}"
       vars:
         dns_dnsmasq__test_quadlet_lines: "{{ (dns_dnsmasq__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "{{ dns_dnsmasq__test_config_file }}"
+      register: 'dns_dnsmasq__test_config'
+
+    - name: 'Assert the options of the configuration'
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__test_config_lines == dns_dnsmasq__expect.config
+        fail_msg: "{{ dns_dnsmasq__test_config.content | b64decode }}"
+      vars:
+        dns_dnsmasq__test_config_lines: >-
+          {{ (dns_dnsmasq__test_config.content | b64decode).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}
 
     - name: 'Read the state of the dnsmasq service'
       ansible.builtin.command: 'systemctl is-active dnsmasq'
@@ -59,6 +74,7 @@
           - dns_dnsmasq__test_net.IPAddress == dns_dnsmasq__expect.ip
           - dns_dnsmasq__expect.ip6 is none or dns_dnsmasq__test_net.GlobalIPv6Address == dns_dnsmasq__expect.ip6
           - ('CAP_NET_ADMIN' in dns_dnsmasq__test_container.EffectiveCaps) == dns_dnsmasq__expect.dhcp
+          - ('CAP_NET_RAW' in dns_dnsmasq__test_container.EffectiveCaps) == dns_dnsmasq__expect.dhcp
           - >-
             dns_dnsmasq__test_container.Config.Labels | default({}, true) | dict2items
             | selectattr('key', 'in', dns_dnsmasq__expect.labels.keys() | list) | items2dict
@@ -90,3 +106,23 @@
           - "'status: NOERROR' in dns_dnsmasq__test_dig.stdout"
           - dns_dnsmasq__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
         fail_msg: "{{ dns_dnsmasq__test_dig.stdout | default(dns_dnsmasq__test_dig.stderr) }}"
+
+    - name: 'Resolve the addresses of the configuration with dnsmasq'
+      ansible.builtin.command: "dig @{{ dns_dnsmasq__expect.ip }} {{ item.key }} A +short +time=3 +tries=1"
+      loop: "{{ dns_dnsmasq__expect.resolve | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'dns_dnsmasq__test_resolve'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the addresses of the configuration'
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout_lines | map('trim') | list == [ item.item.value ]
+        fail_msg: "{{ item.item.key }}: {{ item.stdout }} {{ item.stderr | default('') }}"
+        quiet: true
+      loop: "{{ dns_dnsmasq__test_resolve.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"

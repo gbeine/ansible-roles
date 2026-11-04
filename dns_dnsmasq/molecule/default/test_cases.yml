@@ -11,16 +11,25 @@ dns_dnsmasq__test_network:
 
 dns_dnsmasq__test_image: 'docker.io/4km3/dnsmasq:2.90-r3-alpine-3'
 
+dns_dnsmasq__test_config_file: '/srv/dnsmasq/dnsmasq.conf'
+
 dns_dnsmasq__test_cases:
 
-  # side_effect enables DHCP, verify checks the state afterwards
+  # side_effect enables DHCP, only the quadlet changes, verify checks the state afterwards
   - name: 'molecule-dnsmasq-dns'
     role_vars:
+      dnsmasq_home: '/srv/dnsmasq'
       dnsmasq_ip: '10.89.0.10'
       dnsmasq_network: 'podman-molecule'
       dnsmasq_hostname: 'dnsmasq-molecule'
       dnsmasq_timezone: 'Europe/Berlin'
+      dnsmasq_config:
+        domain-needed: true
+        bogus-priv: true
+        log-queries: false
+        address: [ '/molecule.test/10.89.0.99' ]
     side_effect:
+      changed: [ 'quadlet' ]
       role_vars:
         dnsmasq_enable_dhcp: true
     expect:
@@ -28,9 +37,17 @@ dns_dnsmasq__test_cases:
       ip6: ~
       dhcp: true
       labels: {}
+      config:
+        - 'address=/molecule.test/10.89.0.99'
+        - 'bogus-priv'
+        - 'domain-needed'
+      resolve:
+        molecule.test: '10.89.0.99'
 
+  # side_effect adds an address, only the configuration changes, verify checks the state afterwards
   - name: 'molecule-dnsmasq-dhcp'
     role_vars:
+      dnsmasq_home: '/srv/dnsmasq'
       dnsmasq_ip: '10.89.0.10'
       dnsmasq_ipv6: 'fd00:89::10'
       dnsmasq_network: 'podman-molecule'
@@ -39,9 +56,31 @@ dns_dnsmasq__test_cases:
       dnsmasq_enable_dhcp: true
       dnsmasq_labels:
         molecule.test: 'dnsmasq'
+      dnsmasq_config:
+        domain-needed: true
+        address: [ '/molecule.test/10.89.0.99' ]
+        dhcp-range: '10.89.0.100,10.89.0.200,12h'
+        dhcp-authoritative: true
+    side_effect:
+      changed: [ 'config' ]
+      role_vars:
+        dnsmasq_config:
+          domain-needed: true
+          address: [ '/molecule.test/10.89.0.99', '/changed.test/10.89.0.98' ]
+          dhcp-range: '10.89.0.100,10.89.0.200,12h'
+          dhcp-authoritative: true
     expect:
       ip: '10.89.0.10'
       ip6: 'fd00:89::10'
       dhcp: true
       labels:
         molecule.test: 'dnsmasq'
+      config:
+        - 'address=/molecule.test/10.89.0.99'
+        - 'address=/changed.test/10.89.0.98'
+        - 'dhcp-authoritative'
+        - 'dhcp-range=10.89.0.100,10.89.0.200,12h'
+        - 'domain-needed'
+      resolve:
+        molecule.test: '10.89.0.99'
+        changed.test: '10.89.0.98'

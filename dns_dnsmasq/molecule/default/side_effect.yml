@@ -19,10 +19,11 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+    - name: 'Read the checksums of the quadlet unit and the configuration before the invalid runs'
       ansible.builtin.stat:
-        path: "{{ dns_dnsmasq__test_quadlet_path }}"
+        path: "{{ item }}"
         checksum_algorithm: 'md5'
+      loop: [ "{{ dns_dnsmasq__test_quadlet_path }}", "{{ dns_dnsmasq__test_config_file }}" ]
       register: 'dns_dnsmasq__test_md5_before'
 
     # Include parameters take precedence over set_fact and only exist inside the include
@@ -50,6 +51,35 @@
           message: 'dnsmasq_labels is not a dictionary'
           search: "^dnsmasq_labels has to be a dictionary if set: \\['molecule\\.test=dnsmasq'\\]$"
 
+    - name: 'Run dns_dnsmasq with dnsmasq_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config: [ 'domain-needed' ]
+        dns_dnsmasq__test_invalid:
+          message: 'dnsmasq_config is not a dictionary'
+          search: "^dnsmasq_config has to be a dictionary: \\['domain-needed'\\]$"
+
+    - name: 'Run dns_dnsmasq with a dictionary as value in dnsmasq_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config:
+          domain-needed: true
+          server: { address: '9.9.9.9' }
+        dns_dnsmasq__test_invalid:
+          message: 'a dictionary as value in dnsmasq_config'
+          search: '^dnsmasq_config values have to be a boolean, a string, a number or a list of strings and numbers: server$'
+
+    # The variables are valid, dnsmasq --test rejects the unknown option before the configuration is replaced
+    - name: 'Run dns_dnsmasq with an unknown option in dnsmasq_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config:
+          domain-needed: true
+          molecule-no-such-option: true
+        dns_dnsmasq__test_invalid:
+          message: 'an unknown option in dnsmasq_config'
+          search: 'dnsmasq: bad option at line'
+
     - name: 'Change the role variables of the test case'
       when: dns_dnsmasq__test_case.side_effect is defined
       block:
@@ -75,9 +105,21 @@
           register: 'dns_dnsmasq__test_started_after'
           changed_when: false
 
-        - name: 'Assert the quadlet changed and the service was restarted'
+        - name: 'Read the state of the service after the change'
+          ansible.builtin.command: 'systemctl is-active dnsmasq'
+          register: 'dns_dnsmasq__test_active_after'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the expected changes and the restart of the service'
           ansible.builtin.assert:
             that:
-              - dns_dnsmasq__quadlet_result is changed
+              - (dns_dnsmasq__quadlet_result is changed) == ('quadlet' in dns_dnsmasq__test_case.side_effect.changed)
+              - (dns_dnsmasq__config_result is changed) == ('config' in dns_dnsmasq__test_case.side_effect.changed)
               - dns_dnsmasq__test_started_after.stdout | int > dns_dnsmasq__test_started_before.stdout | int
-            fail_msg: "before {{ dns_dnsmasq__test_started_before.stdout }}, after {{ dns_dnsmasq__test_started_after.stdout }}"
+            fail_msg: >-
+              quadlet changed: {{ dns_dnsmasq__quadlet_result is changed }},
+              configuration changed: {{ dns_dnsmasq__config_result is changed }},
+              expected changes: {{ dns_dnsmasq__test_case.side_effect.changed | join(', ') }},
+              start before {{ dns_dnsmasq__test_started_before.stdout }}, after {{ dns_dnsmasq__test_started_after.stdout }},
+              state {{ dns_dnsmasq__test_active_after.stdout }}

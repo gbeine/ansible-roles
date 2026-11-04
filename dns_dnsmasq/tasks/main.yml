@@ -10,6 +10,9 @@
           - dns_dnsmasq__enable_dhcp is boolean
           - dns_dnsmasq__publish is sequence and dns_dnsmasq__publish is not string
           - dns_dnsmasq__labels is not defined or dns_dnsmasq__labels is mapping
+          - dns_dnsmasq__config is mapping
+          - dns_dnsmasq__config_invalid_keys | length == 0
+          - dns_dnsmasq__config_invalid_values | length == 0
         # Only the failing checks are reported
         fail_msg: >-
           {{ [ ('dnsmasq_enable_dhcp has to be a boolean: ' ~ dns_dnsmasq__enable_dhcp)
@@ -17,9 +20,49 @@
                ('dnsmasq_publish has to be a list: ' ~ dns_dnsmasq__publish)
                  if dns_dnsmasq__publish is string or dns_dnsmasq__publish is not sequence else '',
                ('dnsmasq_labels has to be a dictionary if set: ' ~ dns_dnsmasq__labels)
-                 if dns_dnsmasq__labels is defined and dns_dnsmasq__labels is not mapping else '' ]
+                 if dns_dnsmasq__labels is defined and dns_dnsmasq__labels is not mapping else '',
+               ('dnsmasq_config has to be a dictionary: ' ~ dns_dnsmasq__config)
+                 if dns_dnsmasq__config is not mapping else '',
+               ('dnsmasq_config has invalid option names: ' ~ dns_dnsmasq__config_invalid_keys | join(', '))
+                 if dns_dnsmasq__config_invalid_keys | length > 0 else '',
+               ('dnsmasq_config values have to be a boolean, a string, a number or a list of strings and numbers: '
+                ~ dns_dnsmasq__config_invalid_values | join(', '))
+                 if dns_dnsmasq__config_invalid_values | length > 0 else '' ]
              | select | join('. ') }}
         quiet: true
+      vars:
+        # Option names of dnsmasq consist of letters, digits and dashes
+        dns_dnsmasq__config_invalid_keys: >-
+          {{ (dns_dnsmasq__config.keys() | list if dns_dnsmasq__config is mapping else [])
+             | reject('match', '^[A-Za-z0-9][A-Za-z0-9-]*$') | list }}
+        # Strings must not contain line breaks, they would add further options
+        dns_dnsmasq__config_invalid_values: >-
+          {%- set ns = namespace(invalid=[]) -%}
+          {%- for key, value in (dns_dnsmasq__config.items() if dns_dnsmasq__config is mapping else []) -%}
+          {%-   set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
+          {%-   if value is not boolean and (value is mapping
+                  or values | select('boolean') | list | length > 0
+                  or values | reject('string') | reject('number') | list | length > 0
+                  or values | select('string') | select('search', '\n') | list | length > 0) -%}
+          {%-     set ns.invalid = ns.invalid + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.invalid }}
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ dns_dnsmasq__home }}"
+        mode: '0755'
+        state: 'directory'
+
+    # dnsmasq checks the syntax of the configuration in a throwaway container before it is replaced
+    - name: 'Generate the configuration'
+      ansible.builtin.template:
+        src: 'dnsmasq.conf.j2'
+        dest: "{{ dns_dnsmasq__podman_config_file }}"
+        mode: '0644'
+        validate: "podman run --rm --network none --volume %s:/etc/dnsmasq.conf:ro {{ dns_dnsmasq__container.image }} --test"
+      register: 'dns_dnsmasq__config_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -67,7 +110,8 @@
         dns_dnsmasq__running: >-
           {{ (ansible_facts.services[dns_dnsmasq__container.name + '.service'].state | default('')) == 'running' }}
         dns_dnsmasq__restart: >-
-          {{ dns_dnsmasq__running | bool and dns_dnsmasq__quadlet_result is changed }}
+          {{ dns_dnsmasq__running | bool
+             and (dns_dnsmasq__config_result is changed or dns_dnsmasq__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
