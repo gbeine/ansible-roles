@@ -11,6 +11,8 @@ dns_unbound__test_network:
 
 dns_unbound__test_image: 'docker.io/klutchell/unbound:latest'
 
+dns_unbound__test_config_file: '/srv/unbound/custom.conf.d/unbound.conf'
+
 dns_unbound__test_cases:
 
   - name: 'molecule-unbound-ipv4-only'
@@ -22,6 +24,7 @@ dns_unbound__test_cases:
     expect:
       ip: '10.89.0.10'
       ip6: ~
+      config: ~
 
   - name: 'molecule-unbound-ipv6'
     role_vars:
@@ -33,3 +36,56 @@ dns_unbound__test_cases:
     expect:
       ip: '10.89.0.10'
       ip6: 'fd00:89::10'
+      config: ~
+
+  # side_effect switches the forwarders, only the configuration changes, verify checks the TLS session afterwards
+  - name: 'molecule-unbound-config'
+    role_vars:
+      unbound_home: '/srv/unbound'
+      unbound_ip: '10.89.0.10'
+      unbound_network: 'podman-molecule'
+      unbound_hostname: 'unbound-molecule'
+      unbound_timezone: 'Europe/Berlin'
+      unbound_config:
+        server:
+          qname-minimisation: true
+          cache-max-ttl: 86400
+          private-domain: [ 'molecule.test', 'home.arpa' ]
+        forward-zone:
+          - name: '.'
+            forward-tls-upstream: true
+            forward-addr:
+              - '1.1.1.1@853#cloudflare-dns.com'
+              - '1.0.0.1@853#cloudflare-dns.com'
+    side_effect:
+      changed: [ 'config' ]
+      role_vars:
+        unbound_config:
+          server:
+            qname-minimisation: true
+            cache-max-ttl: 86400
+            private-domain: [ 'molecule.test', 'home.arpa' ]
+          forward-zone:
+            - name: '.'
+              forward-tls-upstream: true
+              forward-addr:
+                - '9.9.9.9@853#dns.quad9.net'
+                - '149.112.112.112@853#dns.quad9.net'
+    expect:
+      ip: '10.89.0.10'
+      ip6: ~
+      # Lines of the generated file without indentation, clauses and options sorted by name, name first
+      config:
+        - 'forward-zone:'
+        - 'name: .'
+        - 'forward-addr: 9.9.9.9@853#dns.quad9.net'
+        - 'forward-addr: 149.112.112.112@853#dns.quad9.net'
+        - 'forward-tls-upstream: yes'
+        - 'server:'
+        - 'cache-max-ttl: 86400'
+        - 'private-domain: molecule.test'
+        - 'private-domain: home.arpa'
+        - 'qname-minimisation: yes'
+      forwarder_ips:
+        - '9.9.9.9'
+        - '149.112.112.112'

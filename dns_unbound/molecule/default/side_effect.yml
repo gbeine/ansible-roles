@@ -1,0 +1,152 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_unbound__test_case: "{{ dns_unbound__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_unbound__test_quadlet_path: '/etc/containers/systemd/unbound.container'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_unbound__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the quadlet unit and the configuration before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: [ "{{ dns_unbound__test_quadlet_path }}", "{{ dns_unbound__test_config_file }}" ]
+      register: 'dns_unbound__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include.
+    # unbound_home is set, otherwise the platforms without it report the missing home as well.
+    - name: 'Run dns_unbound with unbound_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_home: '/srv/unbound'
+        unbound_config: [ 'server' ]
+        dns_unbound__test_invalid:
+          message: 'unbound_config is not a dictionary'
+          search: "^unbound_config has to be a dictionary: \\['server'\\]$"
+
+    - name: 'Run dns_unbound with unbound_config but without unbound_home (expect ERROR)'
+      when: dns_unbound__test_case.role_vars.unbound_home is not defined
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_config:
+          server:
+            verbosity: 1
+        dns_unbound__test_invalid:
+          message: 'unbound_config without unbound_home'
+          search: '^unbound_home is required with unbound_config$'
+
+    - name: 'Run dns_unbound with a clause that is not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_home: '/srv/unbound'
+        unbound_config:
+          server: 'verbosity: 1'
+          Remote-Control:
+            control-enable: false
+        dns_unbound__test_invalid:
+          message: 'a clause that is not a dictionary and a clause with an invalid name'
+          search: '^unbound_config clauses have to be a dictionary or a list of dictionaries with a valid name: server, Remote-Control$'
+
+    - name: 'Run dns_unbound with an invalid option name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_home: '/srv/unbound'
+        unbound_config:
+          server:
+            'log queries': true
+        dns_unbound__test_invalid:
+          message: 'an invalid option name'
+          search: '^unbound_config has invalid option names: server\.log queries$'
+
+    - name: 'Run dns_unbound with a dictionary as option value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_home: '/srv/unbound'
+        unbound_config:
+          server:
+            verbosity: { level: 1 }
+        dns_unbound__test_invalid:
+          message: 'a dictionary as option value'
+          search: '^unbound_config values have to be a boolean, a string, a number or a list of strings and numbers: server\.verbosity$'
+
+    - name: 'Run dns_unbound with a TLS forwarder without certificate name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_home: '/srv/unbound'
+        unbound_config:
+          forward-zone:
+            - name: '.'
+              forward-tls-upstream: true
+              forward-addr: [ '1.1.1.1@853#cloudflare-dns.com', '1.0.0.1@853' ]
+        dns_unbound__test_invalid:
+          message: 'a TLS forwarder without certificate name'
+          search: '^unbound_config forward-addr entries need the name of the certificate after # when forward-tls-upstream is set: 1\.0\.0\.1@853$'
+
+    # The variables are valid, unbound-checkconf rejects the option before the configuration is replaced
+    - name: 'Run dns_unbound with an option unbound does not know (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_home: '/srv/unbound'
+        unbound_config:
+          server:
+            molecule-no-such-option: true
+        dns_unbound__test_invalid:
+          message: 'an option unbound does not know'
+          search: 'unknown keyword|syntax error'
+
+    - name: 'Change the role variables of the test case'
+      when: dns_unbound__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value unbound'
+          register: 'dns_unbound__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ dns_unbound__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run dns_unbound with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'dns_unbound'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value unbound'
+          register: 'dns_unbound__test_started_after'
+          changed_when: false
+
+        - name: 'Read the state of the service after the change'
+          ansible.builtin.command: 'systemctl is-active unbound'
+          register: 'dns_unbound__test_active_after'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the expected changes and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - (dns_unbound__quadlet_result is changed) == ('quadlet' in dns_unbound__test_case.side_effect.changed)
+              - (dns_unbound__config_result is changed) == ('config' in dns_unbound__test_case.side_effect.changed)
+              - dns_unbound__test_started_after.stdout | int > dns_unbound__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ dns_unbound__quadlet_result is changed }},
+              configuration changed: {{ dns_unbound__config_result is changed }},
+              expected changes: {{ dns_unbound__test_case.side_effect.changed | join(', ') }},
+              start before {{ dns_unbound__test_started_before.stdout }}, after {{ dns_unbound__test_started_after.stdout }},
+              state {{ dns_unbound__test_active_after.stdout }}
