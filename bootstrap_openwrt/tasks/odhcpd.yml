@@ -1,0 +1,141 @@
+---
+# The sections dhcp of /etc/config/dhcp are shared with dns_dnsmasq:
+# this role manages the options of odhcpd, dns_dnsmasq the options in bootstrap_openwrt__odhcpd_dnsmasq_options,
+# both keep the options of the other
+
+- name: Check that odhcpd is installed
+  ansible.builtin.raw: 'test -x /usr/sbin/odhcpd && echo installed || echo missing'
+  register: bootstrap_openwrt__odhcpd_installed
+  changed_when: false
+  check_mode: false
+
+- name: Skip odhcpd, it is not installed
+  ansible.builtin.debug:
+    msg: '/usr/sbin/odhcpd is missing, openwrt_odhcpd and openwrt_odhcpd_interfaces are ignored'
+  when: "'installed' not in bootstrap_openwrt__odhcpd_installed.stdout"
+
+- name: Configure the sections of odhcpd
+  when: "'installed' in bootstrap_openwrt__odhcpd_installed.stdout"
+  vars:
+    # UCI knows no booleans, true and false become '1' and '0'
+    bootstrap_openwrt__odhcpd_uci: "{{ bootstrap_openwrt__odhcpd_uci_json | trim | from_json }}"
+    bootstrap_openwrt__odhcpd_uci_json: >-
+      {%- set result = {} -%}
+      {%- for section, options in [ ['odhcpd', bootstrap_openwrt__odhcpd] ] + bootstrap_openwrt__odhcpd_interfaces.items() | list -%}
+      {%-   set converted = {} -%}
+      {%-   for key, value in options.items() -%}
+      {%-     set _ = converted.update({key: (('1' if value else '0') if value is boolean
+                                             else (value | map('string') | list if value is sequence and value is not string
+                                                   else value | string))}) -%}
+      {%-   endfor -%}
+      {%-   set _ = result.update({section: converted}) -%}
+      {%- endfor -%}
+      {{ result | to_json }}
+  block:
+
+    - name: Read current dhcp configuration
+      community.openwrt.slurp:
+        src: /etc/config/dhcp
+      register: bootstrap_openwrt__odhcpd_current
+      check_mode: false
+
+    - name: Read existing dhcp sections
+      community.openwrt.uci:
+        command: show
+        config: dhcp
+      register: bootstrap_openwrt__odhcpd_show_before
+      check_mode: false
+
+    - name: Set section odhcpd
+      community.openwrt.uci:
+        command: section
+        config: dhcp
+        type: odhcpd
+        name: odhcpd
+        value: "{{ bootstrap_openwrt__odhcpd_uci.odhcpd }}"
+        replace: true
+
+    # The options of dns_dnsmasq are kept, new sections get interface and ignore,
+    # dnsmasq serves no DHCP there until dns_dnsmasq declares a dhcp-range
+    - name: Set options of odhcpd in sections dhcp
+      community.openwrt.uci:
+        command: section
+        config: dhcp
+        type: dhcp
+        name: "{{ item.key }}"
+        value: >-
+          {{ item.value
+             if bootstrap_openwrt__odhcpd_show_before.result is search('(?m)^dhcp[.]' ~ item.key ~ '=dhcp$')
+             else {'interface': item.key, 'ignore': '1'} | combine(item.value) }}
+        replace: true
+        keep_keys: >-
+          {{ bootstrap_openwrt__odhcpd_show_before.result
+             | regex_findall('(?m)^dhcp[.]' ~ item.key ~ '[.]([A-Za-z0-9_]+)=')
+             | select('in', bootstrap_openwrt__odhcpd_dnsmasq_options) | unique | list }}
+      loop: "{{ bootstrap_openwrt__odhcpd_uci | dict2items | rejectattr('key', 'equalto', 'odhcpd') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Read dhcp sections
+      community.openwrt.uci:
+        command: show
+        config: dhcp
+      register: bootstrap_openwrt__odhcpd_show
+      check_mode: false
+
+    # Only options, the sections dhcp belong to dns_dnsmasq
+    - name: Determine odhcpd options to delete
+      ansible.builtin.set_fact:
+        bootstrap_openwrt__odhcpd_delete: >-
+          {%- set sections = bootstrap_openwrt__odhcpd_show.result
+                             | regex_findall('(?m)^dhcp[.]([^.=\n]+)=dhcp$')
+                             | reject('in', bootstrap_openwrt__odhcpd_interfaces.keys() | list) | list -%}
+          {{ bootstrap_openwrt__odhcpd_show.result
+             | regex_findall('(?m)^dhcp[.]([^.=\n]+)[.]([A-Za-z0-9_]+)=')
+             | selectattr('0', 'in', sections)
+             | rejectattr('1', 'in', bootstrap_openwrt__odhcpd_dnsmasq_options)
+             | map('join', '.') | unique | list }}
+
+    - name: Show odhcpd options to delete
+      ansible.builtin.debug:
+        var: bootstrap_openwrt__odhcpd_delete
+
+    - name: Delete undeclared odhcpd options
+      community.openwrt.uci:
+        command: delete
+        key: "dhcp.{{ item }}"
+      loop: "{{ bootstrap_openwrt__odhcpd_delete }}"
+      when: bootstrap_openwrt__odhcpd_prune | bool
+
+    - name: Read pending dhcp changes
+      community.openwrt.uci:
+        command: changes
+        config: dhcp
+      register: bootstrap_openwrt__odhcpd_pending
+      check_mode: false
+
+    # The backup contains the configuration before this change, it is only written before a commit
+    - name: Create backup directory on the controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      check_mode: false
+      when: bootstrap_openwrt__odhcpd_pending.changes | default({}) | length > 0
+
+    - name: Store dhcp backup on the controller
+      ansible.builtin.copy:
+        content: "{{ bootstrap_openwrt__odhcpd_current.content | b64decode }}"
+        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/dhcp"
+        mode: '0600'
+      delegate_to: localhost
+      check_mode: false
+      when: bootstrap_openwrt__odhcpd_pending.changes | default({}) | length > 0
+
+    - name: Commit dhcp changes
+      community.openwrt.uci:
+        command: commit
+        config: dhcp
+      when: bootstrap_openwrt__odhcpd_pending.changes | default({}) | length > 0
+      notify: Reload odhcpd

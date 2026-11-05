@@ -1,19 +1,28 @@
 ---
 dns_dnsmasq__test_cases:
 
-  # Without variables the configuration has to stay in the delivered state of OpenWrt
+  # Without variables the configuration has to stay in the delivered state of OpenWrt.
+  # The base VM disables DHCP on lan (ignore), the role sets the pool delivered by OpenWrt there
   - name: 'molecule-dnsmasq-openwrt-default'
     role_vars: {}
     expect:
       delivered: true
+      # Options of the base VM that differ from the delivery of OpenWrt, excluded from the comparison
+      delivered_ignore: [ 'dhcp.lan.start', 'dhcp.lan.limit', 'dhcp.lan.leasetime', 'dhcp.lan.ignore' ]
+      absent: [ 'dhcp.lan.ignore' ]
       hosts: 0
-      uci: []
+      uci:
+        - 'dhcp.lan.start=100'
+        - 'dhcp.lan.limit=150'
+        - 'dhcp.lan.leasetime=12h'
       resolve: {}
 
   # side_effect changes cache-size, verify checks the state afterwards,
-  # prepare creates the static lease of wallbox like LuCI, the role updates it
+  # prepare creates the static lease of wallbox like LuCI, the role updates it,
+  # prepare creates the undeclared section dhcp molecule6 with an option of odhcpd, the role keeps it without pool
   - name: 'molecule-dnsmasq-openwrt'
     prepare_luci_host: true
+    prepare_odhcpd_section: true
     role_vars:
       # Ignored on OpenWrt
       dnsmasq_enable_dhcp: true
@@ -51,10 +60,16 @@ dns_dnsmasq__test_cases:
           mx-host: [ 'record.test,router.record.test,5' ]
     expect:
       delivered: false
+      # Options of dnsmasq removed from the section dhcp of odhcpd
+      absent: [ 'dhcp.molecule6.start' ]
       # No additional section for the static lease of LuCI
       hosts: 3
       # Lines of uci show dhcp without quotes
       uci:
+        - 'dhcp.molecule6=dhcp'
+        - 'dhcp.molecule6.interface=molecule6'
+        - 'dhcp.molecule6.ignore=1'
+        - 'dhcp.molecule6.ra=server'
         - 'dhcp.@dnsmasq[0]=dnsmasq'
         - 'dhcp.@dnsmasq[0].boguspriv=0'
         - 'dhcp.@dnsmasq[0].cachesize=800'

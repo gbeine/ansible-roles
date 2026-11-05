@@ -28,6 +28,16 @@
         dns_dnsmasq__test_lines: "{{ dns_dnsmasq__test_parts[0].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
         dns_dnsmasq__test_delivered: "{{ dns_dnsmasq__test_parts[1].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
         dns_dnsmasq__test_state: "{{ dns_dnsmasq__test_parts[2].splitlines() | map('trim') | list }}"
+        # Without absent options the expression matches nothing
+        dns_dnsmasq__test_absent: >-
+          {{ ('^(' ~ dns_dnsmasq__test_expect.absent | map('regex_escape') | join('|') ~ ')=')
+             if dns_dnsmasq__test_expect.absent | default([]) | length > 0 else '(?!)' }}
+        # Options of the base VM excluded from the comparison with the delivered state
+        dns_dnsmasq__test_delivered_ignore: >-
+          {{ ('^(' ~ dns_dnsmasq__test_expect.delivered_ignore | map('regex_escape') | join('|') ~ ')=')
+             if dns_dnsmasq__test_expect.delivered_ignore | default([]) | length > 0 else '(?!)' }}
+        dns_dnsmasq__test_lines_compared: "{{ dns_dnsmasq__test_lines | reject('match', dns_dnsmasq__test_delivered_ignore) | list }}"
+        dns_dnsmasq__test_delivered_compared: "{{ dns_dnsmasq__test_delivered | reject('match', dns_dnsmasq__test_delivered_ignore) | list }}"
         # Options of odhcpd and others in the sections dhcp and the section odhcpd are kept
         dns_dnsmasq__test_kept: >-
           {{ dns_dnsmasq__test_delivered
@@ -36,15 +46,18 @@
         that:
           - "'dnsmasq running' in dns_dnsmasq__test_state"
           - "'dnsmasq enabled' in dns_dnsmasq__test_state"
-          - not dns_dnsmasq__test_expect.delivered or dns_dnsmasq__test_lines == dns_dnsmasq__test_delivered
+          - not dns_dnsmasq__test_expect.delivered or dns_dnsmasq__test_lines_compared == dns_dnsmasq__test_delivered_compared
           - dns_dnsmasq__test_expect.uci | difference(dns_dnsmasq__test_lines) | length == 0
+          - dns_dnsmasq__test_lines | select('match', dns_dnsmasq__test_absent) | list | length == 0
           - dns_dnsmasq__test_kept | difference(dns_dnsmasq__test_lines) | length == 0
           - dns_dnsmasq__test_lines | select('match', '^dhcp[.]@host.[0-9]+.=host$') | list | length == dns_dnsmasq__test_expect.hosts
         fail_msg: >-
+          not removed: {{ dns_dnsmasq__test_lines | select('match', dns_dnsmasq__test_absent)
+                          | join(', ') | default('none', true) }},
           missing: {{ dns_dnsmasq__test_expect.uci | difference(dns_dnsmasq__test_lines) | join(', ') | default('none', true) }},
           lost: {{ dns_dnsmasq__test_kept | difference(dns_dnsmasq__test_lines) | join(', ') | default('none', true) }},
           changed from the delivered configuration:
-          {{ dns_dnsmasq__test_lines | symmetric_difference(dns_dnsmasq__test_delivered) | join(', ') | default('none', true)
+          {{ dns_dnsmasq__test_lines_compared | symmetric_difference(dns_dnsmasq__test_delivered_compared) | join(', ') | default('none', true)
              if dns_dnsmasq__test_expect.delivered else 'not checked' }},
           host sections: {{ dns_dnsmasq__test_lines | select('match', '^dhcp[.]@host.[0-9]+.=host$') | list | length }},
           state: {{ dns_dnsmasq__test_state | join(', ') }}

@@ -291,12 +291,17 @@
       register: 'dns_dnsmasq__openwrt_show'
       check_mode: false
 
-    # Only the section types managed by the role are pruned, odhcpd, boot, match and others stay untouched
+    # Only the section types managed by the role are pruned, odhcpd, boot, match and others stay untouched.
+    # Undeclared sections dhcp with options of odhcpd (bootstrap_openwrt) are kept, dnsmasq ignores their interface
     - name: 'Determine the sections to delete'
       ansible.builtin.set_fact:
         dns_dnsmasq__openwrt_delete: >-
+          {{ dns_dnsmasq__openwrt_undeclared | reject('in', dns_dnsmasq__openwrt_odhcpd_candidates) | list }}
+        dns_dnsmasq__openwrt_odhcpd_sections: "{{ dns_dnsmasq__openwrt_odhcpd_candidates }}"
+      vars:
+        dns_dnsmasq__openwrt_undeclared: >-
           {{ dns_dnsmasq__openwrt_show.result
-             | regex_findall('(?m)^dhcp\.([^.=\n]+)=([\w-]+)$')
+             | regex_findall('(?m)^dhcp[.]([^.=\n]+)=([\w-]+)$')
              | selectattr('1', 'in', dns_dnsmasq__openwrt_section_types)
              | reverse
              | map(attribute='0')
@@ -304,6 +309,13 @@
                  (dns_dnsmasq__openwrt_translation.sections | selectattr('name', 'defined') | map(attribute='name') | list)
                  + (dns_dnsmasq__openwrt_found.results | map(attribute='result', default='') | list))
              | list }}
+        dns_dnsmasq__openwrt_odhcpd_candidates: >-
+          {{ dns_dnsmasq__openwrt_show.result
+             | regex_findall('(?m)^dhcp[.]([^.=\n]+)[.]([A-Za-z0-9_]+)=')
+             | selectattr('0', 'in', dns_dnsmasq__openwrt_show.result | regex_findall('(?m)^dhcp[.]([^.=\n]+)=dhcp$'))
+             | selectattr('0', 'in', dns_dnsmasq__openwrt_undeclared)
+             | rejectattr('1', 'in', dns_dnsmasq__openwrt_dhcp_options)
+             | map(attribute='0') | unique | list }}
 
     - name: 'Show the sections to delete'
       ansible.builtin.debug:
@@ -314,6 +326,26 @@
         command: 'delete'
         key: "dhcp.{{ item }}"
       loop: "{{ dns_dnsmasq__openwrt_delete }}"
+      when: dns_dnsmasq__prune | bool
+
+    # Like no-dhcp-interface, the options of odhcpd are kept
+    - name: 'Disable dnsmasq on the sections dhcp of odhcpd'
+      community.openwrt.uci:
+        command: 'section'
+        config: 'dhcp'
+        type: 'dhcp'
+        name: "{{ item }}"
+        value:
+          interface: >-
+            {{ dns_dnsmasq__openwrt_show.result
+               | regex_findall('(?m)^dhcp[.]' ~ item | regex_escape ~ "[.]interface='([^']*)'$") | first | default(item) }}
+          ignore: '1'
+        replace: true
+        keep_keys: >-
+          {{ dns_dnsmasq__openwrt_show.result
+             | regex_findall('(?m)^dhcp[.]' ~ item | regex_escape ~ '[.]([A-Za-z0-9_]+)=')
+             | reject('in', dns_dnsmasq__openwrt_dhcp_options) | unique | list }}
+      loop: "{{ dns_dnsmasq__openwrt_odhcpd_sections }}"
       when: dns_dnsmasq__prune | bool
 
     - name: 'Read the pending changes of the dhcp configuration'

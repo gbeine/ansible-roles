@@ -141,6 +141,8 @@ Templates in `dnsmasq_config` are rendered completely before the translation, a 
 - The sections `dhcp` keep the options the role does not manage, e.g. `dhcpv4`, `dhcpv6`, `ra` and `ndp` of odhcpd.
 - With `dnsmasq_prune` (default `true`) the role removes the sections of the types `dnsmasq`, `dhcp`, `tag`, `host`, `domain`, `hostrecord`, `cname`, `srvhost` and `mxhost`
   that are neither declared by name nor found by `find`, sections of other types (e.g. `odhcpd`, `boot`) stay untouched.
+  Undeclared sections `dhcp` with options of odhcpd (managed by `openwrt_odhcpd_interfaces` of the role `bootstrap_openwrt`) are kept,
+  the role removes its own options there and sets `ignore '1'` like for `no-dhcp-interface`.
   All hostnames of LuCI (`domain`) have to be declared as `host-record`, the role no longer creates sections `hostrecord`.
 - Before a commit the role stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/dhcp`.
 - After a change of the configuration the role restarts dnsmasq.
@@ -188,13 +190,15 @@ The molecule scenario `openwrt` runs the role in two clones of the tart VM `open
 | Platform | Test case |
 |---|---|
 | `molecule-dnsmasq-openwrt-default` | No variables, the dhcp configuration stays in the delivered state |
-| `molecule-dnsmasq-openwrt` | Own configuration with `server`, `address`, a pool, DHCP options for the pool and a tag, static leases with `tag`, `leasetime`, `duid` and `dns`, `host-record`, `cname`, `srv-host`, `mx-host` and `bogus-priv` disabled, `side_effect` changes `cache-size` |
+| `molecule-dnsmasq-openwrt` | Own configuration with `server`, `address`, a pool, DHCP options for the pool and a tag, static leases with `tag`, `leasetime`, `duid` and `dns`, `host-record`, `cname`, `srv-host`, `mx-host` and `bogus-priv` disabled, an undeclared section `dhcp` with an option of odhcpd, `side_effect` changes `cache-size` |
 
-`prepare` stores the delivered configuration (`uci show dhcp`) and creates a static lease like LuCI (`list mac`, `list duid`) on `molecule-dnsmasq-openwrt`, the role has to update it instead of adding another section.
+`prepare` stores the delivered configuration (`uci show dhcp`) and creates a static lease like LuCI (`list mac`, `list duid`) on `molecule-dnsmasq-openwrt`, the role has to update it instead of adding another section,
+and creates the section `dhcp` `molecule6` with `ra` and `start`, the role has to keep it with `ra` and `ignore '1'` and without `start`.
 `side_effect` runs the role with `txt-record`, a `dhcp-range` without netmask, a `dhcp-option` without tag and a `dhcp-host` as string,
 and checks that the role fails with exactly the expected message and `/etc/config/dhcp` is unchanged (tasks marked `expect ERROR`).
 Afterwards it changes `cache-size` and checks that the configuration is committed and dnsmasq is restarted.
 `verify` checks that the configuration of `molecule-dnsmasq-openwrt-default` equals the delivered one,
+except the pool of `lan`: the base VM disables DHCP on `lan` (`ignore`), the role sets the pool delivered by OpenWrt (`start` 100, `limit` 150, `leasetime` 12h),
 the expected UCI options of `molecule-dnsmasq-openwrt`, that the options of odhcpd are kept, that dnsmasq runs and is enabled,
 and resolves `address`, `host-record`, `cname` and the name of the `dhcp-host` with `dns` with `nslookup` via `127.0.0.1`.
 The collection `community.openwrt` is required on the controller.
