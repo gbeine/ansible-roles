@@ -11,7 +11,7 @@
 
 - name: Skip odhcpd, it is not installed
   ansible.builtin.debug:
-    msg: '/usr/sbin/odhcpd is missing, openwrt_odhcpd and openwrt_odhcpd_interfaces are ignored'
+    msg: '/usr/sbin/odhcpd is missing, openwrt_odhcpd is ignored'
   when: "'installed' not in bootstrap_openwrt__odhcpd_installed.stdout"
 
 - name: Configure the sections of odhcpd
@@ -20,17 +20,18 @@
     # UCI knows no booleans, true and false become '1' and '0'
     bootstrap_openwrt__odhcpd_uci: "{{ bootstrap_openwrt__odhcpd_uci_json | trim | from_json }}"
     bootstrap_openwrt__odhcpd_uci_json: >-
-      {%- set result = {} -%}
-      {%- for section, options in [ ['odhcpd', bootstrap_openwrt__odhcpd] ] + bootstrap_openwrt__odhcpd_interfaces.items() | list -%}
+      {%- set result = [] -%}
+      {%- for entry in bootstrap_openwrt__odhcpd -%}
       {%-   set converted = {} -%}
-      {%-   for key, value in options.items() -%}
+      {%-   for key, value in (entry.options | default({})).items() -%}
       {%-     set _ = converted.update({key: (('1' if value else '0') if value is boolean
                                              else (value | map('string') | list if value is sequence and value is not string
                                                    else value | string))}) -%}
       {%-   endfor -%}
-      {%-   set _ = result.update({section: converted}) -%}
+      {%-   set _ = result.append({'type': entry.type, 'name': entry.name | string, 'options': converted}) -%}
       {%- endfor -%}
       {{ result | to_json }}
+    bootstrap_openwrt__odhcpd_dhcp: "{{ bootstrap_openwrt__odhcpd_uci | selectattr('type', 'eq', 'dhcp') | list }}"
   block:
 
     - name: Read current dhcp configuration
@@ -46,14 +47,18 @@
       register: bootstrap_openwrt__odhcpd_show_before
       check_mode: false
 
+    # Without an entry of type odhcpd the section odhcpd stays untouched
     - name: Set section odhcpd
       community.openwrt.uci:
         command: section
         config: dhcp
         type: odhcpd
         name: odhcpd
-        value: "{{ bootstrap_openwrt__odhcpd_uci.odhcpd }}"
+        value: "{{ item.options }}"
         replace: true
+      loop: "{{ bootstrap_openwrt__odhcpd_uci | selectattr('type', 'eq', 'odhcpd') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
 
     # The options of dns_dnsmasq are kept, new sections get interface and ignore,
     # dnsmasq serves no DHCP there until dns_dnsmasq declares a dhcp-range
@@ -62,19 +67,19 @@
         command: section
         config: dhcp
         type: dhcp
-        name: "{{ item.key }}"
+        name: "{{ item.name }}"
         value: >-
-          {{ item.value
-             if bootstrap_openwrt__odhcpd_show_before.result is search('(?m)^dhcp[.]' ~ item.key ~ '=dhcp$')
-             else {'interface': item.key, 'ignore': '1'} | combine(item.value) }}
+          {{ item.options
+             if bootstrap_openwrt__odhcpd_show_before.result is search('(?m)^dhcp[.]' ~ item.name ~ '=dhcp$')
+             else {'interface': item.name, 'ignore': '1'} | combine(item.options) }}
         replace: true
         keep_keys: >-
           {{ bootstrap_openwrt__odhcpd_show_before.result
-             | regex_findall('(?m)^dhcp[.]' ~ item.key ~ '[.]([A-Za-z0-9_]+)=')
+             | regex_findall('(?m)^dhcp[.]' ~ item.name ~ '[.]([A-Za-z0-9_]+)=')
              | select('in', bootstrap_openwrt__odhcpd_dnsmasq_options) | unique | list }}
-      loop: "{{ bootstrap_openwrt__odhcpd_uci | dict2items | rejectattr('key', 'equalto', 'odhcpd') | list }}"
+      loop: "{{ bootstrap_openwrt__odhcpd_dhcp }}"
       loop_control:
-        label: "{{ item.key }}"
+        label: "{{ item.name }}"
 
     - name: Read dhcp sections
       community.openwrt.uci:
@@ -89,7 +94,7 @@
         bootstrap_openwrt__odhcpd_delete: >-
           {%- set sections = bootstrap_openwrt__odhcpd_show.result
                              | regex_findall('(?m)^dhcp[.]([^.=\n]+)=dhcp$')
-                             | reject('in', bootstrap_openwrt__odhcpd_interfaces.keys() | list) | list -%}
+                             | reject('in', bootstrap_openwrt__odhcpd_dhcp | map(attribute='name') | list) | list -%}
           {{ bootstrap_openwrt__odhcpd_show.result
              | regex_findall('(?m)^dhcp[.]([^.=\n]+)[.]([A-Za-z0-9_]+)=')
              | selectattr('0', 'in', sections)

@@ -141,7 +141,7 @@ Templates in `dnsmasq_config` are rendered completely before the translation, a 
 - The sections `dhcp` keep the options the role does not manage, e.g. `dhcpv4`, `dhcpv6`, `ra` and `ndp` of odhcpd.
 - With `dnsmasq_prune` (default `true`) the role removes the sections of the types `dnsmasq`, `dhcp`, `tag`, `host`, `domain`, `hostrecord`, `cname`, `srvhost` and `mxhost`
   that are neither declared by name nor found by `find`, sections of other types (e.g. `odhcpd`, `boot`) stay untouched.
-  Undeclared sections `dhcp` with options of odhcpd (managed by `openwrt_odhcpd_interfaces` of the role `bootstrap_openwrt`) are kept,
+  Undeclared sections `dhcp` with options of odhcpd (managed by `openwrt_odhcpd` of the role `bootstrap_openwrt`) are kept,
   the role removes its own options there and sets `ignore '1'` like for `no-dhcp-interface`.
   All hostnames of LuCI (`domain`) have to be declared as `host-record`, the role no longer creates sections `hostrecord`.
 - Before a commit the role stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/dhcp`.

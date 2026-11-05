@@ -104,42 +104,51 @@ or if an entry of `openwrt_network` matches a pattern by `name`, `type`, `find.n
 a protected section must not be declared.
 The firewall zones of the protected interfaces are not affected, the role does not manage `/etc/config/firewall`.
 
-### Default for `openwrt_odhcpd` and `openwrt_odhcpd_interfaces`
+### Default for `openwrt_odhcpd`
 
-The defaults are the configuration written by `odhcpd.defaults` of OpenWrt with dnsmasq.
+The default is the configuration written by `odhcpd.defaults` of OpenWrt with dnsmasq.
 
 ```yaml
 bootstrap_openwrt__odhcpd_default:
-  leasefile: '/tmp/odhcpd.leases'
-  leasetrigger: '/usr/sbin/odhcpd-update'
-  loglevel: '4'
-  piodir: '/tmp/odhcpd-piodir'
-  hostsdir: '/tmp/hosts'
+  - type: 'odhcpd'
+    name: 'odhcpd'
+    options:
+      leasefile: '/tmp/odhcpd.leases'
+      leasetrigger: '/usr/sbin/odhcpd-update'
+      loglevel: '4'
+      piodir: '/tmp/odhcpd-piodir'
+      hostsdir: '/tmp/hosts'
 
-bootstrap_openwrt__odhcpd_interfaces_default:
-  lan:
-    dhcpv4: 'server'
-    dhcpv6: 'server'
-    ra: 'server'
-    ra_slaac: '1'
-    ra_flags: ['managed-config', 'other-config']
+  - type: 'dhcp'
+    name: 'lan'
+    options:
+      dhcpv4: 'server'
+      dhcpv6: 'server'
+      ra: 'server'
+      ra_slaac: '1'
+      ra_flags: ['managed-config', 'other-config']
 ```
 
 ### odhcpd and dns_dnsmasq
 
-`openwrt_odhcpd` holds the options of `config odhcpd 'odhcpd'` in `/etc/config/dhcp`, the role replaces the section with them.
-`openwrt_odhcpd_interfaces` holds the options of odhcpd in the sections `config dhcp '<name>'` by section name.
+`openwrt_odhcpd` is a list of sections of `/etc/config/dhcp` like the other lists of the role, every entry has `type`, `name` and `options`:
+
+- at most one entry of type `odhcpd` with the name `odhcpd`, the role replaces `config odhcpd 'odhcpd'` with its options,
+  without this entry the section stays untouched,
+- one entry of type `dhcp` per interface with the name of the section `config dhcp '<name>'` and the options of odhcpd there.
+
+`name` is required and unique, `find` is not supported, the sections `dhcp` are named after their interface and shared with `dns_dnsmasq`.
 The values are strings, numbers, booleans (written as `'1'` and `'0'`) or lists (written as `list`).
-The role skips both if `/usr/sbin/odhcpd` is missing.
+The role fails before any change on an invalid entry and skips `openwrt_odhcpd` if `/usr/sbin/odhcpd` is missing.
 
 The sections `dhcp` are shared with the role `dns_dnsmasq`:
 
 - `dns_dnsmasq` manages `interface`, `start`, `limit`, `dynamicdhcp`, `leasetime`, `ignore` and `dhcp_option` (the pool of dnsmasq),
 - this role manages all other options (`dhcpv4`, `dhcpv6*`, `ra*`, `ndp`, `dns`, `domain`, `ntp`, ...),
-- each role keeps the options of the other, `openwrt_odhcpd_interfaces` must not contain options of `dns_dnsmasq`.
+- each role keeps the options of the other, the entries of type `dhcp` in `openwrt_odhcpd` must not contain options of `dns_dnsmasq`.
 
 A section that does not exist yet is created with `interface '<name>'` and `ignore '1'`, dnsmasq serves no DHCP there until `dns_dnsmasq` declares a `dhcp-range`.
-With `openwrt_odhcpd_prune` (default `true`) the role removes the options of odhcpd from the sections `dhcp` that are not in `openwrt_odhcpd_interfaces`,
+With `openwrt_odhcpd_prune` (default `true`) the role removes the options of odhcpd from the sections `dhcp` that are not declared in `openwrt_odhcpd`,
 the sections themselves are removed by `dns_dnsmasq` only.
 `dns_dnsmasq` keeps undeclared sections `dhcp` with options of odhcpd and sets `ignore '1'` there.
 
@@ -166,15 +175,18 @@ config dhcp 'office'
 is split into `dnsmasq_config` of `dns_dnsmasq` (`dhcp-range: [ 'office,<net>.128,<net>.191,<netmask>,12h' ]`) and
 
 ```yaml
-openwrt_odhcpd_interfaces:
-  office:
-    dhcpv4: 'server'
-    ra: 'server'
-    ra_preference: 'medium'
-    dhcpv6: 'server'
-    dhcpv6_pd: '1'
-    dhcpv6_pd_min_len: '64'
-    ra_flags: [ 'none' ]
+openwrt_odhcpd:
+  # ... the entry of type odhcpd and the other interfaces
+  - type: 'dhcp'
+    name: 'office'
+    options:
+      dhcpv4: 'server'
+      ra: 'server'
+      ra_preference: 'medium'
+      dhcpv6: 'server'
+      dhcpv6_pd: '1'
+      dhcpv6_pd_min_len: '64'
+      ra_flags: [ 'none' ]
 ```
 
 The backup of `dhcp` is written to the same file as by `dns_dnsmasq`, it contains the state before the last change.
@@ -273,7 +285,7 @@ the platforms of this scenario set `image`, `user`, `password` and `authorized_k
 | Platform | Tested |
 |---|---|
 | `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, protected network sections (interface by name, peer by type, device by option `name`), time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults including the section `owut`, odhcpd with defaults, removal of an undeclared option of odhcpd (`dhcp.wan.ra`) |
-| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), an enabled service (`uhttpd`, disabled and stopped in `prepare`) and uhttpd with HTTPS, own `openwrt_odhcpd` and `openwrt_odhcpd_interfaces` with numbers, booleans and lists, a new section `molecule6`, kept options of dns_dnsmasq (`dhcp.lan.start`) |
+| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), an enabled service (`uhttpd`, disabled and stopped in `prepare`) and uhttpd with HTTPS, own `openwrt_odhcpd` with numbers, booleans and lists, a new section `molecule6`, kept options of dns_dnsmasq (`dhcp.lan.start`) |
 
 ACME is not tested, it needs a real DNS zone and CA, wireless is not tested, the VM has no radios.
 
@@ -285,7 +297,7 @@ the protected sections `wg_molecule`, a section of the type `wireguard_wg_molecu
 the init script of uhttpd generates certificate and key, the role does not install uhttpd and fails without them.
 `converge` reads the ports of `br-lan` from the clone.
 `side_effect` runs the role with a declared section that is protected, with a pattern instead of a list,
-with `openwrt_odhcpd_interfaces` as list and with an option of dns_dnsmasq in `openwrt_odhcpd_interfaces`,
+with `openwrt_odhcpd` as dictionary, with an option of dns_dnsmasq and with an unknown type in `openwrt_odhcpd`,
 and checks that the role fails with exactly the expected message and `/etc/config/network` is unchanged (tasks marked `expect ERROR`).
 `verify` checks that the protected sections still exist, `molecule_stale` is removed and the options of `/etc/config/dhcp`. The backups of the role are written to `molecule/default/backups/`, which is ignored by git.
 

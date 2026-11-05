@@ -36,63 +36,66 @@
     - name: Validate openwrt_odhcpd
       ansible.builtin.assert:
         that:
-          - bootstrap_openwrt__odhcpd is mapping
-          - bootstrap_openwrt__odhcpd_interfaces_valid | bool
-          - bootstrap_openwrt__odhcpd_invalid_names | length == 0
-          - bootstrap_openwrt__odhcpd_invalid_options | length == 0
-          - bootstrap_openwrt__odhcpd_dnsmasq_conflicts | length == 0
+          - bootstrap_openwrt__odhcpd_valid | bool
+          - bootstrap_openwrt__odhcpd_invalid | length == 0
         # Only the failing checks are reported
         fail_msg: >-
-          {{ [ ('openwrt_odhcpd has to be a dictionary: ' ~ bootstrap_openwrt__odhcpd)
-                 if bootstrap_openwrt__odhcpd is not mapping else '',
-               ('openwrt_odhcpd_interfaces has to be a dictionary of dictionaries: ' ~ bootstrap_openwrt__odhcpd_interfaces)
-                 if not bootstrap_openwrt__odhcpd_interfaces_valid | bool else '',
-               ('openwrt_odhcpd_interfaces has invalid section names: ' ~ bootstrap_openwrt__odhcpd_invalid_names | join(', '))
-                 if bootstrap_openwrt__odhcpd_invalid_names | length > 0 else '',
-               ('openwrt_odhcpd options need a name of lower case letters, digits and underscores and a boolean, a string,'
-                ~ ' a number or a list of strings and numbers: ' ~ bootstrap_openwrt__odhcpd_invalid_options | join(', '))
-                 if bootstrap_openwrt__odhcpd_invalid_options | length > 0 else '',
-               ('openwrt_odhcpd_interfaces must not set options of dns_dnsmasq: ' ~ bootstrap_openwrt__odhcpd_dnsmasq_conflicts | join(', '))
-                 if bootstrap_openwrt__odhcpd_dnsmasq_conflicts | length > 0 else '' ]
+          {{ [ ('openwrt_odhcpd has to be a list of dictionaries: ' ~ bootstrap_openwrt__odhcpd)
+                 if not bootstrap_openwrt__odhcpd_valid | bool else '',
+               ('openwrt_odhcpd has invalid entries: ' ~ bootstrap_openwrt__odhcpd_invalid | join(', '))
+                 if bootstrap_openwrt__odhcpd_invalid | length > 0 else '' ]
              | select | join('. ') }}
         quiet: true
       vars:
-        bootstrap_openwrt__odhcpd_interfaces_valid: >-
-          {{ bootstrap_openwrt__odhcpd_interfaces is mapping
-             and bootstrap_openwrt__odhcpd_interfaces.values() | reject('mapping') | list | length == 0 }}
-        bootstrap_openwrt__odhcpd_sections: >-
-          {{ ([ ['odhcpd', bootstrap_openwrt__odhcpd] ] if bootstrap_openwrt__odhcpd is mapping else [])
-             + (bootstrap_openwrt__odhcpd_interfaces.items() | list if bootstrap_openwrt__odhcpd_interfaces_valid | bool else []) }}
-        bootstrap_openwrt__odhcpd_invalid_names: >-
-          {{ (bootstrap_openwrt__odhcpd_interfaces.keys() | list if bootstrap_openwrt__odhcpd_interfaces_valid | bool else [])
-             | map('string') | reject('match', '^[A-Za-z0-9_]+$') | list
-             + (['odhcpd'] if bootstrap_openwrt__odhcpd_interfaces_valid | bool and 'odhcpd' in bootstrap_openwrt__odhcpd_interfaces else []) }}
-        # Strings must not contain line breaks
-        bootstrap_openwrt__odhcpd_invalid_options: >-
+        bootstrap_openwrt__odhcpd_valid: >-
+          {{ bootstrap_openwrt__odhcpd is sequence and bootstrap_openwrt__odhcpd is not string
+             and bootstrap_openwrt__odhcpd is not mapping
+             and bootstrap_openwrt__odhcpd | reject('mapping') | list | length == 0 }}
+        # Option names of UCI, values are booleans, strings, numbers or lists of strings and numbers without line breaks
+        bootstrap_openwrt__odhcpd_invalid: >-
           {%- set ns = namespace(invalid=[]) -%}
-          {%- for section, options in bootstrap_openwrt__odhcpd_sections -%}
+          {%- set entries = bootstrap_openwrt__odhcpd if bootstrap_openwrt__odhcpd_valid | bool else [] -%}
+          {%- set names = entries | selectattr('name', 'defined') | map(attribute='name') | map('string') | list -%}
+          {%- for entry in entries -%}
+          {%-   set reasons = [] -%}
+          {%-   set name = entry.name | default('') | string -%}
+          {%-   for key in entry.keys() | reject('in', ['type', 'name', 'options']) -%}
+          {%-     set _ = reasons.append('unknown attribute ' ~ key) -%}
+          {%-   endfor -%}
+          {%-   if entry.type | default('') not in ['odhcpd', 'dhcp'] -%}
+          {%-     set _ = reasons.append('unknown type ' ~ entry.type | default('')) -%}
+          {%-   endif -%}
+          {%-   if entry.name is not defined or name is not match('^[A-Za-z0-9_]+$') -%}
+          {%-     set _ = reasons.append('needs a name of letters, digits and underscores') -%}
+          {%-   elif names | select('equalto', name) | list | length > 1 -%}
+          {%-     set _ = reasons.append('name used more than once') -%}
+          {%-   elif (entry.type | default('') == 'odhcpd') != (name == 'odhcpd') -%}
+          {%-     set _ = reasons.append('the section odhcpd needs type odhcpd and name odhcpd') -%}
+          {%-   endif -%}
+          {%-   set options = entry.options | default({}) -%}
+          {%-   if options is not mapping -%}
+          {%-     set _ = reasons.append('options has to be a dictionary') -%}
+          {%-     set options = {} -%}
+          {%-   endif -%}
           {%-   for key, value in options.items() -%}
           {%-     set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
           {%-     if key is not string or key is not match('^[a-z0-9_]+$') or value is mapping
                      or (value is not boolean and values | reject('string') | reject('number') | list | length > 0)
                      or (value is not boolean and values | select('boolean') | list | length > 0)
                      or values | select('string') | select('search', '\n') | list | length > 0 -%}
-          {%-       set ns.invalid = ns.invalid + [ section ~ '.' ~ key ] -%}
+          {%-       set _ = reasons.append('invalid option ' ~ key) -%}
           {%-     endif -%}
           {%-   endfor -%}
-          {%- endfor -%}
-          {{ ns.invalid }}
-        bootstrap_openwrt__odhcpd_dnsmasq_conflicts: >-
-          {%- set ns = namespace(conflicts=[]) -%}
-          {%- set interfaces = bootstrap_openwrt__odhcpd_sections[1:] if bootstrap_openwrt__odhcpd is mapping
-                               else bootstrap_openwrt__odhcpd_sections -%}
-          {%- for section, options in interfaces -%}
-          {%-   set keys = options.keys() | select('in', bootstrap_openwrt__odhcpd_dnsmasq_options) | list -%}
-          {%-   if keys | length > 0 -%}
-          {%-     set ns.conflicts = ns.conflicts + [ section ~ ' (' ~ keys | join(', ') ~ ')' ] -%}
+          {%-   set conflicts = options.keys() | select('in', bootstrap_openwrt__odhcpd_dnsmasq_options) | list
+                                if entry.type | default('') == 'dhcp' else [] -%}
+          {%-   if conflicts | length > 0 -%}
+          {%-     set _ = reasons.append('options of dns_dnsmasq: ' ~ conflicts | join(', ')) -%}
+          {%-   endif -%}
+          {%-   if reasons | length > 0 -%}
+          {%-     set ns.invalid = ns.invalid + [ (name if name != '' else '#' ~ loop.index) ~ ' (' ~ reasons | join(', ') ~ ')' ] -%}
           {%-   endif -%}
           {%- endfor -%}
-          {{ ns.conflicts }}
+          {{ ns.invalid }}
 
     - name: Initialise OpenWRT
       ansible.builtin.import_role:
