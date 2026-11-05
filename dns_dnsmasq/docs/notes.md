@@ -111,7 +111,7 @@ The init script enables `boguspriv`, `rebind_protection` and `nonwildcard` if th
 |---|---|---|---|
 | options of the tables in `vars/OpenWrt.yml` | `dnsmasq` | unnamed | the first section |
 | `dhcp-range=<interface>,<start>,<end>,<netmask>[,<leasetime>]` | `dhcp` (`interface`, `start`, `limit`, `leasetime`) | interface | `interface` |
-| `dhcp-range=<interface>,<start>,static,<netmask>[,<leasetime>]` | `dhcp` (`interface`, `start`, `dynamicdhcp 0`, `leasetime`) | interface | `interface` |
+| `dhcp-range=<interface>,<start>,static,<netmask>[,<leasetime>]` | `dhcp` (`interface`, `start`, `limit 150`, `dynamicdhcp 0`, `leasetime`) | interface | `interface` |
 | `no-dhcp-interface=<interface>` | `dhcp` (`interface`, `ignore 1`) | interface | `interface` |
 | `dhcp-option=tag:<interface>,<option>` for an interface with a pool | list `dhcp_option` of the pool | | |
 | `dhcp-option=tag:<tag>,<option>` | `tag` (list `dhcp_option`) | tag | |
@@ -126,7 +126,7 @@ in the same case and order as in `/etc/config/dhcp`.
 
 `start` and `limit` of a pool are relative to the network of the interface like in OpenWrt,
 the role calculates them from `<start>`, `<end>` and `<netmask>` (`192.168.1.100` to `192.168.1.249` in `/24` gives `start 100`, `limit 150`).
-`static` gives a pool with static leases only (`dynamicdhcp 0`), `limit` is not used then.
+`static` gives a pool with static leases only (`dynamicdhcp 0`) and `limit 150` like LuCI, the default of dnsmasq.
 The role manages `dynamicdhcp`, a pool written with `<start>,<end>` is dynamic, an existing `dynamicdhcp 0` is removed.
 
 The init script supports less than `dnsmasq.conf`, the role fails before it changes anything
