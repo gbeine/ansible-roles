@@ -23,7 +23,10 @@
         echo "listen_port=$(wg show wg0 listen-port)";
         echo "peers=$(wg show wg0 peers | wc -l)";
         echo "allowed_ips=$(wg show wg0 allowed-ips | cut -f2 | tr '\n' ' ')";
-        echo "link_wgold=$(ip link show wgold >/dev/null 2>&1 && echo present || echo absent)"
+        echo "link_wgold=$(ip link show wgold >/dev/null 2>&1 && echo present || echo absent)";
+        {% for key, value in vpn_wireguard__test_expect.secrets.items() %}
+        echo "secret_{{ loop.index }}=$([ "$(uci -q get '{{ key }}')" = '{{ value }}' ] && echo match || echo mismatch)";
+        {% endfor %}
       register: 'vpn_wireguard__test_state'
       changed_when: false
 
@@ -46,6 +49,8 @@
           - vpn_wireguard__test_wg.peers | int == vpn_wireguard__test_expect.wg.peers
           - vpn_wireguard__test_expect.wg.allowed_ips in vpn_wireguard__test_wg.allowed_ips
           - vpn_wireguard__test_wg.link_wgold == 'absent'
+          - vpn_wireguard__test_wg | dict2items | selectattr('key', 'match', '^secret_') | rejectattr('value', 'eq', 'match') | list | length == 0
+          - vpn_wireguard__test_wg | dict2items | selectattr('key', 'match', '^secret_') | list | length == vpn_wireguard__test_expect.secrets | length
         fail_msg: >-
           uci: {{ vpn_wireguard__test_uci }},
           missing: {{ vpn_wireguard__test_expect.peer_lines | difference(vpn_wireguard__test_lines) | join(', ') | default('none', true) }},

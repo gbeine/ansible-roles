@@ -10,7 +10,7 @@ The role detects OpenWrt itself, the same variables apply to both platforms.
 | `interface` | yes | file name | section name | Name of the interface, e.g. `wg0`, on OpenWrt 1 to 15 letters, digits or underscores |
 | `address` | yes | `Address` | `list addresses` | Addresses of the interface, comma separated or a list, e.g. `10.90.0.1/24, fd00:90::1/64` |
 | `private_key` | yes | `PrivateKey` | `private_key` | Private key of the interface |
-| `peers` | yes | `[Peer]` | `wireguard_<interface>` | List of peers, may be empty |
+| `peers` | no | `[Peer]` | `wireguard_<interface>` | List of peers, may be missing or empty, e.g. for a server without peers yet |
 | `listen_port` | no | `ListenPort` | `listen_port` | UDP port the interface listens on, required if peers connect to this host |
 | `mtu` | no | `MTU` | `mtu` | MTU of the interface |
 | `fwmark` | no | `FwMark` | `fwmark` | Firewall mark of the outgoing packets |
@@ -20,6 +20,7 @@ The role detects OpenWrt itself, the same variables apply to both platforms.
 | `ip6prefix` | no | ignored | `list ip6prefix` | IPv6 prefixes delegated through the interface, comma separated or a list |
 | `nohostroute` | no | ignored | `nohostroute` | Boolean, `true` adds no route to the endpoints |
 | `tunlink` | no | ignored | `tunlink` | Interface the endpoints are reached through |
+| general interface options | no | ignored | option of the same name | Options of netifd and LuCI (tab Advanced): booleans `auto`, `defaultroute`, `peerdns`, `delegate`, `force_link`, numbers `dns_metric`, `ip6assign`, `ip6weight`, lists `dns`, `dns_search`, `ip6class`, strings `ip4table`, `ip6table`, `ip6hint`, `ip6ifaceid`, `multipath` |
 
 ### Peers
 
@@ -31,8 +32,9 @@ The role detects OpenWrt itself, the same variables apply to both platforms.
 | `endpoint` | no | `Endpoint` | `endpoint_host`, `endpoint_port` | `host:port` or `[address]:port` of the peer, required on the side that initiates the connection |
 | `persistent_keepalive` | no | `PersistentKeepalive` | `persistent_keepalive` | Keepalive interval in seconds, useful behind NAT |
 | `description` | no | comment above `[Peer]` | `description` | Name of the peer, shown by LuCI |
-| `route_allowed_ips` | no | only `true` | `route_allowed_ips` | Boolean, default `true`: routes to `allowed_ips` are added like by `wg-quick` |
+| `route_allowed_ips` | no | only `true` | `route_allowed_ips` | Boolean, `true` adds routes to `allowed_ips`. Not set: no option on OpenWrt (netifd adds no routes), on Debian `wg-quick` always adds them |
 | `disabled` | no | peer omitted | `disabled '1'` | Boolean, `true` keeps the peer in the variables without using it |
+| `private_key` | no | not written | `private_key` | Private key of the peer, used by LuCI to generate the configuration of the client, never needed by WireGuard itself |
 
 Optional attributes that are not set do not appear in the configuration.
 The role checks all attributes before it changes anything: required attributes, unknown attributes, numbers, booleans,
@@ -53,6 +55,7 @@ wireguard_networks:
       - public_key: 'k1b0...='
         preshared_key: "{{ vault_wireguard_wg0_client_psk }}"
         allowed_ips: '10.90.0.2/32, fd00:90::2/128'
+        route_allowed_ips: true
 ```
 
 The matching client:
@@ -140,7 +143,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 
 | Platform | Role in the test |
 |---|---|
-| `molecule-vpn-wireguard-a` | Server with `listen_port`, a peer with preshared key, a peer with `description` and `route_allowed_ips: false` without preshared key and endpoint and a disabled peer. `prepare` creates the interface `wgold` that has to be removed. |
+| `molecule-vpn-wireguard-a` | Server with `listen_port`, `delegate` (ignored with a warning), a peer with preshared key and `private_key` (not written), a peer with `description` and `route_allowed_ips: false` without preshared key and endpoint and a disabled peer. `prepare` creates the interface `wgold` that has to be removed. |
 | `molecule-vpn-wireguard-b` | Client with `endpoint` pointing to a and `persistent_keepalive` |
 
 `verify` checks the configuration files including the comment of the description and the missing disabled peer, the services and the removal of `wgold`.
@@ -164,14 +167,14 @@ The molecule scenario `openwrt` runs the role in two clones of the tart VM `open
 
 | Platform | Role in the test |
 |---|---|
-| `molecule-wireguard-openwrt-a` | Server with `listen_port`, `mtu`, a peer with preshared key and a peer with `description` and `route_allowed_ips: false`. `prepare` creates the interface `wgold` with a peer (removed), a peer of b like LuCI (updated, not added), a stranger peer in `wg0` (removed) and the interface `molecule_other` with `proto none` (kept). |
-| `molecule-wireguard-openwrt-b` | Client with `endpoint` pointing to a and `persistent_keepalive` |
+| `molecule-wireguard-openwrt-a` | Server with `listen_port`, `mtu`, `defaultroute`, `delegate`, `multipath`, a peer with preshared key, `private_key` (written, replaces the one set like LuCI) and `route_allowed_ips: true` and a peer with `description` and `route_allowed_ips: false`. `prepare` creates the interface `wgold` with a peer (removed), a peer of b like LuCI (updated, not added), a stranger peer in `wg0` (removed) and the interface `molecule_other` with `proto none` (kept). |
+| `molecule-wireguard-openwrt-b` | Client with `endpoint` pointing to a and `persistent_keepalive` without `route_allowed_ips` (no option), the interface `wg1` without peers |
 
 The role installs `wireguard-tools` in both VMs and restarts the network once.
 `side_effect` runs the role with `postup`, an interface name with a dash, an endpoint without port and two peers with the same public key
 and checks that the role fails with exactly the expected message and `/etc/config/network` is unchanged (tasks marked `expect ERROR`).
 Afterwards it changes the allowed IPs of a peer on a.
-`verify` checks the UCI options, the peer sections, the removed sections and the running interface with `wg show`, including the changed allowed IPs.
+`verify` checks the UCI options, the peer sections, the private key of the peer, the removed sections and the running interface with `wg show`, including the changed allowed IPs.
 The collection `community.openwrt` is required on the controller.
 
 | Environment variable | Default | Description |
