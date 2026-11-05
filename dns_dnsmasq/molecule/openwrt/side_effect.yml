@@ -1,0 +1,97 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_dnsmasq__test_case: "{{ dns_dnsmasq__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_dnsmasq__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the dhcp configuration before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/dhcp'
+      register: 'dns_dnsmasq__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_dnsmasq with an option without UCI counterpart (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config:
+          txt-record: [ 'record.test,v=spf1 -all' ]
+        dns_dnsmasq__test_invalid:
+          message: 'an option without UCI counterpart'
+          search: '^txt-record is not supported on OpenWrt$'
+
+    - name: 'Run dns_dnsmasq with a dhcp-range without netmask (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config:
+          dhcp-range: [ 'lan,192.168.1.100,192.168.1.249,12h' ]
+        dns_dnsmasq__test_invalid:
+          message: 'a dhcp-range without netmask'
+          search: '^dhcp-range needs <interface>,<start>,<end>\|static,<netmask>\[,<leasetime>\] on OpenWrt: lan,192\.168\.1\.100,192\.168\.1\.249,12h$'
+
+    - name: 'Run dns_dnsmasq with a dhcp-option without tag (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config:
+          dhcp-option: [ 'option:ntp-server,192.168.1.1' ]
+        dns_dnsmasq__test_invalid:
+          message: 'a dhcp-option without tag'
+          search: '^dhcp-option needs exactly one tag:<interface or tag> on OpenWrt: option:ntp-server,192\.168\.1\.1$'
+
+    - name: 'Run dns_dnsmasq with a dhcp-host as string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dnsmasq_config:
+          dhcp-host: [ 'aa:bb:cc:dd:ee:01,192.168.1.20' ]
+        dns_dnsmasq__test_invalid:
+          message: 'a dhcp-host as string'
+          search: "^dnsmasq_config dhcp-host has to be a list of dictionaries: \\['aa:bb:cc:dd:ee:01,192\\.168\\.1\\.20'\\]$"
+
+    - name: 'Change the configuration of the test case'
+      when: dns_dnsmasq__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the PID of dnsmasq before the change'
+          ansible.builtin.raw: 'pidof dnsmasq'
+          register: 'dns_dnsmasq__test_pid_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ dns_dnsmasq__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run dns_dnsmasq with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'dns_dnsmasq'
+
+        - name: 'Read the PID of dnsmasq after the change'
+          ansible.builtin.raw: 'pidof dnsmasq'
+          register: 'dns_dnsmasq__test_pid_after'
+          changed_when: false
+          retries: 10
+          delay: 1
+          until: dns_dnsmasq__test_pid_after.rc == 0
+
+        - name: 'Assert the configuration was committed and dnsmasq was restarted'
+          ansible.builtin.assert:
+            that:
+              - dns_dnsmasq__openwrt_commit_result is changed
+              - dns_dnsmasq__test_pid_after.stdout | trim != dns_dnsmasq__test_pid_before.stdout | trim
+            fail_msg: "PID before {{ dns_dnsmasq__test_pid_before.stdout | trim }}, after {{ dns_dnsmasq__test_pid_after.stdout | trim }}"

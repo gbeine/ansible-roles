@@ -1,0 +1,34 @@
+---
+# OpenWrt has no Python, all tasks use raw
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_dnsmasq__test_case: "{{ dns_dnsmasq__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Assert the clone is OpenWrt with dnsmasq'
+      ansible.builtin.raw: '. /etc/openwrt_release && test -x /usr/sbin/dnsmasq && test -x /etc/init.d/dnsmasq'
+      changed_when: false
+
+    # verify compares the configuration of the host without variables with the delivered state
+    - name: 'Store the delivered dhcp configuration'
+      ansible.builtin.raw: 'test -f /root/dhcp.orig || uci show dhcp | sort > /root/dhcp.orig'
+      changed_when: false
+
+    # LuCI stores the MAC addresses as list, the role has to find and update this section instead of adding another one
+    - name: 'Create a static lease like LuCI'
+      ansible.builtin.raw: >-
+        uci add dhcp host >/dev/null
+        && uci set dhcp.@host[-1].name=wallbox
+        && uci add_list dhcp.@host[-1].mac=3C:1A:CC:1D:FE:46
+        && uci set dhcp.@host[-1].ip=192.168.1.200
+        && uci add_list dhcp.@host[-1].duid=00010001c792bc873c1acc1dfe46
+        && uci commit dhcp
+      changed_when: true
+      when: dns_dnsmasq__test_case.prepare_luci_host | default(false)

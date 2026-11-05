@@ -1,0 +1,36 @@
+---
+# Runs dns_dnsmasq with the invalid configuration passed as include parameter,
+# the role has to fail at the validation before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run dns_dnsmasq with an invalid configuration (expect ERROR): {{ dns_dnsmasq__test_invalid.message }}"
+  block:
+
+    - name: 'Run dns_dnsmasq, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'dns_dnsmasq'
+
+    - name: 'Fail because the invalid configuration was accepted'
+      ansible.builtin.fail:
+        msg: "The invalid configuration was accepted: {{ dns_dnsmasq__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the dhcp configuration after the invalid run'
+      ansible.builtin.raw: 'md5sum /etc/config/dhcp'
+      register: 'dns_dnsmasq__test_md5_after'
+      changed_when: false
+
+    - name: 'Assert the run failed at the validation before any change'
+      vars:
+        dns_dnsmasq__test_md5_regex: '[0-9a-f]{32}'
+        dns_dnsmasq__test_md5_before_sum: "{{ dns_dnsmasq__test_md5_before.stdout | regex_search(dns_dnsmasq__test_md5_regex) }}"
+        dns_dnsmasq__test_md5_after_sum: "{{ dns_dnsmasq__test_md5_after.stdout | regex_search(dns_dnsmasq__test_md5_regex) }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(dns_dnsmasq__test_invalid.search)
+          - dns_dnsmasq__test_md5_before_sum | length == 32
+          - dns_dnsmasq__test_md5_after_sum == dns_dnsmasq__test_md5_before_sum
+        fail_msg: >-
+          Failure: {{ ansible_failed_result.msg | default('') }}
+          Checksum before: {{ dns_dnsmasq__test_md5_before_sum }}, after: {{ dns_dnsmasq__test_md5_after_sum }}.

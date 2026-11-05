@@ -1,0 +1,109 @@
+---
+dns_dnsmasq__test_cases:
+
+  # Without variables the configuration has to stay in the delivered state of OpenWrt
+  - name: 'molecule-dnsmasq-openwrt-default'
+    role_vars: {}
+    expect:
+      delivered: true
+      hosts: 0
+      uci: []
+      resolve: {}
+
+  # side_effect changes cache-size, verify checks the state afterwards,
+  # prepare creates the static lease of wallbox like LuCI, the role updates it
+  - name: 'molecule-dnsmasq-openwrt'
+    prepare_luci_host: true
+    role_vars:
+      # Ignored on OpenWrt
+      dnsmasq_enable_dhcp: true
+      dnsmasq_config:
+        bogus-priv: false
+        cache-size: 500
+        server: [ '9.9.9.9', '/corp.molecule.test/10.0.0.1' ]
+        address: [ '/address.molecule.test/192.168.1.99' ]
+        dhcp-range: [ 'lan,192.168.1.50,192.168.1.99,255.255.255.0,6h', 'guest,192.168.2.100,static,255.255.255.0,1h' ]
+        dhcp-option: [ 'tag:lan,option:ntp-server,192.168.1.1', 'tag:voip,option:tftp-server,192.168.1.2' ]
+        dhcp-host:
+          - { mac: 'aa:bb:cc:dd:ee:01', ip: '192.168.1.10', name: 'printer' }
+          - { mac: 'aa:bb:cc:dd:ee:02', tag: 'voip', ip: '192.168.1.11', name: 'phone', leasetime: 'infinite' }
+          - { mac: '3C:1A:CC:1D:FE:46', duid: '00010001c792bc873c1acc1dfe46', ip: '192.168.1.12', name: 'wallbox', dns: '1' }
+        host-record: [ 'router.record.test,192.168.1.1', 'dual.record.test.,192.168.1.2,fd00::2' ]
+        cname: [ 'www.record.test,router.record.test' ]
+        srv-host: [ '_ldap._tcp.record.test,router.record.test,389,1,10' ]
+        mx-host: [ 'record.test,router.record.test,5' ]
+    side_effect:
+      role_vars:
+        dnsmasq_config:
+          bogus-priv: false
+          cache-size: 800
+          server: [ '9.9.9.9', '/corp.molecule.test/10.0.0.1' ]
+          address: [ '/address.molecule.test/192.168.1.99' ]
+          dhcp-range: [ 'lan,192.168.1.50,192.168.1.99,255.255.255.0,6h', 'guest,192.168.2.100,static,255.255.255.0,1h' ]
+          dhcp-option: [ 'tag:lan,option:ntp-server,192.168.1.1', 'tag:voip,option:tftp-server,192.168.1.2' ]
+          dhcp-host:
+            - { mac: 'aa:bb:cc:dd:ee:01', ip: '192.168.1.10', name: 'printer' }
+            - { mac: 'aa:bb:cc:dd:ee:02', tag: 'voip', ip: '192.168.1.11', name: 'phone', leasetime: 'infinite' }
+            - { mac: '3C:1A:CC:1D:FE:46', duid: '00010001c792bc873c1acc1dfe46', ip: '192.168.1.12', name: 'wallbox', dns: '1' }
+          host-record: [ 'router.record.test,192.168.1.1', 'dual.record.test.,192.168.1.2,fd00::2' ]
+          cname: [ 'www.record.test,router.record.test' ]
+          srv-host: [ '_ldap._tcp.record.test,router.record.test,389,1,10' ]
+          mx-host: [ 'record.test,router.record.test,5' ]
+    expect:
+      delivered: false
+      # No additional section for the static lease of LuCI
+      hosts: 3
+      # Lines of uci show dhcp without quotes
+      uci:
+        - 'dhcp.@dnsmasq[0]=dnsmasq'
+        - 'dhcp.@dnsmasq[0].boguspriv=0'
+        - 'dhcp.@dnsmasq[0].cachesize=800'
+        - 'dhcp.@dnsmasq[0].domainneeded=1'
+        - 'dhcp.@dnsmasq[0].rebind_protection=1'
+        - 'dhcp.@dnsmasq[0].server=9.9.9.9 /corp.molecule.test/10.0.0.1'
+        - 'dhcp.@dnsmasq[0].address=/address.molecule.test/192.168.1.99'
+        - 'dhcp.lan=dhcp'
+        - 'dhcp.lan.interface=lan'
+        - 'dhcp.lan.start=50'
+        - 'dhcp.lan.limit=50'
+        - 'dhcp.lan.leasetime=6h'
+        - 'dhcp.lan.dhcp_option=option:ntp-server,192.168.1.1'
+        - 'dhcp.wan.ignore=1'
+        # static gives dynamicdhcp 0 without limit
+        - 'dhcp.guest=dhcp'
+        - 'dhcp.guest.interface=guest'
+        - 'dhcp.guest.start=100'
+        - 'dhcp.guest.dynamicdhcp=0'
+        - 'dhcp.guest.leasetime=1h'
+        - 'dhcp.voip=tag'
+        - 'dhcp.voip.dhcp_option=option:tftp-server,192.168.1.2'
+        # The section of LuCI created in prepare comes first
+        - 'dhcp.@host[0].name=wallbox'
+        - 'dhcp.@host[0].mac=3C:1A:CC:1D:FE:46'
+        - 'dhcp.@host[0].ip=192.168.1.12'
+        - 'dhcp.@host[0].duid=00010001c792bc873c1acc1dfe46'
+        - 'dhcp.@host[0].dns=1'
+        - 'dhcp.@host[1].mac=aa:bb:cc:dd:ee:01'
+        - 'dhcp.@host[1].ip=192.168.1.10'
+        - 'dhcp.@host[1].name=printer'
+        - 'dhcp.@host[2].mac=aa:bb:cc:dd:ee:02'
+        - 'dhcp.@host[2].tag=voip'
+        - 'dhcp.@host[2].ip=192.168.1.11'
+        - 'dhcp.@host[2].leasetime=infinite'
+        # host-record gives one section domain per address
+        - 'dhcp.@domain[0].name=router.record.test'
+        - 'dhcp.@domain[0].ip=192.168.1.1'
+        - 'dhcp.@domain[1].name=dual.record.test.'
+        - 'dhcp.@domain[1].ip=192.168.1.2'
+        - 'dhcp.@domain[2].name=dual.record.test.'
+        - 'dhcp.@domain[2].ip=fd00::2'
+        - 'dhcp.@cname[0].cname=www.record.test'
+        - 'dhcp.@cname[0].target=router.record.test'
+        - 'dhcp.@srvhost[0].port=389'
+        - 'dhcp.@mxhost[0].pref=5'
+      resolve:
+        address.molecule.test: '192.168.1.99'
+        router.record.test: '192.168.1.1'
+        www.record.test: '192.168.1.1'
+        # dns of the dhcp-host, the init script adds the domain lan of the default
+        wallbox.lan: '192.168.1.12'

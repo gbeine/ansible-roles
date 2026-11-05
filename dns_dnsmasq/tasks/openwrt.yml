@@ -1,0 +1,357 @@
+---
+
+- name: 'Configure dnsmasq on OpenWrt'
+  vars:
+    dns_dnsmasq__openwrt_changed: "{{ (dns_dnsmasq__openwrt_commit_result | default({})) is changed }}"
+  block:
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Include OpenWrt specific variables'
+      ansible.builtin.include_vars:
+        file: 'OpenWrt.yml'
+
+    # A failing template in the configuration (e.g. an unknown filter) disappears silently inside the translation,
+    # rendering the configuration completely shows the error before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__openwrt_config | to_json | length > 0
+        quiet: true
+
+    # The structure of the sections follows monitoring_snmp: type, optional name, find and options,
+    # names and find follow the default configuration of OpenWrt, unnamed sections are found by find
+    - name: 'Translate the configuration to the UCI configuration of dhcp'
+      ansible.builtin.set_fact:
+        dns_dnsmasq__openwrt_translation: "{{ dns_dnsmasq__openwrt_translation_json | trim | from_json }}"
+      vars:
+        dns_dnsmasq__openwrt_translation_json: >-
+          {% set config = dns_dnsmasq__openwrt_config %}
+          {% set errors = [] %}
+          {% set sections = [] %}
+          {% set dnsmasq = {} %}
+          {% set pools = {} %}
+          {% set tags = {} %}
+          {% set ipv4 = '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$' %}
+          {% set uci_name = '^[A-Za-z0-9_]+$' %}
+          {% set powers = [] %}
+          {% for bits in range(33) %}{% set _ = powers.append(2 ** bits) %}{% endfor %}
+          {% macro number(address) %}{% set o = address.split('.') | map('int') | list %}{{ ((o[0] * 256 + o[1]) * 256 + o[2]) * 256 + o[3] }}{% endmacro %}
+          {% for key, value in config | dictsort %}
+          {%   set values = (value if value is sequence and value is not string else [ value ]) | map('string') | list %}
+          {%   if key in dns_dnsmasq__openwrt_bool_options %}
+          {%     if value is boolean %}
+          {%       set _ = dnsmasq.update({dns_dnsmasq__openwrt_bool_options[key]: '1' if value else '0'}) %}
+          {%     else %}
+          {%       set _ = errors.append(key ~ ' has to be a boolean on OpenWrt: ' ~ value) %}
+          {%     endif %}
+          {%   elif value is boolean and not value %}
+          {#     false omits the option like in dnsmasq.conf #}
+          {%   elif value is boolean %}
+          {%     set _ = errors.append(key ~ ' needs a value: ' ~ value) %}
+          {%   elif key in dns_dnsmasq__openwrt_value_options %}
+          {%     if values | length == 1 %}
+          {%       set _ = dnsmasq.update({dns_dnsmasq__openwrt_value_options[key]: values[0]}) %}
+          {%     else %}
+          {%       set _ = errors.append(key ~ ' takes a single value on OpenWrt: ' ~ values | join(', ')) %}
+          {%     endif %}
+          {%   elif key in dns_dnsmasq__openwrt_list_options %}
+          {%     if values | length > 0 %}
+          {%       set _ = dnsmasq.update({dns_dnsmasq__openwrt_list_options[key]: values}) %}
+          {%     endif %}
+          {%   elif key not in dns_dnsmasq__openwrt_section_options %}
+          {%     set _ = errors.append(key ~ ' is not supported on OpenWrt') %}
+          {%   endif %}
+          {% endfor %}
+          {% for option in dns_dnsmasq__openwrt_default_enabled %}
+          {%   if option not in dnsmasq %}{% set _ = dnsmasq.update({option: '0'}) %}{% endif %}
+          {% endfor %}
+          {% set _ = sections.append({'type': 'dnsmasq', 'find': {}, 'options': dnsmasq}) %}
+          {% macro entries(key) %}{{ ([] if config[key] is boolean
+                                       else (config[key] if config[key] is sequence and config[key] is not string else [ config[key] ]))
+                                      | map('string') | list | to_json }}{% endmacro %}
+          {#   DHCP pools, the start and the limit are relative to the network of the interface like in OpenWrt #}
+          {% for entry in (entries('dhcp-range') | from_json if 'dhcp-range' in config else []) %}
+          {%   set fields = entry.split(',') %}
+          {%   set interface = fields[0] | regex_replace('^set:', '') %}
+          {%   if fields | length not in [4, 5] or interface is not match(uci_name)
+                  or fields[1] is not match(ipv4) or (fields[2] is not match(ipv4) and fields[2] != 'static') or fields[3] is not match(ipv4) %}
+          {%     set _ = errors.append('dhcp-range needs <interface>,<start>,<end>|static,<netmask>[,<leasetime>] on OpenWrt: ' ~ entry) %}
+          {%   else %}
+          {%     set size = 4294967296 - (number(fields[3]) | int) %}
+          {%     set start = number(fields[1]) | int %}
+          {#     static allows the static leases only, like dynamicdhcp 0 in dnsmasq.init #}
+          {%     set static = fields[2] == 'static' %}
+          {%     set end = start if static else number(fields[2]) | int %}
+          {%     if size not in powers or size < 4 or (start - start % size) != (end - end % size) or end < start %}
+          {%       set _ = errors.append('dhcp-range needs a netmask and a start and end in the same network on OpenWrt: ' ~ entry) %}
+          {%     elif interface in pools %}
+          {%       set _ = errors.append('dhcp-range has more than one range for the interface ' ~ interface ~ ': ' ~ entry) %}
+          {%     else %}
+          {%       if static %}
+          {%         set options = {'interface': interface, 'start': (start % size) | string, 'dynamicdhcp': '0'} %}
+          {%       else %}
+          {%         set options = {'interface': interface, 'start': (start % size) | string, 'limit': (end - start + 1) | string} %}
+          {%       endif %}
+          {%       if fields | length == 5 %}{% set _ = options.update({'leasetime': fields[4]}) %}{% endif %}
+          {%       set _ = pools.update({interface: options}) %}
+          {%     endif %}
+          {%   endif %}
+          {% endfor %}
+          {% for interface in (entries('no-dhcp-interface') | from_json if 'no-dhcp-interface' in config else []) %}
+          {%   if interface is not match(uci_name) %}
+          {%     set _ = errors.append('no-dhcp-interface needs the name of an interface on OpenWrt: ' ~ interface) %}
+          {%   elif interface in pools %}
+          {%     set _ = errors.append('no-dhcp-interface is set for the interface ' ~ interface ~ ' with a dhcp-range') %}
+          {%   else %}
+          {%     set _ = pools.update({interface: {'interface': interface, 'ignore': '1'}}) %}
+          {%   endif %}
+          {% endfor %}
+          {#   DHCP options belong to the pool of the interface or to a tag #}
+          {% for entry in (entries('dhcp-option') | from_json if 'dhcp-option' in config else []) %}
+          {%   set fields = entry.split(',', 1) %}
+          {%   set tag = fields[0] | regex_replace('^tag:', '') %}
+          {%   if fields | length != 2 or fields[0] is not match('^tag:') or tag is not match(uci_name) or fields[1] is match('^tag:') %}
+          {%     set _ = errors.append('dhcp-option needs exactly one tag:<interface or tag> on OpenWrt: ' ~ entry) %}
+          {%   elif tag in pools %}
+          {%     set _ = pools[tag].update({'dhcp_option': pools[tag].get('dhcp_option', []) + [ fields[1] ]}) %}
+          {%   else %}
+          {%     set _ = tags.update({tag: tags.get(tag, []) + [ fields[1] ]}) %}
+          {%   endif %}
+          {% endfor %}
+          {% for interface, options in pools | dictsort %}
+          {%   set _ = sections.append({'type': 'dhcp', 'name': interface, 'find': {'interface': interface}, 'options': options}) %}
+          {% endfor %}
+          {% for tag, options in tags | dictsort %}
+          {%   set _ = sections.append({'type': 'tag', 'name': tag, 'find': {'dhcp_option': options}, 'options': {'dhcp_option': options}}) %}
+          {% endfor %}
+          {#   Static leases, the entries are dictionaries with the options of the UCI section host, validated in main.yml,
+               lists become UCI lists #}
+          {% for entry in ([] if config['dhcp-host'] | default(false) is false else config['dhcp-host']) %}
+          {%   set options = {} %}
+          {%   for key, value in entry | dictsort %}
+          {%     if value is boolean %}
+          {%       set _ = options.update({key: '1' if value else '0'}) %}
+          {%     elif value is sequence and value is not string %}
+          {%       set _ = options.update({key: value | map('string') | list}) %}
+          {%     elif key in ['mac', 'duid'] %}
+          {#       LuCI stores the MAC addresses and the DUID as list, find has to compare a list #}
+          {%       set _ = options.update({key: [ value | string ]}) %}
+          {%     else %}
+          {%       set _ = options.update({key: value | string}) %}
+          {%     endif %}
+          {%   endfor %}
+          {%   set key = 'mac' if 'mac' in options else ('duid' if 'duid' in options else 'name') %}
+          {%   set _ = sections.append({'type': 'host', 'find': {key: options[key]}, 'options': options}) %}
+          {% endfor %}
+          {#   DNS records #}
+          {% for entry in (entries('host-record') | from_json if 'host-record' in config else []) %}
+          {%   set fields = entry.split(',') %}
+          {%   set addresses = fields | select('match', ipv4 ~ '|^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*$') | list %}
+          {%   set names = fields | reject('in', addresses) | list %}
+          {%   if names | length == 0 or addresses | length == 0 or fields[:names | length] != names
+                  or names | reject('match', '^[A-Za-z0-9][A-Za-z0-9.-]*$') | list | length > 0 %}
+          {%     set _ = errors.append('host-record needs <name>[,<name>...],<address>[,<address>] on OpenWrt: ' ~ entry) %}
+          {%   else %}
+          {#     One section domain per address like the hostnames of LuCI, dnsmasq.init writes them to a hosts file #}
+          {%     for address in addresses %}
+          {%       set _ = sections.append({'type': 'domain', 'find': {'name': names | join(' '), 'ip': address},
+                                            'options': {'name': names | join(' '), 'ip': address}}) %}
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+          {% for entry in (entries('cname') | from_json if 'cname' in config else []) %}
+          {%   set fields = entry.split(',') %}
+          {%   if fields | length != 2 %}
+          {%     set _ = errors.append('cname needs exactly <cname>,<target> on OpenWrt: ' ~ entry) %}
+          {%   else %}
+          {%     set _ = sections.append({'type': 'cname', 'find': {'cname': fields[0]}, 'options': {'cname': fields[0], 'target': fields[1]}}) %}
+          {%   endif %}
+          {% endfor %}
+          {% for entry in (entries('srv-host') | from_json if 'srv-host' in config else []) %}
+          {%   set fields = entry.split(',') %}
+          {%   if fields | length < 3 or fields | length > 5 or fields[2:] | reject('match', '^[0-9]+$') | list | length > 0 %}
+          {%     set _ = errors.append('srv-host needs <srv>,<target>,<port>[,<priority>[,<weight>]] on OpenWrt: ' ~ entry) %}
+          {%   else %}
+          {%     set options = {'srv': fields[0], 'target': fields[1], 'port': fields[2]} %}
+          {%     if fields | length > 3 %}{% set _ = options.update({'class': fields[3]}) %}{% endif %}
+          {%     if fields | length > 4 %}{% set _ = options.update({'weight': fields[4]}) %}{% endif %}
+          {%     set _ = sections.append({'type': 'srvhost', 'find': {'srv': fields[0], 'target': fields[1]}, 'options': options}) %}
+          {%   endif %}
+          {% endfor %}
+          {% for entry in (entries('mx-host') | from_json if 'mx-host' in config else []) %}
+          {%   set fields = entry.split(',') %}
+          {%   if fields | length not in [2, 3] or fields[2:] | reject('match', '^[0-9]+$') | list | length > 0 %}
+          {%     set _ = errors.append('mx-host needs <domain>,<relay>[,<preference>] on OpenWrt: ' ~ entry) %}
+          {%   else %}
+          {%     set options = {'domain': fields[0], 'relay': fields[1]} %}
+          {%     if fields | length > 2 %}{% set _ = options.update({'pref': fields[2]}) %}{% endif %}
+          {%     set _ = sections.append({'type': 'mxhost', 'find': {'domain': fields[0]}, 'options': options}) %}
+          {%   endif %}
+          {% endfor %}
+          {{ {'sections': sections, 'errors': errors} | to_json }}
+
+    - name: 'Validate the configuration for OpenWrt'
+      vars:
+        # Unnamed sections are found by find, two entries with the same find would update the same section
+        dns_dnsmasq__openwrt_unnamed_finds: >-
+          {{ dns_dnsmasq__openwrt_translation.sections | rejectattr('name', 'defined')
+             | map(attribute='type') | zip(dns_dnsmasq__openwrt_translation.sections | rejectattr('name', 'defined') | map(attribute='find'))
+             | map('to_json') | list }}
+        dns_dnsmasq__openwrt_duplicates: >-
+          {%- set duplicates = [] -%}
+          {%- for find in dns_dnsmasq__openwrt_unnamed_finds | unique -%}
+          {%-   if dns_dnsmasq__openwrt_unnamed_finds | select('eq', find) | list | length > 1 -%}
+          {%-     set _ = duplicates.append(find) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ duplicates }}
+      ansible.builtin.assert:
+        that:
+          - dns_dnsmasq__openwrt_translation.errors | length == 0
+          - dns_dnsmasq__openwrt_duplicates | length == 0
+        # Only the failing checks are reported
+        fail_msg: >-
+          {{ (dns_dnsmasq__openwrt_translation.errors
+              + (['entries of the same kind have to differ on OpenWrt: ' ~ dns_dnsmasq__openwrt_duplicates | join(', ')]
+                 if dns_dnsmasq__openwrt_duplicates | length > 0 else []))
+             | join('. ') }}
+        quiet: true
+
+    - name: 'Show the UCI sections of dhcp'
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.type }} {{ item.name | default('(unnamed)') }}:
+          find {{ item.find.keys() | join(', ') | default('first section', true) }}; options {{ item.options.keys() | join(', ') }}
+      loop: "{{ dns_dnsmasq__openwrt_translation.sections }}"
+      loop_control:
+        label: "{{ item.name | default(item.type) }}"
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check that dnsmasq is installed'
+      ansible.builtin.raw: 'test -x /usr/sbin/dnsmasq && test -x /etc/init.d/dnsmasq'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Read the current dhcp configuration'
+      community.openwrt.slurp:
+        src: "{{ dns_dnsmasq__openwrt_uci_config }}"
+      register: 'dns_dnsmasq__openwrt_current'
+      check_mode: false
+
+    - name: 'Read the sections of the dhcp configuration before the change'
+      community.openwrt.uci:
+        command: 'show'
+        config: 'dhcp'
+      register: 'dns_dnsmasq__openwrt_show_before'
+      check_mode: false
+
+    # odhcpd and LuCI keep their options in the sections dhcp (dhcpv4, dhcpv6, ra, ...), only the options of dnsmasq are replaced
+    - name: 'Set the sections of the dhcp configuration'
+      community.openwrt.uci:
+        command: 'section'
+        config: 'dhcp'
+        type: "{{ item.type }}"
+        name: "{{ item.name | default(omit) }}"
+        find: "{{ item.find }}"
+        value: "{{ item.options }}"
+        replace: true
+        keep_keys: >-
+          {{ dns_dnsmasq__openwrt_show_before.result
+             | regex_findall('(?m)^dhcp\.' ~ item.name ~ '\.([A-Za-z0-9_]+)=')
+             | reject('in', dns_dnsmasq__openwrt_dhcp_options) | unique | list
+             if item.type == 'dhcp' else omit }}
+      loop: "{{ dns_dnsmasq__openwrt_translation.sections }}"
+      loop_control:
+        label: "{{ item.name | default(item.type) }}"
+
+    - name: 'Look up the IDs of the unnamed sections'
+      community.openwrt.uci:
+        command: 'find'
+        config: 'dhcp'
+        type: "{{ item.type }}"
+        find: "{{ item.find }}"
+      loop: "{{ dns_dnsmasq__openwrt_translation.sections | rejectattr('name', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.type }}"
+      register: 'dns_dnsmasq__openwrt_found'
+      check_mode: false
+      failed_when:
+        - dns_dnsmasq__openwrt_found.failed | default(false)
+        - not ansible_check_mode
+
+    - name: 'Read the sections of the dhcp configuration'
+      community.openwrt.uci:
+        command: 'show'
+        config: 'dhcp'
+      register: 'dns_dnsmasq__openwrt_show'
+      check_mode: false
+
+    # Only the section types managed by the role are pruned, odhcpd, boot, match and others stay untouched
+    - name: 'Determine the sections to delete'
+      ansible.builtin.set_fact:
+        dns_dnsmasq__openwrt_delete: >-
+          {{ dns_dnsmasq__openwrt_show.result
+             | regex_findall('(?m)^dhcp\.([^.=\n]+)=([\w-]+)$')
+             | selectattr('1', 'in', dns_dnsmasq__openwrt_section_types)
+             | reverse
+             | map(attribute='0')
+             | reject('in',
+                 (dns_dnsmasq__openwrt_translation.sections | selectattr('name', 'defined') | map(attribute='name') | list)
+                 + (dns_dnsmasq__openwrt_found.results | map(attribute='result', default='') | list))
+             | list }}
+
+    - name: 'Show the sections to delete'
+      ansible.builtin.debug:
+        var: 'dns_dnsmasq__openwrt_delete'
+
+    - name: 'Delete the undeclared sections'
+      community.openwrt.uci:
+        command: 'delete'
+        key: "dhcp.{{ item }}"
+      loop: "{{ dns_dnsmasq__openwrt_delete }}"
+      when: dns_dnsmasq__prune | bool
+
+    - name: 'Read the pending changes of the dhcp configuration'
+      community.openwrt.uci:
+        command: 'changes'
+        config: 'dhcp'
+      register: 'dns_dnsmasq__openwrt_pending'
+      check_mode: false
+
+    # The backup contains the configuration before this change, it is only written before a commit
+    - name: 'Create the backup directory on the controller'
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+        state: 'directory'
+        mode: '0700'
+      delegate_to: 'localhost'
+      check_mode: false
+      when: dns_dnsmasq__openwrt_pending.changes | default({}) | length > 0
+
+    - name: 'Store the backup on the controller'
+      ansible.builtin.copy:
+        content: "{{ dns_dnsmasq__openwrt_current.content | b64decode }}"
+        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/dhcp"
+        mode: '0600'
+      delegate_to: 'localhost'
+      check_mode: false
+      when: dns_dnsmasq__openwrt_pending.changes | default({}) | length > 0
+
+    - name: 'Commit the dhcp configuration'
+      community.openwrt.uci:
+        command: 'commit'
+        config: 'dhcp'
+      register: 'dns_dnsmasq__openwrt_commit_result'
+      when: dns_dnsmasq__openwrt_pending.changes | default({}) | length > 0
+
+    - name: 'Start and enable dnsmasq'
+      community.openwrt.service:
+        name: 'dnsmasq'
+        enabled: true
+        state: "{{ 'restarted' if dns_dnsmasq__openwrt_changed | bool else 'started' }}"
+      when: not ansible_check_mode

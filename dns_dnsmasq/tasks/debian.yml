@@ -1,0 +1,166 @@
+---
+
+- name: 'Validate the role variables of the container'
+  ansible.builtin.assert:
+    that:
+      - dns_dnsmasq__enable_dhcp is boolean
+      - dns_dnsmasq__publish is sequence and dns_dnsmasq__publish is not string
+      - dns_dnsmasq__labels is not defined or dns_dnsmasq__labels is mapping
+    # Only the failing checks are reported
+    fail_msg: >-
+      {{ [ ('dnsmasq_enable_dhcp has to be a boolean: ' ~ dns_dnsmasq__enable_dhcp)
+             if dns_dnsmasq__enable_dhcp is not boolean else '',
+           ('dnsmasq_publish has to be a list: ' ~ dns_dnsmasq__publish)
+             if dns_dnsmasq__publish is string or dns_dnsmasq__publish is not sequence else '',
+           ('dnsmasq_labels has to be a dictionary if set: ' ~ dns_dnsmasq__labels)
+             if dns_dnsmasq__labels is defined and dns_dnsmasq__labels is not mapping else '' ]
+         | select | join('. ') }}
+    quiet: true
+
+# The entries of dhcp-host are dictionaries with the options of the UCI section host of OpenWrt,
+# they are translated like dhcp_host_add in dnsmasq.init of OpenWrt, dns adds a host-record
+- name: 'Translate dhcp-host to dnsmasq.conf'
+  ansible.builtin.set_fact:
+    dns_dnsmasq__debian_translation: "{{ dns_dnsmasq__debian_translation_json | trim | from_json }}"
+  vars:
+    dns_dnsmasq__debian_translation_json: >-
+      {% set config = dns_dnsmasq__config %}
+      {% set hosts = [] if config['dhcp-host'] | default(false) is false else config['dhcp-host'] %}
+      {% set domain = config.domain.split(',')[0] if config.domain is defined and config.domain is string else '' %}
+      {% set lines = [] %}
+      {% set records = [] %}
+      {% set ignored = [] %}
+      {% macro values(entry, key) %}{{ ([] if entry[key] is not defined
+                                         else (entry[key] if entry[key] is sequence and entry[key] is not string else [ entry[key] ]))
+                                        | map('string') | list | to_json }}{% endmacro %}
+      {% for entry in hosts %}
+      {%   set label = entry.name if entry.name is defined else (entry.mac if entry.mac is defined and entry.mac is string else '#' ~ loop.index) %}
+      {%   for key in entry.keys() | select('in', dns_dnsmasq__dhcp_host_openwrt_only) %}
+      {%     set _ = ignored.append(label ~ ': ' ~ key ~ ' ' ~ entry[key]) %}
+      {%   endfor %}
+      {%   set macs = values(entry, 'mac') | from_json %}
+      {%   set name = entry.name | string if entry.name is defined else '' %}
+      {%   set fields = values(entry, 'match_tag') | from_json | map('regex_replace', '^', 'tag:') | list %}
+      {%   if macs | length > 0 %}
+      {%     set _ = fields.extend(macs) %}
+      {%   elif entry.duid is not defined %}
+      {#     Without MAC and DUID the name identifies the host #}
+      {%     set _ = fields.append(name) %}
+      {%     set name = '' %}
+      {%   endif %}
+      {%   if entry.duid is defined %}
+      {%     set _ = fields.append('id:' ~ (entry.duid | string | replace(':', '') | regex_findall('..') | join(':'))) %}
+      {%   endif %}
+      {%   set _ = fields.extend(values(entry, 'tag') | from_json | map('regex_replace', '^', 'set:') | list) %}
+      {%   if entry.broadcast | default(false) | string in ['True', '1'] %}
+      {%     set _ = fields.append('set:needs-broadcast') %}
+      {%   endif %}
+      {%   if entry.ip is defined %}
+      {%     set _ = fields.append(entry.ip | string) %}
+      {%   endif %}
+      {%   if entry.hostid is defined %}
+      {%     set hostid = entry.hostid | string | regex_replace('^0x', '') | int(base=16) %}
+      {%     set _ = fields.append('[::%x:%x]' | format((hostid // 65536) % 65536, hostid % 65536)) %}
+      {%   endif %}
+      {%   if name != '' %}
+      {%     set _ = fields.append(name) %}
+      {%   endif %}
+      {%   if entry.leasetime is defined %}
+      {%     set _ = fields.append(entry.leasetime | string) %}
+      {%   endif %}
+      {%   set _ = lines.append(fields | join(',')) %}
+      {%   if entry.dns | default(false) | string in ['True', '1'] %}
+      {%     set _ = records.append(([ entry.name ] + ([ entry.name ~ '.' ~ domain ] if domain != '' else []) + [ entry.ip ]) | join(',')) %}
+      {%   endif %}
+      {% endfor %}
+      {% set changes = {} %}
+      {% if 'dhcp-host' in config %}
+      {%   set _ = changes.update({'dhcp-host': lines}) %}
+      {% endif %}
+      {% if records | length > 0 %}
+      {%   set existing = config['host-record'] | default([]) %}
+      {%   set existing = [] if existing is boolean else (existing if existing is sequence and existing is not string else [ existing ]) %}
+      {%   set _ = changes.update({'host-record': existing + records}) %}
+      {% endif %}
+      {{ {'config': config | combine(changes), 'ignored': ignored} | to_json }}
+
+- name: 'Warn about the ignored options of dhcp-host'
+  ansible.builtin.debug:
+    msg: "WARNING: dhcp-host option without counterpart in dnsmasq.conf ignored, {{ dns_dnsmasq__ignored }}"
+  loop: "{{ dns_dnsmasq__debian_translation.ignored }}"
+  loop_control:
+    loop_var: 'dns_dnsmasq__ignored'
+
+- name: 'Create directories'
+  ansible.builtin.file:
+    dest: "{{ dns_dnsmasq__home }}"
+    mode: '0755'
+    state: 'directory'
+
+# dnsmasq checks the syntax of the configuration in a throwaway container before it is replaced
+- name: 'Generate the configuration'
+  ansible.builtin.template:
+    src: 'dnsmasq.conf.j2'
+    dest: "{{ dns_dnsmasq__podman_config_file }}"
+    mode: '0644'
+    validate: "podman run --rm --network none --volume %s:/etc/dnsmasq.conf:ro {{ dns_dnsmasq__container.image }} --test"
+  register: 'dns_dnsmasq__config_result'
+
+- name: 'Gathering facts about services...'
+  ansible.builtin.service_facts:
+
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ dns_dnsmasq__container.name }}"
+    hostname: "{{ dns_dnsmasq__container.hostname }}"
+    image: "{{ dns_dnsmasq__container.image }}"
+    ip: "{{ dns_dnsmasq__container.ip }}"
+    ip6: "{{ dns_dnsmasq__container.ipv6 | default(omit) }}"
+    network: "{{ dns_dnsmasq__container.network }}"
+    timezone: "{{ dns_dnsmasq__container.timezone }}"
+    cap_add: "{{ dns_dnsmasq__container.cap_add | default(omit) }}"
+    env: "{{ dns_dnsmasq__container.environment | default(omit) }}"
+    etc_hosts: "{{ dns_dnsmasq__container.etc_hosts | default(omit) }}"
+    expose: "{{ dns_dnsmasq__container.expose | default(omit) }}"
+    label: "{{ dns_dnsmasq__container.labels | default(omit) }}"
+    publish: "{{ dns_dnsmasq__container.publish | default(omit) }}"
+    secrets: "{{ dns_dnsmasq__container.secrets | default(omit) }}"
+    volume: "{{ dns_dnsmasq__container.volumes | default(omit) }}"
+    quadlet_options: |
+      [Install]
+      WantedBy=default.target
+
+      [Service]
+      RestartSec=5
+      Restart=always
+
+      [Unit]
+      {% if dns_dnsmasq__container.requires is defined %}
+      Requires={{ dns_dnsmasq__container.requires | join(' ') }}
+      {% endif %}
+    restart_policy: 'no'
+    state: 'quadlet'
+  register: 'dns_dnsmasq__quadlet_result'
+
+- name: 'Start and enable container'
+  ansible.builtin.systemd_service:
+    name: "{{ dns_dnsmasq__container.name }}"
+    daemon_reload: true
+    state: "{{ 'restarted' if dns_dnsmasq__restart | bool else 'started' }}"
+    enabled: true
+  vars:
+    dns_dnsmasq__running: >-
+      {{ (ansible_facts.services[dns_dnsmasq__container.name + '.service'].state | default('')) == 'running' }}
+    dns_dnsmasq__restart: >-
+      {{ dns_dnsmasq__running | bool
+         and (dns_dnsmasq__config_result is changed or dns_dnsmasq__quadlet_result is changed) }}
+  when: 'not ansible_check_mode'
+
+- name: 'Enable autoupdate on container'
+  when: 'dns_dnsmasq__autoupdate_enabled | bool'
+  ansible.builtin.include_role:
+    name: 'container_update'
+  vars:
+    container_name: "{{ dns_dnsmasq__container.name }}"
+    container_image: "{{ dns_dnsmasq__container.image }}"
+    container_schedule: "{{ dns_dnsmasq__autoupdate_schedule }}"

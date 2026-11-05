@@ -1,0 +1,70 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_dnsmasq__test_case: "{{ dns_dnsmasq__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_dnsmasq__test_expect: "{{ dns_dnsmasq__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the dhcp configuration, the delivered configuration and the state of dnsmasq'
+      ansible.builtin.raw: >-
+        uci show dhcp | sort; echo '---';
+        cat /root/dhcp.orig; echo '---';
+        pidof dnsmasq >/dev/null && echo 'dnsmasq running'; /etc/init.d/dnsmasq enabled && echo 'dnsmasq enabled'; true
+      register: 'dns_dnsmasq__test_uci'
+      changed_when: false
+
+    - name: 'Assert the dhcp configuration and the state of dnsmasq'
+      vars:
+        dns_dnsmasq__test_parts: "{{ dns_dnsmasq__test_uci.stdout.split('---') }}"
+        # uci show quotes the values
+        dns_dnsmasq__test_lines: "{{ dns_dnsmasq__test_parts[0].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
+        dns_dnsmasq__test_delivered: "{{ dns_dnsmasq__test_parts[1].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
+        dns_dnsmasq__test_state: "{{ dns_dnsmasq__test_parts[2].splitlines() | map('trim') | list }}"
+        # Options of odhcpd and others in the sections dhcp and the section odhcpd are kept
+        dns_dnsmasq__test_kept: >-
+          {{ dns_dnsmasq__test_delivered
+             | select('match', '^dhcp\.(odhcpd[.=]|(lan|wan)\.(?!(interface|start|limit|leasetime|ignore|dhcp_option)=))') | list }}
+      ansible.builtin.assert:
+        that:
+          - "'dnsmasq running' in dns_dnsmasq__test_state"
+          - "'dnsmasq enabled' in dns_dnsmasq__test_state"
+          - not dns_dnsmasq__test_expect.delivered or dns_dnsmasq__test_lines == dns_dnsmasq__test_delivered
+          - dns_dnsmasq__test_expect.uci | difference(dns_dnsmasq__test_lines) | length == 0
+          - dns_dnsmasq__test_kept | difference(dns_dnsmasq__test_lines) | length == 0
+          - dns_dnsmasq__test_lines | select('match', '^dhcp[.]@host.[0-9]+.=host$') | list | length == dns_dnsmasq__test_expect.hosts
+        fail_msg: >-
+          missing: {{ dns_dnsmasq__test_expect.uci | difference(dns_dnsmasq__test_lines) | join(', ') | default('none', true) }},
+          lost: {{ dns_dnsmasq__test_kept | difference(dns_dnsmasq__test_lines) | join(', ') | default('none', true) }},
+          changed from the delivered configuration:
+          {{ dns_dnsmasq__test_lines | symmetric_difference(dns_dnsmasq__test_delivered) | join(', ') | default('none', true)
+             if dns_dnsmasq__test_expect.delivered else 'not checked' }},
+          host sections: {{ dns_dnsmasq__test_lines | select('match', '^dhcp[.]@host.[0-9]+.=host$') | list | length }},
+          state: {{ dns_dnsmasq__test_state | join(', ') }}
+
+    - name: 'Resolve the records of the configuration with dnsmasq'
+      ansible.builtin.raw: "nslookup {{ item.key }} 127.0.0.1"
+      loop: "{{ dns_dnsmasq__test_expect.resolve | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'dns_dnsmasq__test_resolve'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the records of the configuration'
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout is search('Address:\s+' ~ (item.item.value | regex_escape) ~ '\s*$', multiline=true)
+        fail_msg: "{{ item.item.key }}: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ dns_dnsmasq__test_resolve.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"

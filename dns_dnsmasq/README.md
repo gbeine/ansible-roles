@@ -8,4 +8,4 @@ container_repository: https://github.com/4km3/docker-dnsmasq
 documentation_link: https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html
 ---
 
-Installs and configures dnsmasq as a podman quadlet.
+Installs and configures dnsmasq as a podman quadlet on Debian and with the UCI configuration on OpenWrt.
