@@ -7,15 +7,15 @@
     - name: 'Validate the role variables'
       ansible.builtin.assert:
         that:
-          - dns_unbound__config_custom is mapping
+          - unbound_config | default({}) is mapping
           - dns_unbound__config_invalid_clauses | length == 0
           - dns_unbound__config_invalid_options | length == 0
           - dns_unbound__config_invalid_values | length == 0
           - dns_unbound__config_invalid_forwarders | length == 0
         # Only the failing checks are reported
         fail_msg: >-
-          {{ [ ('unbound_config has to be a dictionary: ' ~ dns_unbound__config_custom)
-                 if dns_unbound__config_custom is not mapping else '',
+          {{ [ ('unbound_config has to be a dictionary: ' ~ unbound_config)
+                 if unbound_config | default({}) is not mapping else '',
                ('unbound_config clauses have to be a dictionary, a list of dictionaries or null with a valid name: '
                 ~ dns_unbound__config_invalid_clauses | join(', '))
                  if dns_unbound__config_invalid_clauses | length > 0 else '',
@@ -32,10 +32,12 @@
       vars:
         # Clause and option names of unbound consist of lowercase letters, digits and dashes
         dns_unbound__config_name_pattern: '^[a-z][a-z0-9-]*$'
+        # The merged configuration, the defaults are valid, so every finding comes from unbound_config
+        dns_unbound__config_clauses: "{{ dns_unbound__config.items() | list if unbound_config | default({}) is mapping else [] }}"
         # A clause is given once as a dictionary, repeated as a list of dictionaries or removed with null
         dns_unbound__config_invalid_clauses: >-
           {%- set ns = namespace(invalid=[]) -%}
-          {%- for clause, value in (dns_unbound__config_custom.items() if dns_unbound__config_custom is mapping else []) -%}
+          {%- for clause, value in dns_unbound__config_clauses -%}
           {%-   set clauses = value if value is sequence and value is not mapping and value is not string else [ value ] -%}
           {%-   if clause is not match(dns_unbound__config_name_pattern) or clauses | length == 0
                   or (value is not none and clauses | reject('mapping') | list | length > 0) -%}
@@ -45,7 +47,7 @@
           {{ ns.invalid }}
         dns_unbound__config_invalid_options: >-
           {%- set ns = namespace(invalid=[]) -%}
-          {%- for clause, value in (dns_unbound__config_custom.items() if dns_unbound__config_custom is mapping else []) -%}
+          {%- for clause, value in dns_unbound__config_clauses -%}
           {%-   for options in (value if value is sequence and value is not mapping and value is not string else [ value ]) | select('mapping') -%}
           {%-     for option in options.keys() | reject('match', dns_unbound__config_name_pattern) -%}
           {%-       set ns.invalid = ns.invalid + [ clause ~ '.' ~ option ] -%}
@@ -56,7 +58,7 @@
         # Strings must not contain line breaks, they would add further options; null removes the option
         dns_unbound__config_invalid_values: >-
           {%- set ns = namespace(invalid=[]) -%}
-          {%- for clause, value in (dns_unbound__config_custom.items() if dns_unbound__config_custom is mapping else []) -%}
+          {%- for clause, value in dns_unbound__config_clauses -%}
           {%-   for options in (value if value is sequence and value is not mapping and value is not string else [ value ]) | select('mapping') -%}
           {%-     for option, setting in options.items() -%}
           {%-       set settings = setting if setting is sequence and setting is not string and setting is not mapping else [ setting ] -%}
@@ -73,7 +75,7 @@
         # Unbound does not verify the certificate of a TLS forwarder without the name after #
         dns_unbound__config_invalid_forwarders: >-
           {%- set ns = namespace(invalid=[]) -%}
-          {%- set zones = dns_unbound__config_custom['forward-zone'] | default([], true) if dns_unbound__config_custom is mapping else [] -%}
+          {%- set zones = dict(dns_unbound__config_clauses)['forward-zone'] | default([], true) -%}
           {%- for zone in (zones if zones is sequence and zones is not mapping and zones is not string else [ zones ]) | select('mapping') -%}
           {%-   if zone['forward-tls-upstream'] | default(false) is sameas true -%}
           {%-     set addresses = zone['forward-addr'] | default([], true) -%}
