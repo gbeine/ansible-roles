@@ -12,10 +12,13 @@ the keys are the clause names (`server`, `forward-zone`, `stub-zone`, ...), the 
 A clause given as a dictionary is written once, a clause given as a list of dictionaries once per element.
 
 * `true` writes `option: yes`, `false` writes `option: no`
-* a string or number writes `option: value`
+* a string or number writes `option: value`, the value is written as it is: options with several arguments
+  like `access-control: 10.0.0.0/8 allow` are one string, values that Unbound wants quoted like `local-data`
+  carry their quotes in the string
 * a list writes one line `option: value` per element in the order of the list
 
 Clauses and options are written sorted by name, `name` first.
+Only section clauses are supported, the `include` directive is not.
 The role writes the file as `custom.conf.d/unbound.conf` in `unbound_home` and mounts the directory read-only to `/etc/unbound/custom.conf.d`,
 from where the image includes it after its own configuration:
 options with a single value override the image, options with several values like `access-control` add to it.
@@ -30,13 +33,15 @@ unbound_home: '/srv/unbound'
 unbound_config:
   server:
     private-domain: [ 'home.arpa' ]
+    local-zone: [ 'home.arpa. transparent' ]
+    local-data: [ '"printer.home.arpa. A 192.168.1.20"' ]
   forward-zone:
     - name: '.'
       forward-tls-upstream: true
       forward-addr: [ '9.9.9.9@853#dns.quad9.net', '149.112.112.112@853#dns.quad9.net' ]
   stub-zone:
-    - name: 'home.arpa'
-      stub-addr: '192.168.1.1'
+    - name: 'lab.example.org'
+      stub-addr: '192.168.2.53'
 ```
 
 Removing `unbound_config` removes the mount, the file in `unbound_home` is left behind.
