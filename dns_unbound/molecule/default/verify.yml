@@ -26,11 +26,11 @@
           - dns_unbound__expect.ip6 is none or ('IP6=' + dns_unbound__expect.ip6) in dns_unbound__test_quadlet_lines
           - dns_unbound__expect.ip6 is not none or dns_unbound__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - ('Network=' + dns_unbound__test_case.role_vars.unbound_network) in dns_unbound__test_quadlet_lines
-          - (dns_unbound__expect.config is not none) == (dns_unbound__test_quadlet_volume in dns_unbound__test_quadlet_lines)
+          - dns_unbound__test_quadlet_volume in dns_unbound__test_quadlet_lines
         fail_msg: "{{ dns_unbound__test_quadlet.content | b64decode }}"
       vars:
         dns_unbound__test_quadlet_lines: "{{ (dns_unbound__test_quadlet.content | b64decode).splitlines() }}"
-        dns_unbound__test_quadlet_volume: "Volume={{ dns_unbound__test_case.role_vars.unbound_home | default('') }}/custom.conf.d:/etc/unbound/custom.conf.d:ro"
+        dns_unbound__test_quadlet_volume: "Volume={{ dns_unbound__test_case.role_vars.unbound_home }}/unbound.conf:/etc/unbound/unbound.conf:ro"
 
     - name: 'Read the state of the unbound service'
       ansible.builtin.command: 'systemctl is-active unbound'
@@ -83,30 +83,26 @@
         path: "{{ dns_unbound__test_config_file }}"
       register: 'dns_unbound__test_config_stat'
 
-    - name: 'Assert there is no configuration'
-      when: dns_unbound__expect.config is none
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "{{ dns_unbound__test_config_file }}"
+      register: 'dns_unbound__test_config'
+
+    # Lines without indentation and comments; expected lines have to be there, absent lines must not
+    - name: 'Assert the configuration'
       ansible.builtin.assert:
         that:
-          - not dns_unbound__test_config_stat.stat.exists
+          - dns_unbound__test_config_stat.stat.mode == '0644'
+          - dns_unbound__expect.config | difference(dns_unbound__test_config_lines) | length == 0
+          - dns_unbound__test_config_lines | select('search', dns_unbound__expect.config_absent | map('regex_escape') | join('|')) | list | length == 0
+        fail_msg: "{{ dns_unbound__test_config.content | b64decode }}"
+      vars:
+        dns_unbound__test_config_lines: >-
+          {{ (dns_unbound__test_config.content | b64decode).splitlines() | map('trim') | reject('match', '#') | select | list }}
 
-    - name: 'Check the configuration'
-      when: dns_unbound__expect.config is not none
+    - name: 'Check the forwarding'
+      when: dns_unbound__expect.forwarder_ips is defined
       block:
-
-        - name: 'Read the configuration'
-          ansible.builtin.slurp:
-            src: "{{ dns_unbound__test_config_file }}"
-          register: 'dns_unbound__test_config'
-
-        - name: 'Assert the configuration carries the change of the side effect'
-          ansible.builtin.assert:
-            that:
-              - dns_unbound__test_config_stat.stat.mode == '0644'
-              - dns_unbound__test_config_lines == dns_unbound__expect.config
-            fail_msg: "{{ dns_unbound__test_config.content | b64decode }}"
-          vars:
-            dns_unbound__test_config_lines: >-
-              {{ (dns_unbound__test_config.content | b64decode).splitlines() | map('trim') | reject('match', '#') | select | list }}
 
         - name: 'Read the PID of the unbound container'
           ansible.builtin.command: "podman inspect unbound --format '{{ '{{' }}.State.Pid{{ '}}' }}'"

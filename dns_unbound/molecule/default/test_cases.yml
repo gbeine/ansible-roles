@@ -11,12 +11,27 @@ dns_unbound__test_network:
 
 dns_unbound__test_image: 'docker.io/klutchell/unbound:latest'
 
-dns_unbound__test_config_file: '/srv/unbound/custom.conf.d/unbound.conf'
+dns_unbound__test_config_file: '/srv/unbound/unbound.conf'
+
+# Lines of the generated file without indentation that the defaults of the role produce
+dns_unbound__test_config_default:
+  - 'server:'
+  - 'access-control: 127.0.0.0/8 allow'
+  - 'access-control: 10.0.0.0/8 allow'
+  - 'auto-trust-anchor-file: /var/unbound/root.key'
+  - 'chroot: ""'
+  - 'do-daemonize: no'
+  - 'interface: 0.0.0.0'
+  - 'root-hints: /var/unbound/root.hints'
+  - 'tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt'
+  - 'username: unbound'
+  - 'verbosity: 1'
 
 dns_unbound__test_cases:
 
   - name: 'molecule-unbound-ipv4-only'
     role_vars:
+      unbound_home: '/srv/unbound'
       unbound_ip: '10.89.0.10'
       unbound_network: 'podman-molecule'
       unbound_hostname: 'unbound-molecule'
@@ -24,10 +39,12 @@ dns_unbound__test_cases:
     expect:
       ip: '10.89.0.10'
       ip6: ~
-      config: ~
+      config: "{{ dns_unbound__test_config_default }}"
+      config_absent: [ 'forward-zone:' ]
 
   - name: 'molecule-unbound-ipv6'
     role_vars:
+      unbound_home: '/srv/unbound'
       unbound_ip: '10.89.0.10'
       unbound_ipv6: 'fd00:89::10'
       unbound_network: 'podman-molecule'
@@ -36,9 +53,11 @@ dns_unbound__test_cases:
     expect:
       ip: '10.89.0.10'
       ip6: 'fd00:89::10'
-      config: ~
+      config: "{{ dns_unbound__test_config_default }}"
+      config_absent: [ 'forward-zone:' ]
 
-  # side_effect switches the forwarders, only the configuration changes, verify checks the TLS session afterwards
+  # side_effect switches the forwarders, overrides and removes a server option; only the configuration changes,
+  # verify checks the file and the TLS session afterwards
   - name: 'molecule-unbound-config'
     role_vars:
       unbound_home: '/srv/unbound'
@@ -48,8 +67,6 @@ dns_unbound__test_cases:
       unbound_timezone: 'Europe/Berlin'
       unbound_config:
         server:
-          qname-minimisation: true
-          cache-max-ttl: 86400
           private-domain: [ 'molecule.test', 'home.arpa' ]
         forward-zone:
           - name: '.'
@@ -62,9 +79,9 @@ dns_unbound__test_cases:
       role_vars:
         unbound_config:
           server:
-            qname-minimisation: true
-            cache-max-ttl: 86400
             private-domain: [ 'molecule.test', 'home.arpa' ]
+            verbosity: 2
+            so-sndbuf: ~
           forward-zone:
             - name: '.'
               forward-tls-upstream: true
@@ -82,10 +99,15 @@ dns_unbound__test_cases:
         - 'forward-addr: 149.112.112.112@853#dns.quad9.net'
         - 'forward-tls-upstream: yes'
         - 'server:'
-        - 'cache-max-ttl: 86400'
+        - 'access-control: 127.0.0.0/8 allow'
         - 'private-domain: molecule.test'
         - 'private-domain: home.arpa'
-        - 'qname-minimisation: yes'
+        - 'username: unbound'
+        - 'verbosity: 2'
+      config_absent:
+        - 'verbosity: 1'
+        - 'so-sndbuf: 0'
+        - 'cloudflare'
       forwarder_ips:
         - '9.9.9.9'
         - '149.112.112.112'
