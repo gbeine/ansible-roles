@@ -1,0 +1,45 @@
+---
+# OpenWrt has no Python, all tasks use raw
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    vpn_wireguard__test_case: "{{ vpn_wireguard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Assert the clone is OpenWrt'
+      ansible.builtin.raw: '. /etc/openwrt_release && echo "release=${DISTRIB_RELEASE}"'
+      changed_when: false
+
+    # uci accepts the sections without the WireGuard tools, the role installs them
+    - name: 'Create sections like LuCI that the role has to remove, update or keep'
+      ansible.builtin.raw: >-
+        uci set network.wgold=interface
+        && uci set network.wgold.proto=wireguard
+        && uci set network.wgold.private_key='{{ vpn_wireguard__test_keys.old_private }}'
+        && uci add_list network.wgold.addresses=10.91.0.1/24
+        && uci add network wireguard_wgold >/dev/null
+        && uci set network.@wireguard_wgold[-1].public_key='{{ vpn_wireguard__test_keys.x_public }}'
+        && uci add_list network.@wireguard_wgold[-1].allowed_ips=10.91.0.2/32
+        && uci set network.wg0=interface
+        && uci set network.wg0.proto=wireguard
+        && uci set network.wg0.private_key='{{ vpn_wireguard__test_keys.a_private }}'
+        && uci add network wireguard_wg0 >/dev/null
+        && uci set network.@wireguard_wg0[-1].description=luci
+        && uci set network.@wireguard_wg0[-1].public_key='{{ vpn_wireguard__test_keys.b_public }}'
+        && uci add_list network.@wireguard_wg0[-1].allowed_ips=10.90.0.2/32
+        && uci add network wireguard_wg0 >/dev/null
+        && uci set network.@wireguard_wg0[-1].description=stranger
+        && uci set network.@wireguard_wg0[-1].public_key='{{ vpn_wireguard__test_keys.old_private }}'
+        && uci add_list network.@wireguard_wg0[-1].allowed_ips=10.90.0.9/32
+        && uci set network.molecule_other=interface
+        && uci set network.molecule_other.proto=none
+        && uci commit network
+      changed_when: true
+      no_log: true
+      when: vpn_wireguard__test_case.prepare | bool

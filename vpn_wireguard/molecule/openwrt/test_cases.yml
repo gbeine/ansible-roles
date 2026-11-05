@@ -1,0 +1,93 @@
+---
+# Test keys only, generated with wg genkey, wg pubkey and wg genpsk. Never use them elsewhere.
+vpn_wireguard__test_keys:
+  a_private: 'yG8jESpsEWccYxxaKoIPqGVERRw9ljxwTM3zu17shlE='
+  a_public: 'JsX9OuH8J3w8VOn1Mw0mwkt+rlmkDGlYd8gDhcnHkgQ='
+  b_private: '6JdedNag0BEHN+seRISfbrpe2LEiXhe52hWJMpETo2w='
+  b_public: '3yp6ihSEAuGAJ3Jx2Ga5SkeRTpbgTBVEkfJSIkUwInI='
+  x_public: 'aUHr69byXdhtL0jOA9WLezz967G6zmdGJXlaxZkGMzg='
+  old_private: 'uMAaj745B1Y6tqYmV1x7/ZsFHLwqe+zfk6O8DYeYc1A='
+  ab_preshared: 'Skj2vkyh4ReDjXlTrfquXu03H5H5HmxOCNjPr9KEy4w='
+
+vpn_wireguard__test_network_a:
+  - interface: 'wg0'
+    address: '10.90.0.1/24, fd00:90::1/64'
+    private_key: "{{ vpn_wireguard__test_keys.a_private }}"
+    listen_port: 51820
+    mtu: 1420
+    peers:
+      - public_key: "{{ vpn_wireguard__test_keys.b_public }}"
+        preshared_key: "{{ vpn_wireguard__test_keys.ab_preshared }}"
+        allowed_ips: '10.90.0.2/32, fd00:90::2/128'
+      - public_key: "{{ vpn_wireguard__test_keys.x_public }}"
+        description: 'molecule-x'
+        allowed_ips: '10.90.0.3/32'
+        route_allowed_ips: false
+
+vpn_wireguard__test_cases:
+
+  # Server: listens on 51820, knows b and x.
+  # prepare creates the undeclared interface wgold with a peer (removed), a peer of b like LuCI (updated, not added),
+  # a stranger peer in wg0 (removed) and the interface molecule_other with proto none (kept)
+  - name: 'molecule-wireguard-openwrt-a'
+    prepare: true
+    role_vars:
+      wireguard_networks: "{{ vpn_wireguard__test_network_a }}"
+    # side_effect runs the role with a changed peer, the interface has to be restarted
+    updated_role_vars:
+      wireguard_networks: >-
+        {{ [ vpn_wireguard__test_network_a[0]
+             | combine({'peers': [ vpn_wireguard__test_network_a[0].peers[0],
+                                   vpn_wireguard__test_network_a[0].peers[1] | combine({'allowed_ips': '10.90.0.3/32, 10.90.3.0/24'}) ]}) ] }}
+    expect:
+      uci:
+        network.wg0.proto: 'wireguard'
+        network.wg0.listen_port: '51820'
+        network.wg0.mtu: '1420'
+        network.wg0.addresses: '10.90.0.1/24 fd00:90::1/64'
+        network.wgold: 'absent'
+        network.molecule_other.proto: 'none'
+      # Lines of uci show network without keys and quotes, the peers are found by their order
+      peer_lines:
+        - 'network.@wireguard_wg0[0].allowed_ips=10.90.0.2/32 fd00:90::2/128'
+        - 'network.@wireguard_wg0[0].route_allowed_ips=1'
+        - 'network.@wireguard_wg0[1].description=molecule-x'
+        - 'network.@wireguard_wg0[1].allowed_ips=10.90.0.3/32 10.90.3.0/24'
+        - 'network.@wireguard_wg0[1].route_allowed_ips=0'
+      peer_sections: 2
+      peers_absent: [ 'description=luci', 'description=stranger', 'wireguard_wgold' ]
+      wg:
+        listen_port: '51820'
+        peers: 2
+        allowed_ips: '10.90.3.0/24'
+
+  # Client: connects to a, keeps the connection alive
+  - name: 'molecule-wireguard-openwrt-b'
+    prepare: false
+    role_vars:
+      wireguard_networks:
+        - interface: 'wg0'
+          address: '10.90.0.2/24, fd00:90::2/64'
+          private_key: "{{ vpn_wireguard__test_keys.b_private }}"
+          peers:
+            - public_key: "{{ vpn_wireguard__test_keys.a_public }}"
+              preshared_key: "{{ vpn_wireguard__test_keys.ab_preshared }}"
+              allowed_ips: '10.90.0.0/24, fd00:90::/64'
+              endpoint: "{{ hostvars['molecule-wireguard-openwrt-a']['ansible_host'] }}:51820"
+              persistent_keepalive: 25
+    expect:
+      uci:
+        network.wg0.proto: 'wireguard'
+        network.wg0.listen_port: 'absent'
+        network.wg0.addresses: '10.90.0.2/24 fd00:90::2/64'
+      peer_lines:
+        - "network.@wireguard_wg0[0].endpoint_host={{ hostvars['molecule-wireguard-openwrt-a']['ansible_host'] }}"
+        - 'network.@wireguard_wg0[0].endpoint_port=51820'
+        - 'network.@wireguard_wg0[0].persistent_keepalive=25'
+        - 'network.@wireguard_wg0[0].route_allowed_ips=1'
+      peer_sections: 1
+      peers_absent: []
+      wg:
+        listen_port: ''
+        peers: 1
+        allowed_ips: '10.90.0.0/24'

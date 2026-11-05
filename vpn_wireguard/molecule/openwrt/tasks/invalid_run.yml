@@ -1,0 +1,36 @@
+---
+# Runs vpn_wireguard with the invalid networks passed as include parameter,
+# the role has to fail at the validation before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run vpn_wireguard with invalid networks (expect ERROR): {{ vpn_wireguard__test_invalid.message }}"
+  block:
+
+    - name: 'Run vpn_wireguard, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'vpn_wireguard'
+
+    - name: 'Fail because the invalid networks were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid networks were accepted: {{ vpn_wireguard__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the network configuration after the invalid run'
+      ansible.builtin.raw: 'md5sum /etc/config/network'
+      register: 'vpn_wireguard__test_md5_after'
+      changed_when: false
+
+    - name: 'Assert the run failed at the validation before any change'
+      vars:
+        vpn_wireguard__test_md5_regex: '[0-9a-f]{32}'
+        vpn_wireguard__test_md5_before_sum: "{{ vpn_wireguard__test_md5_before.stdout | regex_search(vpn_wireguard__test_md5_regex) }}"
+        vpn_wireguard__test_md5_after_sum: "{{ vpn_wireguard__test_md5_after.stdout | regex_search(vpn_wireguard__test_md5_regex) }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(vpn_wireguard__test_invalid.search)
+          - vpn_wireguard__test_md5_before_sum | length == 32
+          - vpn_wireguard__test_md5_after_sum == vpn_wireguard__test_md5_before_sum
+        fail_msg: >-
+          Failure: {{ ansible_failed_result.msg | default('') }}
+          Checksum before: {{ vpn_wireguard__test_md5_before_sum }}, after: {{ vpn_wireguard__test_md5_after_sum }}.

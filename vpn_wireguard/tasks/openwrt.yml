@@ -1,0 +1,290 @@
+---
+
+- name: 'Include OpenWrt specific variables'
+  ansible.builtin.include_vars:
+    file: 'OpenWrt.yml'
+
+# An interface is the section interface of the same name with proto wireguard,
+# every peer is an unnamed section wireguard_<interface>, found by public_key like the peers created by LuCI
+- name: 'Translate wireguard_networks to the UCI configuration of network'
+  ansible.builtin.set_fact:
+    vpn_wireguard__openwrt_translation: "{{ vpn_wireguard__openwrt_translation_json | trim | from_json }}"
+  no_log: true
+  vars:
+    vpn_wireguard__openwrt_translation_json: >-
+      {% set sections = [] %}
+      {% set errors = [] %}
+      {% macro as_list(value) %}{{ (value if value is sequence and value is not string else (value | string).split(','))
+                                 | map('string') | map('trim') | select | list | to_json }}{% endmacro %}
+      {% for network in vpn_wireguard__networks %}
+      {%   set iface = network.interface | string %}
+      {%   if iface is not match('^[A-Za-z0-9_]{1,15}$') %}
+      {%     set _ = errors.append('interface names need 1 to 15 letters, digits or underscores on OpenWrt: ' ~ iface) %}
+      {%   endif %}
+      {%   if network.postup is defined or network.postdown is defined %}
+      {%     set _ = errors.append('postup and postdown are not supported on OpenWrt, use /etc/config/firewall: ' ~ iface) %}
+      {%   endif %}
+      {%   set options = {'proto': 'wireguard', 'private_key': network.private_key | string,
+                          'addresses': as_list(network.address) | from_json} %}
+      {%   for key in vpn_wireguard__openwrt_interface_options if network[key] is defined %}
+      {%     set value = network[key] %}
+      {%     set _ = options.update({key: (('1' if value else '0') if value is boolean
+                                           else (as_list(value) | from_json if key in vpn_wireguard__list_options else value | string))}) %}
+      {%   endfor %}
+      {%   set _ = sections.append({'interface': iface, 'type': 'interface', 'name': iface, 'options': options}) %}
+      {%   for peer in network.peers %}
+      {%     set options = {'public_key': peer.public_key | string, 'allowed_ips': as_list(peer.allowed_ips) | from_json,
+                            'route_allowed_ips': '1' if peer.route_allowed_ips | default(true) else '0'} %}
+      {%     for key in ['preshared_key', 'persistent_keepalive', 'description'] if peer[key] is defined %}
+      {%       set _ = options.update({key: peer[key] | string}) %}
+      {%     endfor %}
+      {%     if peer.endpoint is defined %}
+      {%       set endpoint = peer.endpoint | string %}
+      {%       set host = endpoint.rsplit(':', 1)[0] %}
+      {%       set _ = options.update({'endpoint_host': host[1:-1] if host.startswith('[') else host,
+                                       'endpoint_port': endpoint.rsplit(':', 1)[1]}) %}
+      {%     endif %}
+      {%     if peer.disabled | default(false) %}
+      {%       set _ = options.update({'disabled': '1'}) %}
+      {%     endif %}
+      {%     set _ = sections.append({'interface': iface, 'type': 'wireguard_' ~ iface,
+                                      'find': {'public_key': peer.public_key | string}, 'options': options}) %}
+      {%   endfor %}
+      {% endfor %}
+      {{ {'sections': sections, 'errors': errors} | to_json }}
+
+- name: 'Validate wireguard_networks for OpenWrt'
+  ansible.builtin.assert:
+    that:
+      - vpn_wireguard__openwrt_translation.errors | length == 0
+    fail_msg: "{{ vpn_wireguard__openwrt_translation.errors | join('. ') }}"
+    quiet: true
+
+- name: 'Initialise OpenWrt'
+  ansible.builtin.import_role:
+    name: 'community.openwrt.init'
+
+- name: 'Check reachability'
+  community.openwrt.ping:
+
+- name: 'Check the WireGuard tools and the package manager'
+  ansible.builtin.raw: >-
+    test -x /usr/bin/wg && echo 'wg=yes' || echo 'wg=no';
+    command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg';
+    grep -qs -e renew_handler -e renew-handler /lib/netifd/proto/wireguard.sh /lib/netifd/proto/wireguard.uc
+    && echo 'renew=yes' || echo 'renew=no'
+  register: 'vpn_wireguard__openwrt_tools'
+  changed_when: false
+  check_mode: false
+
+- name: 'Install the WireGuard packages with apk'
+  community.openwrt.apk:
+    name: "{{ vpn_wireguard__openwrt_packages | join(',') }}"
+    state: 'present'
+    update_cache: true
+  register: 'vpn_wireguard__openwrt_apk'
+  when:
+    - "'wg=no' in vpn_wireguard__openwrt_tools.stdout_lines | map('trim')"
+    - "'manager=apk' in vpn_wireguard__openwrt_tools.stdout_lines | map('trim')"
+
+- name: 'Install the WireGuard packages with opkg'
+  community.openwrt.opkg:
+    name: "{{ vpn_wireguard__openwrt_packages | join(',') }}"
+    state: 'present'
+    update_cache: true
+  register: 'vpn_wireguard__openwrt_opkg'
+  when:
+    - "'wg=no' in vpn_wireguard__openwrt_tools.stdout_lines | map('trim')"
+    - "'manager=opkg' in vpn_wireguard__openwrt_tools.stdout_lines | map('trim')"
+
+- name: 'Read the current network configuration'
+  community.openwrt.slurp:
+    src: '/etc/config/network'
+  register: 'vpn_wireguard__openwrt_current'
+  no_log: true
+  check_mode: false
+
+# Named sections are set without find, find would take over the first section of the type
+- name: 'Set the sections of WireGuard'
+  community.openwrt.uci:
+    command: 'section'
+    config: 'network'
+    type: "{{ item.type }}"
+    name: "{{ item.name | default(omit) }}"
+    find: "{{ item.find | default(omit) }}"
+    value: "{{ item.options }}"
+    replace: true
+    redact_keys: "{{ vpn_wireguard__openwrt_secret_options }}"
+  loop: "{{ vpn_wireguard__openwrt_translation.sections }}"
+  loop_control:
+    label: >-
+      {{ item.name if item.name is defined
+         else item.type ~ ' ' ~ (item.options.description | default(item.find.public_key[:8] ~ '...')) }}
+  register: 'vpn_wireguard__openwrt_set'
+
+- name: 'Look up the IDs of the peers'
+  community.openwrt.uci:
+    command: 'find'
+    config: 'network'
+    type: "{{ item.type }}"
+    find: "{{ item.find }}"
+  loop: "{{ vpn_wireguard__openwrt_translation.sections | selectattr('find', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.type ~ ' ' ~ (item.options.description | default(item.find.public_key[:8] ~ '...')) }}"
+  register: 'vpn_wireguard__openwrt_found'
+  check_mode: false
+  failed_when:
+    - vpn_wireguard__openwrt_found.failed | default(false)
+    - not ansible_check_mode
+
+- name: 'Read the sections of the network configuration'
+  community.openwrt.uci:
+    command: 'show'
+    config: 'network'
+  register: 'vpn_wireguard__openwrt_show'
+  no_log: true
+  check_mode: false
+
+# Undeclared WireGuard interfaces are removed with their peers, declared interfaces lose their undeclared peers,
+# other sections stay untouched
+- name: 'Determine the sections to delete'
+  ansible.builtin.set_fact:
+    vpn_wireguard__openwrt_removed: "{{ vpn_wireguard__openwrt_undeclared }}"
+    vpn_wireguard__openwrt_delete: >-
+      {{ vpn_wireguard__openwrt_types
+         | selectattr('1', 'in', (vpn_wireguard__openwrt_declared + vpn_wireguard__openwrt_undeclared)
+                                 | map('regex_replace', '^', 'wireguard_') | list)
+         | map(attribute='0')
+         | reject('in', vpn_wireguard__openwrt_found.results | map(attribute='result', default='') | list)
+         | reverse | list
+         + vpn_wireguard__openwrt_undeclared }}
+  vars:
+    vpn_wireguard__openwrt_types: "{{ vpn_wireguard__openwrt_show.result | regex_findall('(?m)^network[.]([^.=]+)=([A-Za-z0-9_-]+)$') }}"
+    vpn_wireguard__openwrt_declared: "{{ vpn_wireguard__networks | map(attribute='interface') | map('string') | list }}"
+    vpn_wireguard__openwrt_undeclared: >-
+      {{ vpn_wireguard__openwrt_show.result
+         | regex_findall("(?m)^network[.]([^.=]+)[.]proto='wireguard'$")
+         | reject('in', vpn_wireguard__openwrt_declared) | list }}
+
+- name: 'Show the sections to delete'
+  ansible.builtin.debug:
+    var: 'vpn_wireguard__openwrt_delete'
+
+- name: 'Delete the undeclared sections'
+  community.openwrt.uci:
+    command: 'delete'
+    key: "network.{{ item }}"
+  loop: "{{ vpn_wireguard__openwrt_delete }}"
+  register: 'vpn_wireguard__openwrt_deleted'
+  when: vpn_wireguard__networks_prune | bool
+
+- name: 'Read the pending changes of the network configuration'
+  community.openwrt.uci:
+    command: 'changes'
+    config: 'network'
+  register: 'vpn_wireguard__openwrt_pending'
+  no_log: true
+  check_mode: false
+
+# The backup contains the configuration before this change, it is only written before a commit
+- name: 'Create the backup directory on the controller'
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+    state: 'directory'
+    mode: '0700'
+  delegate_to: 'localhost'
+  check_mode: false
+  when: vpn_wireguard__openwrt_pending.changes | default({}) | length > 0
+
+- name: 'Store the backup on the controller (secrets redacted)'
+  ansible.builtin.copy:
+    content: >-
+      {{ vpn_wireguard__openwrt_current.content | b64decode
+         | regex_replace('(?m)^(\s*option\s+(' ~ vpn_wireguard__openwrt_secret_options | join('|') ~ ')\s+).*$', "\g<1>'REDACTED'") }}
+    dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/network"
+    mode: '0600'
+  delegate_to: 'localhost'
+  no_log: true
+  check_mode: false
+  when: vpn_wireguard__openwrt_pending.changes | default({}) | length > 0
+
+- name: 'Commit the network configuration'
+  community.openwrt.uci:
+    command: 'commit'
+    config: 'network'
+  when: vpn_wireguard__openwrt_pending.changes | default({}) | length > 0
+
+# netifd loads its protocol handlers only at its start, after the installation of wireguard-tools
+# the network is restarted once, all interfaces restart shortly
+- name: 'Restart the network after the installation of WireGuard'
+  when:
+    - vpn_wireguard__openwrt_installed | bool
+    - not ansible_check_mode
+  vars:
+    vpn_wireguard__openwrt_installed: "{{ vpn_wireguard__openwrt_apk is changed or vpn_wireguard__openwrt_opkg is changed }}"
+  block:
+
+    - name: 'Restart the network'
+      community.openwrt.nohup:
+        command: '/etc/init.d/network restart'
+        delay: 1
+
+    - name: 'Wait for the connection after the restart of the network'
+      community.openwrt.wait_for_connection:
+        timeout: "{{ vpn_wireguard__openwrt_wait_for_connection_timeout }}"
+        delay: 5
+      when: vpn_wireguard__openwrt_wait_for_connection | bool
+
+# netifd takes over new, removed and changed interface sections at the reload, it does not see changed peers.
+# The handler of OpenWrt 25.12 and later takes changed peers with renew (wg syncconf, the link stays),
+# older handlers need ifup (down and up). ifup on an interface netifd restarts itself can remove the link.
+- name: 'Apply the network configuration'
+  when:
+    - vpn_wireguard__openwrt_pending.changes | default({}) | length > 0
+    - not ansible_check_mode
+    - not (vpn_wireguard__openwrt_apk is changed or vpn_wireguard__openwrt_opkg is changed)
+  vars:
+    vpn_wireguard__openwrt_declared: "{{ vpn_wireguard__networks | map(attribute='interface') | map('string') | list }}"
+    vpn_wireguard__openwrt_changed_interfaces: >-
+      {{ vpn_wireguard__openwrt_set.results | select('changed') | selectattr('item.type', 'eq', 'interface')
+         | map(attribute='item.interface') | list }}
+    # Declared interfaces with changed or deleted peers and an unchanged interface section
+    vpn_wireguard__openwrt_changed_peers: >-
+      {{ ((vpn_wireguard__openwrt_set.results | select('changed') | selectattr('item.type', 'ne', 'interface')
+           | map(attribute='item.interface') | list)
+          + (vpn_wireguard__openwrt_deleted.results | default([]) | select('changed') | map(attribute='item')
+             | select('match', '^@wireguard_') | map('regex_replace', '^@wireguard_', '') | map('split', '[') | map('first') | list))
+         | select('in', vpn_wireguard__openwrt_declared) | reject('in', vpn_wireguard__openwrt_changed_interfaces) | unique | list }}
+    vpn_wireguard__openwrt_renew: "{{ 'renew=yes' in vpn_wireguard__openwrt_tools.stdout_lines | map('trim') }}"
+  block:
+
+    - name: 'Reload the network configuration'
+      community.openwrt.command:
+        cmd: 'ubus call network reload'
+
+    - name: 'Renew the WireGuard interfaces with changed peers'
+      community.openwrt.command:
+        cmd: "ubus call network.interface.{{ item }} renew"
+      loop: "{{ vpn_wireguard__openwrt_changed_peers if vpn_wireguard__openwrt_renew | bool else [] }}"
+
+    - name: 'Restart the WireGuard interfaces with changed peers'
+      community.openwrt.command:
+        cmd: "ifup {{ item }}"
+      loop: "{{ [] if vpn_wireguard__openwrt_renew | bool else vpn_wireguard__openwrt_changed_peers }}"
+
+# Fails with the log of netifd if an interface does not come up
+- name: 'Wait for the WireGuard interfaces'
+  ansible.builtin.raw: >-
+    ifstatus {{ item }} | grep -q '"up": true' && wg show {{ item }} listen-port >/dev/null 2>&1
+    && echo 'state=up' || { echo 'state=down'; ifstatus {{ item }}; logread -e netifd -e wireguard | tail -n 30; }
+  loop: "{{ vpn_wireguard__networks | map(attribute='interface') | map('string') | list }}"
+  register: 'vpn_wireguard__openwrt_state'
+  until: "'state=up' in vpn_wireguard__openwrt_state.stdout_lines | map('trim')"
+  retries: 10
+  delay: 3
+  changed_when: false
+  failed_when: "'state=up' not in vpn_wireguard__openwrt_state.stdout_lines | map('trim')"
+  when:
+    - not ansible_check_mode
+    - vpn_wireguard__openwrt_pending.changes | default({}) | length > 0
+      or vpn_wireguard__openwrt_apk is changed or vpn_wireguard__openwrt_opkg is changed

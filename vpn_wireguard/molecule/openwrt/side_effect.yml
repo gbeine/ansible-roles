@@ -1,0 +1,77 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    vpn_wireguard__test_case: "{{ vpn_wireguard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    vpn_wireguard__test_network: "{{ vpn_wireguard__test_case.role_vars.wireguard_networks[0] }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ vpn_wireguard__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the network configuration before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/network'
+      register: 'vpn_wireguard__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run vpn_wireguard with postup (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wireguard_networks: ["{{ vpn_wireguard__test_network | combine({'postup': 'iptables -A FORWARD -i wg0 -j ACCEPT'}) }}"]
+        vpn_wireguard__test_invalid:
+          message: 'postup'
+          search: '^postup and postdown are not supported on OpenWrt, use /etc/config/firewall: wg0$'
+
+    - name: 'Run vpn_wireguard with an interface name OpenWrt does not accept (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wireguard_networks: ["{{ vpn_wireguard__test_network | combine({'interface': 'wg-0'}) }}"]
+        vpn_wireguard__test_invalid:
+          message: 'an interface name with a dash'
+          search: '^interface names need 1 to 15 letters, digits or underscores on OpenWrt: wg-0$'
+
+    - name: 'Run vpn_wireguard with an endpoint without port (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wireguard_networks:
+          - "{{ vpn_wireguard__test_network | combine({'peers': [vpn_wireguard__test_network.peers[0] | combine({'endpoint': 'vpn.example.org'})]}) }}"
+        vpn_wireguard__test_invalid:
+          message: 'an endpoint without port'
+          search: '^wireguard_networks has invalid entries: wg0 [(]peer 1 endpoint has to be host:port or .address.:port[)]$'
+
+    - name: 'Run vpn_wireguard with two peers with the same public key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wireguard_networks:
+          - "{{ vpn_wireguard__test_network | combine({'peers': [vpn_wireguard__test_network.peers[0], vpn_wireguard__test_network.peers[0]]}) }}"
+        vpn_wireguard__test_invalid:
+          message: 'two peers with the same public key'
+          search: '^wireguard_networks has invalid entries: wg0 [(]public_key used by more than one peer '
+
+    # A changed peer has to be applied, verify checks the allowed IPs of the running interface
+    - name: 'Change a peer'
+      when: vpn_wireguard__test_case.updated_role_vars is defined
+      block:
+
+        - name: 'Set the updated role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ vpn_wireguard__test_case.updated_role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run vpn_wireguard with the changed peer'
+          ansible.builtin.include_role:
+            name: 'vpn_wireguard'

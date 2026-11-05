@@ -4,125 +4,98 @@
   tags: [ 'vpn', 'vpn_wireguard' ]
   block:
 
-    - name: 'Include OS-specific variables'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}.yml"
-
-    - name: 'Validate wireguard_networks entries'
+    - name: 'Validate wireguard_networks'
       ansible.builtin.assert:
         that:
-          - item.interface is defined
-          - item.address is defined
-          - item.private_key is defined
-          - item.peers is defined
-          - item.peers is sequence and item.peers is not string
-          - item.peers | rejectattr('public_key', 'defined') | list | length == 0
-          - item.peers | rejectattr('allowed_ips', 'defined') | list | length == 0
+          - vpn_wireguard__networks_valid | bool
+          - vpn_wireguard__networks_invalid | length == 0
+        # Only the failing checks are reported
         fail_msg: >-
-          WireGuard network {{ item.interface | default('?') }} needs interface, address, private_key and peers,
-          every peer needs public_key and allowed_ips
+          {{ [ ('wireguard_networks has to be a list of dictionaries: ' ~ vpn_wireguard__networks)
+                 if not vpn_wireguard__networks_valid | bool else '',
+               ('wireguard_networks has invalid entries: ' ~ vpn_wireguard__networks_invalid | join(', '))
+                 if vpn_wireguard__networks_invalid | length > 0 else '' ]
+             | select | join('. ') }}
         quiet: true
-      loop: "{{ vpn_wireguard__networks }}"
-      loop_control:
-        label: "{{ item.interface | default('?') }}"
+      vars:
+        vpn_wireguard__networks_valid: >-
+          {{ vpn_wireguard__networks is sequence and vpn_wireguard__networks is not string
+             and vpn_wireguard__networks is not mapping
+             and vpn_wireguard__networks | reject('mapping') | list | length == 0 }}
+        # Strings must not contain line breaks, they would add further lines to the configuration
+        vpn_wireguard__networks_invalid: >-
+          {%- set ns = namespace(invalid=[]) -%}
+          {#- [address]:port or host:port, the first character of [address] is checked separately -#}
+          {%- set endpoint = '^(.[0-9A-Fa-f:.]+[]]|[^ :[]+):[0-9]{1,5}$' -%}
+          {%- for network in (vpn_wireguard__networks if vpn_wireguard__networks_valid | bool else []) -%}
+          {%-   set reasons = [] -%}
+          {%-   for key in vpn_wireguard__network_required if network[key] is not defined -%}
+          {%-     set _ = reasons.append('needs ' ~ key) -%}
+          {%-   endfor -%}
+          {%-   for key, value in network.items() if key != 'peers' -%}
+          {%-     set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
+          {%-     if key not in vpn_wireguard__network_options -%}
+          {%-       set _ = reasons.append('unknown option ' ~ key) -%}
+          {%-     elif key in vpn_wireguard__boolean_options and value is not boolean -%}
+          {%-       set _ = reasons.append(key ~ ' has to be a boolean') -%}
+          {%-     elif key in vpn_wireguard__number_options and (value is boolean or value | string is not match('^[0-9]+$')) -%}
+          {%-       set _ = reasons.append(key ~ ' has to be a number') -%}
+          {%-     elif value is mapping or (value is not string and value is not number and key not in vpn_wireguard__list_options)
+                       or values | reject('string') | reject('number') | list | length > 0
+                       or values | map('string') | select('search', '\n') | list | length > 0 -%}
+          {%-       set _ = reasons.append('invalid ' ~ key) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   set peers = network.peers | default([]) -%}
+          {%-   if peers is not sequence or peers is string or peers is mapping or peers | reject('mapping') | list | length > 0 -%}
+          {%-     set _ = reasons.append('peers has to be a list of dictionaries') -%}
+          {%-     set peers = [] -%}
+          {%-   endif -%}
+          {%-   for peer in peers -%}
+          {%-     set label = 'peer ' ~ peer.description | default(loop.index) -%}
+          {%-     for key in vpn_wireguard__peer_required if peer[key] is not defined -%}
+          {%-       set _ = reasons.append(label ~ ' needs ' ~ key) -%}
+          {%-     endfor -%}
+          {%-     for key, value in peer.items() -%}
+          {%-       if key not in vpn_wireguard__peer_options -%}
+          {%-         set _ = reasons.append(label ~ ' has unknown option ' ~ key) -%}
+          {%-       elif key in vpn_wireguard__boolean_options and value is not boolean -%}
+          {%-         set _ = reasons.append(label ~ ' ' ~ key ~ ' has to be a boolean') -%}
+          {%-       elif key in vpn_wireguard__number_options and (value is boolean or value | string is not match('^[0-9]+$')) -%}
+          {%-         set _ = reasons.append(label ~ ' ' ~ key ~ ' has to be a number') -%}
+          {%-       elif value is mapping or (value is not string and value is not number) or value | string is search('\n') -%}
+          {%-         set _ = reasons.append(label ~ ' invalid ' ~ key) -%}
+          {%-       elif key == 'endpoint' and (value | string is not match(endpoint)
+                                            or (value | string).startswith('[') != (']:' in value | string)) -%}
+          {%-         set _ = reasons.append(label ~ ' endpoint has to be host:port or [address]:port') -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endfor -%}
+          {%-   set keys = peers | selectattr('public_key', 'defined') | map(attribute='public_key') | list -%}
+          {%-   for key in keys | unique if keys | select('equalto', key) | list | length > 1 -%}
+          {%-     set _ = reasons.append('public_key used by more than one peer ' ~ key[:8] ~ '...') -%}
+          {%-   endfor -%}
+          {%-   if reasons | length > 0 -%}
+          {%-     set ns.invalid = ns.invalid + [ network.interface | default('#' ~ loop.index) ~ ' (' ~ reasons | join(', ') ~ ')' ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.invalid }}
 
-    - name: 'Install packages'
-      ansible.builtin.apt:
-        update_cache: true
-        install_recommends: false
-        pkg: "{{ vpn_wireguard__packages }}"
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'vpn_wireguard__release_file'
+      changed_when: false
+      check_mode: false
 
-    - name: 'Generate configuration files'
-      ansible.builtin.copy:
-        content: |
-          #
-          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
-          #
+    - name: 'Set the platform'
+      ansible.builtin.set_fact:
+        vpn_wireguard__openwrt: "{{ vpn_wireguard__release_file.stdout is search('DISTRIB_ID=.?OpenWrt') }}"
 
-          [Interface]
-          PrivateKey = {{ item.private_key }}
-          Address = {{ item.address }}
-          {% if item.listen_port is defined %}
-          ListenPort = {{ item.listen_port }}
-          {% endif %}
-          {% if item.mtu is defined %}
-          MTU = {{ item.mtu }}
-          {% endif %}
-          {% if item.postup is defined %}
-          PostUp = {{ item.postup }}
-          {% endif %}
-          {% if item.postdown is defined %}
-          PostDown = {{ item.postdown }}
-          {% endif %}
-          {% for peer in item.peers %}
+    - name: 'Configure WireGuard with wg-quick on Debian'
+      ansible.builtin.include_tasks: 'debian.yml'
+      when: not vpn_wireguard__openwrt | bool
 
-          [Peer]
-          PublicKey = {{ peer.public_key }}
-          {% if peer.preshared_key is defined %}
-          PresharedKey = {{ peer.preshared_key }}
-          {% endif %}
-          AllowedIPs = {{ peer.allowed_ips }}
-          {% if peer.endpoint is defined %}
-          Endpoint = {{ peer.endpoint }}
-          {% endif %}
-          {% if peer.persistent_keepalive is defined %}
-          PersistentKeepalive = {{ peer.persistent_keepalive }}
-          {% endif %}
-          {% endfor %}
-        dest: "{{ vpn_wireguard__etc_dir }}/{{ item.interface }}.conf"
-        owner: 'root'
-        group: 'root'
-        mode: '640'
-      diff: false
-      loop: "{{ vpn_wireguard__networks }}"
-      loop_control:
-        label: "{{ item.interface }}"
-      register: 'vpn_wireguard__create_config_result'
-      notify:
-        - 'Restart WireGuard'
-
-    - name: 'Enable service'
-      ansible.builtin.systemd_service:
-        name: "wg-quick@{{ item.interface }}"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
-      loop: "{{ vpn_wireguard__networks }}"
-      loop_control:
-        label: "{{ item.interface }}"
-      when: 'not ansible_check_mode'
-
-    - name: 'Remove undeclared interfaces'
-      when: vpn_wireguard__networks_prune | bool
-      block:
-
-        - name: 'Find configuration files'
-          ansible.builtin.find:
-            paths: "{{ vpn_wireguard__etc_dir }}"
-            patterns: '*.conf'
-          register: 'vpn_wireguard__configs'
-
-        - name: 'Determine undeclared interfaces'
-          ansible.builtin.set_fact:
-            vpn_wireguard__undeclared: >-
-              {{ vpn_wireguard__configs.files | map(attribute='path') | map('basename') | map('regex_replace', '\.conf$', '')
-                 | reject('in', vpn_wireguard__networks | map(attribute='interface') | list) | list }}
-
-        - name: 'Stop and disable undeclared interfaces'
-          ansible.builtin.systemd_service:
-            name: "wg-quick@{{ item }}"
-            state: 'stopped'
-            enabled: false
-          loop: "{{ vpn_wireguard__undeclared }}"
-          failed_when: false
-          when: 'not ansible_check_mode'
-
-        - name: 'Delete configuration files of undeclared interfaces'
-          ansible.builtin.file:
-            path: "{{ vpn_wireguard__etc_dir }}/{{ item }}.conf"
-            state: absent
-          loop: "{{ vpn_wireguard__undeclared }}"
+    - name: 'Configure WireGuard on OpenWrt'
+      ansible.builtin.include_tasks: 'openwrt.yml'
+      when: vpn_wireguard__openwrt | bool

@@ -1,0 +1,54 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    vpn_wireguard__test_case: "{{ vpn_wireguard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    vpn_wireguard__test_expect: "{{ vpn_wireguard__test_case.expect }}"
+
+  tasks:
+
+    # The keys are filtered out, the output appears in the messages of failed assertions
+    - name: 'Read the network configuration and the state of wg0'
+      ansible.builtin.raw: >-
+        {% for key in vpn_wireguard__test_expect.uci %}echo "{{ key }}=$(uci -q get {{ key }} || echo absent)";{% endfor %}
+        echo '---';
+        uci show network | grep -v -e private_key -e preshared_key | sed "s/'//g";
+        echo '---';
+        echo "listen_port=$(wg show wg0 listen-port)";
+        echo "peers=$(wg show wg0 peers | wc -l)";
+        echo "allowed_ips=$(wg show wg0 allowed-ips | cut -f2 | tr '\n' ' ')";
+        echo "link_wgold=$(ip link show wgold >/dev/null 2>&1 && echo present || echo absent)"
+      register: 'vpn_wireguard__test_state'
+      changed_when: false
+
+    - name: 'Assert the network configuration and the state of wg0'
+      vars:
+        vpn_wireguard__test_parts: "{{ vpn_wireguard__test_state.stdout.split('---') }}"
+        vpn_wireguard__test_uci: >-
+          {{ dict(vpn_wireguard__test_parts[0].splitlines() | map('trim') | select('search', '=') | map('split', '=', 1) | list) }}
+        vpn_wireguard__test_lines: "{{ vpn_wireguard__test_parts[1].splitlines() | map('trim') | select | list }}"
+        vpn_wireguard__test_wg: >-
+          {{ dict(vpn_wireguard__test_parts[2].splitlines() | map('trim') | select('search', '=') | map('split', '=', 1) | list) }}
+        vpn_wireguard__test_peer_lines: "{{ vpn_wireguard__test_lines | select('search', '=wireguard_wg0$') | list }}"
+      ansible.builtin.assert:
+        that:
+          - vpn_wireguard__test_uci == vpn_wireguard__test_expect.uci
+          - vpn_wireguard__test_expect.peer_lines | difference(vpn_wireguard__test_lines) | length == 0
+          - vpn_wireguard__test_peer_lines | length == vpn_wireguard__test_expect.peer_sections
+          - vpn_wireguard__test_lines | select('search', vpn_wireguard__test_expect.peers_absent | join('|') | default('(?!)', true)) | list | length == 0
+          - vpn_wireguard__test_expect.wg.listen_port == '' or vpn_wireguard__test_wg.listen_port == vpn_wireguard__test_expect.wg.listen_port
+          - vpn_wireguard__test_wg.peers | int == vpn_wireguard__test_expect.wg.peers
+          - vpn_wireguard__test_expect.wg.allowed_ips in vpn_wireguard__test_wg.allowed_ips
+          - vpn_wireguard__test_wg.link_wgold == 'absent'
+        fail_msg: >-
+          uci: {{ vpn_wireguard__test_uci }},
+          missing: {{ vpn_wireguard__test_expect.peer_lines | difference(vpn_wireguard__test_lines) | join(', ') | default('none', true) }},
+          peer sections: {{ vpn_wireguard__test_peer_lines | length }},
+          wg: {{ vpn_wireguard__test_wg }},
+          configuration: {{ vpn_wireguard__test_lines | select('search', 'wg|wireguard|molecule') | join(', ') }}
