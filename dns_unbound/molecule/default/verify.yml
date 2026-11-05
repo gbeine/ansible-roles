@@ -26,9 +26,11 @@
           - dns_unbound__expect.ip6 is none or ('IP6=' + dns_unbound__expect.ip6) in dns_unbound__test_quadlet_lines
           - dns_unbound__expect.ip6 is not none or dns_unbound__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - ('Network=' + dns_unbound__test_case.role_vars.unbound_network) in dns_unbound__test_quadlet_lines
+          - dns_unbound__test_quadlet_volume in dns_unbound__test_quadlet_lines
         fail_msg: "{{ dns_unbound__test_quadlet.content | b64decode }}"
       vars:
         dns_unbound__test_quadlet_lines: "{{ (dns_unbound__test_quadlet.content | b64decode).splitlines() }}"
+        dns_unbound__test_quadlet_volume: "Volume={{ dns_unbound__test_case.role_vars.unbound_home }}/unbound.conf:/etc/unbound/unbound.conf:ro"
 
     - name: 'Read the state of the unbound service'
       ansible.builtin.command: 'systemctl is-active unbound'
@@ -75,3 +77,62 @@
           - "'status: NOERROR' in dns_unbound__test_dig.stdout"
           - dns_unbound__test_dig.stdout_lines | select('match', '^example\\.org\\.\\s+\\d+\\s+IN\\s+A\\s') | list | length > 0
         fail_msg: "{{ dns_unbound__test_dig.stdout | default(dns_unbound__test_dig.stderr) }}"
+
+    - name: 'Read the configuration'
+      ansible.builtin.stat:
+        path: "{{ dns_unbound__test_config_file }}"
+      register: 'dns_unbound__test_config_stat'
+
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "{{ dns_unbound__test_config_file }}"
+      register: 'dns_unbound__test_config'
+
+    # Lines without indentation and comments; expected lines have to be there, absent lines must not
+    - name: 'Assert the configuration'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__test_config_stat.stat.mode == '0644'
+          - dns_unbound__expect.config | difference(dns_unbound__test_config_lines) | length == 0
+          - dns_unbound__test_config_lines | select('search', dns_unbound__expect.config_absent | map('regex_escape') | join('|')) | list | length == 0
+        fail_msg: "{{ dns_unbound__test_config.content | b64decode }}"
+      vars:
+        dns_unbound__test_config_lines: >-
+          {{ (dns_unbound__test_config.content | b64decode).splitlines() | map('trim') | reject('match', '#') | select | list }}
+
+    - name: 'Check the forwarding'
+      when: dns_unbound__expect.forwarder_ips is defined
+      block:
+
+        - name: 'Read the PID of the unbound container'
+          ansible.builtin.command: "podman inspect unbound --format '{{ '{{' }}.State.Pid{{ '}}' }}'"
+          register: 'dns_unbound__test_container_pid'
+          changed_when: false
+
+        # The connections of the container are only visible in its network namespace,
+        # Unbound keeps the TLS session to the forwarder open for a while after the query
+        - name: 'Resolve example.net through unbound and look for the TLS session to the forwarder'
+          ansible.builtin.shell: >-
+            dig @{{ dns_unbound__expect.ip }} example.net A +time=3 +tries=1
+            && nsenter -t {{ dns_unbound__test_container_pid.stdout }} -n ss -Htn state established '( dport = :853 )'
+          register: 'dns_unbound__test_forwarder_session'
+          changed_when: false
+          failed_when: false
+          until: >-
+            dns_unbound__test_forwarder_session.rc == 0
+            and 'status: NOERROR' in dns_unbound__test_forwarder_session.stdout
+            and dns_unbound__test_forwarder_session.stdout_lines | select('search', dns_unbound__test_forwarder_pattern) | list | length > 0
+          retries: 15
+          delay: 2
+          vars:
+            dns_unbound__test_forwarder_pattern: "({{ dns_unbound__expect.forwarder_ips | map('regex_escape') | join('|') }}):853"
+
+        - name: 'Assert the answer came through a TLS session to the forwarder'
+          ansible.builtin.assert:
+            that:
+              - dns_unbound__test_forwarder_session.rc == 0
+              - "'status: NOERROR' in dns_unbound__test_forwarder_session.stdout"
+              - dns_unbound__test_forwarder_session.stdout_lines | select('search', dns_unbound__test_forwarder_pattern) | list | length > 0
+            fail_msg: "{{ dns_unbound__test_forwarder_session.stdout | default(dns_unbound__test_forwarder_session.stderr) }}"
+          vars:
+            dns_unbound__test_forwarder_pattern: "({{ dns_unbound__expect.forwarder_ips | map('regex_escape') | join('|') }}):853"

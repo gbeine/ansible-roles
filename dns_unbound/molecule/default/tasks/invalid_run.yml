@@ -1,0 +1,39 @@
+---
+# Runs dns_unbound with the invalid role variables passed as include parameters,
+# the role has to fail at the validation before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run dns_unbound with invalid variables (expect ERROR): {{ dns_unbound__test_invalid.message }}"
+  block:
+
+    - name: 'Run dns_unbound, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'dns_unbound'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ dns_unbound__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksums of the quadlet unit and the configuration after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: [ "{{ dns_unbound__test_quadlet_path }}", "{{ dns_unbound__test_config_file }}" ]
+      register: 'dns_unbound__test_md5_after'
+
+    # The validation of the template reports the output of unbound-checkconf in stderr
+    - name: 'Assert the run failed at the validation before any change'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__test_failure is search(dns_unbound__test_invalid.search, multiline=true)
+          - dns_unbound__test_md5_before_sums | select | list | length == 2
+          - dns_unbound__test_md5_after_sums == dns_unbound__test_md5_before_sums
+        fail_msg: >-
+          Failure: {{ dns_unbound__test_failure }}
+          Checksums before: {{ dns_unbound__test_md5_before_sums | join(', ') }}, after: {{ dns_unbound__test_md5_after_sums | join(', ') }}.
+      vars:
+        dns_unbound__test_failure: "{{ ansible_failed_result.msg | default('') }}\n{{ ansible_failed_result.stderr | default('') }}"
+        dns_unbound__test_md5_before_sums: "{{ dns_unbound__test_md5_before.results | map(attribute='stat.checksum', default='') | list }}"
+        dns_unbound__test_md5_after_sums: "{{ dns_unbound__test_md5_after.results | map(attribute='stat.checksum', default='') | list }}"
