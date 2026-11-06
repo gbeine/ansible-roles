@@ -49,7 +49,8 @@ Empty lists give empty files like the delivery, domains added in LuCI are remove
 
 ### Validation
 
-The role checks before any change that `adblock_config` is a dictionary of known options with values of their type,
+`adblock_config` has to be a dictionary, otherwise merging it with the default fails.
+The role checks before any change that the options of `adblock_config` are known options with values of their type,
 booleans, numbers in range, the values of a choice, lists of strings and no line breaks,
 that the lists are lists of domains of letters, digits, `_`, `*`, `.` and `-` and that no domain is in both lists.
 The feeds are checked against the feed files on the host after the installation of the package, also before any change.
