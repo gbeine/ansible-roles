@@ -1,0 +1,64 @@
+---
+- name: 'Side effect'
+  hosts: 'molecule-otelcol-contrib'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_opentelemetry_collector__test_case: "{{ monitoring_opentelemetry_collector__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Read the configuration before the update'
+      ansible.builtin.stat:
+        path: '/etc/otelcol-contrib/config.yaml'
+        get_checksum: true
+      register: 'monitoring_opentelemetry_collector__test_config_before'
+
+    - name: 'Set the role variables with the newer release'
+      ansible.builtin.set_fact:
+        otelcol_distribution: "{{ monitoring_opentelemetry_collector__test_case.role_vars.otelcol_distribution }}"
+        otelcol_version: "{{ monitoring_opentelemetry_collector__test_case.side_effect.otelcol_version }}"
+        otelcol_config: "{{ monitoring_opentelemetry_collector__test_case.role_vars.otelcol_config }}"
+
+    - name: 'Run monitoring_opentelemetry_collector with the newer release'
+      ansible.builtin.include_role:
+        name: 'monitoring_opentelemetry_collector'
+
+    - name: 'Read the configuration after the update'
+      ansible.builtin.stat:
+        path: '/etc/otelcol-contrib/config.yaml'
+        get_checksum: true
+      register: 'monitoring_opentelemetry_collector__test_config_updated'
+
+    - name: 'Assert the update kept the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_config_updated.stat.checksum == monitoring_opentelemetry_collector__test_config_before.stat.checksum
+        fail_msg: 'The update of the package changed the configuration'
+
+    - name: 'Run monitoring_opentelemetry_collector with invalid variables (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      loop:
+        - message: 'an unknown distribution'
+          search: '^otelcol_distribution has to be one of otelcol, otelcol-contrib: otelcol-otlp$'
+          role_vars:
+            otelcol_distribution: 'otelcol-otlp'
+        - message: 'a version without patch level'
+          search: "^otelcol_version has to be 'latest' or a release like 0[.]164[.]0: 0[.]164$"
+          role_vars:
+            otelcol_version: '0.164'
+        - message: 'a configuration that is no mapping'
+          search: '^otelcol_config has to be a mapping that is not empty$'
+          role_vars:
+            otelcol_config: [ 'receivers' ]
+        - message: 'a configuration with an unknown receiver'
+          search: 'failed to validate'
+          role_vars:
+            otelcol_config: >-
+              {{ monitoring_opentelemetry_collector__test_contrib_config | combine({'receivers': {'molecule_unknown': {}}}, recursive=true) }}
+      loop_control:
+        loop_var: 'monitoring_opentelemetry_collector__test_invalid'
+        label: "{{ monitoring_opentelemetry_collector__test_invalid.message }}"

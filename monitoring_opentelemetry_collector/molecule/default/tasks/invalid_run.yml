@@ -1,0 +1,44 @@
+---
+# Runs monitoring_opentelemetry_collector with the invalid variables in monitoring_opentelemetry_collector__test_invalid.role_vars,
+# the role has to fail before it changes the configuration
+
+- name: "Run monitoring_opentelemetry_collector with invalid variables (expect ERROR): {{ monitoring_opentelemetry_collector__test_invalid.message }}"
+  block:
+
+    - name: 'Set the invalid role variables (expect ERROR)'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_opentelemetry_collector__test_invalid.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_opentelemetry_collector, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'monitoring_opentelemetry_collector'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ monitoring_opentelemetry_collector__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the configuration after the invalid run'
+      ansible.builtin.stat:
+        path: '/etc/otelcol-contrib/config.yaml'
+        get_checksum: true
+      register: 'monitoring_opentelemetry_collector__test_config_after'
+
+    - name: 'Assert the run failed with the expected message before the configuration changed'
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(monitoring_opentelemetry_collector__test_invalid.search, ignorecase=false)
+          - monitoring_opentelemetry_collector__test_config_after.stat.checksum == monitoring_opentelemetry_collector__test_config_before.stat.checksum
+        fail_msg: "Failure: {{ ansible_failed_result.msg | default('') }}"
+
+  always:
+
+    - name: 'Restore the role variables of the test case'
+      ansible.builtin.set_fact:
+        otelcol_distribution: "{{ monitoring_opentelemetry_collector__test_case.role_vars.otelcol_distribution }}"
+        otelcol_version: "{{ monitoring_opentelemetry_collector__test_case.side_effect.otelcol_version }}"
+        otelcol_config: "{{ monitoring_opentelemetry_collector__test_case.role_vars.otelcol_config }}"

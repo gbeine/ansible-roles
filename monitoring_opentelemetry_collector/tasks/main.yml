@@ -1,0 +1,175 @@
+---
+
+- name: 'Install and configure the OpenTelemetry Collector'
+  tags: [ 'monitoring', 'monitoring_opentelemetry_collector' ]
+  vars:
+    monitoring_opentelemetry_collector__other_distributions: >-
+      {{ monitoring_opentelemetry_collector__distributions | reject('eq', monitoring_opentelemetry_collector__distribution) | list }}
+    monitoring_opentelemetry_collector__config_file: "/etc/{{ monitoring_opentelemetry_collector__distribution }}/config.yaml"
+    # The package restarts the collector on its installation, the configuration is written afterwards
+    monitoring_opentelemetry_collector__restart_needed: "{{ monitoring_opentelemetry_collector__config_result is changed }}"
+    monitoring_opentelemetry_collector__installed_version: >-
+      {{ (ansible_facts['packages'][monitoring_opentelemetry_collector__distribution] | default([{}]) | first).version | default('') }}
+    monitoring_opentelemetry_collector__package: >-
+      {{ monitoring_opentelemetry_collector__distribution ~ '_' ~ monitoring_opentelemetry_collector__release
+         ~ '_linux_' ~ monitoring_opentelemetry_collector__architecture ~ '.deb' }}
+    monitoring_opentelemetry_collector__package_url: >-
+      {{ monitoring_opentelemetry_collector__download_url ~ '/v' ~ monitoring_opentelemetry_collector__release
+         ~ '/' ~ monitoring_opentelemetry_collector__package }}
+  block:
+
+    - name: 'Validate the variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_opentelemetry_collector__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_opentelemetry_collector__invalid: >-
+          {{ [ ('otelcol_distribution has to be one of ' ~ monitoring_opentelemetry_collector__distributions | join(', ')
+                ~ ': ' ~ monitoring_opentelemetry_collector__distribution)
+                 if monitoring_opentelemetry_collector__distribution is not string
+                    or monitoring_opentelemetry_collector__distribution not in monitoring_opentelemetry_collector__distributions else '',
+               ("otelcol_version has to be 'latest' or a release like 0.164.0: " ~ monitoring_opentelemetry_collector__version)
+                 if monitoring_opentelemetry_collector__version is not string
+                    or monitoring_opentelemetry_collector__version is not match('^(latest|v?[0-9]+[.][0-9]+[.][0-9]+)$') else '',
+               'otelcol_config has to be a mapping that is not empty'
+                 if monitoring_opentelemetry_collector__config is not mapping or monitoring_opentelemetry_collector__config | length == 0 else '' ]
+             | select | list }}
+
+    - name: 'Read the architecture of dpkg'
+      ansible.builtin.command: 'dpkg --print-architecture'
+      register: 'monitoring_opentelemetry_collector__dpkg_architecture'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Set the architecture of the package'
+      ansible.builtin.set_fact:
+        monitoring_opentelemetry_collector__architecture: >-
+          {{ monitoring_opentelemetry_collector__architectures[monitoring_opentelemetry_collector__dpkg_architecture.stdout | trim] | default('') }}
+
+    - name: 'Validate the architecture'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__architecture | length > 0
+        fail_msg: >-
+          No package of the OpenTelemetry Collector for the architecture {{ monitoring_opentelemetry_collector__dpkg_architecture.stdout | trim }},
+          supported are {{ monitoring_opentelemetry_collector__architectures.keys() | join(', ') }}
+        quiet: true
+
+    - name: 'Read the releases of the OpenTelemetry Collector'
+      ansible.builtin.uri:
+        url: "{{ monitoring_opentelemetry_collector__releases_url }}"
+        headers:
+          Accept: 'application/vnd.github+json'
+      register: 'monitoring_opentelemetry_collector__releases'
+      check_mode: false
+      when: monitoring_opentelemetry_collector__version == 'latest'
+
+    # latest is the newest release of the collector with a package for the distribution and the architecture
+    - name: 'Set the release'
+      ansible.builtin.set_fact:
+        monitoring_opentelemetry_collector__release: "{{ monitoring_opentelemetry_collector__release_json | trim | from_json }}"
+      vars:
+        monitoring_opentelemetry_collector__release_json: >-
+          {% if monitoring_opentelemetry_collector__version == 'latest' %}
+          {%   set ns = namespace(release='') %}
+          {%   for release in monitoring_opentelemetry_collector__releases.json | rejectattr('draft') | rejectattr('prerelease')
+                 if ns.release == '' and release.tag_name is match('^v[0-9]+[.][0-9]+[.][0-9]+$') %}
+          {%     set version = release.tag_name[1:] %}
+          {%     set package = monitoring_opentelemetry_collector__distribution ~ '_' ~ version ~ '_linux_'
+                            ~ monitoring_opentelemetry_collector__architecture ~ '.deb' %}
+          {%     if package in release.assets | map(attribute='name') %}
+          {%       set ns.release = version %}
+          {%     endif %}
+          {%   endfor %}
+          {{ ns.release | to_json }}
+          {% else %}
+          {{ monitoring_opentelemetry_collector__version | regex_replace('^v', '') | to_json }}
+          {% endif %}
+
+    - name: 'Validate the release'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__release | length > 0
+        fail_msg: >-
+          No release of the OpenTelemetry Collector with a package of {{ monitoring_opentelemetry_collector__distribution }}
+          for {{ monitoring_opentelemetry_collector__architecture }} in {{ monitoring_opentelemetry_collector__releases_url }}
+        quiet: true
+
+    - name: 'Gather the installed packages'
+      ansible.builtin.package_facts:
+        manager: 'apt'
+
+    # The distributions use the same ports with the default configuration, the other one is removed before the installation
+    - name: 'Remove the other distributions'
+      ansible.builtin.apt:
+        name: "{{ monitoring_opentelemetry_collector__other_distributions }}"
+        state: 'absent'
+        purge: true
+
+    # The package is downloaded only if the release is not installed, also in check mode to check the checksum
+    - name: 'Install the package of the release'
+      when: monitoring_opentelemetry_collector__installed_version != monitoring_opentelemetry_collector__release
+      block:
+
+        - name: 'Create a temporary directory for the package'
+          ansible.builtin.tempfile:
+            state: 'directory'
+            suffix: '.otelcol'
+          register: 'monitoring_opentelemetry_collector__tempdir'
+          check_mode: false
+
+        - name: 'Download the package and verify its checksum'
+          ansible.builtin.get_url:
+            url: "{{ monitoring_opentelemetry_collector__package_url }}"
+            dest: "{{ monitoring_opentelemetry_collector__tempdir.path }}/{{ monitoring_opentelemetry_collector__package }}"
+            checksum: "sha256:{{ monitoring_opentelemetry_collector__package_url }}.sha256"
+            mode: '0644'
+          check_mode: false
+
+        # apt uses force-confdef and force-confold, the managed configuration is kept
+        - name: 'Install the package'
+          ansible.builtin.apt:
+            deb: "{{ monitoring_opentelemetry_collector__tempdir.path }}/{{ monitoring_opentelemetry_collector__package }}"
+          register: 'monitoring_opentelemetry_collector__package_result'
+
+      always:
+
+        - name: 'Remove the temporary directory of the package'
+          ansible.builtin.file:
+            path: "{{ monitoring_opentelemetry_collector__tempdir.path }}"
+            state: 'absent'
+          check_mode: false
+          when: monitoring_opentelemetry_collector__tempdir.path is defined
+
+    # In check mode the package of a first installation is missing, there is no directory and no binary to validate
+    - name: 'Write the configuration'
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible (monitoring_opentelemetry_collector)
+          # To limit exposure to denial of service attacks, change the host in endpoints below from 0.0.0.0 to a specific network interface.
+          # See https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/security-best-practices.md#safeguards-against-denial-of-service-attacks
+
+          {{ monitoring_opentelemetry_collector__config | to_nice_yaml(indent=2, sort_keys=false) }}
+        dest: "{{ monitoring_opentelemetry_collector__config_file }}"
+        owner: 'root'
+        group: "{{ monitoring_opentelemetry_collector__groups[monitoring_opentelemetry_collector__distribution] }}"
+        mode: '0640'
+        validate: "/usr/bin/{{ monitoring_opentelemetry_collector__distribution }} validate --config=%s"
+      register: 'monitoring_opentelemetry_collector__config_result'
+      when: not ansible_check_mode or monitoring_opentelemetry_collector__installed_version | length > 0
+
+    - name: 'Enable and start the collector'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_opentelemetry_collector__distribution }}.service"
+        enabled: true
+        state: 'started'
+      when: not ansible_check_mode or monitoring_opentelemetry_collector__installed_version | length > 0
+
+    - name: 'Restart the collector with the changed configuration'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_opentelemetry_collector__distribution }}.service"
+        state: 'restarted'
+      when: monitoring_opentelemetry_collector__restart_needed | bool

@@ -1,0 +1,126 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+    # The default configuration of the role
+    - '../../defaults/main.yml'
+
+  vars:
+    monitoring_opentelemetry_collector__test_case: "{{ monitoring_opentelemetry_collector__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_opentelemetry_collector__test_expect: "{{ monitoring_opentelemetry_collector__test_case.expect }}"
+    monitoring_opentelemetry_collector__test_config: >-
+      {{ monitoring_opentelemetry_collector__config_default if monitoring_opentelemetry_collector__test_expect.config == 'default'
+         else monitoring_opentelemetry_collector__test_expect.config }}
+
+  tasks:
+
+    - name: 'Read the architecture of dpkg'
+      ansible.builtin.command: 'dpkg --print-architecture'
+      register: 'monitoring_opentelemetry_collector__test_architecture'
+      changed_when: false
+
+    - name: 'Read the releases of the OpenTelemetry Collector'
+      ansible.builtin.uri:
+        url: "{{ monitoring_opentelemetry_collector__releases_url }}"
+        headers:
+          Accept: 'application/vnd.github+json'
+      register: 'monitoring_opentelemetry_collector__test_releases'
+      when: monitoring_opentelemetry_collector__test_expect.version == 'latest'
+
+    - name: 'Set the expected version'
+      ansible.builtin.set_fact:
+        monitoring_opentelemetry_collector__test_version: "{{ monitoring_opentelemetry_collector__test_version_json | trim | from_json }}"
+      vars:
+        monitoring_opentelemetry_collector__test_version_json: >-
+          {% if monitoring_opentelemetry_collector__test_expect.version == 'latest' %}
+          {%   set ns = namespace(release='') %}
+          {%   for release in monitoring_opentelemetry_collector__test_releases.json | rejectattr('draft') | rejectattr('prerelease')
+                 if ns.release == '' and release.tag_name is match('^v[0-9]+[.][0-9]+[.][0-9]+$') %}
+          {%     set package = monitoring_opentelemetry_collector__test_expect.package ~ '_' ~ release.tag_name[1:] ~ '_linux_'
+                                ~ (monitoring_opentelemetry_collector__test_architecture.stdout | trim) ~ '.deb' %}
+          {%     if package in release.assets | map(attribute='name') %}{% set ns.release = release.tag_name[1:] %}{% endif %}
+          {%   endfor %}
+          {{ ns.release | to_json }}
+          {% else %}
+          {{ monitoring_opentelemetry_collector__test_expect.version | to_json }}
+          {% endif %}
+
+    - name: 'Read the installed distributions'
+      ansible.builtin.command:
+        argv: [ 'dpkg-query', '--show', '--showformat=${Version} ${db:Status-Status}', "{{ item }}" ]
+      loop: "{{ [monitoring_opentelemetry_collector__test_expect.package] + monitoring_opentelemetry_collector__test_expect.absent }}"
+      register: 'monitoring_opentelemetry_collector__test_packages'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the distribution is installed in the expected version and the other one is removed'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_version | length > 0
+          - monitoring_opentelemetry_collector__test_packages.results[0].stdout == monitoring_opentelemetry_collector__test_version ~ ' installed'
+          - >-
+            monitoring_opentelemetry_collector__test_packages.results[1:] | map(attribute='stdout')
+            | select('search', 'installed|config-files') | list | length == 0
+        fail_msg: >-
+          expected {{ monitoring_opentelemetry_collector__test_expect.package }} {{ monitoring_opentelemetry_collector__test_version }}:
+          {{ monitoring_opentelemetry_collector__test_packages.results | map(attribute='item')
+             | zip(monitoring_opentelemetry_collector__test_packages.results | map(attribute='stdout')) | list }}
+
+    - name: 'Read the state of the collector'
+      ansible.builtin.command:
+        argv: [ 'systemctl', "{{ item }}", "{{ monitoring_opentelemetry_collector__test_expect.package }}" ]
+      loop: [ 'is-active', 'is-enabled' ]
+      register: 'monitoring_opentelemetry_collector__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the collector is active and enabled'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_service.results[0].stdout == 'active'
+          - monitoring_opentelemetry_collector__test_service.results[1].stdout == 'enabled'
+        fail_msg: "{{ monitoring_opentelemetry_collector__test_service.results | map(attribute='stdout') | join(', ') }}"
+
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "/etc/{{ monitoring_opentelemetry_collector__test_expect.package }}/config.yaml"
+      register: 'monitoring_opentelemetry_collector__test_config_file'
+
+    - name: 'Read the attributes of the configuration'
+      ansible.builtin.stat:
+        path: "/etc/{{ monitoring_opentelemetry_collector__test_expect.package }}/config.yaml"
+      register: 'monitoring_opentelemetry_collector__test_config_stat'
+
+    - name: 'Assert the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_config_file.content | b64decode | from_yaml == monitoring_opentelemetry_collector__test_config
+          - monitoring_opentelemetry_collector__test_config_stat.stat.pw_name == 'root'
+          - monitoring_opentelemetry_collector__test_config_stat.stat.gr_name == monitoring_opentelemetry_collector__test_expect.group
+          - monitoring_opentelemetry_collector__test_config_stat.stat.mode == '0640'
+        fail_msg: "{{ monitoring_opentelemetry_collector__test_config_file.content | b64decode }}"
+
+    - name: 'Wait for the OTLP port'
+      ansible.builtin.wait_for:
+        host: >-
+          {{ '127.0.0.1' if monitoring_opentelemetry_collector__test_expect.address == '0.0.0.0'
+             else monitoring_opentelemetry_collector__test_expect.address }}
+        port: 4317
+        timeout: 30
+
+    - name: 'Read the listening address of the OTLP port'
+      ansible.builtin.command: 'ss -Hltn sport = :4317'
+      register: 'monitoring_opentelemetry_collector__test_listen'
+      changed_when: false
+
+    - name: 'Assert the OTLP port listens on the expected address'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_listen.stdout is search(monitoring_opentelemetry_collector__test_expect.address ~ ':4317|[*]:4317')
+          - >-
+            monitoring_opentelemetry_collector__test_expect.address == '0.0.0.0'
+            or monitoring_opentelemetry_collector__test_listen.stdout is not search('[*]:4317|0[.]0[.]0[.]0:4317')
+        fail_msg: "{{ monitoring_opentelemetry_collector__test_listen.stdout }}"
