@@ -1,0 +1,103 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_mdns_repeater__test_case: "{{ dns_mdns_repeater__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_mdns_repeater__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the mdns-repeater configuration before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/mdns_repeater'
+      register: 'dns_mdns_repeater__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_mdns_repeater with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config:
+          molecule: true
+        dns_mdns_repeater__test_invalid:
+          message: 'an unknown option'
+          search: '^unknown option molecule$'
+
+    - name: 'Run dns_mdns_repeater with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config:
+          enabled: 'maybe'
+        dns_mdns_repeater__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: maybe$'
+
+    - name: 'Run dns_mdns_repeater with a single device (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config:
+          interface: [ 'br-lan' ]
+        dns_mdns_repeater__test_invalid:
+          message: 'a single device'
+          search: '^interface needs at least two devices$'
+
+    - name: 'Run dns_mdns_repeater with a device given twice (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config:
+          interface: [ 'br-lan', 'br-lan' ]
+        dns_mdns_repeater__test_invalid:
+          message: 'a device given twice'
+          search: '^interface has the device br-lan more than once$'
+
+    - name: 'Run dns_mdns_repeater with an invalid device name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config:
+          interface: [ 'br-lan', 'br lan' ]
+        dns_mdns_repeater__test_invalid:
+          message: 'an invalid device name'
+          search: '^interface has invalid devices: br lan$'
+
+    - name: 'Run dns_mdns_repeater without devices (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config:
+          interface: ~
+        dns_mdns_repeater__test_invalid:
+          message: 'no devices'
+          search: '^interface needs at least two devices$'
+
+    - name: 'Run dns_mdns_repeater with a configuration that is no dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mdns_repeater_config: [ 'interface' ]
+        dns_mdns_repeater__test_invalid:
+          message: 'a configuration that is no dictionary'
+          search: "^mdns_repeater_config has to be a dictionary: \\['interface'\\]$"
+
+    - name: 'Run dns_mdns_repeater with the changed devices'
+      when: dns_mdns_repeater__test_case.side_effect is defined
+      block:
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ dns_mdns_repeater__test_case.side_effect | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run dns_mdns_repeater with the changed devices'
+          ansible.builtin.include_role:
+            name: 'dns_mdns_repeater'

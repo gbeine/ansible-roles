@@ -1,0 +1,37 @@
+---
+# OpenWrt has no Python, all tasks use raw
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_mdns_repeater__test_case: "{{ dns_mdns_repeater__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Assert the clone is OpenWrt without mdns-repeater'
+      ansible.builtin.raw: '. /etc/openwrt_release && ! test -x /usr/sbin/mdns-repeater'
+      changed_when: false
+
+    # The role has to keep the installation and remove options and sections set by hand
+    - name: 'Install mdns-repeater with an option and a section the role has to remove'
+      ansible.builtin.raw: >-
+        if command -v apk >/dev/null; then apk update >/dev/null && apk add mdns-repeater;
+        else opkg update >/dev/null && opkg install mdns-repeater; fi
+        && uci set mdns_repeater.main.molecule=1
+        && uci set mdns_repeater.molecule=mdns_repeater
+        && uci add_list mdns_repeater.molecule.interface=br-lan
+        && uci commit mdns_repeater
+      changed_when: true
+      when: dns_mdns_repeater__test_case.prepare_package | bool
+
+    # mdns-repeater needs an IPv4 address on every device
+    - name: 'Create the bridge br-molecule'
+      ansible.builtin.raw: >-
+        ip link show br-molecule >/dev/null 2>&1
+        || { ip link add br-molecule type bridge && ip addr add 192.0.2.1/24 dev br-molecule && ip link set br-molecule up; }
+      changed_when: true
+      when: dns_mdns_repeater__test_case.prepare_package | bool

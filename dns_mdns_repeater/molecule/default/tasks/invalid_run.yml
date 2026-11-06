@@ -1,0 +1,36 @@
+---
+# Runs dns_mdns_repeater with the invalid variables passed as include parameters,
+# the role has to fail before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run dns_mdns_repeater with invalid variables (expect ERROR): {{ dns_mdns_repeater__test_invalid.message }}"
+  block:
+
+    - name: 'Run dns_mdns_repeater, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'dns_mdns_repeater'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ dns_mdns_repeater__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the mdns-repeater configuration after the invalid run'
+      ansible.builtin.raw: 'md5sum /etc/config/mdns_repeater'
+      register: 'dns_mdns_repeater__test_md5_after'
+      changed_when: false
+
+    # Only the checksums are compared, the raw output differs after community.openwrt.init changed the connection settings
+    - name: 'Assert the run failed with the expected message before any change'
+      vars:
+        dns_mdns_repeater__test_sums_before: "{{ dns_mdns_repeater__test_md5_before.stdout | regex_findall('[0-9a-f]{32}') }}"
+        dns_mdns_repeater__test_sums_after: "{{ dns_mdns_repeater__test_md5_after.stdout | regex_findall('[0-9a-f]{32}') }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(dns_mdns_repeater__test_invalid.search)
+          - dns_mdns_repeater__test_sums_before | length == 1
+          - dns_mdns_repeater__test_sums_after == dns_mdns_repeater__test_sums_before
+        fail_msg: >-
+          Failure: {{ ansible_failed_result.msg | default('') }}
+          Checksums before: {{ dns_mdns_repeater__test_sums_before | join(', ') }}, after: {{ dns_mdns_repeater__test_sums_after | join(', ') }}.

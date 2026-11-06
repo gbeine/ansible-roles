@@ -1,0 +1,52 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_mdns_repeater__test_case: "{{ dns_mdns_repeater__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_mdns_repeater__test_expect: "{{ dns_mdns_repeater__test_case.expect }}"
+
+  tasks:
+
+    # procd starts mdns-repeater in the background, the command line contains the devices in the order of the configuration
+    - name: 'Wait for mdns-repeater'
+      ansible.builtin.raw: >-
+        for pid in $(pidof mdns-repeater); do echo "process=$(tr '\0' ' ' < /proc/$pid/cmdline)"; done; true
+      register: 'dns_mdns_repeater__test_process'
+      changed_when: false
+      until: >-
+        dns_mdns_repeater__test_expect.process == ''
+        or dns_mdns_repeater__test_process.stdout_lines | map('trim')
+           | select('search', '-f ' ~ dns_mdns_repeater__test_expect.process | regex_escape ~ '$') | list | length == 1
+      retries: 10
+      delay: 3
+
+    - name: 'Read the mdns-repeater configuration and the state of the service'
+      ansible.builtin.raw: >-
+        uci show mdns_repeater | sort; echo '---';
+        /etc/init.d/mdns-repeater enabled && echo 'mdns-repeater enabled'; true
+      register: 'dns_mdns_repeater__test_uci'
+      changed_when: false
+
+    - name: 'Assert the mdns-repeater configuration and the state of the service'
+      vars:
+        dns_mdns_repeater__test_parts: "{{ dns_mdns_repeater__test_uci.stdout.split('---') }}"
+        # uci show quotes the values
+        dns_mdns_repeater__test_lines: >-
+          {{ dns_mdns_repeater__test_parts[0].splitlines() | map('trim') | map('regex_replace', "'", '') | select | list }}
+        dns_mdns_repeater__test_absent: "{{ '^(' ~ dns_mdns_repeater__test_expect.absent | map('regex_escape') | join('|') ~ ')=' }}"
+      ansible.builtin.assert:
+        that:
+          - "'mdns-repeater enabled' in dns_mdns_repeater__test_parts[1]"
+          - dns_mdns_repeater__test_expect.uci | difference(dns_mdns_repeater__test_lines) | length == 0
+          - dns_mdns_repeater__test_lines | select('match', dns_mdns_repeater__test_absent) | list | length == 0
+        fail_msg: >-
+          missing in UCI: {{ dns_mdns_repeater__test_expect.uci | difference(dns_mdns_repeater__test_lines) | join(', ') | default('none', true) }},
+          not removed: {{ dns_mdns_repeater__test_lines | select('match', dns_mdns_repeater__test_absent) | join(', ') | default('none', true) }},
+          state: {{ dns_mdns_repeater__test_parts[1] | trim }},
+          processes: {{ dns_mdns_repeater__test_process.stdout_lines | join(' | ') }}

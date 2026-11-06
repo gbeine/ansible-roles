@@ -1,0 +1,237 @@
+---
+
+- name: 'Install and configure mdns-repeater'
+  tags: [ 'dns', 'dns_mdns_repeater' ]
+  vars:
+    dns_mdns_repeater__installed: >-
+      {{ (dns_mdns_repeater__apk | default({})) is changed or (dns_mdns_repeater__opkg | default({})) is changed }}
+    dns_mdns_repeater__changed: >-
+      {{ (dns_mdns_repeater__commit_result | default({})) is changed or dns_mdns_repeater__installed | bool }}
+    dns_mdns_repeater__options: "{{ dns_mdns_repeater__translation.options | default({}) }}"
+    # enabled switches the service, without it mdns-repeater is stopped and disabled
+    dns_mdns_repeater__enabled: "{{ dns_mdns_repeater__options.enabled | default('1') == '1' }}"
+    # Devices of the configuration that do not exist on the host, mdns-repeater does not start without them
+    dns_mdns_repeater__missing: >-
+      {{ dns_mdns_repeater__options.interface | default([])
+         | reject('in', (dns_mdns_repeater__devices.stdout | default('')).split()) | list }}
+  block:
+
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'dns_mdns_repeater__release_file'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Assert the host is OpenWrt'
+      ansible.builtin.assert:
+        that:
+          - dns_mdns_repeater__release_file.stdout is search('DISTRIB_ID=.?OpenWrt')
+        fail_msg: 'dns_mdns_repeater supports OpenWrt only'
+        quiet: true
+
+    # A failing template in the variables disappears silently inside the translation,
+    # rendering them completely shows the error before anything changes
+    - name: 'Render the variables'
+      ansible.builtin.assert:
+        that:
+          - dns_mdns_repeater__config | to_json | length > 0
+        quiet: true
+
+    # The translation collects every invalid option
+    - name: 'Translate the configuration to the UCI configuration of mdns-repeater'
+      ansible.builtin.set_fact:
+        dns_mdns_repeater__translation: "{{ dns_mdns_repeater__translation_json | trim | from_json }}"
+      vars:
+        dns_mdns_repeater__translation_json: >-
+          {% set errors = [] %}
+          {% set options = {} %}
+          {% set config = dns_mdns_repeater__config %}
+          {% if config is not mapping %}
+          {%   set _ = errors.append('mdns_repeater_config has to be a dictionary: ' ~ config) %}
+          {%   set config = {} %}
+          {% endif %}
+          {% for key, value in config | dictsort if value is not none %}
+          {%   set values = (value if value is sequence and value is not string else (value | string).replace(',', ' ').split()) %}
+          {%   if key in dns_mdns_repeater__boolean_options %}
+          {%     if value is boolean or value | string in ['0', '1'] %}
+          {%       set _ = options.update({key: ('1' if value else '0') if value is boolean else value | string}) %}
+          {%     else %}
+          {%       set _ = errors.append(key ~ ' has to be a boolean: ' ~ value) %}
+          {%     endif %}
+          {%   elif key not in dns_mdns_repeater__list_options %}
+          {%     set _ = errors.append('unknown option ' ~ key) %}
+          {%   elif value is mapping or values | reject('string') | list | length > 0 %}
+          {%     set _ = errors.append(key ~ ' has to be a list of devices') %}
+          {%   else %}
+          {%     set invalid = values | reject('match', dns_mdns_repeater__device_pattern) | list %}
+          {%     if invalid | length > 0 %}
+          {%       set _ = errors.append(key ~ ' has invalid devices: ' ~ invalid | join(', ')) %}
+          {%     endif %}
+          {%     for device in values | unique if values | select('eq', device) | list | length > 1 %}
+          {%       set _ = errors.append(key ~ ' has the device ' ~ device ~ ' more than once') %}
+          {%     endfor %}
+          {%     set _ = options.update({key: values}) %}
+          {%   endif %}
+          {% endfor %}
+          {#  mdns-repeater repeats between devices, a single device has nothing to repeat to #}
+          {% if errors | length == 0 and options.interface | default([]) | length < 2 %}
+          {%   set _ = errors.append('interface needs at least two devices') %}
+          {% endif %}
+          {{ {'options': options, 'errors': errors} | to_json }}
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - dns_mdns_repeater__translation.errors | length == 0
+        fail_msg: "{{ dns_mdns_repeater__translation.errors | join('. ') }}"
+        quiet: true
+
+    - name: 'Show the devices'
+      ansible.builtin.debug:
+        msg: "mdns_repeater {{ dns_mdns_repeater__section }}: {{ dns_mdns_repeater__options.interface | join(', ') }}"
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check mdns-repeater and the package manager'
+      ansible.builtin.raw: >-
+        test -x {{ dns_mdns_repeater__binary }} && test -x /etc/init.d/{{ dns_mdns_repeater__service }}
+        && echo 'mdns_repeater=yes' || echo 'mdns_repeater=no';
+        command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg'
+      register: 'dns_mdns_repeater__tools'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Install mdns-repeater with apk'
+      community.openwrt.apk:
+        name: "{{ dns_mdns_repeater__packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      register: 'dns_mdns_repeater__apk'
+      when:
+        - "'mdns_repeater=no' in dns_mdns_repeater__tools.stdout_lines | map('trim')"
+        - "'manager=apk' in dns_mdns_repeater__tools.stdout_lines | map('trim')"
+
+    - name: 'Install mdns-repeater with opkg'
+      community.openwrt.opkg:
+        name: "{{ dns_mdns_repeater__packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      register: 'dns_mdns_repeater__opkg'
+      when:
+        - "'mdns_repeater=no' in dns_mdns_repeater__tools.stdout_lines | map('trim')"
+        - "'manager=opkg' in dns_mdns_repeater__tools.stdout_lines | map('trim')"
+
+    # In check mode the package of a first installation is missing, there is no configuration to compare
+    - name: 'Configure mdns-repeater'
+      when: not (ansible_check_mode and 'mdns_repeater=no' in dns_mdns_repeater__tools.stdout_lines | map('trim'))
+      block:
+
+        # VLANs and bridges can be created later, missing devices are no error
+        - name: 'Read the devices of the host'
+          ansible.builtin.raw: 'ls /sys/class/net'
+          register: 'dns_mdns_repeater__devices'
+          changed_when: false
+          check_mode: false
+
+        - name: 'Warn about missing devices'
+          ansible.builtin.debug:
+            msg: "WARNING: device {{ item }} does not exist on the host, mdns-repeater is enabled but not started"
+          loop: "{{ dns_mdns_repeater__missing if dns_mdns_repeater__enabled | bool else [] }}"
+
+        - name: 'Read the current mdns-repeater configuration'
+          community.openwrt.slurp:
+            src: "{{ dns_mdns_repeater__uci_config }}"
+          register: 'dns_mdns_repeater__current'
+          check_mode: false
+
+        - name: 'Set the section main of the mdns-repeater configuration'
+          community.openwrt.uci:
+            command: 'section'
+            config: 'mdns_repeater'
+            type: 'mdns_repeater'
+            name: "{{ dns_mdns_repeater__section }}"
+            value: "{{ dns_mdns_repeater__options }}"
+            replace: true
+
+        - name: 'Read the sections of the mdns-repeater configuration'
+          community.openwrt.uci:
+            command: 'show'
+            config: 'mdns_repeater'
+          register: 'dns_mdns_repeater__show'
+          check_mode: false
+
+        - name: 'Delete the other sections'
+          community.openwrt.uci:
+            command: 'delete'
+            key: "mdns_repeater.{{ item }}"
+          loop: >-
+            {{ dns_mdns_repeater__show.result | regex_findall('(?m)^mdns_repeater[.]([^.=\n]+)=[\w-]+$')
+               | reject('eq', dns_mdns_repeater__section) | reverse | list }}
+
+        - name: 'Read the pending changes of the mdns-repeater configuration'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'mdns_repeater'
+          register: 'dns_mdns_repeater__pending'
+          check_mode: false
+
+        # The backup contains the configuration before this change, it is only written before a commit
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: dns_mdns_repeater__pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup on the controller'
+          ansible.builtin.copy:
+            content: "{{ dns_mdns_repeater__current.content | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/mdns_repeater"
+            mode: '0600'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: dns_mdns_repeater__pending.changes | default({}) | length > 0
+
+        - name: 'Commit the mdns-repeater configuration'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'mdns_repeater'
+          register: 'dns_mdns_repeater__commit_result'
+          when: dns_mdns_repeater__pending.changes | default({}) | length > 0
+
+        - name: 'Start and enable mdns-repeater'
+          community.openwrt.service:
+            name: "{{ dns_mdns_repeater__service }}"
+            enabled: true
+            state: "{{ 'restarted' if dns_mdns_repeater__changed | bool else 'started' }}"
+          when:
+            - not ansible_check_mode
+            - dns_mdns_repeater__enabled | bool
+            - dns_mdns_repeater__missing | length == 0
+
+        # mdns-repeater exits at once without a device, procd starts it with the interface triggers of the init script
+        - name: 'Enable mdns-repeater without starting it'
+          community.openwrt.service:
+            name: "{{ dns_mdns_repeater__service }}"
+            enabled: true
+          when:
+            - not ansible_check_mode
+            - dns_mdns_repeater__enabled | bool
+            - dns_mdns_repeater__missing | length > 0
+
+        - name: 'Stop and disable mdns-repeater'
+          community.openwrt.service:
+            name: "{{ dns_mdns_repeater__service }}"
+            enabled: false
+            state: 'stopped'
+          when:
+            - not ansible_check_mode
+            - not dns_mdns_repeater__enabled | bool
