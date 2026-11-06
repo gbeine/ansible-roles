@@ -1,0 +1,296 @@
+---
+
+- name: 'Configure chrony on OpenWrt'
+  vars:
+    time_chrony__openwrt_installed: >-
+      {{ (time_chrony__openwrt_apk | default({})) is changed or (time_chrony__openwrt_opkg | default({})) is changed }}
+    time_chrony__openwrt_changed: >-
+      {{ (time_chrony__openwrt_commit_result | default({})) is changed or time_chrony__openwrt_installed | bool }}
+    time_chrony__openwrt_enabled: "{{ time_chrony__config.enabled | default(true) | bool }}"
+    # chrony-nts is needed for sources with nts, the role selects the variant at the installation only
+    time_chrony__openwrt_package: >-
+      {{ 'chrony-nts' if time_chrony__openwrt_translation.sections | selectattr('options.nts', 'defined')
+                         | selectattr('options.nts', 'eq', '1') | list | length > 0 else 'chrony' }}
+  block:
+
+    # The structure of the sections follows dns_dnsmasq: type, optional name, find and options
+    - name: 'Translate the configuration to the UCI configuration of chrony'
+      ansible.builtin.set_fact:
+        time_chrony__openwrt_translation: "{{ time_chrony__openwrt_translation_json | trim | from_json }}"
+      vars:
+        time_chrony__openwrt_translation_json: >-
+          {% set config = time_chrony__config %}
+          {% set errors = [] %}
+          {% set sections = [] %}
+          {% set number = '^-?[0-9]+([.][0-9]+)?([eE]-?[0-9]+)?$' %}
+          {% macro values(value) %}{{ ([] if value is none or value is sameas false
+                                       else (value if value is sequence and value is not string else [ value ]))
+                                      | map('string') | list | to_json }}{% endmacro %}
+          {% for key, value in config.items() if value is not none and value is not sameas false %}
+          {%   set lines = values(value) | from_json %}
+          {%   if key in time_chrony__source_types %}
+          {%     set hosts = [] %}
+          {%     for line in lines %}
+          {%       set tokens = line.split() %}
+          {%       set options = {'hostname': tokens[0] | default('')} %}
+          {%       set ns = namespace(index=1) %}
+          {%       for position in tokens[1:] if ns.index < tokens | length %}
+          {%         set token = tokens[ns.index] %}
+          {%         if token in time_chrony__openwrt_source_flags %}
+          {%           set _ = options.update({token: '1'}) %}
+          {%           set ns.index = ns.index + 1 %}
+          {%         elif token in time_chrony__openwrt_source_numbers and (tokens[ns.index + 1] | default('')) is match(number)
+                        and (token != 'maxsources' or key == 'pool') %}
+          {%           set _ = options.update({token: tokens[ns.index + 1]}) %}
+          {%           set ns.index = ns.index + 2 %}
+          {%         elif token == 'maxsources' %}
+          {%           set _ = errors.append(key ~ ' ' ~ line ~ ': maxsources is supported for pool only on OpenWrt') %}
+          {%           set ns.index = tokens | length %}
+          {%         else %}
+          {%           set _ = errors.append(key ~ ' ' ~ line ~ ': ' ~ token ~ ' is not supported on OpenWrt') %}
+          {%           set ns.index = tokens | length %}
+          {%         endif %}
+          {%       endfor %}
+          {%       if options.hostname == '' %}
+          {%         set _ = errors.append(key ~ ' needs a host name') %}
+          {%       elif options.hostname in hosts %}
+          {%         set _ = errors.append(key ~ ' ' ~ options.hostname ~ ' is declared more than once') %}
+          {%       endif %}
+          {%       set _ = hosts.append(options.hostname) %}
+          {%       set _ = sections.append({'type': key, 'find': {'hostname': options.hostname}, 'options': options}) %}
+          {%     endfor %}
+          {%   elif key == 'allow_interface' %}
+          {%     if lines | length > 0 %}
+          {%       set _ = sections.append({'type': 'allow', 'name': 'allow', 'options': {'interface': lines}}) %}
+          {%     endif %}
+          {%   elif key == 'dhcp_ntp_server' %}
+          {%     set _ = sections.append({'type': 'dhcp_ntp_server', 'name': 'dhcp_ntp_server', 'options': {'iburst': '1', 'disabled': '0'}}) %}
+          {%   elif key == 'makestep' %}
+          {%     set tokens = lines | join(' ') | split %}
+          {%     if lines | length != 1 or tokens | length != 2 or tokens | reject('match', number) | list | length > 0 %}
+          {%       set _ = errors.append('makestep needs <threshold> <limit> on OpenWrt: ' ~ lines | join(', ')) %}
+          {%     else %}
+          {%       set _ = sections.append({'type': 'makestep', 'name': 'makestep', 'options': {'threshold': tokens[0], 'limit': tokens[1]}}) %}
+          {%     endif %}
+          {%   elif key == 'smoothtime' %}
+          {%     set tokens = lines | join(' ') | split %}
+          {%     if lines | length != 1 or tokens | length not in [2, 3] or tokens[:2] | reject('match', number) | list | length > 0
+                    or (tokens | length == 3 and tokens[2] != 'leaponly') %}
+          {%       set _ = errors.append('smoothtime needs <maxppm> <maxwander> [leaponly] on OpenWrt: ' ~ lines | join(', ')) %}
+          {%     else %}
+          {%       set _ = sections.append({'type': 'smoothtime', 'name': 'smoothtime',
+                                            'options': {'maxppm': tokens[0], 'maxwander': tokens[1], 'leaponly': '1' if tokens | length == 3 else '0'}}) %}
+          {%     endif %}
+          {%   elif key in [ 'clockprecision', 'leapsecmode', 'logchange', 'nosystemcert', 'ntstrustedcerts', 'rtccheck', 'enabled' ] %}
+          {%     if key not in [ 'nosystemcert', 'rtccheck', 'enabled' ] and lines | length != 1 %}
+          {%       set _ = errors.append(key ~ ' has to be a single value on OpenWrt') %}
+          {%     endif %}
+          {%   elif key == 'allow' %}
+          {%     set _ = errors.append('allow is not supported on OpenWrt, use allow_interface with the networks of /etc/config/network') %}
+          {%   elif key in time_chrony__openwrt_static_directives %}
+          {%     set _ = errors.append(key ~ ' is set in /etc/chrony/chrony.conf of the package on OpenWrt, the role does not manage it') %}
+          {%   else %}
+          {%     set _ = errors.append(key ~ ' is not supported on OpenWrt') %}
+          {%   endif %}
+          {% endfor %}
+          {#  Single directives of the sections systemclock, logging and nts #}
+          {% set systemclock = {} %}
+          {% if config.clockprecision | default(none) is not none %}{% set _ = systemclock.update({'precision': config.clockprecision | string}) %}{% endif %}
+          {% if config.leapsecmode | default(none) is not none %}{% set _ = systemclock.update({'leapsecmode': config.leapsecmode | string}) %}{% endif %}
+          {% if systemclock | length > 0 %}
+          {%   set _ = sections.append({'type': 'systemclock', 'name': 'systemclock', 'options': systemclock}) %}
+          {% endif %}
+          {% if config.logchange | default(none) is not none %}
+          {%   set _ = sections.append({'type': 'logging', 'name': 'logging', 'options': {'logchange': config.logchange | string}}) %}
+          {% endif %}
+          {% set nts = {} %}
+          {% if config.rtccheck | default(none) is not none %}{% set _ = nts.update({'rtccheck': '1' if config.rtccheck else '0'}) %}{% endif %}
+          {% if config.nosystemcert | default(none) is not none %}{% set _ = nts.update({'systemcerts': '0' if config.nosystemcert else '1'}) %}{% endif %}
+          {% if config.ntstrustedcerts | default(none) is not none %}{% set _ = nts.update({'trustedcerts': config.ntstrustedcerts | string}) %}{% endif %}
+          {% if nts | length > 0 %}
+          {%   set _ = sections.append({'type': 'nts', 'name': 'nts', 'options': nts}) %}
+          {% endif %}
+          {{ {'sections': sections, 'errors': errors} | to_json }}
+
+    - name: 'Validate the configuration for OpenWrt'
+      ansible.builtin.assert:
+        that:
+          - time_chrony__openwrt_translation.errors | length == 0
+        fail_msg: "{{ time_chrony__openwrt_translation.errors | join('. ') }}"
+        quiet: true
+
+    - name: 'Show the UCI sections of chrony'
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.type }} {{ item.name | default('(unnamed)') }}:
+          {{ item.options.items() | map('join', '=') | join(', ') }}
+      loop: "{{ time_chrony__openwrt_translation.sections }}"
+      loop_control:
+        label: "{{ item.name | default(item.type) }}"
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check chrony and the package manager'
+      ansible.builtin.raw: >-
+        test -x /usr/sbin/chronyd && test -x /etc/init.d/{{ time_chrony__openwrt_service }} && echo 'chrony=yes' || echo 'chrony=no';
+        command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg';
+        test -x /etc/init.d/{{ time_chrony__openwrt_old_service }} && echo 'sysntpd=yes' || echo 'sysntpd=no'
+      register: 'time_chrony__openwrt_tools'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Install chrony with apk'
+      community.openwrt.apk:
+        name: "{{ time_chrony__openwrt_package }}"
+        state: 'present'
+        update_cache: true
+      register: 'time_chrony__openwrt_apk'
+      when:
+        - "'chrony=no' in time_chrony__openwrt_tools.stdout_lines | map('trim')"
+        - "'manager=apk' in time_chrony__openwrt_tools.stdout_lines | map('trim')"
+
+    - name: 'Install chrony with opkg'
+      community.openwrt.opkg:
+        name: "{{ time_chrony__openwrt_package }}"
+        state: 'present'
+        update_cache: true
+      register: 'time_chrony__openwrt_opkg'
+      when:
+        - "'chrony=no' in time_chrony__openwrt_tools.stdout_lines | map('trim')"
+        - "'manager=opkg' in time_chrony__openwrt_tools.stdout_lines | map('trim')"
+
+    # chrony replaces the NTP client of busybox, the section system.ntp stays with bootstrap_openwrt
+    - name: 'Stop and disable sysntpd'
+      community.openwrt.service:
+        name: "{{ time_chrony__openwrt_old_service }}"
+        enabled: false
+        state: 'stopped'
+      when:
+        - not ansible_check_mode
+        - "'sysntpd=yes' in time_chrony__openwrt_tools.stdout_lines | map('trim')"
+
+    # In check mode the package of a first installation is missing, there is no configuration to compare
+    - name: 'Configure chrony'
+      when: not (ansible_check_mode and 'chrony=no' in time_chrony__openwrt_tools.stdout_lines | map('trim'))
+      block:
+
+        - name: 'Read the current chrony configuration'
+          community.openwrt.slurp:
+            src: "{{ time_chrony__openwrt_uci_config }}"
+          register: 'time_chrony__openwrt_current'
+          check_mode: false
+
+        - name: 'Set the sections of the chrony configuration'
+          community.openwrt.uci:
+            command: 'section'
+            config: 'chrony'
+            type: "{{ item.type }}"
+            name: "{{ item.name | default(omit) }}"
+            find: "{{ item.find | default(omit) }}"
+            value: "{{ item.options }}"
+            replace: true
+          loop: "{{ time_chrony__openwrt_translation.sections }}"
+          loop_control:
+            label: "{{ item.name if item.name is defined else item.type ~ ' ' ~ item.find.hostname }}"
+
+        - name: 'Look up the IDs of the unnamed sections'
+          community.openwrt.uci:
+            command: 'find'
+            config: 'chrony'
+            type: "{{ item.type }}"
+            find: "{{ item.find }}"
+          loop: "{{ time_chrony__openwrt_translation.sections | rejectattr('name', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.type ~ ' ' ~ item.find.hostname }}"
+          register: 'time_chrony__openwrt_found'
+          check_mode: false
+          failed_when:
+            - time_chrony__openwrt_found.failed | default(false)
+            - not ansible_check_mode
+
+        - name: 'Read the sections of the chrony configuration'
+          community.openwrt.uci:
+            command: 'show'
+            config: 'chrony'
+          register: 'time_chrony__openwrt_show'
+          check_mode: false
+
+        # Only the section types managed by the role are pruned
+        - name: 'Determine the sections to delete'
+          ansible.builtin.set_fact:
+            time_chrony__openwrt_delete: >-
+              {{ time_chrony__openwrt_show.result
+                 | regex_findall('(?m)^chrony[.]([^.=\n]+)=([\w-]+)$')
+                 | selectattr('1', 'in', time_chrony__openwrt_section_types)
+                 | reverse
+                 | map(attribute='0')
+                 | reject('in',
+                     (time_chrony__openwrt_translation.sections | selectattr('name', 'defined') | map(attribute='name') | list)
+                     + (time_chrony__openwrt_found.results | map(attribute='result', default='') | list))
+                 | list }}
+
+        - name: 'Show the sections to delete'
+          ansible.builtin.debug:
+            var: 'time_chrony__openwrt_delete'
+
+        - name: 'Delete the undeclared sections'
+          community.openwrt.uci:
+            command: 'delete'
+            key: "chrony.{{ item }}"
+          loop: "{{ time_chrony__openwrt_delete }}"
+
+        - name: 'Read the pending changes of the chrony configuration'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'chrony'
+          register: 'time_chrony__openwrt_pending'
+          check_mode: false
+
+        # The backup contains the configuration before this change, it is only written before a commit
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: time_chrony__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup on the controller'
+          ansible.builtin.copy:
+            content: "{{ time_chrony__openwrt_current.content | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/chrony"
+            mode: '0600'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: time_chrony__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Commit the chrony configuration'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'chrony'
+          register: 'time_chrony__openwrt_commit_result'
+          when: time_chrony__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Start and enable chrony'
+          community.openwrt.service:
+            name: "{{ time_chrony__openwrt_service }}"
+            enabled: true
+            state: "{{ 'restarted' if time_chrony__openwrt_changed | bool else 'started' }}"
+          when:
+            - not ansible_check_mode
+            - time_chrony__openwrt_enabled | bool
+
+        - name: 'Stop and disable chrony'
+          community.openwrt.service:
+            name: "{{ time_chrony__openwrt_service }}"
+            enabled: false
+            state: 'stopped'
+          when:
+            - not ansible_check_mode
+            - not time_chrony__openwrt_enabled | bool

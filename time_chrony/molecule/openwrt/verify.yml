@@ -1,0 +1,51 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    time_chrony__test_case: "{{ time_chrony__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    time_chrony__test_expect: "{{ time_chrony__test_case.expect }}"
+
+  tasks:
+
+    # chronyd.init writes the configuration from UCI at the start of chronyd
+    - name: 'Read the chrony configuration, the generated configuration and the state of the services'
+      ansible.builtin.raw: >-
+        uci show chrony | sort; echo '---';
+        cat /var/etc/chrony.d/10-uci.conf; echo '---';
+        pidof chronyd >/dev/null && echo 'chronyd running'; /etc/init.d/chronyd enabled && echo 'chronyd enabled';
+        /etc/init.d/sysntpd enabled && echo 'sysntpd enabled'; pidof ntpd >/dev/null && echo 'ntpd running'; true
+      register: 'time_chrony__test_state'
+      changed_when: false
+
+    - name: 'Assert the chrony configuration, the generated configuration and the state of the services'
+      vars:
+        time_chrony__test_parts: "{{ time_chrony__test_state.stdout.split('---') }}"
+        # uci show quotes the values
+        time_chrony__test_lines: "{{ time_chrony__test_parts[0].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
+        time_chrony__test_generated: "{{ time_chrony__test_parts[1].splitlines() | map('trim') | select | list }}"
+        time_chrony__test_status: "{{ time_chrony__test_parts[2].splitlines() | map('trim') | list }}"
+      ansible.builtin.assert:
+        that:
+          - "'chronyd running' in time_chrony__test_status"
+          - "'chronyd enabled' in time_chrony__test_status"
+          - "'sysntpd enabled' not in time_chrony__test_status"
+          - "'ntpd running' not in time_chrony__test_status"
+          - time_chrony__test_expect.uci | difference(time_chrony__test_lines) | length == 0
+          - time_chrony__test_lines | select('search', time_chrony__test_expect.absent | map('regex_escape') | join('|')) | list | length == 0
+          - time_chrony__test_expect.generated | difference(time_chrony__test_generated) | length == 0
+          - >-
+            time_chrony__test_generated
+            | select('search', time_chrony__test_expect.generated_absent | map('regex_escape') | join('|')) | list | length == 0
+        fail_msg: >-
+          missing in UCI: {{ time_chrony__test_expect.uci | difference(time_chrony__test_lines) | join(', ') | default('none', true) }},
+          missing in the generated configuration:
+          {{ time_chrony__test_expect.generated | difference(time_chrony__test_generated) | join(', ') | default('none', true) }},
+          state: {{ time_chrony__test_status | join(', ') }},
+          uci: {{ time_chrony__test_lines | join(' | ') }},
+          generated: {{ time_chrony__test_generated | join(' | ') }}

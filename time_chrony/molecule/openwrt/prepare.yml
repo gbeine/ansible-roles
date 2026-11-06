@@ -1,0 +1,28 @@
+---
+# OpenWrt has no Python, all tasks use raw
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    time_chrony__test_case: "{{ time_chrony__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Assert the clone is OpenWrt without chrony and with sysntpd'
+      ansible.builtin.raw: '. /etc/openwrt_release && ! test -x /usr/sbin/chronyd && test -x /etc/init.d/sysntpd'
+      changed_when: false
+
+    # The role has to keep the installation and remove the server
+    - name: 'Install chrony with a server the role has to remove'
+      ansible.builtin.raw: >-
+        if command -v apk >/dev/null; then apk update >/dev/null && apk add chrony;
+        else opkg update >/dev/null && opkg install chrony; fi
+        && uci add chrony server >/dev/null
+        && uci set chrony.@server[-1].hostname=molecule.example
+        && uci commit chrony
+      changed_when: true
+      when: time_chrony__test_case.prepare_package | bool

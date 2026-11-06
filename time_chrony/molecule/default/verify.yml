@@ -1,0 +1,52 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    time_chrony__test_case: "{{ time_chrony__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    time_chrony__test_expect: "{{ time_chrony__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "{{ time_chrony__test_config_file }}"
+      register: 'time_chrony__test_config'
+
+    - name: 'Read the state of chrony and systemd-timesyncd'
+      ansible.builtin.shell: >-
+        systemctl is-active chrony; systemctl is-enabled chrony;
+        dpkg-query --show --showformat='${db:Status-Status}' systemd-timesyncd 2>/dev/null || echo 'not-installed';
+        echo; echo '---'; ss -Hlun 'sport = :123'
+      register: 'time_chrony__test_state'
+      changed_when: false
+
+    - name: 'Assert the configuration and the state'
+      vars:
+        time_chrony__test_lines: >-
+          {{ (time_chrony__test_config.content | b64decode).splitlines() | map('trim') | reject('match', '#') | select | list }}
+        time_chrony__test_parts: "{{ time_chrony__test_state.stdout.split('---') }}"
+        time_chrony__test_status: "{{ time_chrony__test_parts[0].splitlines() | map('trim') | select | list }}"
+        time_chrony__test_listen: "{{ time_chrony__test_parts[1].splitlines() | map('trim') | select | list | length > 0 }}"
+      ansible.builtin.assert:
+        that:
+          - time_chrony__test_expect.lines | difference(time_chrony__test_lines) | length == 0
+          - time_chrony__test_lines | select('search', time_chrony__test_expect.absent | map('regex_escape') | join('|')) | list | length == 0
+          - time_chrony__test_status[0] == 'active'
+          - time_chrony__test_status[1] == 'enabled'
+          - time_chrony__test_status[2] in ['not-installed', 'config-files']
+          - time_chrony__test_listen | bool == time_chrony__test_expect.listen
+        fail_msg: "state: {{ time_chrony__test_status }}, configuration: {{ time_chrony__test_lines }}"
+
+    - name: 'Read the sources of chrony'
+      ansible.builtin.command: 'chronyc -n -c sources'
+      register: 'time_chrony__test_sources'
+      changed_when: false
+      until: time_chrony__test_sources.stdout_lines | length > 0
+      retries: 10
+      delay: 3
+      when: time_chrony__test_expect.sources | bool

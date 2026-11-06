@@ -1,0 +1,49 @@
+---
+
+- name: 'Warn about the ignored OpenWrt options'
+  ansible.builtin.debug:
+    msg: "WARNING: option of the UCI configuration of OpenWrt ignored, {{ time_chrony__ignored }}"
+  loop: "{{ time_chrony__config.keys() | select('in', time_chrony__openwrt_only_options) | list }}"
+  loop_control:
+    loop_var: 'time_chrony__ignored'
+
+# chrony provides time-daemon, apt removes systemd-timesyncd
+- name: 'Install chrony'
+  ansible.builtin.apt:
+    name: "{{ time_chrony__debian_packages }}"
+    state: 'present'
+    update_cache: true
+    cache_valid_time: 3600
+
+# chronyd -p parses the configuration and fails on unknown directives before the file is replaced,
+# the AppArmor profile of chronyd denies reading the temporary file of Ansible, chronyd checks a copy in /etc/chrony
+- name: 'Write the configuration'
+  ansible.builtin.template:
+    src: 'chrony.conf.j2'
+    dest: "{{ time_chrony__debian_config_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+    validate: >-
+      sh -c 'cp "$1" "$2" && chronyd -p -f "$2"; rc=$?; rm -f "$2"; exit $rc'
+      time_chrony_check %s {{ time_chrony__debian_check_file | quote }}
+  register: 'time_chrony__debian_config_result'
+
+- name: 'Start and enable chrony'
+  ansible.builtin.systemd_service:
+    name: "{{ time_chrony__debian_service }}"
+    enabled: true
+    # The package starts chrony with its own configuration, the written configuration needs a restart
+    state: "{{ 'restarted' if time_chrony__debian_config_result is changed else 'started' }}"
+  when:
+    - not ansible_check_mode
+    - time_chrony__config.enabled | default(true) | bool
+
+- name: 'Stop and disable chrony'
+  ansible.builtin.systemd_service:
+    name: "{{ time_chrony__debian_service }}"
+    enabled: false
+    state: 'stopped'
+  when:
+    - not ansible_check_mode
+    - not time_chrony__config.enabled | default(true) | bool

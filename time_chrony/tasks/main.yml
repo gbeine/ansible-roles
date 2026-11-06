@@ -1,0 +1,72 @@
+---
+
+- name: 'Install and configure chrony'
+  tags: [ 'time', 'time_chrony' ]
+  block:
+
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'time_chrony__release_file'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Set the platform'
+      ansible.builtin.set_fact:
+        time_chrony__openwrt: "{{ time_chrony__release_file.stdout is search('DISTRIB_ID=.?OpenWrt') }}"
+
+    - name: 'Include the variables of the platform'
+      ansible.builtin.include_vars:
+        file: "{{ 'OpenWrt.yml' if time_chrony__openwrt | bool else 'Debian.yml' }}"
+
+    # A failing template in the variables (e.g. an unknown filter) disappears silently in the checks,
+    # rendering them completely shows the error before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - (time_chrony__config | to_json | length) + (time_chrony__ntp_sources | to_json | length) > 0
+        quiet: true
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - time_chrony__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ time_chrony__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        time_chrony__invalid: >-
+          {%- set errors = [] -%}
+          {%- set sources = time_chrony__ntp_sources -%}
+          {%- if sources is not sequence or sources is string or sources is mapping -%}
+          {%-   set _ = errors.append('common_globals__ntp_sources has to be a list') -%}
+          {%- else -%}
+          {%-   for source in sources -%}
+          {%-     if source is not mapping or source.type | default('') not in time_chrony__source_types
+                     or source.address | default('') is not string or source.address | default('') | length == 0
+                     or (source.options is defined and (source.options is string or source.options is not sequence)) -%}
+          {%-       set _ = errors.append('common_globals__ntp_sources needs type server, pool or peer, address and a list options: ' ~ source) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {%- for key, value in time_chrony__config.items() if value is not none -%}
+          {%-   set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
+          {%-   if key is not string or key is not match(time_chrony__name_pattern) -%}
+          {%-     set _ = errors.append('chrony_config has an invalid directive name: ' ~ key) -%}
+          {%-   elif key in time_chrony__boolean_options and value is not boolean -%}
+          {%-     set _ = errors.append(key ~ ' has to be a boolean: ' ~ value) -%}
+          {%-   elif value is mapping or values | reject('string') | reject('number') | reject('boolean') | list | length > 0 -%}
+          {%-     set _ = errors.append(key ~ ' has to be a string, a number, a boolean or a list of them') -%}
+          {%-   elif values | map('string') | select('search', '[\n\r]') | list | length > 0 -%}
+          {%-     set _ = errors.append(key ~ ' must not contain line breaks') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ errors }}
+
+    - name: 'Install and configure chrony on Debian'
+      ansible.builtin.include_tasks: 'debian.yml'
+      when: not time_chrony__openwrt | bool
+
+    - name: 'Configure chrony on OpenWrt'
+      ansible.builtin.include_tasks: 'openwrt.yml'
+      when: time_chrony__openwrt | bool

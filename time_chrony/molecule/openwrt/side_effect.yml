@@ -1,0 +1,83 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    time_chrony__test_case: "{{ time_chrony__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ time_chrony__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the chrony configuration before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/chrony'
+      register: 'time_chrony__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run time_chrony with allow (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          allow: [ '192.168.0.0/16' ]
+        time_chrony__test_invalid:
+          message: 'allow'
+          search: '^allow is not supported on OpenWrt, use allow_interface with the networks of /etc/config/network$'
+
+    - name: 'Run time_chrony with an unknown option of a server (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          server: [ 'ntp.example.org iburst burstx' ]
+        time_chrony__test_invalid:
+          message: 'an unknown option of a server'
+          search: '^server ntp\.example\.org iburst burstx: burstx is not supported on OpenWrt$'
+
+    - name: 'Run time_chrony with maxsources for a server (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          server: [ 'ntp.example.org maxsources 4' ]
+        time_chrony__test_invalid:
+          message: 'maxsources for a server'
+          search: '^server ntp\.example\.org maxsources 4: maxsources is supported for pool only on OpenWrt$'
+
+    - name: 'Run time_chrony with a directive of the static configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          driftfile: '/tmp/drift'
+        time_chrony__test_invalid:
+          message: 'a directive of the static configuration'
+          search: '^driftfile is set in /etc/chrony/chrony\.conf of the package on OpenWrt, the role does not manage it$'
+
+    - name: 'Run time_chrony with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          enabled: 'maybe'
+        time_chrony__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: maybe$'
+
+    - name: 'Run time_chrony with the changed configuration'
+      when: time_chrony__test_case.side_effect is defined
+      block:
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            chrony_config: "{{ time_chrony__test_case.role_vars.chrony_config | combine(time_chrony__test_case.side_effect) }}"
+
+        - name: 'Run time_chrony with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'time_chrony'

@@ -1,0 +1,36 @@
+---
+# Runs time_chrony with the invalid configuration passed as include parameter,
+# the role has to fail before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run time_chrony with an invalid configuration (expect ERROR): {{ time_chrony__test_invalid.message }}"
+  block:
+
+    - name: 'Run time_chrony, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'time_chrony'
+
+    - name: 'Fail because the invalid configuration was accepted'
+      ansible.builtin.fail:
+        msg: "The invalid configuration was accepted: {{ time_chrony__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the chrony configuration after the invalid run'
+      ansible.builtin.raw: 'md5sum /etc/config/chrony'
+      register: 'time_chrony__test_md5_after'
+      changed_when: false
+
+    # Only the checksums are compared, the raw output differs after community.openwrt.init changed the connection settings
+    - name: 'Assert the run failed with the expected message before any change'
+      vars:
+        time_chrony__test_sums_before: "{{ time_chrony__test_md5_before.stdout | regex_findall('[0-9a-f]{32}') }}"
+        time_chrony__test_sums_after: "{{ time_chrony__test_md5_after.stdout | regex_findall('[0-9a-f]{32}') }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(time_chrony__test_invalid.search)
+          - time_chrony__test_sums_before | length == 1
+          - time_chrony__test_sums_after == time_chrony__test_sums_before
+        fail_msg: >-
+          Failure: {{ ansible_failed_result.msg | default('') }}
+          Checksums before: {{ time_chrony__test_sums_before | join(', ') }}, after: {{ time_chrony__test_sums_after | join(', ') }}.

@@ -1,0 +1,100 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    time_chrony__test_case: "{{ time_chrony__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ time_chrony__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the configuration before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ time_chrony__test_config_file }}"
+        get_checksum: true
+      register: 'time_chrony__test_config_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run time_chrony with an invalid directive name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          'log tracking': true
+        time_chrony__test_invalid:
+          message: 'an invalid directive name'
+          search: '^chrony_config has an invalid directive name: log tracking$'
+
+    - name: 'Run time_chrony with a dictionary as value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          server: { 'address': '192.0.2.1' }
+        time_chrony__test_invalid:
+          message: 'a dictionary as value'
+          search: '^server has to be a string, a number, a boolean or a list of them$'
+
+    - name: 'Run time_chrony with a line break (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          local: "stratum 10\nallow 0/0"
+        time_chrony__test_invalid:
+          message: 'a line break'
+          search: '^local must not contain line breaks$'
+
+    - name: 'Run time_chrony with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          enabled: 'maybe'
+        time_chrony__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: maybe$'
+
+    # chronyd -p checks the configuration before it replaces the file
+    - name: 'Run time_chrony with a directive chrony does not know (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chrony_config:
+          molecule: 'yes'
+        time_chrony__test_invalid:
+          message: 'a directive chrony does not know'
+          search: '^failed to validate$'
+
+    - name: 'Run time_chrony with the changed configuration'
+      when: time_chrony__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of chrony before the change'
+          ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value chrony'
+          register: 'time_chrony__test_start_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            chrony_config: "{{ time_chrony__test_case.role_vars.chrony_config | combine(time_chrony__test_case.side_effect) }}"
+
+        - name: 'Run time_chrony with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'time_chrony'
+
+        - name: 'Read the start time of chrony after the change'
+          ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value chrony'
+          register: 'time_chrony__test_start_after'
+          changed_when: false
+
+        - name: 'Assert chrony restarted'
+          ansible.builtin.assert:
+            that:
+              - time_chrony__test_start_after.stdout | int > time_chrony__test_start_before.stdout | int
+            fail_msg: "{{ time_chrony__test_start_before.stdout }} -> {{ time_chrony__test_start_after.stdout }}"
