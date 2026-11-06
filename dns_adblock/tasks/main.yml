@@ -1,0 +1,313 @@
+---
+
+- name: 'Install and configure adblock'
+  tags: [ 'dns', 'dns_adblock' ]
+  vars:
+    dns_adblock__installed: >-
+      {{ (dns_adblock__apk | default({})) is changed or (dns_adblock__opkg | default({})) is changed }}
+    dns_adblock__changed: >-
+      {{ (dns_adblock__commit_result | default({})) is changed
+         or (dns_adblock__lists_result | default({})) is changed
+         or dns_adblock__installed | bool }}
+    dns_adblock__options: "{{ dns_adblock__translation.options | default({}) }}"
+  block:
+
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'dns_adblock__release_file'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Assert the host is OpenWrt'
+      ansible.builtin.assert:
+        that:
+          - dns_adblock__release_file.stdout is search('DISTRIB_ID=.?OpenWrt')
+        fail_msg: 'dns_adblock supports OpenWrt only'
+        quiet: true
+
+    # A failing template in the variables disappears silently inside the translation,
+    # rendering them completely shows the error before anything changes
+    - name: 'Render the variables'
+      ansible.builtin.assert:
+        that:
+          - (dns_adblock__config | to_json | length) + (dns_adblock__allowlist | to_json | length) + (dns_adblock__blocklist | to_json | length) > 0
+        quiet: true
+
+    # The options of the section global get the prefix adb_, the translation collects every invalid option
+    - name: 'Translate the configuration to the UCI configuration of adblock'
+      ansible.builtin.set_fact:
+        dns_adblock__translation: "{{ dns_adblock__translation_json | trim | from_json }}"
+      vars:
+        dns_adblock__translation_json: >-
+          {% set errors = [] %}
+          {% set options = {} %}
+          {% set config = dns_adblock__config %}
+          {% set known = dns_adblock__boolean_options + dns_adblock__number_options.keys() | list + dns_adblock__list_options
+                         + dns_adblock__choice_options.keys() | list + dns_adblock__string_options %}
+          {% if config is not mapping %}
+          {%   set _ = errors.append('adblock_config has to be a dictionary: ' ~ config) %}
+          {%   set config = {} %}
+          {% endif %}
+          {% for key, value in config | dictsort if value is not none %}
+          {%   set option = 'adb_' ~ key | string %}
+          {%   set values = (value if value is sequence and value is not string else (value | string).replace(',', ' ').split()) %}
+          {%   if key not in known %}
+          {%     set _ = errors.append('unknown option ' ~ key) %}
+          {%   elif value is mapping or (value is not string and value is not number and value is not boolean
+                                         and (key not in dns_adblock__list_options or value is not sequence)) %}
+          {%     set _ = errors.append(key ~ ' has an invalid value') %}
+          {%   elif key in dns_adblock__list_options and values | reject('string') | reject('number') | list | length > 0 %}
+          {%     set _ = errors.append(key ~ ' has to be a list of strings') %}
+          {%   elif ((value if value is sequence and value is not string else [ value ]) | map('string')
+                   | select('search', '[\n\r]') | list | length > 0) %}
+          {%     set _ = errors.append(key ~ ' must not contain line breaks') %}
+          {%   elif key in dns_adblock__boolean_options %}
+          {%     if value is boolean or value | string in ['0', '1'] %}
+          {%       set _ = options.update({option: ('1' if value else '0') if value is boolean else value | string}) %}
+          {%     else %}
+          {%       set _ = errors.append(key ~ ' has to be a boolean: ' ~ value) %}
+          {%     endif %}
+          {%   elif key in dns_adblock__number_options %}
+          {%     set range = dns_adblock__number_options[key] %}
+          {%     if value is boolean or value | string is not match('^[0-9]+$')
+                    or value | int < range.min | default(0) or value | int > range.max | default(value | int) %}
+          {%       set _ = errors.append(key ~ ' has to be a number' ~ (' from ' ~ range.min ~ ' to ' ~ range.max if range.max is defined
+                                                                       else ' from ' ~ range.min) ~ ': ' ~ value) %}
+          {%     else %}
+          {%       set _ = options.update({option: value | string}) %}
+          {%     endif %}
+          {%   elif key in dns_adblock__choice_options %}
+          {%     if value | string in dns_adblock__choice_options[key] %}
+          {%       set _ = options.update({option: value | string}) %}
+          {%     else %}
+          {%       set _ = errors.append(key ~ ' has to be one of ' ~ dns_adblock__choice_options[key] | join(', ') ~ ': ' ~ value) %}
+          {%     endif %}
+          {%   elif key in dns_adblock__list_options %}
+          {%     if values | length > 0 %}
+          {%       set _ = options.update({option: values | map('string') | list}) %}
+          {%     endif %}
+          {%   elif value is sequence and value is not string %}
+          {%     set _ = errors.append(key ~ ' has to be a single value') %}
+          {%   else %}
+          {%     set _ = options.update({option: value | string}) %}
+          {%   endif %}
+          {% endfor %}
+          {#  The local lists, one domain per line #}
+          {% set domain = '^[A-Za-z0-9_*][A-Za-z0-9_*.-]*$' %}
+          {% set lists = {'adblock_allowlist': dns_adblock__allowlist, 'adblock_blocklist': dns_adblock__blocklist} %}
+          {% for name, domains in lists | dictsort %}
+          {%   if domains is string or domains is mapping or domains is not sequence %}
+          {%     set _ = errors.append(name ~ ' has to be a list of domains') %}
+          {%   else %}
+          {%     set entries = domains | reject('string') | map('string') | list %}
+          {%     set invalid = domains | select('string') | reject('match', domain) | list %}
+          {%     if entries | length > 0 %}
+          {%       set _ = errors.append(name ~ ' has entries that are no domains: ' ~ entries | join(', ')) %}
+          {%     endif %}
+          {%     if invalid | length > 0 %}
+          {%       set _ = errors.append(name ~ ' has invalid domains: ' ~ invalid | join(', ')) %}
+          {%     endif %}
+          {%   endif %}
+          {% endfor %}
+          {% if errors | length == 0 %}
+          {%   set both = dns_adblock__allowlist | map('string') | select('in', dns_adblock__blocklist | map('string') | list) | list %}
+          {%   if both | length > 0 %}
+          {%     set _ = errors.append('domains in adblock_allowlist and adblock_blocklist: ' ~ both | unique | join(', ')) %}
+          {%   endif %}
+          {% endif %}
+          {{ {'options': options, 'errors': errors} | to_json }}
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - dns_adblock__translation.errors | length == 0
+        fail_msg: "{{ dns_adblock__translation.errors | join('. ') }}"
+        quiet: true
+
+    - name: 'Show the options of the section global'
+      ansible.builtin.debug:
+        msg: "adblock {{ dns_adblock__section }}: {{ dns_adblock__options.keys() | join(', ') }}"
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check adblock and the package manager'
+      ansible.builtin.raw: >-
+        test -x /usr/bin/adblock.sh && test -x /etc/init.d/adblock && echo 'adblock=yes' || echo 'adblock=no';
+        command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg'
+      register: 'dns_adblock__tools'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Install adblock with apk'
+      community.openwrt.apk:
+        name: "{{ dns_adblock__packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      register: 'dns_adblock__apk'
+      when:
+        - "'adblock=no' in dns_adblock__tools.stdout_lines | map('trim')"
+        - "'manager=apk' in dns_adblock__tools.stdout_lines | map('trim')"
+
+    - name: 'Install adblock with opkg'
+      community.openwrt.opkg:
+        name: "{{ dns_adblock__packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      register: 'dns_adblock__opkg'
+      when:
+        - "'adblock=no' in dns_adblock__tools.stdout_lines | map('trim')"
+        - "'manager=opkg' in dns_adblock__tools.stdout_lines | map('trim')"
+
+    # In check mode the package of a first installation is missing, there are no feeds and no configuration to compare
+    - name: 'Configure adblock'
+      when: not (ansible_check_mode and 'adblock=no' in dns_adblock__tools.stdout_lines | map('trim'))
+      block:
+
+        # The feed files are JSON objects with the names of the feeds as keys, the custom feed file is empty by default
+        # The feed files are JSON objects with the names of the feeds as keys, the custom feed file is empty by default,
+        # the category file has lines <feed>;<name>;<path> (utc: <feed>;<name>), the last column is the value of hag_feed, utc_feed, ...
+        - name: 'Read the feed files and the categories'
+          ansible.builtin.raw: >-
+            for file in '{{ dns_adblock__options.adb_feedfile | default(dns_adblock__feedfile) }}'
+            '{{ dns_adblock__options.adb_customfeedfile | default(dns_adblock__customfeedfile) }}';
+            do echo '---'; cat "$file" 2>/dev/null; done;
+            echo '---'; cat '{{ dns_adblock__categoryfile }}' 2>/dev/null; true
+          register: 'dns_adblock__feedfiles'
+          changed_when: false
+          check_mode: false
+
+        # Without a category file (older versions of adblock) the categories are not checked
+        - name: 'Validate the feeds and categories'
+          vars:
+            dns_adblock__feed_parts: "{{ dns_adblock__feedfiles.stdout.split('---') }}"
+            dns_adblock__feeds_known: >-
+              {{ dns_adblock__feed_parts[1:3] | map('trim') | select
+                 | map('from_json') | map('dict2items') | flatten | map(attribute='key') | list }}
+            dns_adblock__feeds_unknown: >-
+              {{ dns_adblock__options.adb_feed | default([]) | reject('in', dns_adblock__feeds_known) | list }}
+            dns_adblock__categories: >-
+              {{ dns_adblock__feed_parts[3] | default('') | regex_findall('(?m)^([^;\s]+);(?:[^;\n]*;)?([^;\s]+)[ \t\r]*$') }}
+            dns_adblock__invalid: >-
+              {%- set errors = [] -%}
+              {%- if dns_adblock__feeds_unknown | length > 0 -%}
+              {%-   set _ = errors.append('unknown feeds: ' ~ dns_adblock__feeds_unknown | join(', ')
+                                          ~ ', known are ' ~ dns_adblock__feeds_known | sort | join(', ')) -%}
+              {%- endif -%}
+              {%- for option, feed in dns_adblock__category_options.items() if dns_adblock__categories | length > 0 -%}
+              {%-   set known = dns_adblock__categories | selectattr('0', 'eq', feed) | map(attribute='1') | list -%}
+              {%-   set unknown = dns_adblock__options['adb_' ~ option] | default([]) | reject('in', known) | list -%}
+              {%-   if unknown | length > 0 -%}
+              {%-     set _ = errors.append('unknown categories of ' ~ option ~ ': ' ~ unknown | join(', ')
+                                            ~ ', known are ' ~ known | join(', ')) -%}
+              {%-   endif -%}
+              {%- endfor -%}
+              {{ errors }}
+          ansible.builtin.assert:
+            that:
+              - dns_adblock__invalid | length == 0
+            fail_msg: "{{ dns_adblock__invalid | join('. ') }}"
+            quiet: true
+
+        - name: 'Read the current adblock configuration'
+          community.openwrt.slurp:
+            src: "{{ dns_adblock__uci_config }}"
+          register: 'dns_adblock__current'
+          check_mode: false
+
+        # Options set in LuCI and not declared are removed, except the options adblock detects and stores itself
+        - name: 'Set the section global of the adblock configuration'
+          community.openwrt.uci:
+            command: 'section'
+            config: 'adblock'
+            type: 'adblock'
+            name: "{{ dns_adblock__section }}"
+            value: "{{ dns_adblock__options }}"
+            replace: true
+            keep_keys: "{{ dns_adblock__detected_options | reject('in', dns_adblock__options.keys() | list) | list }}"
+
+        - name: 'Read the sections of the adblock configuration'
+          community.openwrt.uci:
+            command: 'show'
+            config: 'adblock'
+          register: 'dns_adblock__show'
+          check_mode: false
+
+        - name: 'Delete the other sections'
+          community.openwrt.uci:
+            command: 'delete'
+            key: "adblock.{{ item }}"
+          loop: >-
+            {{ dns_adblock__show.result | regex_findall('(?m)^adblock[.]([^.=\n]+)=[\w-]+$')
+               | reject('eq', dns_adblock__section) | reverse | list }}
+
+        - name: 'Read the pending changes of the adblock configuration'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'adblock'
+          register: 'dns_adblock__pending'
+          check_mode: false
+
+        # The backup contains the configuration before this change, it is only written before a commit
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: dns_adblock__pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup on the controller'
+          ansible.builtin.copy:
+            content: "{{ dns_adblock__current.content | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/adblock"
+            mode: '0600'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: dns_adblock__pending.changes | default({}) | length > 0
+
+        - name: 'Commit the adblock configuration'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'adblock'
+          register: 'dns_adblock__commit_result'
+          when: dns_adblock__pending.changes | default({}) | length > 0
+
+        - name: 'Write the allowlist and the blocklist'
+          community.openwrt.copy:
+            content: "{{ item.domains | map('string') | map('regex_replace', '$', '\n') | join('') }}"
+            dest: "{{ item.file }}"
+            mode: '0644'
+          loop:
+            - { file: "{{ dns_adblock__allowlist_file }}", domains: "{{ dns_adblock__allowlist }}" }
+            - { file: "{{ dns_adblock__blocklist_file }}", domains: "{{ dns_adblock__blocklist }}" }
+          loop_control:
+            label: "{{ item.file }}"
+          register: 'dns_adblock__lists_result'
+
+        # adblock.init refuses start, restart and reload while a processing runs, e.g. the download of the feeds after the installation
+        - name: 'Wait for a running adblock processing'
+          ansible.builtin.raw: >-
+            end=$(( $(date +%s) + {{ dns_adblock__wait_timeout | int }} ));
+            while pid="$(cat {{ dns_adblock__pidfile }} 2>/dev/null)"; [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; do
+            [ "$(date +%s)" -ge "$end" ] && { echo 'busy'; exit 0; }; sleep 5; done; echo 'idle'
+          register: 'dns_adblock__wait'
+          changed_when: false
+          check_mode: false
+          failed_when: "'idle' not in dns_adblock__wait.stdout"
+          when:
+            - dns_adblock__changed | bool
+            - not ansible_check_mode
+
+        - name: 'Start and enable adblock'
+          community.openwrt.service:
+            name: 'adblock'
+            enabled: true
+            state: "{{ 'restarted' if dns_adblock__changed | bool else 'started' }}"
+          when: not ansible_check_mode

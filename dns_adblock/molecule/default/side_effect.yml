@@ -1,0 +1,128 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_adblock__test_case: "{{ dns_adblock__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_adblock__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the adblock configuration and the lists before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/adblock /etc/adblock/adblock.allowlist /etc/adblock/adblock.blocklist'
+      register: 'dns_adblock__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_adblock with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config:
+          molecule: true
+        dns_adblock__test_invalid:
+          message: 'an unknown option'
+          search: '^unknown option molecule$'
+
+    - name: 'Run dns_adblock with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config:
+          enabled: 'maybe'
+        dns_adblock__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: maybe$'
+
+    - name: 'Run dns_adblock with a number out of range (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config:
+          nicelimit: 30
+        dns_adblock__test_invalid:
+          message: 'a number out of range'
+          search: '^nicelimit has to be a number from 0 to 19: 30$'
+
+    - name: 'Run dns_adblock with an unknown DNS backend (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config:
+          dns: 'bind'
+        dns_adblock__test_invalid:
+          message: 'an unknown DNS backend'
+          search: '^dns has to be one of dnsmasq, unbound, named, kresd, smartdns, raw: bind$'
+
+    - name: 'Run dns_adblock with an unknown feed (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config:
+          feed: [ 'certpl', 'molecule_feed' ]
+        dns_adblock__test_invalid:
+          message: 'an unknown feed'
+          search: '^unknown feeds: molecule_feed, known are '
+
+    - name: 'Run dns_adblock with an unknown category (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config:
+          hag_feed: [ 'wildcard/native.xiaomi-onlydomains.tx' ]
+        dns_adblock__test_invalid:
+          message: 'an unknown category'
+          search: '^unknown categories of hag_feed: wildcard/native\.xiaomi-onlydomains\.tx, known are '
+
+    - name: 'Run dns_adblock with an empty entry in the allowlist (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_allowlist: [ 'example.org', ~ ]
+        dns_adblock__test_invalid:
+          message: 'an empty entry in the allowlist'
+          search: '^adblock_allowlist has entries that are no domains: None$'
+
+    - name: 'Run dns_adblock with an invalid domain in the blocklist (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_blocklist: [ 'example.com', 'bad domain' ]
+        dns_adblock__test_invalid:
+          message: 'an invalid domain in the blocklist'
+          search: '^adblock_blocklist has invalid domains: bad domain$'
+
+    - name: 'Run dns_adblock with a domain in both lists (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_allowlist: [ 'example.org' ]
+        adblock_blocklist: [ 'example.org' ]
+        dns_adblock__test_invalid:
+          message: 'a domain in both lists'
+          search: '^domains in adblock_allowlist and adblock_blocklist: example\.org$'
+
+    - name: 'Run dns_adblock with a configuration that is no dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        adblock_config: [ 'enabled' ]
+        dns_adblock__test_invalid:
+          message: 'a configuration that is no dictionary'
+          search: "^adblock_config has to be a dictionary: \\['enabled'\\]$"
+
+    - name: 'Run dns_adblock with the changed lists'
+      when: dns_adblock__test_case.side_effect is defined
+      block:
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ dns_adblock__test_case.side_effect | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run dns_adblock with the changed lists'
+          ansible.builtin.include_role:
+            name: 'dns_adblock'

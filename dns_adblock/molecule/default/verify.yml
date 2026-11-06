@@ -1,0 +1,63 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_adblock__test_case: "{{ dns_adblock__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_adblock__test_expect: "{{ dns_adblock__test_case.expect }}"
+
+  tasks:
+
+    # adblock downloads the feeds in the background after a start, the status is enabled afterwards
+    - name: 'Wait for adblock and resolve the domains'
+      ansible.builtin.raw: >-
+        echo "status=$(jsonfilter -i /var/run/adblock/adblock.runtime.json -e '@.adblock_status' 2>/dev/null)";
+        {% for domain in dns_adblock__test_expect.blocked + dns_adblock__test_expect.resolved %}
+        nslookup {{ domain }} 127.0.0.1 2>/dev/null | grep -q '^Name:' && echo '{{ domain }}=resolved' || echo '{{ domain }}=blocked';
+        {% endfor %}
+        true
+      register: 'dns_adblock__test_state'
+      changed_when: false
+      until: >-
+        'status=enabled' in dns_adblock__test_state.stdout_lines | map('trim')
+        and dns_adblock__test_expect.blocked | map('regex_replace', '$', '=blocked')
+            | difference(dns_adblock__test_state.stdout_lines | map('trim')) | length == 0
+        and dns_adblock__test_expect.resolved | map('regex_replace', '$', '=resolved')
+            | difference(dns_adblock__test_state.stdout_lines | map('trim')) | length == 0
+      retries: 30
+      delay: 10
+
+    - name: 'Read the adblock configuration and the lists'
+      ansible.builtin.raw: >-
+        uci show adblock | sort; echo '---';
+        cat /etc/adblock/adblock.allowlist; echo '---';
+        cat /etc/adblock/adblock.blocklist; echo '---';
+        /etc/init.d/adblock enabled && echo 'adblock enabled'; true
+      register: 'dns_adblock__test_files'
+      changed_when: false
+
+    - name: 'Assert the adblock configuration and the lists'
+      vars:
+        dns_adblock__test_parts: "{{ dns_adblock__test_files.stdout.split('---') }}"
+        # uci show quotes the values
+        dns_adblock__test_lines: "{{ dns_adblock__test_parts[0].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
+        dns_adblock__test_allowlist: "{{ dns_adblock__test_parts[1].splitlines() | map('trim') | select | list }}"
+        dns_adblock__test_blocklist: "{{ dns_adblock__test_parts[2].splitlines() | map('trim') | select | list }}"
+        dns_adblock__test_absent: "{{ '(' ~ dns_adblock__test_expect.absent | map('regex_escape') | join('|') ~ ')=' }}"
+      ansible.builtin.assert:
+        that:
+          - "'adblock enabled' in dns_adblock__test_parts[3]"
+          - dns_adblock__test_expect.uci | difference(dns_adblock__test_lines) | length == 0
+          - dns_adblock__test_lines | select('search', dns_adblock__test_absent) | list | length == 0
+          - dns_adblock__test_allowlist == dns_adblock__test_expect.allowlist
+          - dns_adblock__test_blocklist == dns_adblock__test_expect.blocklist
+        fail_msg: >-
+          missing in UCI: {{ dns_adblock__test_expect.uci | difference(dns_adblock__test_lines) | join(', ') | default('none', true) }},
+          not removed: {{ dns_adblock__test_lines | select('search', dns_adblock__test_absent) | join(', ') | default('none', true) }},
+          allowlist: {{ dns_adblock__test_allowlist }}, blocklist: {{ dns_adblock__test_blocklist }},
+          state: {{ dns_adblock__test_parts[3] | trim }}
