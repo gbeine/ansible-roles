@@ -13,7 +13,7 @@ Use `unbound_publish` to publish the port on the host, e.g. `[ '53:53/udp', '53:
 
 `unbound_config` is a dictionary of [unbound.conf](https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html) clauses,
 the keys are the clause names (`server`, `forward-zone`, `stub-zone`, ...), the values the options of the clause.
-It is merged recursively into the defaults of the role (`dns_unbound__config_default`, the configuration of the image):
+It is merged recursively into the default of the platform (`dns_unbound__config_default` of `vars/Debian.yml`, the configuration of the image, or of `vars/OpenWrt.yml`):
 an option set in `unbound_config` replaces the option of the defaults, a list replaces the list as a whole,
 `null` removes the option or the clause.
 A clause given as a dictionary is written once, a clause given as a list of dictionaries once per element.
@@ -56,7 +56,8 @@ unbound_config:
 
 ### Validation
 
-The role checks before any change that `unbound_config` is a dictionary of clauses with valid names,
+`unbound_config` has to be a dictionary, otherwise merging it with the default fails.
+The role checks before any change that the clauses have valid names,
 each a dictionary, a list of dictionaries or `null`, with valid option names and booleans, strings, numbers, lists of strings and numbers or `null` as values,
 and that every `forward-addr` of a TLS forward zone carries the name of the certificate after `#`.
 Option names consist of lowercase letters, digits and dashes, the UCI options of OpenWrt are allowed with their names in their clauses.
