@@ -28,6 +28,7 @@
           - dns_unbound__config_invalid_options | length == 0
           - dns_unbound__config_invalid_values | length == 0
           - dns_unbound__config_invalid_forwarders | length == 0
+          - dns_unbound__config_invalid_zone_names | length == 0
         # Only the failing checks are reported
         fail_msg: >-
           {{ [ ('unbound_config has to be a dictionary: ' ~ dns_unbound__config_user)
@@ -42,7 +43,9 @@
                  if dns_unbound__config_invalid_values | length > 0 else '',
                ('unbound_config forward-addr entries need the name of the certificate after # when forward-tls-upstream is set: '
                 ~ dns_unbound__config_invalid_forwarders | join(', '))
-                 if dns_unbound__config_invalid_forwarders | length > 0 else '' ]
+                 if dns_unbound__config_invalid_forwarders | length > 0 else '',
+               ('unbound_config zones need a name or a list of names: ' ~ dns_unbound__config_invalid_zone_names | join(', '))
+                 if dns_unbound__config_invalid_zone_names | length > 0 else '' ]
              | select | join('. ') }}
         quiet: true
       vars:
@@ -61,6 +64,20 @@
                   or (value is not none and clauses | reject('mapping') | list | length > 0) -%}
           {%-     set ns.invalid = ns.invalid + [ clause ] -%}
           {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.invalid }}
+        # name of a zone is one name or a list of names, a clause is written for every name
+        dns_unbound__config_invalid_zone_names: >-
+          {%- set ns = namespace(invalid=[]) -%}
+          {%- for clause, value in dns_unbound__config_clauses if clause in dns_unbound__zone_clauses -%}
+          {%-   for zone in (value if value is sequence and value is not mapping and value is not string else [ value ]) | select('mapping') -%}
+          {%-     set name = zone.name | default(none) -%}
+          {%-     set names = name if name is sequence and name is not string and name is not mapping else [ name ] -%}
+          {%-     if name is none or name is mapping or names | length == 0
+                    or names | reject('string') | list | length > 0 or names | reject | list | length > 0 -%}
+          {%-       set ns.invalid = ns.invalid + [ clause ~ ' ' ~ loop.index ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
           {%- endfor -%}
           {{ ns.invalid }}
         dns_unbound__config_invalid_options: >-

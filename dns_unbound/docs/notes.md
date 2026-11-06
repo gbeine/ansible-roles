@@ -17,6 +17,9 @@ It is merged recursively into the defaults of the role (`dns_unbound__config_def
 an option set in `unbound_config` replaces the option of the defaults, a list replaces the list as a whole,
 `null` removes the option or the clause.
 A clause given as a dictionary is written once, a clause given as a list of dictionaries once per element.
+`name` of a `forward-zone`, `stub-zone` or `auth-zone` is one name or a list of names like `zone_name` of OpenWrt, the zone is written once per name.
+The `url` of an `auth-zone` is the URL of the zone file or the directory of the zone files ending with `/`, then `root.zone` or `<name>.zone` is added for every name.
+A zone with the UCI option `enabled: false` is not written, like on OpenWrt.
 
 * `true` writes `option: yes`, `false` writes `option: no`
 * a string or number writes `option: value`, the value is written as it is: options with several arguments
@@ -103,7 +106,7 @@ The clause `server` becomes the section `unbound 'ub_main'`, `manual_conf` is al
 | `num-threads` | `num_threads` | 1 or 2 |
 | `cache-min-ttl` | `ttl_min` | up to 1800 |
 | `cache-max-negative-ttl` | `ttl_neg_max` | number |
-| `ratelimit` | `rate_limit` | 11 to 99999, `ip-ratelimit` is half of it |
+| `ratelimit` | `rate_limit` | 0 (no rate limit) or 11 to 99999, `ip-ratelimit` is half of it |
 | `extended-statistics` | `extended_stats` | boolean |
 | `interface-automatic` | `interface_auto` | boolean, without it `0` (unbound.sh would enable it) |
 | `qname-minimisation` | `query_minimize` | boolean |
@@ -115,11 +118,12 @@ The clause `server` becomes the section `unbound 'ub_main'`, `manual_conf` is al
 unbound.sh replaces numbers outside these ranges without notice, the role fails instead.
 
 Options of the UCI configuration without counterpart in `unbound.conf` are written with their UCI names into the clause `server`,
-booleans as `0` and `1`: `add_extra_dns`, `add_local_fqdn`, `add_wan_fqdn`, `dhcp_link`, `dhcp4_slaac6`, `domain`, `domain_type`, `exclude_ipv6_ga`,
+booleans as `0` and `1`: `enabled`, `add_extra_dns`, `add_local_fqdn`, `add_wan_fqdn`, `dhcp_link`, `dhcp4_slaac6`, `domain`, `domain_type`, `exclude_ipv6_ga`,
 the lists `iface_lan`, `iface_trig` and `iface_wan`, `localservice`, `prefetch_root`, `protocol`, `rebind_localhost`, `rebind_protection`,
 `recursion`, `resource`, `root_age`, `unbound_control`, `validator` and `validator_ntp`.
 They select options unbound.sh writes itself, e.g. `localservice` and `iface_lan` the `access-control` lines, `rebind_protection` the `private-address` lines,
 `resource` the cache sizes, `recursion` the prefetching and `validator` the DNSSEC validation.
+`enabled` is the switch *Enable Unbound* of LuCI, unbound.sh does not read it; with `enabled: false` the role writes the configuration and stops and disables unbound like LuCI.
 
 ```yaml
 unbound_config:
@@ -134,19 +138,33 @@ unbound_config:
       forward-addr: [ '9.9.9.9@853#dns.quad9.net', '149.112.112.112@853#dns.quad9.net' ]
 ```
 
-The zones become named sections `zone`, `fwd_`, `stub_` or `auth_` followed by the name with `_` instead of other characters (`fwd_root` for `.`, `stub_lab_example_org`):
+Every zone becomes a section `zone` with all its names in `list zone_name`. The UCI option `section` names the section,
+without it the name is `fwd_`, `stub_` or `auth_` followed by the first name with `_` instead of other characters (`fwd_root` for `.`, `stub_lab_example_org`):
 
 | Clause | Options of unbound | UCI options |
 |---|---|---|
-| `forward-zone` | `name`, `forward-addr`, `forward-host`, `forward-first`, `forward-tls-upstream` | `zone_type forward_zone`, `zone_name`, `server` (addresses and hosts as written, with `@port#name`), `fallback`, `tls_upstream`, UCI only: `resolv_conf`, `dns_assist` |
-| `stub-zone` | `name`, `stub-addr`, `stub-first` | `zone_type stub_zone`, `zone_name`, `server`, `fallback` |
-| `auth-zone` | `name`, `primary` or `master`, `url`, `fallback-enabled` | `zone_type auth_zone`, `zone_name`, `server`, `url_dir`, `fallback` |
+| `forward-zone` | `name`, `forward-addr`, `forward-host`, `forward-first`, `forward-tls-upstream` | `zone_type forward_zone`, `zone_name`, `server` (addresses and hosts as written, with `@port#name`), `fallback`, `tls_upstream`, UCI only: `section`, `enabled`, `resolv_conf`, `dns_assist` |
+| `stub-zone` | `name`, `stub-addr`, `stub-first` | `zone_type stub_zone`, `zone_name`, `server`, `fallback`, UCI only: `section`, `enabled` |
+| `auth-zone` | `name`, `primary` or `master`, `url`, `fallback-enabled` | `zone_type auth_zone`, `zone_name`, `server`, `url_dir`, `fallback`, UCI only: `section`, `enabled` |
 
-Every zone section gets `enabled '1'`, `forward-first`, `stub-first` and `fallback-enabled` are `0` without the option like in unbound.
+Every zone section gets `enabled '1'` or the UCI option `enabled` of the zone (`false` keeps the zone in UCI without writing it to the configuration of unbound), `forward-first`, `stub-first` and `fallback-enabled` are `0` without the option like in unbound.
 unbound.sh decides between `forward-addr` and `forward-host` itself, an address has to be one it accepts; a forwarder on the loopback (e.g. dnsmasq on `127.0.0.1@1053`)
 needs `dns_assist` in the zone, otherwise unbound.sh drops it.
-An `auth-zone` needs `validator_ntp: false` in `server`, `url` has to end with `/<name>.zone` (`/root.zone` for `.`),
+An enabled `auth-zone` needs `validator_ntp: false` in `server`. `url` is the directory of the zone files ending with `/` (`url_dir`),
+or for a single name the URL of the zone file ending with `/<name>.zone` (`/root.zone` for `.`);
 unbound.sh writes `zonefile`, `for-downstream: no` and `for-upstream: yes` itself.
+The zone `auth_icann` of the delivery of OpenWrt is:
+
+```yaml
+unbound_config:
+  auth-zone:
+    - section: 'auth_icann'
+      name: [ '.', 'arpa.', 'in-addr.arpa.', 'ip6.arpa.' ]
+      enabled: false
+      fallback-enabled: true
+      primary: [ 'lax.xfr.dns.icann.org', 'iad.xfr.dns.icann.org' ]
+      url: 'https://www.internic.net/domain/'
+```
 
 The role fails before it changes anything for options and clauses without UCI counterpart (e.g. `access-control`, `private-address`, `module-config`, `remote-control`, `view`),
 the message names the UCI option that writes the option if there is one, and for values unbound.sh would replace or drop.
@@ -198,7 +216,7 @@ the VMs need access to the package feeds.
 | Platform | Test case |
 |---|---|
 | `molecule-unbound-openwrt-default` | Without variables, `prepare` disables the DNS of dnsmasq so unbound gets port 53 |
-| `molecule-unbound-openwrt` | `unbound_config` with port 1053, `domain-insecure`, `resource`, a forward zone over TLS and a stub zone; `prepare` creates `/etc/config/unbound` with a zone the role has to remove and without the section `unbound` |
+| `molecule-unbound-openwrt` | `unbound_config` with port 1053, `domain-insecure`, `resource`, `ratelimit: 0`, a forward zone over TLS and a disabled stub zone; `prepare` creates `/etc/config/unbound` with a zone the role has to remove and without the section `unbound` |
 
 `prepare` installs `unbound-checkconf`, the role installs `unbound-daemon`.
 `side_effect` runs the role with an option and a clause without UCI counterpart, different `hide-identity` and `hide-version`, a privileged port

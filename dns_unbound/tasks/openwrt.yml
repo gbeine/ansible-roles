@@ -56,6 +56,10 @@
           {%       set _ = options.update({key: values(value) | from_json}) %}
           {%     elif value is sequence and value is not string %}
           {%       set _ = errors.append('server.' ~ key ~ ' has to be a single value on OpenWrt') %}
+          {%     elif key == 'enabled' and not boolean(value) | from_json and value | string not in ['0', '1'] %}
+          {%       set _ = errors.append('server.enabled has to be a boolean on OpenWrt') %}
+          {%     elif key == 'enabled' %}
+          {%       set _ = options.update({key: '1' if truth(value) | from_json or value | string == '1' else '0'}) %}
           {%     else %}
           {%       set _ = options.update({key: uci(value)}) %}
           {%     endif %}
@@ -123,11 +127,22 @@
           {%     set _ = errors.append(clause ~ ' is not supported on OpenWrt') %}
           {%   else %}
           {%     for zone in entries(value) | from_json %}
-          {%       set zone_name = zone.name | default('') | string %}
-          {%       set label = clause ~ ' ' ~ (zone_name | default('without name', true)) %}
-          {%       set section = dns_unbound__openwrt_zone_prefixes[clause]
-                                 ~ ((zone_name | regex_replace('[.]$', '')) | default('root', true) | regex_replace('[^A-Za-z0-9_]', '_')) %}
-          {%       set options = {'enabled': '1', 'zone_name': [ zone_name ]} %}
+          {#       name is one name or a list of names like zone_name of UCI, section names the UCI section #}
+          {%       set zone_names = values(zone.name | default(none)) | from_json | select | list %}
+          {%       set zone_name = zone_names | first | default('') %}
+          {%       set label = clause ~ ' ' ~ (zone_names | join(', ') | default('without name', true)) %}
+          {%       set section = (zone.section | string) if zone.section is defined and zone.section is not none
+                                 else dns_unbound__openwrt_zone_prefixes[clause]
+                                      ~ ((zone_name | regex_replace('[.]$', '')) | default('root', true) | regex_replace('[^A-Za-z0-9_]', '_')) %}
+          {%       if section is not match('^[A-Za-z0-9_]+$') %}
+          {%         set _ = errors.append(label ~ ' section has to consist of letters, digits and underscores on OpenWrt: ' ~ section) %}
+          {%       endif %}
+          {%       set enabled = zone.enabled | default(true) %}
+          {%       if not boolean(enabled) | from_json and enabled | string not in ['0', '1'] %}
+          {%         set _ = errors.append(label ~ ' enabled has to be a boolean on OpenWrt') %}
+          {%       endif %}
+          {%       set options = {'enabled': '1' if truth(enabled) | from_json or enabled | string == '1' else '0',
+                                  'zone_name': zone_names} %}
           {%       set servers = [] %}
           {%       if zone_name == '' %}
           {%         set _ = errors.append(label ~ ' needs a name') %}
@@ -173,23 +188,30 @@
           {%           set _ = servers.append(item) %}
           {%         endfor %}
           {%         set first = 'stub-first' %}
-          {%         set known = ['name', 'stub-addr', 'stub-first'] %}
+          {%         set known = ['name', 'stub-addr', 'stub-first'] + only['stub-zone'] %}
           {%         if servers | length == 0 %}
           {%           set _ = errors.append(label ~ ' needs stub-addr on OpenWrt') %}
           {%         endif %}
           {%       else %}
           {%         set _ = options.update({'zone_type': 'auth_zone'}) %}
           {%         set file = 'root.zone' if zone_name == '.' else (zone_name ~ '.zone') | replace('..', '.') %}
+          {#         A url ending with / is the directory of the zone files of all names #}
           {%         for item in values(zone.primary | default(none)) | from_json + values(zone.master | default(none)) | from_json %}
           {%           set _ = servers.append(item) %}
           {%         endfor %}
           {%         set url = zone.url | default('') | string %}
-          {%         if url != '' and not url.endswith('/' ~ file) %}
+          {%         if url.endswith('/') %}
+          {%           set _ = options.update({'url_dir': url}) %}
+          {%         elif url != '' and zone_names | length > 1 %}
+          {%           set _ = errors.append(label ~ ' url has to be a directory ending with / for more than one name on OpenWrt') %}
+          {%         elif url != '' and not url.endswith('/' ~ file) %}
           {%           set _ = errors.append(label ~ ' url has to end with /' ~ file ~ ' on OpenWrt') %}
           {%         elif url != '' %}
           {%           set _ = options.update({'url_dir': url[:url | length - file | length]}) %}
           {%         endif %}
-          {%         if zone.zonefile is defined and zone.zonefile | string != file %}
+          {%         if zone.zonefile is defined and zone_names | length > 1 %}
+          {%           set _ = errors.append(label ~ ' zonefile is not supported for more than one name on OpenWrt') %}
+          {%         elif zone.zonefile is defined and zone.zonefile | string != file %}
           {%           set _ = errors.append(label ~ ' zonefile has to be ' ~ file ~ ' on OpenWrt') %}
           {%         endif %}
           {%         if zone['for-downstream'] is defined and truth(zone['for-downstream']) | from_json %}
@@ -201,11 +223,13 @@
           {%         if servers | length == 0 and url == '' %}
           {%           set _ = errors.append(label ~ ' needs primary or url on OpenWrt') %}
           {%         endif %}
-          {%         if truth(server.validator_ntp | default(true)) | from_json or server.validator_ntp | default(true) | string == '1' %}
+          {%         if options.enabled == '1'
+                    and (truth(server.validator_ntp | default(true)) | from_json or server.validator_ntp | default(true) | string == '1') %}
           {%           set _ = errors.append(label ~ ' needs server.validator_ntp false on OpenWrt, unbound.sh skips auth zones otherwise') %}
           {%         endif %}
           {%         set first = 'fallback-enabled' %}
-          {%         set known = ['name', 'primary', 'master', 'url', 'zonefile', 'for-downstream', 'for-upstream', 'fallback-enabled'] %}
+          {%         set known = ['name', 'primary', 'master', 'url', 'zonefile', 'for-downstream', 'for-upstream', 'fallback-enabled']
+                            + only['auth-zone'] %}
           {%       endif %}
           {%       if zone[first] is defined and zone[first] is not none and not boolean(zone[first]) | from_json %}
           {%         set _ = errors.append(label ~ ' ' ~ first ~ ' has to be a boolean on OpenWrt') %}
@@ -360,9 +384,14 @@
           register: 'dns_unbound__openwrt_commit_result'
           when: dns_unbound__openwrt_pending.changes | default({}) | length > 0
 
+        # enabled of the section unbound is the switch Enable Unbound of LuCI, LuCI stops unbound without it
         - name: 'Start and enable unbound'
           community.openwrt.service:
             name: 'unbound'
-            enabled: true
-            state: "{{ 'restarted' if dns_unbound__openwrt_changed | bool else 'started' }}"
+            enabled: "{{ dns_unbound__openwrt_enabled | bool }}"
+            state: >-
+              {{ ('restarted' if dns_unbound__openwrt_changed | bool else 'started') if dns_unbound__openwrt_enabled | bool else 'stopped' }}
+          vars:
+            dns_unbound__openwrt_enabled: >-
+              {{ (dns_unbound__openwrt_translation.sections | selectattr('type', 'eq', 'unbound') | first).options.enabled | default('1') == '1' }}
           when: not ansible_check_mode

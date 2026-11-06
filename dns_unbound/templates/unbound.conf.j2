@@ -2,7 +2,15 @@
 ### {{ ansible_managed }}
 ###
 {% for clause, value in dns_unbound__config | dictsort if value is not none %}
-{%   for options in (value if value is sequence and value is not mapping and value is not string else [ value ]) %}
+{#   Zones with enabled false (UCI option of OpenWrt) are not written like by unbound.sh #}
+{%   for entry in (value if value is sequence and value is not mapping and value is not string else [ value ])
+       if not (entry is mapping and entry.enabled is defined and (entry.enabled is sameas false or entry.enabled | string in [ '0', 'no' ])) %}
+{#     A zone with a list of names is written once per name, a url of an auth-zone ending with / gets the zone file like on OpenWrt #}
+{%     for name in ((entry.name if entry.name is sequence and entry.name is not string else [ entry.name ]) if 'name' in entry else [ none ]) %}
+{%       set options = entry if name is none else entry | combine({'name': name}) %}
+{%       if clause == 'auth-zone' and options.url is defined and options.url is string and options.url.endswith('/') and name is not none %}
+{%         set options = options | combine({'url': options.url ~ (('root.zone' if name == '.' else (name ~ '.zone') | replace('..', '.')))}) %}
+{%       endif %}
 {{ clause }}:
 {#     Options of the UCI configuration of OpenWrt are not written #}
 {%     for option, setting in ([ ('name', options['name']) ] if 'name' in options else []) + (options | dictsort | rejectattr('0', 'eq', 'name') | list)
@@ -10,6 +18,7 @@
 {%       for item in (setting if setting is sequence and setting is not string else [ setting ]) %}
     {{ option }}: {{ 'yes' if item is sameas true else ('no' if item is sameas false else item) }}
 {%       endfor %}
+{%     endfor %}
 {%     endfor %}
 {%   endfor %}
 {% endfor %}
