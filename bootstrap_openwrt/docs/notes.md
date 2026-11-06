@@ -268,7 +268,7 @@ The role does not configure snmpd any longer, the role `monitoring_snmp` configu
 | Former variable | Now (role `monitoring_snmp`) |
 |---|---|
 | `openwrt_snmpd_enable: true` | run the role `monitoring_snmp` on the device |
-| `openwrt_snmpd` (UCI sections) | `snmpd_settings` and `snmpd_configs` with directives of `snmpd.conf`, the role translates them to UCI |
+| `openwrt_snmpd` (UCI sections) | `snmpd_config` and `snmpd_configs` with directives of `snmpd.conf`, the role translates them to UCI |
 | `openwrt_snmpd_ssl` | `snmpd_ssl` |
 | `openwrt_snmpd_prune` | `snmpd_prune` |
 | `openwrt_snmpd_redact_keys` | removed, the secrets are always redacted |

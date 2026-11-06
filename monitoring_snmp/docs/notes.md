@@ -12,12 +12,12 @@ On Debian the role writes the configuration of `snmpd` to these files:
 
 ### Settings
 
-`snmpd_settings` sets directives of `snmpd.conf`, it is a mapping of the names of the directives to values.
+`snmpd_config` sets directives of `snmpd.conf`, it is a mapping of the names of the directives to values.
 A list writes the directive once per value, e.g. for `view` or `rocommunity`, an empty list or an empty string comments the directive out.
 `snmpd.conf` contains all settings of `snmpd.conf` of the Debian package with their description and default, a setting replaces the default completely.
 
 ```yaml
-snmpd_settings:
+snmpd_config:
   sysLocation: 'Rack 1'
   sysContact: 'admin@example.org'
   agentaddress: 'udp:192.168.99.10:161,udp6:[fd00::10]:161'
@@ -35,7 +35,8 @@ Directives that are not in `snmpd.conf` of the package, e.g. `sysName`, are writ
 
 The settings and directives of the release are in `vars/settings-<release>.yml`, the settings with their descriptions from `snmpd.conf` of the Debian package,
 the directives from snmpd.conf(5) and the include directives of snmp_config(5) of Net-SNMP.
-The role fails before it changes anything if `snmpd_settings` or `snmpd_configs` contain a directive unknown to the release, directives are case-sensitive.
+The role fails before it changes anything if `snmpd_config` or `snmpd_configs` contain a directive unknown to the release, directives are case-sensitive.
+If `snmpd_config` is no mapping, merging it with the default of the platform (`vars/Debian.yml`, `vars/OpenWrt.yml`) fails before anything changes.
 
 ### Defaults of the role
 
@@ -48,7 +49,7 @@ Without variables the role creates the same configuration as a fresh installatio
 
 ### Configs
 
-Every config in `snmpd_configs` needs `name` (letters, digits, `.`, `_` and `-`) and `settings` in the same format as `snmpd_settings`,
+Every config in `snmpd_configs` needs `name` (letters, digits, `.`, `_` and `-`) and `settings` in the same format as `snmpd_config`,
 the role writes it to `/etc/snmp/snmpd.conf.d/<name>.conf`, `snmpd` reads the configs after `snmpd.conf`.
 
 ```yaml
@@ -78,7 +79,7 @@ With `snmpd_prune` (default `true`) the role removes all `*.conf` files in `/etc
 `snmpd_unit` makes `snmpd` depend on other systemd units, e.g. when it listens on an address of a podman network or a VPN, which exists only after the unit started:
 
 ```yaml
-snmpd_settings:
+snmpd_config:
   agentaddress: 'udp:10.90.99.1:161,udp:10.8.0.1:161'
 snmpd_unit:
   # Network podman99 of container_podman, the quadlet file podman99.network becomes the unit podman99-network.service
@@ -124,8 +125,8 @@ and that the journal contains no errors or warnings about lines of the configura
 ### OpenWrt
 
 On OpenWrt the init script of snmpd creates its configuration from the UCI configuration `/etc/config/snmpd`.
-The role uses the same variables as on Debian, `snmpd_settings` and `snmpd_configs` with directives of `snmpd.conf`, and translates them to UCI sections.
-The settings of all configs are added to `snmpd_settings`, lists are appended, every setting replaces the default completely.
+The role uses the same variables as on Debian, `snmpd_config` and `snmpd_configs` with directives of `snmpd.conf`, and translates them to UCI sections.
+The settings of all configs are added to `snmpd_config`, lists are appended, every setting replaces the default of `vars/OpenWrt.yml` completely.
 
 Without variables the role creates the configuration of the former default of the role `bootstrap_openwrt`:
 
@@ -177,7 +178,7 @@ The auth types `SHA-224` to `SHA-512` and the privacy types `DES`, `AES`, `AES-1
 ```yaml
 # SHA-512 and AES need the ssl variant
 snmpd_ssl: true
-snmpd_settings:
+snmpd_config:
   sysLocation: 'Rack 1'
   com2sec: [ 'ro 192.168.99.0/24 monitoring' ]
   com2sec6: []
@@ -199,9 +200,9 @@ snmpd_configs:
 
 | Former variable | Now |
 |---|---|
-| `snmpd_sys_location`, `snmpd_sys_contact`, `snmpd_sys_services` | `sysLocation`, `sysContact`, `sysServices` in `snmpd_settings` |
-| `snmpd_master` | `master` in `snmpd_settings` |
-| `snmpd_agentaddress` (list) | `agentaddress` in `snmpd_settings`, a string like `127.0.0.1,[::1]` |
+| `snmpd_sys_location`, `snmpd_sys_contact`, `snmpd_sys_services` | `sysLocation`, `sysContact`, `sysServices` in `snmpd_config` |
+| `snmpd_master` | `master` in `snmpd_config` |
+| `snmpd_agentaddress` (list) | `agentaddress` in `snmpd_config`, a string like `127.0.0.1,[::1]` |
 
 The defaults of the former role are the defaults of Debian 13 as well.
 
@@ -210,7 +211,7 @@ The role `bootstrap_openwrt` does not configure snmpd any longer:
 | Former variable of `bootstrap_openwrt` | Now |
 |---|---|
 | `openwrt_snmpd_enable: true` | run this role on the device |
-| `openwrt_snmpd` (UCI sections) | `snmpd_settings` and `snmpd_configs` with directives, see [OpenWrt](#openwrt) |
+| `openwrt_snmpd` (UCI sections) | `snmpd_config` and `snmpd_configs` with directives, see [OpenWrt](#openwrt) |
 | `openwrt_snmpd_ssl` | `snmpd_ssl` |
 | `openwrt_snmpd_prune` | `snmpd_prune` |
 | `openwrt_snmpd_redact_keys` | removed, the secrets are always redacted |
@@ -219,7 +220,7 @@ Example, these settings create the sections `@agent[0]`, `@agentx[0]`, `public` 
 `all`, `public_access`, `@system[0]`, `@exec[0]`, `@engineid[0]` and `general` of a former `openwrt_snmpd`:
 
 ```yaml
-snmpd_settings:
+snmpd_config:
   com2sec: [ 'ro 172.21.110.0/24 public', 'ro localhost public' ]
   com2sec6: []
   group: [ 'public v1 ro', 'public v2c ro' ]
