@@ -79,9 +79,10 @@ not through a podman bridge network or published ports.
 ### Validation
 
 The role checks before any change that `dnsmasq_enable_dhcp` is a boolean, `dnsmasq_publish` is a list,
-`dnsmasq_labels` is a dictionary if set and `dnsmasq_config` is a dictionary of valid option names
+`dnsmasq_labels` is a dictionary if set and `dnsmasq_config` has valid option names
 with booleans, strings, numbers or lists of strings and numbers as values, `dhcp-host` a list of valid static leases.
 Strings must not contain line breaks.
+`dnsmasq_config` has to be a dictionary, otherwise merging it with the default of the platform (`vars/Debian.yml`, `vars/OpenWrt.yml`) fails.
 The failure message names only the failing checks.
 
 ### Changes and restarts

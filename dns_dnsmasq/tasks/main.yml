@@ -4,19 +4,31 @@
   tags: [ 'dns_dnsmasq' ]
   block:
 
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'dns_dnsmasq__release_file'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Set the platform'
+      ansible.builtin.set_fact:
+        dns_dnsmasq__openwrt: "{{ dns_dnsmasq__release_file.stdout is search('DISTRIB_ID=.?OpenWrt') }}"
+
+    - name: 'Include the variables of the platform'
+      ansible.builtin.include_vars:
+        file: "{{ 'OpenWrt.yml' if dns_dnsmasq__openwrt | bool else 'Debian.yml' }}"
+
     - name: 'Validate the configuration'
       ansible.builtin.assert:
         that:
-          - dns_dnsmasq__config is mapping
           - dns_dnsmasq__config_invalid_keys | length == 0
           - dns_dnsmasq__config_invalid_values | length == 0
           - dns_dnsmasq__config_dhcp_hosts_valid | bool
           - dns_dnsmasq__config_invalid_dhcp_hosts | length == 0
         # Only the failing checks are reported
         fail_msg: >-
-          {{ [ ('dnsmasq_config has to be a dictionary: ' ~ dns_dnsmasq__config)
-                 if dns_dnsmasq__config is not mapping else '',
-               ('dnsmasq_config has invalid option names: ' ~ dns_dnsmasq__config_invalid_keys | join(', '))
+          {{ [ ('dnsmasq_config has invalid option names: ' ~ dns_dnsmasq__config_invalid_keys | join(', '))
                  if dns_dnsmasq__config_invalid_keys | length > 0 else '',
                ('dnsmasq_config values have to be a boolean, a string, a number or a list of strings and numbers: '
                 ~ dns_dnsmasq__config_invalid_values | join(', '))
@@ -31,7 +43,7 @@
         # dhcp-host is a list of dictionaries with the options of the UCI section host on all platforms,
         # false omits it like any other option
         dns_dnsmasq__config_dhcp_hosts: >-
-          {{ [] if dns_dnsmasq__config is not mapping or dns_dnsmasq__config['dhcp-host'] | default(false) is false
+          {{ [] if dns_dnsmasq__config['dhcp-host'] | default(false) is false
              else dns_dnsmasq__config['dhcp-host'] }}
         dns_dnsmasq__config_dhcp_hosts_valid: >-
           {{ dns_dnsmasq__config_dhcp_hosts is sequence
@@ -84,12 +96,12 @@
           {{ ns.invalid }}
         # Option names of dnsmasq consist of letters, digits and dashes
         dns_dnsmasq__config_invalid_keys: >-
-          {{ (dns_dnsmasq__config.keys() | list if dns_dnsmasq__config is mapping else [])
+          {{ dns_dnsmasq__config.keys() | list
              | reject('match', '^[A-Za-z0-9][A-Za-z0-9-]*$') | list }}
         # Strings must not contain line breaks, they would add further options
         dns_dnsmasq__config_invalid_values: >-
           {%- set ns = namespace(invalid=[]) -%}
-          {%- for key, value in (dns_dnsmasq__config.items() if dns_dnsmasq__config is mapping else []) if key != 'dhcp-host' -%}
+          {%- for key, value in dns_dnsmasq__config.items() if key != 'dhcp-host' -%}
           {%-   set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
           {%-   if value is not boolean and (value is mapping
                   or values | select('boolean') | list | length > 0
@@ -99,17 +111,6 @@
           {%-   endif -%}
           {%- endfor -%}
           {{ ns.invalid }}
-
-    # OpenWrt has no Python, raw works without facts on every system
-    - name: 'Detect OpenWrt'
-      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
-      register: 'dns_dnsmasq__release_file'
-      changed_when: false
-      check_mode: false
-
-    - name: 'Set the platform'
-      ansible.builtin.set_fact:
-        dns_dnsmasq__openwrt: "{{ dns_dnsmasq__release_file.stdout is search('DISTRIB_ID=.?OpenWrt') }}"
 
     - name: 'Install dnsmasq as podman quadlet on Debian'
       ansible.builtin.include_tasks: 'debian.yml'
