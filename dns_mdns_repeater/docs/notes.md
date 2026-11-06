@@ -29,7 +29,8 @@ The firewall has to accept mDNS (UDP port 5353) as input in the zones of the dev
 
 ### Validation
 
-The role checks before any change that `mdns_repeater_config` is a dictionary of known options,
+`mdns_repeater_config` has to be a dictionary, otherwise merging it with the default fails.
+The role checks before any change that `mdns_repeater_config` has known options only,
 that `interface` is a list of at least two different device names of letters, digits, `_`, `.`, `@` and `-` with at most 15 characters.
 The failure message names only the failing checks.
 Devices missing on the host give a warning only, VLANs and bridges can be created later; mdns-repeater does not start without them.
