@@ -8,4 +8,4 @@ container_repository: https://github.com/klutchell/unbound-docker
 documentation_link: https://unbound.docs.nlnetlabs.nl/
 ---
 
-Installs and configures Unbound as a podman quadlet.
+Installs and configures Unbound as a podman quadlet on Debian and with the UCI configuration on OpenWrt.

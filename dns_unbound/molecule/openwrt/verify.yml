@@ -1,0 +1,53 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_unbound__test_case: "{{ dns_unbound__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_unbound__test_expect: "{{ dns_unbound__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the unbound configuration, the generated configuration and the state of unbound'
+      ansible.builtin.raw: >-
+        uci show unbound | sort; echo '---';
+        cat /var/lib/unbound/unbound.conf; echo '---';
+        pidof unbound >/dev/null && echo 'unbound running'; /etc/init.d/unbound enabled && echo 'unbound enabled';
+        netstat -lnu | grep -q ':{{ dns_unbound__test_expect.port }} ' && echo 'port listening';
+        unbound-checkconf /var/lib/unbound/unbound.conf >/dev/null 2>&1 && echo 'checkconf ok'; true
+      register: 'dns_unbound__test_state'
+      changed_when: false
+
+    - name: 'Assert the unbound configuration, the generated configuration and the state of unbound'
+      vars:
+        dns_unbound__test_parts: "{{ dns_unbound__test_state.stdout.split('---') }}"
+        # uci show quotes the values
+        dns_unbound__test_lines: "{{ dns_unbound__test_parts[0].splitlines() | map('trim') | map('regex_replace', \"'\", '') | select | list }}"
+        dns_unbound__test_generated: "{{ dns_unbound__test_parts[1].splitlines() | map('trim') | reject('match', '#') | select | list }}"
+        dns_unbound__test_status: "{{ dns_unbound__test_parts[2].splitlines() | map('trim') | list }}"
+        dns_unbound__test_absent: >-
+          {{ '^(' ~ dns_unbound__test_expect.absent | map('regex_escape') | join('|') ~ ')[.=]' }}
+      ansible.builtin.assert:
+        that:
+          - "'unbound running' in dns_unbound__test_status"
+          - "'unbound enabled' in dns_unbound__test_status"
+          - "'port listening' in dns_unbound__test_status"
+          - "'checkconf ok' in dns_unbound__test_status"
+          - dns_unbound__test_expect.uci | difference(dns_unbound__test_lines) | length == 0
+          - dns_unbound__test_lines | select('match', dns_unbound__test_absent) | list | length == 0
+          - dns_unbound__test_expect.generated | difference(dns_unbound__test_generated) | length == 0
+          - >-
+            dns_unbound__test_generated
+            | select('search', dns_unbound__test_expect.generated_absent | map('regex_escape') | join('|')) | list | length == 0
+        fail_msg: >-
+          missing in UCI: {{ dns_unbound__test_expect.uci | difference(dns_unbound__test_lines) | join(', ') | default('none', true) }},
+          not removed: {{ dns_unbound__test_lines | select('match', dns_unbound__test_absent) | join(', ') | default('none', true) }},
+          missing in the generated configuration:
+          {{ dns_unbound__test_expect.generated | difference(dns_unbound__test_generated) | join(', ') | default('none', true) }},
+          state: {{ dns_unbound__test_status | join(', ') }},
+          generated: {{ dns_unbound__test_generated | join(' | ') }}

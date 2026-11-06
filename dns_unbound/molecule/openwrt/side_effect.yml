@@ -1,0 +1,92 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_unbound__test_case: "{{ dns_unbound__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_unbound__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the unbound configuration before the invalid runs'
+      ansible.builtin.raw: 'md5sum /etc/config/unbound'
+      register: 'dns_unbound__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_unbound with an option without UCI counterpart (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_config:
+          server:
+            access-control: [ '10.0.0.0/8 allow' ]
+        dns_unbound__test_invalid:
+          message: 'an option without UCI counterpart'
+          search: '^server\.access-control is not supported on OpenWrt, it is written by localservice, iface_lan$'
+
+    - name: 'Run dns_unbound with hide-identity different from hide-version (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_config:
+          server:
+            hide-identity: false
+        dns_unbound__test_invalid:
+          message: 'hide-identity different from hide-version'
+          search: '^server\.hide-identity and server\.hide-version have to be equal on OpenWrt, both are written by hide_binddata$'
+
+    - name: 'Run dns_unbound with a privileged port (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_config:
+          server:
+            port: 80
+        dns_unbound__test_invalid:
+          message: 'a privileged port'
+          search: '^server\.port has to be a number from 1024 to 10240 or 53 on OpenWrt: 80$'
+
+    - name: 'Run dns_unbound with an auth-zone with a wrong url (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_config:
+          server:
+            validator_ntp: false
+          auth-zone:
+            - name: '.'
+              url: 'https://www.internic.net/domain/other.zone'
+        dns_unbound__test_invalid:
+          message: 'an auth-zone with a wrong url'
+          search: '^auth-zone \. url has to end with /root\.zone on OpenWrt$'
+
+    - name: 'Run dns_unbound with a clause without UCI counterpart (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        unbound_config:
+          remote-control:
+            control-enable: true
+        dns_unbound__test_invalid:
+          message: 'a clause without UCI counterpart'
+          search: '^remote-control is not supported on OpenWrt$'
+
+    - name: 'Run dns_unbound with the changed configuration'
+      when: dns_unbound__test_case.side_effect is defined
+      block:
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            unbound_config: >-
+              {{ dns_unbound__test_case.role_vars.unbound_config | combine(dns_unbound__test_case.side_effect, recursive=true) }}
+
+        - name: 'Run dns_unbound with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'dns_unbound'

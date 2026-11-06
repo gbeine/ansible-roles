@@ -1,0 +1,45 @@
+---
+# OpenWrt has no Python, all tasks use raw
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    dns_unbound__test_case: "{{ dns_unbound__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Assert the clone is OpenWrt without unbound'
+      ansible.builtin.raw: '. /etc/openwrt_release && ! test -x /usr/sbin/unbound'
+      changed_when: false
+
+    # verify checks the generated configuration with unbound-checkconf, the role installs unbound-daemon only
+    - name: 'Install unbound-checkconf'
+      ansible.builtin.raw: >-
+        if command -v apk >/dev/null; then apk update >/dev/null && apk add unbound-checkconf;
+        else opkg update >/dev/null && opkg install unbound-checkconf; fi
+      changed_when: true
+
+    # dnsmasq listens on port 53 on the addresses of the interfaces, unbound needs the port with interface-automatic
+    - name: 'Set the DNS port of dnsmasq'
+      ansible.builtin.raw: >-
+        uci set dhcp.@dnsmasq[0].port={{ dns_unbound__test_case.prepare_dnsmasq_port }}
+        && uci commit dhcp && /etc/init.d/dnsmasq restart
+      changed_when: true
+      when: dns_unbound__test_case.prepare_dnsmasq_port is defined
+
+    # A configuration without the section unbound and with a zone the role has to remove, the package keeps it
+    - name: 'Create an unbound configuration with a zone'
+      ansible.builtin.raw: >-
+        touch /etc/config/unbound
+        && uci set unbound.fwd_molecule=zone
+        && uci set unbound.fwd_molecule.enabled=1
+        && uci set unbound.fwd_molecule.zone_type=forward_zone
+        && uci add_list unbound.fwd_molecule.zone_name=molecule.example
+        && uci add_list unbound.fwd_molecule.server=192.0.2.1
+        && uci commit unbound
+      changed_when: true
+      when: dns_unbound__test_case.prepare_zone | default(false)

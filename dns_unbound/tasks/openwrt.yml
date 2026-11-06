@@ -1,0 +1,368 @@
+---
+
+- name: 'Configure unbound on OpenWrt'
+  vars:
+    dns_unbound__openwrt_installed: >-
+      {{ 'unbound=no' in dns_unbound__openwrt_tools.stdout_lines | default([]) | map('trim')
+         and ((dns_unbound__openwrt_apk | default({})) is changed or (dns_unbound__openwrt_opkg | default({})) is changed) }}
+    dns_unbound__openwrt_changed: >-
+      {{ (dns_unbound__openwrt_commit_result | default({})) is changed or dns_unbound__openwrt_installed | bool }}
+  block:
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    # A failing template in the configuration (e.g. an unknown filter) disappears silently inside the translation,
+    # rendering the configuration completely shows the error before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__openwrt_config | to_json | length > 0
+        quiet: true
+
+    # The structure of the sections follows dns_dnsmasq: type, name and options, all sections are named
+    - name: 'Translate the configuration to the UCI configuration of unbound'
+      ansible.builtin.set_fact:
+        dns_unbound__openwrt_translation: "{{ dns_unbound__openwrt_translation_json | trim | from_json }}"
+      vars:
+        dns_unbound__openwrt_translation_json: >-
+          {% set config = dns_unbound__openwrt_config %}
+          {% set errors = [] %}
+          {% set sections = [] %}
+          {% set names = [] %}
+          {% set only = dns_unbound__openwrt_only_options %}
+          {#  The address detection of unbound.sh (valid_subnet4, valid_subnet6 and local_subnet of iptools.sh) #}
+          {% set address = '^((?!(127|0|255)[.]|169[.]254[.])[0-9]{1,3}[.][0-9]|f[cd][0-9a-f]{2}:|[1-9][0-9a-f]{3}:)' %}
+          {% set loopback = '^(127[.][0-9][.][0-9]|::1([@#]|$))' %}
+          {% macro uci(value) %}{{ ('1' if value else '0') if value is boolean else value | string }}{% endmacro %}
+          {% macro entries(value) %}{{ ((value if value is sequence and value is not string and value is not mapping else [ value ])
+                                        | select('mapping') | list) | to_json }}{% endmacro %}
+          {% macro values(value) %}{{ ([] if value is none else (value if value is sequence and value is not string else [ value ]))
+                                      | map('string') | list | to_json }}{% endmacro %}
+          {% macro boolean(value) %}{{ (value is boolean or value | string in ['yes', 'no']) | to_json }}{% endmacro %}
+          {% macro truth(value) %}{{ (value is sameas true or value | string == 'yes') | to_json }}{% endmacro %}
+          {#  Clause server: section unbound #}
+          {% set server = (entries(config.server) | from_json | first) if config.server is not none and config.server is defined else {} %}
+          {% if config.server is defined and config.server is not none
+                and config.server is sequence and config.server is not mapping %}
+          {%   set _ = errors.append('server has to be a single clause on OpenWrt') %}
+          {% endif %}
+          {% set options = {'manual_conf': '0'} %}
+          {% for key, value in server.items() if value is not none %}
+          {%   set mapping = dns_unbound__openwrt_server_options[key] | default(none) %}
+          {%   if key in only.server %}
+          {%     if key in dns_unbound__openwrt_only_list_options %}
+          {%       set _ = options.update({key: values(value) | from_json}) %}
+          {%     elif value is sequence and value is not string %}
+          {%       set _ = errors.append('server.' ~ key ~ ' has to be a single value on OpenWrt') %}
+          {%     else %}
+          {%       set _ = options.update({key: uci(value)}) %}
+          {%     endif %}
+          {%   elif mapping is not none and mapping.type == 'list' %}
+          {%     set _ = options.update({mapping.uci: values(value) | from_json}) %}
+          {%   elif mapping is not none and value is sequence and value is not string %}
+          {%     set _ = errors.append('server.' ~ key ~ ' has to be a single value on OpenWrt') %}
+          {%   elif mapping is not none and mapping.type == 'boolean' %}
+          {%     if boolean(value) | from_json %}
+          {%       set _ = options.update({mapping.uci: '1' if truth(value) | from_json else '0'}) %}
+          {%     else %}
+          {%       set _ = errors.append('server.' ~ key ~ ' has to be a boolean on OpenWrt') %}
+          {%     endif %}
+          {%   elif mapping is not none %}
+          {%     set number = value | string %}
+          {%     if value is boolean or number is not match('^[0-9]+$')
+                    or ((number | int < mapping.min | default(0) or number | int > mapping.max | default(number | int))
+                        and number | int not in mapping.also | default([])) %}
+          {%       set _ = errors.append('server.' ~ key ~ ' has to be a number'
+                                         ~ (' from ' ~ mapping.min ~ ' to ' ~ mapping.max if mapping.max is defined else '')
+                                         ~ (' or ' ~ mapping.also | join(', ') if mapping.also is defined else '')
+                                         ~ ' on OpenWrt: ' ~ value) %}
+          {%     else %}
+          {%       set _ = options.update({mapping.uci: number}) %}
+          {%     endif %}
+          {%   elif key in ['hide-identity', 'hide-version', 'dns64-prefix'] %}
+          {%   else %}
+          {%     set _ = errors.append('server.' ~ key ~ ' is not supported on OpenWrt'
+                                       ~ ((', it is written by ' ~ dns_unbound__openwrt_server_hints[key])
+                                          if key in dns_unbound__openwrt_server_hints else '')) %}
+          {%   endif %}
+          {% endfor %}
+          {#  hide_binddata writes hide-identity and hide-version together #}
+          {% set hide_identity = server['hide-identity'] | default(none) %}
+          {% set hide_version = server['hide-version'] | default(none) %}
+          {% if (hide_identity is none) != (hide_version is none)
+                or (hide_identity is not none and truth(hide_identity) != truth(hide_version)) %}
+          {%   set _ = errors.append('server.hide-identity and server.hide-version have to be equal on OpenWrt, both are written by hide_binddata') %}
+          {% elif hide_identity is not none and not (boolean(hide_identity) | from_json and boolean(hide_version) | from_json) %}
+          {%   set _ = errors.append('server.hide-identity and server.hide-version have to be booleans on OpenWrt') %}
+          {% else %}
+          {%   set _ = options.update({'hide_binddata': '1' if hide_identity is not none and truth(hide_identity) | from_json else '0'}) %}
+          {% endif %}
+          {#  dns64 adds the module and the prefix #}
+          {% if server['dns64-prefix'] | default(none) is not none %}
+          {%   if server['dns64-prefix'] is sequence and server['dns64-prefix'] is not string %}
+          {%     set _ = errors.append('server.dns64-prefix has to be a single value on OpenWrt') %}
+          {%   else %}
+          {%     set _ = options.update({'dns64': '1', 'dns64_prefix': server['dns64-prefix'] | string}) %}
+          {%   endif %}
+          {% else %}
+          {%   set _ = options.update({'dns64': '0'}) %}
+          {% endif %}
+          {#  Options without the option in the configuration where the default of unbound.sh differs from unbound #}
+          {% for key, mapping in dns_unbound__openwrt_server_options.items() if mapping.absent is defined and mapping.uci not in options %}
+          {%   set _ = options.update({mapping.uci: mapping.absent}) %}
+          {% endfor %}
+          {% if options.query_min_strict | default('0') == '1' and options.query_minimize | default('0') != '1' %}
+          {%   set _ = errors.append('server.qname-minimisation-strict needs server.qname-minimisation on OpenWrt') %}
+          {% endif %}
+          {% set _ = sections.append({'type': 'unbound', 'name': dns_unbound__openwrt_main_section, 'options': options}) %}
+          {#  Zones: one named section zone per clause, unbound.sh writes the clause again from it #}
+          {% for clause, value in config.items() if value is not none and clause != 'server' %}
+          {%   if clause not in dns_unbound__openwrt_zone_prefixes %}
+          {%     set _ = errors.append(clause ~ ' is not supported on OpenWrt') %}
+          {%   else %}
+          {%     for zone in entries(value) | from_json %}
+          {%       set zone_name = zone.name | default('') | string %}
+          {%       set label = clause ~ ' ' ~ (zone_name | default('without name', true)) %}
+          {%       set section = dns_unbound__openwrt_zone_prefixes[clause]
+                                 ~ ((zone_name | regex_replace('[.]$', '')) | default('root', true) | regex_replace('[^A-Za-z0-9_]', '_')) %}
+          {%       set options = {'enabled': '1', 'zone_name': [ zone_name ]} %}
+          {%       set servers = [] %}
+          {%       if zone_name == '' %}
+          {%         set _ = errors.append(label ~ ' needs a name') %}
+          {%       elif section in names %}
+          {%         set _ = errors.append(label ~ ' gives the same UCI section ' ~ section ~ ' as another zone on OpenWrt') %}
+          {%       endif %}
+          {%       set _ = names.append(section) %}
+          {%       if clause == 'forward-zone' %}
+          {%         set _ = options.update({'zone_type': 'forward_zone'}) %}
+          {%         set assist = zone.dns_assist | default('none') | string %}
+          {%         for item in values(zone['forward-addr'] | default(none)) | from_json %}
+          {%           if item is match(address) or (item is match(loopback) and assist != 'none') %}
+          {%             set _ = servers.append(item) %}
+          {%           elif item is match(loopback) %}
+          {%             set _ = errors.append(label ~ ' forward-addr ' ~ item ~ ' on the loopback needs dns_assist on OpenWrt') %}
+          {%           else %}
+          {%             set _ = errors.append(label ~ ' forward-addr ' ~ item ~ ' is no address unbound.sh accepts on OpenWrt') %}
+          {%           endif %}
+          {%         endfor %}
+          {%         for item in values(zone['forward-host'] | default(none)) | from_json %}
+          {%           if item is match(address) or item is match(loopback) or item is match('^(127[.]|::0)') %}
+          {%             set _ = errors.append(label ~ ' forward-host ' ~ item ~ ' has to be a name on OpenWrt') %}
+          {%           else %}
+          {%             set _ = servers.append(item) %}
+          {%           endif %}
+          {%         endfor %}
+          {%         set first = 'forward-first' %}
+          {%         set tls = zone['forward-tls-upstream'] | default(false) %}
+          {%         set _ = options.update({'tls_upstream': '1' if truth(tls) | from_json else '0'}) %}
+          {%         for key in ['resolv_conf'] if zone[key] is defined and zone[key] is not none %}
+          {%           set _ = options.update({key: uci(zone[key])}) %}
+          {%         endfor %}
+          {%         if zone.dns_assist is defined and zone.dns_assist is not none %}
+          {%           set _ = options.update({'dns_assist': zone.dns_assist | string}) %}
+          {%         endif %}
+          {%         set known = ['name', 'forward-addr', 'forward-host', 'forward-first', 'forward-tls-upstream'] + only['forward-zone'] %}
+          {%         if servers | length == 0 and not truth(zone.resolv_conf | default(false)) | from_json %}
+          {%           set _ = errors.append(label ~ ' needs forward-addr, forward-host or resolv_conf on OpenWrt') %}
+          {%         endif %}
+          {%       elif clause == 'stub-zone' %}
+          {%         set _ = options.update({'zone_type': 'stub_zone'}) %}
+          {%         for item in values(zone['stub-addr'] | default(none)) | from_json %}
+          {%           set _ = servers.append(item) %}
+          {%         endfor %}
+          {%         set first = 'stub-first' %}
+          {%         set known = ['name', 'stub-addr', 'stub-first'] %}
+          {%         if servers | length == 0 %}
+          {%           set _ = errors.append(label ~ ' needs stub-addr on OpenWrt') %}
+          {%         endif %}
+          {%       else %}
+          {%         set _ = options.update({'zone_type': 'auth_zone'}) %}
+          {%         set file = 'root.zone' if zone_name == '.' else (zone_name ~ '.zone') | replace('..', '.') %}
+          {%         for item in values(zone.primary | default(none)) | from_json + values(zone.master | default(none)) | from_json %}
+          {%           set _ = servers.append(item) %}
+          {%         endfor %}
+          {%         set url = zone.url | default('') | string %}
+          {%         if url != '' and not url.endswith('/' ~ file) %}
+          {%           set _ = errors.append(label ~ ' url has to end with /' ~ file ~ ' on OpenWrt') %}
+          {%         elif url != '' %}
+          {%           set _ = options.update({'url_dir': url[:url | length - file | length]}) %}
+          {%         endif %}
+          {%         if zone.zonefile is defined and zone.zonefile | string != file %}
+          {%           set _ = errors.append(label ~ ' zonefile has to be ' ~ file ~ ' on OpenWrt') %}
+          {%         endif %}
+          {%         if zone['for-downstream'] is defined and truth(zone['for-downstream']) | from_json %}
+          {%           set _ = errors.append(label ~ ' for-downstream has to be no on OpenWrt') %}
+          {%         endif %}
+          {%         if zone['for-upstream'] is defined and not truth(zone['for-upstream']) | from_json %}
+          {%           set _ = errors.append(label ~ ' for-upstream has to be yes on OpenWrt') %}
+          {%         endif %}
+          {%         if servers | length == 0 and url == '' %}
+          {%           set _ = errors.append(label ~ ' needs primary or url on OpenWrt') %}
+          {%         endif %}
+          {%         if truth(server.validator_ntp | default(true)) | from_json or server.validator_ntp | default(true) | string == '1' %}
+          {%           set _ = errors.append(label ~ ' needs server.validator_ntp false on OpenWrt, unbound.sh skips auth zones otherwise') %}
+          {%         endif %}
+          {%         set first = 'fallback-enabled' %}
+          {%         set known = ['name', 'primary', 'master', 'url', 'zonefile', 'for-downstream', 'for-upstream', 'fallback-enabled'] %}
+          {%       endif %}
+          {%       if zone[first] is defined and zone[first] is not none and not boolean(zone[first]) | from_json %}
+          {%         set _ = errors.append(label ~ ' ' ~ first ~ ' has to be a boolean on OpenWrt') %}
+          {%       endif %}
+          {%       set _ = options.update({'fallback': '1' if truth(zone[first] | default(false)) | from_json else '0'}) %}
+          {%       for key in zone.keys() | reject('in', known) | sort %}
+          {%         set _ = errors.append(label ~ ' ' ~ key ~ ' is not supported on OpenWrt') %}
+          {%       endfor %}
+          {%       if servers | length > 0 %}
+          {%         set _ = options.update({'server': servers}) %}
+          {%       endif %}
+          {%       set _ = sections.append({'type': 'zone', 'name': section, 'options': options}) %}
+          {%     endfor %}
+          {%   endif %}
+          {% endfor %}
+          {{ {'sections': sections, 'errors': errors} | to_json }}
+
+    - name: 'Validate the configuration for OpenWrt'
+      ansible.builtin.assert:
+        that:
+          - dns_unbound__openwrt_translation.errors | length == 0
+        fail_msg: "{{ dns_unbound__openwrt_translation.errors | join('. ') }}"
+        quiet: true
+
+    - name: 'Show the UCI sections of unbound'
+      ansible.builtin.debug:
+        msg: "{{ item.type }} {{ item.name }}: options {{ item.options.keys() | join(', ') }}"
+      loop: "{{ dns_unbound__openwrt_translation.sections }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check unbound and the package manager'
+      ansible.builtin.raw: >-
+        test -x /usr/sbin/unbound && test -x /etc/init.d/unbound && echo 'unbound=yes' || echo 'unbound=no';
+        command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg'
+      register: 'dns_unbound__openwrt_tools'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Install unbound with apk'
+      community.openwrt.apk:
+        name: "{{ dns_unbound__openwrt_packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      register: 'dns_unbound__openwrt_apk'
+      when:
+        - "'unbound=no' in dns_unbound__openwrt_tools.stdout_lines | map('trim')"
+        - "'manager=apk' in dns_unbound__openwrt_tools.stdout_lines | map('trim')"
+
+    - name: 'Install unbound with opkg'
+      community.openwrt.opkg:
+        name: "{{ dns_unbound__openwrt_packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      register: 'dns_unbound__openwrt_opkg'
+      when:
+        - "'unbound=no' in dns_unbound__openwrt_tools.stdout_lines | map('trim')"
+        - "'manager=opkg' in dns_unbound__openwrt_tools.stdout_lines | map('trim')"
+
+    # In check mode the package of a first installation is missing, there is no configuration to compare
+    - name: 'Configure unbound'
+      when: not (ansible_check_mode and 'unbound=no' in dns_unbound__openwrt_tools.stdout_lines | map('trim'))
+      block:
+
+        # The configuration exists after the installation, it can be missing if the package was removed
+        - name: 'Create the unbound configuration'
+          ansible.builtin.raw: "test -f {{ dns_unbound__openwrt_uci_config }} || { touch {{ dns_unbound__openwrt_uci_config }} && echo 'created'; }"
+          register: 'dns_unbound__openwrt_created'
+          changed_when: "'created' in dns_unbound__openwrt_created.stdout"
+
+        - name: 'Read the current unbound configuration'
+          community.openwrt.slurp:
+            src: "{{ dns_unbound__openwrt_uci_config }}"
+          register: 'dns_unbound__openwrt_current'
+          check_mode: false
+
+        - name: 'Set the sections of the unbound configuration'
+          community.openwrt.uci:
+            command: 'section'
+            config: 'unbound'
+            type: "{{ item.type }}"
+            name: "{{ item.name }}"
+            value: "{{ item.options }}"
+            replace: true
+          loop: "{{ dns_unbound__openwrt_translation.sections }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: 'Read the sections of the unbound configuration'
+          community.openwrt.uci:
+            command: 'show'
+            config: 'unbound'
+          register: 'dns_unbound__openwrt_show'
+          check_mode: false
+
+        # Only the section types managed by the role are pruned
+        - name: 'Determine the sections to delete'
+          ansible.builtin.set_fact:
+            dns_unbound__openwrt_delete: >-
+              {{ dns_unbound__openwrt_show.result
+                 | regex_findall('(?m)^unbound[.]([^.=\n]+)=([\w-]+)$')
+                 | selectattr('1', 'in', dns_unbound__openwrt_section_types)
+                 | reverse
+                 | map(attribute='0')
+                 | reject('in', dns_unbound__openwrt_translation.sections | map(attribute='name') | list)
+                 | list }}
+
+        - name: 'Show the sections to delete'
+          ansible.builtin.debug:
+            var: 'dns_unbound__openwrt_delete'
+
+        - name: 'Delete the undeclared sections'
+          community.openwrt.uci:
+            command: 'delete'
+            key: "unbound.{{ item }}"
+          loop: "{{ dns_unbound__openwrt_delete }}"
+          when: dns_unbound__prune | bool
+
+        - name: 'Read the pending changes of the unbound configuration'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'unbound'
+          register: 'dns_unbound__openwrt_pending'
+          check_mode: false
+
+        # The backup contains the configuration before this change, it is only written before a commit
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: dns_unbound__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup on the controller'
+          ansible.builtin.copy:
+            content: "{{ dns_unbound__openwrt_current.content | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/unbound"
+            mode: '0600'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: dns_unbound__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Commit the unbound configuration'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'unbound'
+          register: 'dns_unbound__openwrt_commit_result'
+          when: dns_unbound__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Start and enable unbound'
+          community.openwrt.service:
+            name: 'unbound'
+            enabled: true
+            state: "{{ 'restarted' if dns_unbound__openwrt_changed | bool else 'started' }}"
+          when: not ansible_check_mode
