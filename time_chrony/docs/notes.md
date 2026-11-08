@@ -52,17 +52,18 @@ The role translates `chrony_config` to UCI sections:
 | `smoothtime <maxppm> <maxwander> [leaponly]` | `smoothtime` | `smoothtime` | `maxppm`, `maxwander`, `leaponly` |
 | `clockprecision`, `leapsecmode` | `systemclock` | `systemclock` | `precision`, `leapsecmode` |
 | `logchange` | `logging` | `logging` | `logchange` |
-| `nosystemcert: true`, `ntstrustedcerts` | `nts` | `nts` | `systemcerts '0'`, `trustedcerts` |
+| `nosystemcert: true` or `false`, `ntstrustedcerts` | `nts` | `nts` | `systemcerts '0'` or `'1'`, `trustedcerts` |
 | UCI only: `rtccheck` | `nts` | `nts` | `rtccheck`, `nocerttimecheck` without RTC |
 | UCI only: `allow_interface` | `allow` | `allow` | `interface`, the networks of `/etc/config/network`, the subnets of their addresses are allowed, WAN allows all |
-| UCI only: `dhcp_ntp_server: true` | `dhcp_ntp_server` | `dhcp_ntp_server` | `iburst '1'`, `disabled '0'`, sources from DHCP |
+| UCI only: `dhcp_ntp_server: true` | `dhcp_ntp_server` | `dhcp_ntp_server` | `iburst '1'`, sources from DHCP |
 
 The default is the delivered configuration: `pool 2.openwrt.pool.ntp.org maxpoll 12 maxsources 4 iburst` (replaced by the sources of common_globals),
-`dhcp_ntp_server`, `allow_interface: [ 'lan' ]`, `makestep 1.0 3` and `rtccheck`.
+`dhcp_ntp_server`, `allow_interface: [ 'lan' ]`, `makestep 1.0 3`, `rtccheck` and `nosystemcert: false` (`systemcerts '1'`).
 
 The role fails before it changes anything for directives without UCI counterpart, e.g. `local`,
 for `allow` (use `allow_interface`), for the directives of the static configuration (`driftfile`, `rtcsync`, …)
 and for unknown options of sources.
+Keys with `false` or `null` remove a key of the default, the role rejects them as well if it does not know them on OpenWrt, e.g. `nosystemcerts: false` instead of `nosystemcert: false`.
 
 - The role installs `chrony-nts` if a source uses `nts`, otherwise `chrony`, if `/usr/sbin/chronyd` is missing; the variant is not changed later.
   In check mode the role stops after the installation then.
