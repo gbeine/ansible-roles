@@ -21,6 +21,17 @@
       ansible.builtin.set_fact:
         bootstrap_openwrt__test_lan_ports: "{{ bootstrap_openwrt__test_ports.stdout | trim | split }}"
 
+    # The keys of molecule for the connection have to stay in the authorized keys of root
+    - name: 'Read the authorized keys of root'
+      ansible.builtin.raw: 'cat /etc/dropbear/authorized_keys 2>/dev/null || true'
+      register: 'bootstrap_openwrt__test_keys'
+      changed_when: false
+
+    - name: 'Set the authorized keys of root without the key of the test'
+      ansible.builtin.set_fact:
+        bootstrap_openwrt__test_root_keys: >-
+          {{ bootstrap_openwrt__test_keys.stdout_lines | map('trim') | select | reject('eq', bootstrap_openwrt__test_root_key) | list }}
+
     - name: 'Set the role variables of the test case'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
@@ -84,3 +95,62 @@
         bootstrap_openwrt__test_invalid:
           message: 'an unknown type in openwrt_odhcpd'
           search: '^openwrt_odhcpd has invalid entries: lan [(]unknown type interface[)]$'
+
+    - name: 'Run bootstrap_openwrt with openwrt_sshd not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_sshd: [ 'dropbear' ]
+        bootstrap_openwrt__test_invalid:
+          message: 'openwrt_sshd not a dictionary'
+          # combine of the default fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run bootstrap_openwrt with an unknown key in openwrt_sshd (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_sshd:
+          openssh: {}
+        bootstrap_openwrt__test_invalid:
+          message: 'an unknown key in openwrt_sshd'
+          search: '^openwrt_sshd has unknown keys: openssh$'
+
+    - name: 'Run bootstrap_openwrt with unknown options of dropbear (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_sshd:
+          dropbear:
+            PasswordAuth: false
+            'Banner File': '/etc/banner'
+        bootstrap_openwrt__test_invalid:
+          message: 'unknown options of dropbear'
+          search: '^openwrt_sshd[.]dropbear has unknown options: PasswordAuth, Banner File$'
+
+    - name: 'Run bootstrap_openwrt with sftp.enable not a boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_sshd:
+          sftp:
+            enable: 'maybe'
+        bootstrap_openwrt__test_invalid:
+          message: 'sftp.enable not a boolean'
+          search: '^openwrt_sshd[.]sftp has to be a dictionary with the boolean enable only$'
+
+    - name: 'Run bootstrap_openwrt with authorized keys that are no list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_sshd:
+          authorized_keys:
+            root: "{{ bootstrap_openwrt__test_root_key }}"
+        bootstrap_openwrt__test_invalid:
+          message: 'authorized keys that are no list'
+          search: '^openwrt_sshd[.]authorized_keys needs user names of lowercase letters, digits, _ and - with lists of keys in one line: root$'
+
+    - name: 'Run bootstrap_openwrt with authorized keys of an unknown user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        openwrt_sshd:
+          authorized_keys:
+            molecule_nobody: [ "{{ bootstrap_openwrt__test_user_key }}" ]
+        bootstrap_openwrt__test_invalid:
+          message: 'authorized keys of an unknown user'
+          search: '^openwrt_sshd[.]authorized_keys has users unknown to /etc/passwd: molecule_nobody$'

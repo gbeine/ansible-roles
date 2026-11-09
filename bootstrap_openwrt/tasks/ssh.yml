@@ -1,0 +1,139 @@
+---
+
+# https://openwrt.org/docs/guide-user/services/nas/sftp.server, dropbear starts the SFTP server of OpenSSH
+- name: Install or remove the SFTP server
+  community.openwrt.apk:
+    name: "{{ bootstrap_openwrt__sshd_sftp_package }}"
+    state: "{{ 'present' if bootstrap_openwrt__sshd.sftp.enable | bool else 'absent' }}"
+
+- name: Configure dropbear
+  vars:
+    # The names of /etc/config/dropbear, booleans become '1' or '0', numbers strings, null removes the option
+    bootstrap_openwrt__sshd_dropbear: >-
+      {%- set options = {} -%}
+      {%- for key, value in bootstrap_openwrt__sshd.dropbear.items() if value is not none -%}
+      {%-   set _ = options.update({bootstrap_openwrt__sshd_dropbear_options[key]: (('1' if value else '0') if value is boolean
+                                          else (value | map('string') | list if value is sequence and value is not string
+                                                else value | string))}) -%}
+      {%- endfor -%}
+      {{ options }}
+  block:
+
+    - name: Read current dropbear configuration
+      community.openwrt.slurp:
+        src: /etc/config/dropbear
+      register: bootstrap_openwrt__sshd_current
+      check_mode: false
+
+    - name: Set section dropbear main
+      community.openwrt.uci:
+        command: section
+        config: dropbear
+        type: dropbear
+        name: main
+        value: "{{ bootstrap_openwrt__sshd_dropbear }}"
+        replace: true
+
+    - name: Read existing dropbear sections
+      community.openwrt.uci:
+        command: show
+        config: dropbear
+      register: bootstrap_openwrt__sshd_show
+      check_mode: false
+
+    - name: Determine dropbear sections to delete
+      ansible.builtin.set_fact:
+        bootstrap_openwrt__sshd_delete: >-
+          {{ bootstrap_openwrt__sshd_show.result | default('')
+             | regex_findall('(?m)^dropbear\.([^.=\n]+)=[\w-]+$')
+             | reject('eq', 'main')
+             | list }}
+
+    - name: Show dropbear sections to delete
+      ansible.builtin.debug:
+        var: bootstrap_openwrt__sshd_delete
+
+    - name: Delete undeclared dropbear sections
+      community.openwrt.uci:
+        command: delete
+        key: "dropbear.{{ item }}"
+      loop: "{{ bootstrap_openwrt__sshd_delete }}"
+      when: bootstrap_openwrt__sshd_prune | bool
+
+    - name: Read pending dropbear changes
+      community.openwrt.uci:
+        command: changes
+        config: dropbear
+      register: bootstrap_openwrt__sshd_pending
+      check_mode: false
+
+    # The backup contains the configuration before this change, it is only written before a commit
+    - name: Create backup directory on the controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      check_mode: false
+      when: bootstrap_openwrt__sshd_pending.changes | default({}) | length > 0
+
+    - name: Store dropbear backup on the controller
+      ansible.builtin.copy:
+        content: "{{ bootstrap_openwrt__sshd_current.content | b64decode }}"
+        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/dropbear"
+        mode: '0600'
+      delegate_to: localhost
+      check_mode: false
+      when: bootstrap_openwrt__sshd_pending.changes | default({}) | length > 0
+
+    - name: Commit dropbear changes
+      community.openwrt.uci:
+        command: commit
+        config: dropbear
+      when: bootstrap_openwrt__sshd_pending.changes | default({}) | length > 0
+      notify: Restart dropbear
+
+# The keys of root are read from /etc/dropbear, the keys of other users from ~/.ssh, users without keys lose the file
+- name: Configure the authorized keys
+  vars:
+    bootstrap_openwrt__sshd_keys: >-
+      {%- set result = [] -%}
+      {%- for user, keys in bootstrap_openwrt__sshd.authorized_keys.items() -%}
+      {%-   set entry = bootstrap_openwrt__sshd_users[user] | default({'uid': '0', 'gid': '0', 'home': '/root'}) -%}
+      {%-   set dir = bootstrap_openwrt__sshd_root_authorized_keys | dirname if user == 'root' else entry.home ~ '/.ssh' -%}
+      {%-   set _ = result.append({'user': user, 'uid': entry.uid, 'gid': entry.gid, 'dir': dir,
+                                   'file': bootstrap_openwrt__sshd_root_authorized_keys if user == 'root' else dir ~ '/authorized_keys',
+                                   'authorized': keys | map('trim') | list}) -%}
+      {%- endfor -%}
+      {{ result }}
+  block:
+
+    - name: Create the .ssh directories of the users
+      community.openwrt.file:
+        path: "{{ item.dir }}"
+        state: directory
+        owner: "{{ item.uid }}"
+        group: "{{ item.gid }}"
+        mode: '0700'
+      loop: "{{ bootstrap_openwrt__sshd_keys | rejectattr('user', 'eq', 'root') | selectattr('authorized') | list }}"
+      loop_control:
+        label: "{{ item.user }}"
+
+    - name: Write the authorized keys
+      community.openwrt.copy:
+        content: "{{ item.authorized | join('\n') }}\n"
+        dest: "{{ item.file }}"
+        owner: "{{ item.uid }}"
+        group: "{{ item.gid }}"
+        mode: '0600'
+      loop: "{{ bootstrap_openwrt__sshd_keys | selectattr('authorized') | list }}"
+      loop_control:
+        label: "{{ item.user }}"
+
+    - name: Remove the authorized keys of users without keys
+      community.openwrt.file:
+        path: "{{ item.file }}"
+        state: absent
+      loop: "{{ bootstrap_openwrt__sshd_keys | rejectattr('authorized') | list }}"
+      loop_control:
+        label: "{{ item.user }}"

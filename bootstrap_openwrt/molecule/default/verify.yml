@@ -138,3 +138,45 @@
               - "'running=yes' in bootstrap_openwrt__test_uhttpd.stdout_lines | map('trim')"
               - bootstrap_openwrt__test_uhttpd.stdout is search('https=0\.0\.0\.0:443')
             fail_msg: "{{ bootstrap_openwrt__test_uhttpd.stdout_lines | map('trim') | join(', ') }}"
+
+    - name: 'Read the configuration and the state of dropbear, the SFTP server and the authorized keys'
+      ansible.builtin.raw: >-
+        for k in {{ bootstrap_openwrt__test_expect.dropbear.keys() | join(' ') }};
+        do echo "$k=$(uci -q get $k || echo absent)"; done;
+        echo "sections=$(uci show dropbear | grep -c '^dropbear[.][^.]*=dropbear$')";
+        /etc/init.d/dropbear running && echo 'running=yes' || echo 'running=no';
+        apk info -e {{ bootstrap_openwrt__test_sftp_package }} >/dev/null && echo 'sftp=yes' || echo 'sftp=no';
+        test -x /usr/libexec/sftp-server && echo 'sftp_server=yes' || echo 'sftp_server=no';
+        echo "root_attrs=$(ls -lnd /etc/dropbear/authorized_keys 2>/dev/null | awk '{print $3":"$4":"$1}')";
+        grep -qxF '{{ bootstrap_openwrt__test_root_key }}' /etc/dropbear/authorized_keys 2>/dev/null && echo 'root_key=yes' || echo 'root_key=no';
+        echo "user_dir=$(ls -lnd {{ bootstrap_openwrt__test_user.home }}/.ssh 2>/dev/null | awk '{print $3":"$4":"$1}')";
+        echo "user_attrs=$(ls -lnd {{ bootstrap_openwrt__test_user.home }}/.ssh/authorized_keys 2>/dev/null | awk '{print $3":"$4":"$1}')";
+        echo "user_keys=$(cat {{ bootstrap_openwrt__test_user.home }}/.ssh/authorized_keys 2>/dev/null | wc -l)";
+        grep -qxF '{{ bootstrap_openwrt__test_user_key }}' {{ bootstrap_openwrt__test_user.home }}/.ssh/authorized_keys 2>/dev/null && echo 'user_key=yes' || echo 'user_key=no'
+      register: 'bootstrap_openwrt__test_ssh'
+      changed_when: false
+      vars:
+        bootstrap_openwrt__test_sftp_package: 'openssh-sftp-server'
+
+    - name: 'Assert the configuration and the state of dropbear, the SFTP server and the authorized keys'
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__test_values | dict2items | selectattr('key', 'in', bootstrap_openwrt__test_expect.dropbear.keys() | list) | items2dict
+            == bootstrap_openwrt__test_expect.dropbear
+          # The second section of prepare.yml on molecule-openwrt-full is removed
+          - bootstrap_openwrt__test_values.sections == '1'
+          - bootstrap_openwrt__test_values.running == 'yes'
+          - bootstrap_openwrt__test_values.sftp == ('yes' if bootstrap_openwrt__test_expect.sftp else 'no')
+          - bootstrap_openwrt__test_values.sftp_server == ('yes' if bootstrap_openwrt__test_expect.sftp else 'no')
+          - not bootstrap_openwrt__test_expect.root_key or bootstrap_openwrt__test_values.root_attrs == '0:0:-rw-------'
+          - bootstrap_openwrt__test_values.root_key == ('yes' if bootstrap_openwrt__test_expect.root_key else 'no')
+          - not bootstrap_openwrt__test_expect.user_key or bootstrap_openwrt__test_values.user_dir == bootstrap_openwrt__test_user_attrs ~ ':drwx------'
+          - not bootstrap_openwrt__test_expect.user_key or bootstrap_openwrt__test_values.user_attrs == bootstrap_openwrt__test_user_attrs ~ ':-rw-------'
+          - not bootstrap_openwrt__test_expect.user_key or bootstrap_openwrt__test_values.user_keys == '1'
+          - bootstrap_openwrt__test_values.user_key == ('yes' if bootstrap_openwrt__test_expect.user_key else 'no')
+        fail_msg: "{{ bootstrap_openwrt__test_ssh.stdout_lines | map('trim') | join(', ') }}"
+      vars:
+        bootstrap_openwrt__test_user_attrs: "{{ bootstrap_openwrt__test_user.uid }}:{{ bootstrap_openwrt__test_user.uid }}"
+        bootstrap_openwrt__test_values: >-
+          {{ dict(bootstrap_openwrt__test_ssh.stdout_lines | map('trim') | select('search', '=')
+                  | map('split', '=', 1) | list) }}

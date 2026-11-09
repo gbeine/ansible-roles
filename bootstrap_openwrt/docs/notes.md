@@ -255,9 +255,79 @@ bootstrap_openwrt__uhttpd_default:
       commonname: 'OpenWrt'
 ```
 
+### SSH
+
+The role always manages SSH: the section `dropbear` `main` of `/etc/config/dropbear`, the SFTP server and the authorized keys.
+`openwrt_sshd` is merged recursively into the default, so only differing options have to be written:
+
+```yaml
+openwrt_sshd:
+  dropbear:
+    password_auth: false
+    root_password_auth: false
+    ssh_keep_alive: 60
+    banner_file: '/etc/banner'
+  sftp:
+    enable: true
+  authorized_keys:
+    root:
+      - 'ssh-ed25519 AAAAC3Nza... admin@example.org'
+    backup:
+      - 'ssh-ed25519 AAAAC3Nza... backup@example.org'
+```
+
+- `dropbear` holds the options of the section `dropbear` `main`, see [dropbear](https://openwrt.org/docs/guide-user/base-system/dropbear),
+  in snake case, the role translates them to the names of `/etc/config/dropbear` (see below).
+  Booleans become `'1'` and `'0'`, numbers strings, `null` removes an option of the default.
+  The section is written completely, other sections of the type `dropbear` are removed (`openwrt_sshd_prune: false` keeps them).
+  After a change dropbear is restarted, running sessions are kept.
+- `sftp.enable: true` installs `openssh-sftp-server`, dropbear starts it for SFTP clients,
+  see [SFTP server](https://openwrt.org/docs/guide-user/services/nas/sftp.server). `false` (default) removes the package.
+- `authorized_keys` maps users to their keys, the file contains exactly these keys.
+  The keys of `root` are written to `/etc/dropbear/authorized_keys`, the keys of other users to `~/.ssh/authorized_keys` of their home in `/etc/passwd`,
+  owned by the user with mode `0600` (`.ssh` with `0700`). An empty list removes the file, users that are not listed are not changed.
+
+The role fails before it changes anything for keys of `openwrt_sshd` other than `dropbear`, `sftp` and `authorized_keys`,
+for unknown options of `dropbear` (e.g. the UCI name `PasswordAuth` instead of `password_auth`) and invalid values (booleans, strings, numbers or lists of them without line breaks),
+for `sftp` without the boolean `enable`, for keys that are no list of strings in one line and for users missing in `/etc/passwd`.
+If `openwrt_sshd` is no dictionary, merging it with the default fails before anything changes.
+The variable is not called `openwrt_ssh`, `community.openwrt.init` defines `openwrt_ssh` as SSH command in its role defaults.
+
+As the role always manages SSH, it resets the section `dropbear` of existing devices to the default and `openwrt_sshd`
+and removes `openssh-sftp-server` without `sftp.enable: true`.
+`enable: false`, `password_auth: false` without keys, a changed `port` or `interface` can lock out Ansible,
+the connection of the next run has to match the new configuration.
+
+| Option in `openwrt_sshd.dropbear` | Option of `/etc/config/dropbear` |
+|---|---|
+| `enable`, `verbose`, `mdns`, `vrf` | same name |
+| `password_auth`, `root_password_auth`, `root_login` | `PasswordAuth`, `RootPasswordAuth`, `RootLogin` |
+| `port`, `interface`, `direct_interface` | `Port`, `Interface`, `DirectInterface` |
+| `gateway_ports`, `local_port_forward`, `remote_port_forward` | `GatewayPorts`, `LocalPortForward`, `RemotePortForward` |
+| `force_command`, `banner_file` | `ForceCommand`, `BannerFile` |
+| `rsa_key_file`, `key_file` (list) | `rsakeyfile`, `keyfile` |
+| `ssh_keep_alive`, `idle_timeout`, `max_session_duration` | `SSHKeepAlive`, `IdleTimeout`, `MaxSessionDuration` |
+| `max_auth_tries`, `recv_window_size` | `MaxAuthTries`, `RecvWindowSize` |
+
+`verbose` is documented by OpenWrt, the current `dropbear.init` does not read it.
+
+### Default for `openwrt_sshd`
+
+```yaml
+bootstrap_openwrt__sshd_default:
+  dropbear:
+    enable: '1'
+    password_auth: 'on'
+    root_password_auth: 'on'
+    port: '22'
+  sftp:
+    enable: false
+  authorized_keys: {}
+```
+
 ### Backups
 
-Before the role commits a change of a UCI configuration (`system`, `network`, `dhcp`, `wireless`, `attendedsysupgrade`, `acme`, `uhttpd`),
+Before the role commits a change of a UCI configuration (`system`, `network`, `dhcp`, `wireless`, `attendedsysupgrade`, `acme`, `uhttpd`, `dropbear`),
 it stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/<config>`,
 secrets of `wireless` and `acme` are redacted. A run without changes writes no backup, the backup always contains the state before the last change.
 

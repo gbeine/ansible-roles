@@ -97,12 +97,92 @@
           {%- endfor -%}
           {{ ns.invalid }}
 
+    # Before any change, openwrt_sshd not being a dictionary already fails in combine,
+    # openwrt_ssh is the SSH command of the role defaults of community.openwrt.init
+    - name: Validate openwrt_sshd
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__sshd_invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ bootstrap_openwrt__sshd_invalid | join('. ') }}"
+        quiet: true
+      vars:
+        bootstrap_openwrt__sshd_invalid: >-
+          {%- set errors = [] -%}
+          {%- set ssh = bootstrap_openwrt__sshd -%}
+          {%- set unknown = ssh.keys() | reject('in', ['dropbear', 'sftp', 'authorized_keys']) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('openwrt_sshd has unknown keys: ' ~ unknown | join(', ')) -%}
+          {%- endif -%}
+          {%- if ssh.dropbear is not mapping -%}
+          {%-   set _ = errors.append('openwrt_sshd.dropbear has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set unknown = ssh.dropbear.keys() | reject('in', bootstrap_openwrt__sshd_dropbear_options.keys() | list) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('openwrt_sshd.dropbear has unknown options: ' ~ unknown | join(', ')) -%}
+          {%-   endif -%}
+          {%-   set invalid = [] -%}
+          {%-   for key, value in ssh.dropbear.items() if value is not none and key not in unknown -%}
+          {%-     set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
+          {%-     if value is mapping
+                     or (value is not boolean and values | reject('string') | reject('number') | list | length > 0)
+                     or (value is not boolean and values | select('boolean') | list | length > 0)
+                     or values | select('string') | select('search', '\n') | list | length > 0 -%}
+          {%-       set _ = invalid.append(key) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('openwrt_sshd.dropbear has invalid values: ' ~ invalid | join(', ')) -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if ssh.sftp is not mapping or ssh.sftp.keys() | reject('eq', 'enable') | list | length > 0
+                 or ssh.sftp.enable is not boolean -%}
+          {%-   set _ = errors.append('openwrt_sshd.sftp has to be a dictionary with the boolean enable only') -%}
+          {%- endif -%}
+          {%- if ssh.authorized_keys is not mapping -%}
+          {%-   set _ = errors.append('openwrt_sshd.authorized_keys has to be a dictionary of users and lists of keys') -%}
+          {%- else -%}
+          {%-   set invalid = [] -%}
+          {%-   for user, keys in ssh.authorized_keys.items() -%}
+          {%-     if user is not string or user is not match('^[a-z_][a-z0-9_-]*$')
+                     or keys is not sequence or keys is string or keys is mapping
+                     or keys | reject('string') | list | length > 0
+                     or keys | select('string') | map('trim') | select('eq', '') | list | length > 0
+                     or keys | select('string') | select('search', '[\n\r]') | list | length > 0 -%}
+          {%-       set _ = invalid.append(user) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('openwrt_sshd.authorized_keys needs user names of lowercase letters, digits, _ and -'
+                                         ~ ' with lists of keys in one line: ' ~ invalid | join(', ')) -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
     - name: Initialise OpenWRT
       ansible.builtin.import_role:
         name: community.openwrt.init
 
     - name: Check reachability
       community.openwrt.ping:
+
+    # Before any change, the users of openwrt_sshd.authorized_keys besides root have to exist
+    - name: Read the users of the system
+      community.openwrt.slurp:
+        src: /etc/passwd
+      register: bootstrap_openwrt__sshd_passwd
+      check_mode: false
+
+    - name: Validate the users of openwrt_sshd.authorized_keys
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__sshd_unknown_users | length == 0
+        fail_msg: "openwrt_sshd.authorized_keys has users unknown to /etc/passwd: {{ bootstrap_openwrt__sshd_unknown_users | join(', ') }}"
+        quiet: true
+      vars:
+        bootstrap_openwrt__sshd_unknown_users: >-
+          {{ bootstrap_openwrt__sshd.authorized_keys.keys() | reject('eq', 'root')
+             | reject('in', bootstrap_openwrt__sshd_users.keys() | list) | list }}
 
     - name: Install packages
       ansible.builtin.include_tasks: packages.yml
@@ -134,3 +214,6 @@
     - name: Configure uhttpd
       ansible.builtin.include_tasks: uhttpd.yml
       when: bootstrap_openwrt__uhttpd_enable | bool
+
+    - name: Configure SSH
+      ansible.builtin.include_tasks: ssh.yml

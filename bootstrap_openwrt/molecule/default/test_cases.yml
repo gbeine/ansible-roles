@@ -37,10 +37,23 @@ bootstrap_openwrt__test_ntp_sources:
   - type: 'server'
     address: '192.0.2.123'
 
+# Keys of the test, the keys of molecule for the connection stay in /etc/dropbear/authorized_keys,
+# converge.yml and side_effect.yml read them into bootstrap_openwrt__test_root_keys
+bootstrap_openwrt__test_root_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDxMn/YmkhnKtX8DY81L3xW4IiMEV2XuG3BBW9obnbwn molecule-root@test'
+bootstrap_openwrt__test_user_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDvUgglAB6kM/E9OeXu+H6IyzKhps6wHj+NvJA1XRioV molecule-user@test'
+
+# Created in prepare.yml on molecule-openwrt-full
+bootstrap_openwrt__test_user:
+  name: 'molecule'
+  uid: 1000
+  home: '/home/molecule'
+
 bootstrap_openwrt__test_cases:
 
   - name: 'molecule-openwrt-minimal'
     prepare_protected: true
+    # The role removes the SFTP server without openwrt_sshd.sftp.enable
+    prepare_sftp: true
     role_vars:
       openwrt_network: "{{ bootstrap_openwrt__test_network }}"
       openwrt_network_protect: "{{ bootstrap_openwrt__test_protect }}"
@@ -69,9 +82,21 @@ bootstrap_openwrt__test_cases:
         dhcp.wan.interface: 'wan'
         dhcp.wan.ignore: '1'
         dhcp.wan.ra: 'absent'
+      # The delivered configuration of dropbear
+      dropbear:
+        dropbear.main.enable: '1'
+        dropbear.main.PasswordAuth: 'on'
+        dropbear.main.RootPasswordAuth: 'on'
+        dropbear.main.Port: '22'
+        dropbear.main.BannerFile: 'absent'
+      sftp: false
+      root_key: false
+      user_key: false
 
   - name: 'molecule-openwrt-full'
     prepare_uhttpd: true
+    # A user for authorized_keys and a second section dropbear the role removes
+    prepare_ssh: true
     role_vars:
       openwrt_network: "{{ bootstrap_openwrt__test_network }}"
       openwrt_timezone: 'Etc/UTC'
@@ -105,6 +130,19 @@ bootstrap_openwrt__test_cases:
       openwrt_services_enabled:
         - 'uhttpd'
       openwrt_uhttpd_enable: true
+      # Booleans and numbers become strings, null removes an option of the default
+      openwrt_sshd:
+        dropbear:
+          root_password_auth: ~
+          banner_file: '/etc/banner'
+          ssh_keep_alive: 60
+          max_auth_tries: 5
+          local_port_forward: false
+        sftp:
+          enable: true
+        authorized_keys:
+          root: "{{ (bootstrap_openwrt__test_root_keys + [ bootstrap_openwrt__test_root_key ]) | unique }}"
+          molecule: [ "{{ bootstrap_openwrt__test_user_key }}" ]
       # Numbers and booleans become strings, molecule6 is created
       openwrt_odhcpd:
         - type: 'odhcpd'
@@ -147,3 +185,15 @@ bootstrap_openwrt__test_cases:
         dhcp.molecule6.ignore: '1'
         dhcp.molecule6.ra: 'server'
         dhcp.wan.ra: 'absent'
+      dropbear:
+        dropbear.main.enable: '1'
+        dropbear.main.PasswordAuth: 'on'
+        dropbear.main.RootPasswordAuth: 'absent'
+        dropbear.main.Port: '22'
+        dropbear.main.BannerFile: '/etc/banner'
+        dropbear.main.SSHKeepAlive: '60'
+        dropbear.main.MaxAuthTries: '5'
+        dropbear.main.LocalPortForward: '0'
+      sftp: true
+      root_key: true
+      user_key: true

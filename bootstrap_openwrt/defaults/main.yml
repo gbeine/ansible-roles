@@ -31,6 +31,10 @@ bootstrap_openwrt__acme: "{{ openwrt_acme | default([]) }}"
 bootstrap_openwrt__uhttpd_enable: "{{ openwrt_uhttpd_enable | default(false) }}"
 bootstrap_openwrt__uhttpd: "{{ openwrt_uhttpd | default(bootstrap_openwrt__uhttpd_default) }}"
 
+# SSH: options of the section dropbear main, the package of the SFTP server and the authorized keys of users,
+# merged recursively into the delivered configuration of OpenWrt, null removes an option of dropbear
+bootstrap_openwrt__sshd: "{{ bootstrap_openwrt__sshd_default | combine(openwrt_sshd | default({}), recursive=true) }}"
+
 # Defaults - no not change
 bootstrap_openwrt__system_default:
   - type: 'system'
@@ -163,6 +167,17 @@ bootstrap_openwrt__uhttpd_default:
       location: 'Unknown'
       commonname: 'OpenWrt'
 
+# /etc/config/dropbear of the package dropbear, no SFTP server, no authorized keys
+bootstrap_openwrt__sshd_default:
+  dropbear:
+    enable: '1'
+    password_auth: 'on'
+    root_password_auth: 'on'
+    port: '22'
+  sftp:
+    enable: false
+  authorized_keys: {}
+
 # helper variables
 bootstrap_openwrt__system_prune: "{{ openwrt_system_prune | default(true) }}"
 bootstrap_openwrt__network_prune: "{{ openwrt_network_prune | default(true) }}"
@@ -171,6 +186,7 @@ bootstrap_openwrt__attendedsysupgrade_prune: "{{ openwrt_attendedsysupgrade_prun
 bootstrap_openwrt__acme_prune: "{{ openwrt_acme_prune | default(true) }}"
 bootstrap_openwrt__uhttpd_prune: "{{ openwrt_uhttpd_prune | default(true) }}"
 bootstrap_openwrt__odhcpd_prune: "{{ openwrt_odhcpd_prune | default(true) }}"
+bootstrap_openwrt__sshd_prune: "{{ openwrt_sshd_prune | default(true) }}"
 
 # Options of the sections dhcp managed by dns_dnsmasq (dns_dnsmasq__openwrt_dhcp_options), both lists have to match,
 # all other options of the sections dhcp belong to odhcpd and this role
@@ -201,3 +217,41 @@ bootstrap_openwrt__network_protect_regex: >-
 bootstrap_openwrt__acme_packages:
   - acme-acmesh
   - acme-acmesh-dnsapi
+
+# SSH
+bootstrap_openwrt__sshd_sftp_package: 'openssh-sftp-server'
+# Users of /etc/passwd with uid, gid and home, read by tasks/main.yml
+bootstrap_openwrt__sshd_users: >-
+  {%- set users = {} -%}
+  {%- for line in (bootstrap_openwrt__sshd_passwd.content | default('') | b64decode).splitlines() if line.split(':') | length >= 6 -%}
+  {%-   set fields = line.split(':') -%}
+  {%-   set _ = users.update({fields[0]: {'uid': fields[2], 'gid': fields[3], 'home': fields[5]}}) -%}
+  {%- endfor -%}
+  {{ users }}
+# dropbear reads the keys of root from this file, the keys of other users from ~/.ssh/authorized_keys
+bootstrap_openwrt__sshd_root_authorized_keys: '/etc/dropbear/authorized_keys'
+# Options of the section dropbear in Ansible and their names in /etc/config/dropbear, see validate_section_dropbear of dropbear.init,
+# verbose is documented by OpenWrt, but not read by dropbear.init any longer
+bootstrap_openwrt__sshd_dropbear_options:
+  enable: 'enable'
+  verbose: 'verbose'
+  password_auth: 'PasswordAuth'
+  root_password_auth: 'RootPasswordAuth'
+  root_login: 'RootLogin'
+  port: 'Port'
+  interface: 'Interface'
+  direct_interface: 'DirectInterface'
+  gateway_ports: 'GatewayPorts'
+  local_port_forward: 'LocalPortForward'
+  remote_port_forward: 'RemotePortForward'
+  force_command: 'ForceCommand'
+  banner_file: 'BannerFile'
+  rsa_key_file: 'rsakeyfile'
+  key_file: 'keyfile'
+  ssh_keep_alive: 'SSHKeepAlive'
+  idle_timeout: 'IdleTimeout'
+  max_session_duration: 'MaxSessionDuration'
+  max_auth_tries: 'MaxAuthTries'
+  recv_window_size: 'RecvWindowSize'
+  mdns: 'mdns'
+  vrf: 'vrf'
