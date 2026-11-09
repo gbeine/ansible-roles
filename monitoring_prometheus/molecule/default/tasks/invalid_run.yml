@@ -1,0 +1,45 @@
+---
+# Runs monitoring_prometheus with the invalid role variables passed as include parameters,
+# the role has to fail before the configuration or the quadlet unit changes.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run monitoring_prometheus with invalid variables (expect ERROR): {{ monitoring_prometheus__test_invalid.message }}"
+  block:
+
+    - name: 'Run monitoring_prometheus, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'monitoring_prometheus'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ monitoring_prometheus__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksums of the quadlet unit and the configuration after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_prometheus__test_files }}"
+      register: 'monitoring_prometheus__test_md5_after'
+
+    # The validation of the files reports the output of promtool in stderr
+    - name: 'Assert the run failed before the configuration changed'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__test_failure is search(monitoring_prometheus__test_invalid.search, multiline=true)
+          - monitoring_prometheus__test_md5_before_sums | select | list | length == monitoring_prometheus__test_files | length
+          - monitoring_prometheus__test_md5_after_sums == monitoring_prometheus__test_md5_before_sums
+        fail_msg: >-
+          Failure: {{ monitoring_prometheus__test_failure }}
+          Checksums before: {{ monitoring_prometheus__test_md5_before_sums | join(', ') }},
+          after: {{ monitoring_prometheus__test_md5_after_sums | join(', ') }}.
+      vars:
+        # A loop reports the messages and stderr of promtool in the results of the items
+        # Double quotes, so \n is a line break for the anchors of the searches
+        monitoring_prometheus__test_failure: "{{ ([ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ]
+          + (ansible_failed_result.results | default([]) | map(attribute='msg', default='') | list)
+          + (ansible_failed_result.results | default([]) | map(attribute='stderr', default='') | list))
+          | join('\n') }}"
+        monitoring_prometheus__test_md5_before_sums: "{{ monitoring_prometheus__test_md5_before.results | map(attribute='stat.checksum', default='') | list }}"
+        monitoring_prometheus__test_md5_after_sums: "{{ monitoring_prometheus__test_md5_after.results | map(attribute='stat.checksum', default='') | list }}"

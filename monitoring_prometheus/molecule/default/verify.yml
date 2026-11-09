@@ -1,0 +1,110 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_prometheus__test_case: "{{ monitoring_prometheus__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_prometheus__expect: "{{ monitoring_prometheus__test_case.expect }}"
+    monitoring_prometheus__test_home: "{{ monitoring_prometheus__test_case.role_vars.prometheus_home }}"
+    monitoring_prometheus__test_url: "http://{{ monitoring_prometheus__expect.ip }}:9090"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_prometheus__test_quadlet_path }}"
+      register: 'monitoring_prometheus__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_prometheus__test_image) in monitoring_prometheus__test_quadlet_lines
+          - ('IP=' + monitoring_prometheus__expect.ip) in monitoring_prometheus__test_quadlet_lines
+          - ('Volume=' + monitoring_prometheus__test_home + '/prometheus.yml:/etc/prometheus/prometheus.yml:ro') in monitoring_prometheus__test_quadlet_lines
+          - ('Volume=' + monitoring_prometheus__test_home + '/rules:/etc/prometheus/rules:ro') in monitoring_prometheus__test_quadlet_lines
+          - ('Volume=' + monitoring_prometheus__test_home + '/data:/prometheus') in monitoring_prometheus__test_quadlet_lines
+          - monitoring_prometheus__test_exec is search('--config.file=/etc/prometheus/prometheus.yml')
+          - monitoring_prometheus__test_exec is search('--storage.tsdb.path=/prometheus')
+          - ((monitoring_prometheus__test_case.role_vars.prometheus_container | default({})).command | default([])) | reject('in', monitoring_prometheus__test_exec) | list | length == 0
+        fail_msg: "{{ monitoring_prometheus__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_prometheus__test_quadlet_lines: "{{ (monitoring_prometheus__test_quadlet.content | b64decode).splitlines() }}"
+        monitoring_prometheus__test_exec: "{{ monitoring_prometheus__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+    - name: 'Read the state of the service, the data directory and the rule files'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: >-
+        {{ [monitoring_prometheus__test_home + '/data']
+           + (monitoring_prometheus__expect.rule_files + monitoring_prometheus__expect.absent_rule_files)
+             | map('regex_replace', '^', monitoring_prometheus__test_home + '/rules/') | list }}
+      register: 'monitoring_prometheus__test_files'
+
+    - name: 'Read the state of the prometheus service'
+      ansible.builtin.command: 'systemctl is-active prometheus'
+      register: 'monitoring_prometheus__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service, the data directory and the rule files'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__test_service.stdout == 'active'
+          - monitoring_prometheus__test_stats[0].uid == 65534
+          - monitoring_prometheus__test_stats[0].gid == 65534
+          - monitoring_prometheus__test_stats[1:] | map(attribute='exists') | list
+            == [true] * (monitoring_prometheus__expect.rule_files | length) + [false] * (monitoring_prometheus__expect.absent_rule_files | length)
+        fail_msg: "service {{ monitoring_prometheus__test_service.stdout }}, files {{ monitoring_prometheus__test_stats }}"
+      vars:
+        monitoring_prometheus__test_stats: "{{ monitoring_prometheus__test_files.results | map(attribute='stat') | list }}"
+
+    - name: 'Wait until Prometheus is ready'
+      ansible.builtin.uri:
+        url: "{{ monitoring_prometheus__test_url }}/-/ready"
+      register: 'monitoring_prometheus__test_ready'
+      until: monitoring_prometheus__test_ready.status == 200
+      retries: 15
+      delay: 2
+
+    - name: 'Read the configuration, the flags, the targets and the rules of Prometheus'
+      ansible.builtin.uri:
+        url: "{{ monitoring_prometheus__test_url }}/api/v1/{{ item }}"
+        return_content: true
+      loop: [ 'status/config', 'status/flags', 'targets', 'rules' ]
+      register: 'monitoring_prometheus__test_api'
+
+    # The first scrape needs one scrape interval
+    - name: 'Wait until the targets are up'
+      ansible.builtin.uri:
+        url: "{{ monitoring_prometheus__test_url }}/api/v1/targets"
+        return_content: true
+      register: 'monitoring_prometheus__test_targets'
+      until: >-
+        monitoring_prometheus__test_targets.json.data.activeTargets | length > 0
+        and monitoring_prometheus__test_targets.json.data.activeTargets | rejectattr('health', 'eq', 'up') | list | length == 0
+      retries: 15
+      delay: 2
+
+    - name: 'Assert the configuration, the flags, the targets and the rules'
+      ansible.builtin.assert:
+        that:
+          - (monitoring_prometheus__test_config.global.scrape_interval | string) == monitoring_prometheus__expect.scrape_interval
+          - monitoring_prometheus__expect.retention is none
+            or monitoring_prometheus__test_flags['storage.tsdb.retention.time'] | default('') == monitoring_prometheus__expect.retention
+          - monitoring_prometheus__test_jobs == monitoring_prometheus__expect.jobs
+          - monitoring_prometheus__test_groups == monitoring_prometheus__expect.rule_groups
+        fail_msg: >-
+          scrape_interval {{ monitoring_prometheus__test_config.global.scrape_interval }},
+          retention {{ monitoring_prometheus__test_flags['storage.tsdb.retention.time'] | default('') }},
+          jobs {{ monitoring_prometheus__test_jobs }}, rule groups {{ monitoring_prometheus__test_groups }}
+      vars:
+        monitoring_prometheus__test_config: "{{ monitoring_prometheus__test_api.results[0].json.data.yaml | from_yaml }}"
+        monitoring_prometheus__test_flags: "{{ monitoring_prometheus__test_api.results[1].json.data }}"
+        monitoring_prometheus__test_jobs: >-
+          {{ monitoring_prometheus__test_targets.json.data.activeTargets | map(attribute='labels.job') | unique | sort }}
+        monitoring_prometheus__test_groups: >-
+          {{ monitoring_prometheus__test_api.results[3].json.data.groups | map(attribute='name') | sort }}

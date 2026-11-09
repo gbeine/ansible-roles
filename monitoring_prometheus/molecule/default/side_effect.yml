@@ -1,0 +1,123 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_prometheus__test_case: "{{ monitoring_prometheus__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_prometheus__test_files:
+      - "{{ monitoring_prometheus__test_quadlet_path }}"
+      - "{{ monitoring_prometheus__test_case.role_vars.prometheus_home }}/prometheus.yml"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_prometheus__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the quadlet unit and the configuration before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_prometheus__test_files }}"
+      register: 'monitoring_prometheus__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_prometheus with prometheus_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_config: [ 'global' ]
+        monitoring_prometheus__test_invalid:
+          message: 'prometheus_config is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_prometheus with an invalid rule name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_rules:
+          'molecule rules':
+            groups: []
+        monitoring_prometheus__test_invalid:
+          message: 'an invalid rule name'
+          search: '^prometheus_rules has invalid names: molecule rules$'
+
+    - name: 'Run monitoring_prometheus with a secret without data (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_secrets:
+          - name: 'prometheus_molecule_password'
+        monitoring_prometheus__test_invalid:
+          message: 'a secret without data'
+          search: '^prometheus_secrets entries need name of letters, digits, \., _ or - and data$'
+
+    # promtool check rules fails in the throwaway container, the rule file is not written,
+    # Prometheus 3 accepts UTF-8 metric names, the error is in the expression
+    - name: 'Run monitoring_prometheus with an invalid rule (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_rules:
+          broken:
+            groups:
+              - name: 'broken'
+                rules:
+                  - record: 'molecule:broken:sum'
+                    expr: 'sum(up'
+        monitoring_prometheus__test_invalid:
+          message: 'an invalid rule'
+          search: 'could not parse expression'
+
+    # promtool check config fails in the throwaway container, the configuration is not written
+    - name: 'Run monitoring_prometheus with an invalid configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_config:
+          global:
+            scrape_interval: 'often'
+        monitoring_prometheus__test_invalid:
+          message: 'an invalid configuration'
+          search: 'failed to validate'
+
+    - name: 'Run monitoring_prometheus with the changed role variables'
+      when: monitoring_prometheus__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value prometheus'
+          register: 'monitoring_prometheus__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ monitoring_prometheus__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run monitoring_prometheus with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'monitoring_prometheus'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value prometheus'
+          register: 'monitoring_prometheus__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed configuration, the removed rule file and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - monitoring_prometheus__config_result is changed
+              - monitoring_prometheus__rules_removed is changed
+              - monitoring_prometheus__quadlet_result is not changed
+              - monitoring_prometheus__test_started_after.stdout | int > monitoring_prometheus__test_started_before.stdout | int
+            fail_msg: >-
+              configuration changed: {{ monitoring_prometheus__config_result is changed }},
+              rule files removed: {{ monitoring_prometheus__rules_removed is changed }},
+              quadlet changed: {{ monitoring_prometheus__quadlet_result is changed }},
+              start before {{ monitoring_prometheus__test_started_before.stdout }}, after {{ monitoring_prometheus__test_started_after.stdout }}

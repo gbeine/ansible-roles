@@ -1,0 +1,200 @@
+---
+
+- name: 'Install Prometheus'
+  tags: [ 'monitoring', 'monitoring_prometheus' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or prometheus_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - (monitoring_prometheus__config | to_json | length) + (monitoring_prometheus__rules | to_json | length) > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_prometheus__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_prometheus__invalid: >-
+          {%- set errors = [] -%}
+          {%- set rules = monitoring_prometheus__rules -%}
+          {%- if rules is not mapping -%}
+          {%-   set _ = errors.append('prometheus_rules has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set names = rules.keys() | reject('match', monitoring_prometheus__name_pattern) | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('prometheus_rules has invalid names: ' ~ names | join(', ')) -%}
+          {%-   endif -%}
+          {%-   set values = rules | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
+          {%-   if values | length > 0 -%}
+          {%-     set _ = errors.append('prometheus_rules entries have to be dictionaries: ' ~ values | join(', ')) -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set secrets = monitoring_prometheus__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('prometheus_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+                      | map('string') | reject('match', monitoring_prometheus__name_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('prometheus_secrets entries need name of letters, digits, ., _ or - and data') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        dest: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - { path: "{{ monitoring_prometheus__podman_home }}", owner: 'root', group: 'root' }
+        - { path: "{{ monitoring_prometheus__podman_rules_dir }}", owner: 'root', group: 'root' }
+        - { path: "{{ monitoring_prometheus__podman_data_dir }}", owner: "{{ monitoring_prometheus__uid }}", group: "{{ monitoring_prometheus__gid }}" }
+      loop_control:
+        label: "{{ item.path }}"
+
+    # promtool of the image checks the rule files in a throwaway container before they are replaced,
+    # the rule files come first, so an invalid rule fails before the configuration changes
+    - name: 'Generate the rule files'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          {{ item.value | to_nice_yaml(indent=2, sort_keys=false) }}
+        dest: "{{ monitoring_prometheus__podman_rules_dir }}/{{ item.key }}.yml"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+        validate: >-
+          podman run --rm --network none --user 0 --entrypoint /bin/promtool
+          --volume %s:/tmp/rules.yml:ro {{ monitoring_prometheus__container.image }}
+          check rules /tmp/rules.yml
+      loop: "{{ monitoring_prometheus__rules | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'monitoring_prometheus__rules_result'
+
+    - name: 'Find the rule files'
+      ansible.builtin.find:
+        paths: "{{ monitoring_prometheus__podman_rules_dir }}"
+        file_type: 'any'
+        hidden: true
+      register: 'monitoring_prometheus__rules_found'
+
+    - name: 'Remove the undeclared rule files'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ monitoring_prometheus__rules_found.files | map(attribute='path')
+           | reject('in', monitoring_prometheus__rules.keys()
+                          | map('regex_replace', '^(.*)$', monitoring_prometheus__podman_rules_dir ~ '/\1.yml') | list)
+           | list }}
+      register: 'monitoring_prometheus__rules_removed'
+
+    # promtool of the image checks the configuration in a throwaway container before it is replaced,
+    # --syntax-only skips the files referenced by the configuration, they are not mounted there
+    - name: 'Generate the configuration'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          {{ (monitoring_prometheus__config
+              | combine({'rule_files': (monitoring_prometheus__config.rule_files | default([], true))
+                                       + [monitoring_prometheus__rules_dir + '/*.yml']})
+              if monitoring_prometheus__rules | length > 0 else monitoring_prometheus__config)
+             | to_nice_yaml(indent=2, sort_keys=false) }}
+        dest: "{{ monitoring_prometheus__podman_config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+        validate: >-
+          podman run --rm --network none --user 0 --entrypoint /bin/promtool
+          --volume %s:{{ monitoring_prometheus__etc_dir }}/prometheus.yml:ro {{ monitoring_prometheus__container.image }}
+          check config --syntax-only {{ monitoring_prometheus__etc_dir }}/prometheus.yml
+      register: 'monitoring_prometheus__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_prometheus__secrets }}"
+      register: 'monitoring_prometheus__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_prometheus__container.name }}"
+        hostname: "{{ monitoring_prometheus__container.hostname }}"
+        image: "{{ monitoring_prometheus__container.image }}"
+        ip: "{{ monitoring_prometheus__container.ip }}"
+        ip6: "{{ monitoring_prometheus__container.ipv6 | default(omit) }}"
+        network: "{{ monitoring_prometheus__container.network }}"
+        timezone: "{{ monitoring_prometheus__container.timezone }}"
+        command: "{{ monitoring_prometheus__container.command | default(omit) }}"
+        env: "{{ monitoring_prometheus__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_prometheus__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_prometheus__container.expose | default(omit) }}"
+        label: "{{ monitoring_prometheus__container.labels | default(omit) }}"
+        publish: "{{ monitoring_prometheus__container.publish | default(omit) }}"
+        secrets: "{{ monitoring_prometheus__container.secrets | default(omit) }}"
+        volume: "{{ monitoring_prometheus__container.volumes | default(omit) }}"
+        quadlet_options: |
+
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if monitoring_prometheus__container.requires is defined %}
+          Requires={{ monitoring_prometheus__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'monitoring_prometheus__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_prometheus__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if monitoring_prometheus__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        monitoring_prometheus__running: >-
+          {{ (ansible_facts.services[monitoring_prometheus__container.name + '.service'].state | default('')) == 'running' }}
+        monitoring_prometheus__restart: >-
+          {{ monitoring_prometheus__running | bool
+             and (monitoring_prometheus__config_result is changed
+                  or monitoring_prometheus__rules_result is changed
+                  or monitoring_prometheus__rules_removed is changed
+                  or monitoring_prometheus__secrets_result is changed
+                  or monitoring_prometheus__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_prometheus__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_prometheus__container.name }}"
+        container_image: "{{ monitoring_prometheus__container.image }}"
+        container_schedule: "{{ monitoring_prometheus__autoupdate_schedule }}"

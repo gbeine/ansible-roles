@@ -1,0 +1,101 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_prometheus__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+
+monitoring_prometheus__test_image: 'docker.io/prom/prometheus:latest'
+monitoring_prometheus__test_quadlet_path: '/etc/containers/systemd/prometheus.container'
+
+monitoring_prometheus__test_cases:
+
+  # Without prometheus_config Prometheus scrapes itself like the image
+  - name: 'molecule-prometheus-default'
+    role_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.40'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-default'
+      prometheus_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.40'
+      jobs: [ 'prometheus' ]
+      scrape_interval: '15s'
+      # The default of Prometheus, the role sets no retention
+      retention: ~
+      rule_groups: []
+      rule_files: []
+      absent_rule_files: []
+
+  # Own scrape job with basic_auth from a secret, rule files and the retention as flag in prometheus_container
+  - name: 'molecule-prometheus'
+    role_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.41'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-molecule'
+      prometheus_timezone: 'Europe/Berlin'
+      prometheus_secrets:
+        - name: 'prometheus_molecule_password'
+          data: 'molecule-password'
+      prometheus_container:
+        command:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          # Prometheus reports durations normalized to the largest unit (7d becomes 1w), 2w stays 2w
+          - '--storage.tsdb.retention.time=2w'
+      prometheus_config:
+        global:
+          scrape_interval: '5s'
+          evaluation_interval: '5s'
+        scrape_configs:
+          - job_name: 'molecule'
+            basic_auth:
+              username: 'molecule'
+              password_file: '/run/secrets/prometheus_molecule_password'
+            static_configs:
+              - targets: [ 'localhost:9090' ]
+      prometheus_rules:
+        recording:
+          groups:
+            - name: 'molecule'
+              rules:
+                - record: 'molecule:up:sum'
+                  expr: 'sum(up)'
+        obsolete:
+          groups:
+            - name: 'obsolete'
+              rules:
+                - record: 'molecule:obsolete:sum'
+                  expr: 'sum(up)'
+    # side_effect changes the scrape interval and removes the rule file obsolete, Prometheus has to restart
+    side_effect:
+      role_vars:
+        prometheus_config:
+          global:
+            scrape_interval: '10s'
+            evaluation_interval: '5s'
+          scrape_configs:
+            - job_name: 'molecule'
+              basic_auth:
+                username: 'molecule'
+                password_file: '/run/secrets/prometheus_molecule_password'
+              static_configs:
+                - targets: [ 'localhost:9090' ]
+        prometheus_rules:
+          recording:
+            groups:
+              - name: 'molecule'
+                rules:
+                  - record: 'molecule:up:sum'
+                    expr: 'sum(up)'
+    expect:
+      ip: '10.89.0.41'
+      jobs: [ 'molecule' ]
+      scrape_interval: '10s'
+      retention: '2w'
+      rule_groups: [ 'molecule' ]
+      rule_files: [ 'recording.yml' ]
+      absent_rule_files: [ 'obsolete.yml' ]
