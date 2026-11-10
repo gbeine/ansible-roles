@@ -1,34 +1,48 @@
 ---
 
-- name: 'Deploy Collabora container'
-  tags: [ 'app_collabora' ]
+- name: 'Install Collabora'
+  tags: [ 'app', 'app_collabora' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or collabora_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_collabora__container | length > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_collabora__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_collabora__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_collabora__invalid: >-
+          {%- set errors = [] -%}
+          {%- if app_collabora__username is not string or app_collabora__username | length == 0 -%}
+          {%-   set _ = errors.append('collabora_username has to be a non-empty string') -%}
+          {%- endif -%}
+          {%- if app_collabora__password is not string or app_collabora__password | length == 0 -%}
+          {%-   set _ = errors.append('collabora_password has to be a non-empty string') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: "{{ item.name }}"
-        data: "{{ item.data }}"
-      with_items:
-        - name: 'collabora_password'
-          data: "{{ app_collabora__password }}"
+        name: 'collabora_password'
+        data: "{{ app_collabora__password }}"
+      register: 'app_collabora__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_collabora__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_collabora__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_collabora__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
+    # Collabora needs the capabilities to create the jails of its document processes
     - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_collabora__container.name }}"
@@ -38,6 +52,7 @@
         ip6: "{{ app_collabora__container.ipv6 | default(omit) }}"
         network: "{{ app_collabora__container.network }}"
         timezone: "{{ app_collabora__container.timezone }}"
+        command: "{{ app_collabora__container.command | default(omit) }}"
         env: "{{ app_collabora__container.environment | default(omit) }}"
         etc_hosts: "{{ app_collabora__container.etc_hosts | default(omit) }}"
         expose: "{{ app_collabora__container.expose | default(omit) }}"
@@ -60,22 +75,35 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if app_collabora__container.requires is defined %}
+          Requires={{ app_collabora__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_collabora__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_collabora__container.name }}"
         daemon_reload: true
-        state: 'started'
+        state: "{{ 'restarted' if app_collabora__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_collabora__running: >-
+          {{ (ansible_facts.services[app_collabora__container.name + '.service'].state | default('')) == 'running' }}
+        app_collabora__restart: >-
+          {{ app_collabora__running | bool
+             and (app_collabora__secrets_result is changed
+                  or app_collabora__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'app_collabora__autoupdate_enabled'
-      include_role:
+      when: 'app_collabora__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_collabora__container.name }}"
         container_image: "{{ app_collabora__container.image }}"
+        container_schedule: "{{ app_collabora__autoupdate_schedule }}"

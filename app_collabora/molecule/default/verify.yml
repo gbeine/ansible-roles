@@ -1,0 +1,120 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_collabora__test_case: "{{ app_collabora__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_collabora__expect: "{{ app_collabora__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_collabora__test_quadlet_path }}"
+      register: 'app_collabora__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_collabora__test_image) in app_collabora__test_quadlet_lines
+          - ('IP=' + app_collabora__expect.ip) in app_collabora__test_quadlet_lines
+          - app_collabora__expect.ip6 is none or ('IP6=' + app_collabora__expect.ip6) in app_collabora__test_quadlet_lines
+          - app_collabora__expect.ip6 is not none or app_collabora__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Secret=collabora_password,type=env,target=password') in app_collabora__test_quadlet_lines
+          - ('PodmanArgs=--no-healthcheck') in app_collabora__test_quadlet_lines
+          - app_collabora__test_capabilities_expected | reject('in', app_collabora__test_capabilities) | list | length == 0
+        fail_msg: "{{ app_collabora__test_quadlet.content | b64decode }}"
+      vars:
+        app_collabora__test_capabilities_expected: [ 'SYS_CHROOT', 'SYS_ADMIN', 'FOWNER', 'CHOWN', 'MKNOD' ]
+        app_collabora__test_quadlet_lines: "{{ (app_collabora__test_quadlet.content | b64decode).splitlines() }}"
+        app_collabora__test_capabilities: >-
+          {{ app_collabora__test_quadlet_lines | select('match', 'AddCapability=')
+             | map('regex_replace', '^AddCapability=', '') | join(' ') | split | map('upper')
+             | map('regex_replace', '^CAP_', '') | list }}
+
+    - name: 'Read the state of the collabora service'
+      ansible.builtin.command: 'systemctl is-active collabora'
+      register: 'app_collabora__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the secret of the password'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'collabora_password' ]
+      register: 'app_collabora__test_secret'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service and the secret'
+      ansible.builtin.assert:
+        that:
+          - app_collabora__test_service.stdout == 'active'
+          - app_collabora__test_secret.rc == 0
+        fail_msg: "service {{ app_collabora__test_service.stdout }}, secret exists {{ app_collabora__test_secret.rc == 0 }}"
+
+    - name: 'Inspect the collabora container'
+      ansible.builtin.command: 'podman inspect collabora'
+      register: 'app_collabora__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses and environment'
+      ansible.builtin.assert:
+        that:
+          - app_collabora__test_net.IPAddress == app_collabora__expect.ip
+          - app_collabora__expect.ip6 is none or app_collabora__test_net.GlobalIPv6Address == app_collabora__expect.ip6
+          - app_collabora__expect.env | reject('in', app_collabora__test_env) | list | length == 0
+          - app_collabora__test_env | map('regex_replace', '=.*$', '') | select('in', app_collabora__expect.absent_env | default([])) | list | length == 0
+        fail_msg: "IPv4 {{ app_collabora__test_net.IPAddress }}, IPv6 {{ app_collabora__test_net.GlobalIPv6Address }}, environment {{ app_collabora__test_env | join(', ') }}"
+      vars:
+        app_collabora__test_container: "{{ (app_collabora__test_inspect.stdout | from_json)[0] }}"
+        app_collabora__test_net: "{{ app_collabora__test_container.NetworkSettings.Networks[app_collabora__test_case.role_vars.collabora_network] }}"
+        app_collabora__test_env: "{{ app_collabora__test_container.Config.Env }}"
+
+    # The first start of Collabora creates the system template of the document processes
+    - name: 'Wait until Collabora is ready'
+      ansible.builtin.uri:
+        url: "{{ app_collabora__expect.url }}/"
+        return_content: true
+        validate_certs: false
+      register: 'app_collabora__test_ready'
+      until: app_collabora__test_ready.status == 200 and app_collabora__test_ready.content is search('OK')
+      retries: 30
+      delay: 5
+
+    - name: 'Read the WOPI discovery'
+      ansible.builtin.uri:
+        url: "{{ app_collabora__expect.url }}/hosting/discovery"
+        return_content: true
+        validate_certs: false
+      register: 'app_collabora__test_discovery'
+
+    - name: 'Request the admin console without credentials'
+      ansible.builtin.uri:
+        url: "{{ app_collabora__expect.url }}/browser/dist/admin/admin.html"
+        validate_certs: false
+        status_code: [ 401 ]
+      register: 'app_collabora__test_admin_anonymous'
+
+    - name: 'Request the admin console with the credentials'
+      ansible.builtin.uri:
+        url: "{{ app_collabora__expect.url }}/browser/dist/admin/admin.html"
+        url_username: "{{ app_collabora__expect.username }}"
+        url_password: "{{ app_collabora__expect.password }}"
+        force_basic_auth: true
+        validate_certs: false
+      register: 'app_collabora__test_admin'
+
+    - name: 'Assert the WOPI discovery and the admin console'
+      ansible.builtin.assert:
+        that:
+          - app_collabora__test_discovery.content is search('wopi-discovery')
+          - app_collabora__test_admin_anonymous.status == 401
+          - app_collabora__test_admin.status == 200
+        fail_msg: >-
+          discovery {{ app_collabora__test_discovery.content | default('') | truncate(200) }},
+          admin console without credentials {{ app_collabora__test_admin_anonymous.status }},
+          with credentials {{ app_collabora__test_admin.status }}

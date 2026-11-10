@@ -1,0 +1,89 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_collabora__test_case: "{{ app_collabora__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_collabora__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ app_collabora__test_quadlet_path }}"
+        checksum_algorithm: 'md5'
+      register: 'app_collabora__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_collabora with collabora_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        collabora_container: [ 'environment' ]
+        app_collabora__test_invalid:
+          message: 'collabora_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_collabora with an empty password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        collabora_password: ''
+        app_collabora__test_invalid:
+          message: 'an empty password'
+          search: '^collabora_password has to be a non-empty string$'
+
+    - name: 'Run app_collabora with an empty username (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        collabora_username: ''
+        app_collabora__test_invalid:
+          message: 'an empty username'
+          search: '^collabora_username has to be a non-empty string$'
+
+    - name: 'Run app_collabora with the changed role variables'
+      when: app_collabora__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'collabora' ]
+          register: 'app_collabora__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ app_collabora__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run app_collabora with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'app_collabora'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'collabora' ]
+          register: 'app_collabora__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed secret and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_collabora__secrets_result is changed
+              - app_collabora__quadlet_result is not changed
+              - app_collabora__test_started_after.stdout | int > app_collabora__test_started_before.stdout | int
+            fail_msg: >-
+              secret changed: {{ app_collabora__secrets_result is changed }},
+              quadlet changed: {{ app_collabora__quadlet_result is changed }},
+              start before {{ app_collabora__test_started_before.stdout }}, after {{ app_collabora__test_started_after.stdout }}

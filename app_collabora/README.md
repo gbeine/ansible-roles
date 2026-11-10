@@ -4,6 +4,7 @@ permalink: /roles/collabora/
 project_link: https://www.collaboraonline.com/
 project_repository: https://gerrit.collaboraoffice.com/
 container_link: https://hub.docker.com/r/collabora/code
+container_repository: https://github.com/CollaboraOnline/online/tree/main/docker
 documentation_link: https://sdk.collaboraonline.com/
 ---
 
