@@ -1,0 +1,133 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_thanos__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+
+monitoring_thanos__test_version: 'v0.42.5'
+monitoring_thanos__test_image: "docker.io/thanosio/thanos:{{ monitoring_thanos__test_version }}"
+monitoring_thanos__test_prometheus_image: 'docker.io/prom/prometheus:latest'
+monitoring_thanos__test_bucket_dir: '/opt/thanos-bucket'
+
+monitoring_thanos__test_cases:
+
+  # Sidecar without object storage, it only serves the StoreAPI
+  - name: 'molecule-thanos-default'
+    # Prometheus started in prepare.yml with monitoring_prometheus,
+    # external labels and equal block durations are required by the sidecar
+    prometheus_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.50'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-default'
+      prometheus_timezone: 'Europe/Berlin'
+      prometheus_config:
+        global:
+          scrape_interval: '5s'
+          external_labels:
+            cluster: 'molecule'
+            replica: 'default'
+      prometheus_container:
+        command:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--storage.tsdb.min-block-duration=2h'
+          - '--storage.tsdb.max-block-duration=2h'
+    role_vars:
+      thanos_component: 'sidecar'
+      thanos_version: 'v0.42.5'
+      thanos_ip: '10.89.0.51'
+      thanos_network: 'podman-molecule'
+      thanos_hostname: 'thanos-sidecar-default'
+      thanos_timezone: 'Europe/Berlin'
+      thanos_prometheus_url: 'http://10.89.0.50:9090'
+      thanos_prometheus_data: '/opt/prometheus-molecule/data'
+    expect:
+      name: 'thanos-sidecar'
+      component: 'sidecar'
+      ip: '10.89.0.51'
+      objstore: false
+
+  # Sidecar uploading to a bucket in the file system, the volume of the bucket is added with thanos_container
+  - name: 'molecule-thanos'
+    prometheus_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.52'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-molecule'
+      prometheus_timezone: 'Europe/Berlin'
+      prometheus_config:
+        global:
+          scrape_interval: '5s'
+          external_labels:
+            cluster: 'molecule'
+            replica: 'molecule'
+      prometheus_container:
+        command:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--storage.tsdb.min-block-duration=2h'
+          - '--storage.tsdb.max-block-duration=2h'
+    role_vars:
+      thanos_component: 'sidecar'
+      thanos_version: 'v0.42.5'
+      thanos_ip: '10.89.0.53'
+      thanos_network: 'podman-molecule'
+      thanos_hostname: 'thanos-sidecar-molecule'
+      thanos_timezone: 'Europe/Berlin'
+      thanos_prometheus_url: 'http://10.89.0.52:9090'
+      thanos_prometheus_data: '/opt/prometheus-molecule/data'
+      thanos_objstore:
+        type: 'FILESYSTEM'
+        config:
+          directory: '/bucket'
+      thanos_container:
+        volumes:
+          - '/etc/localtime:/etc/localtime:ro'
+          - '/etc/timezone:/etc/timezone:ro'
+          - '/opt/prometheus-molecule/data:/prometheus'
+          - '/opt/thanos-bucket:/bucket'
+    # side_effect changes the object storage, the secret changes and the sidecar has to restart
+    side_effect:
+      role_vars:
+        thanos_objstore:
+          type: 'FILESYSTEM'
+          config:
+            directory: '/bucket/changed'
+    expect:
+      name: 'thanos-sidecar'
+      component: 'sidecar'
+      ip: '10.89.0.53'
+      objstore: true
+
+  # Receive storing the samples Prometheus sends with remote write, without object storage
+  - name: 'molecule-thanos-receive'
+    prometheus_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.54'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-receive'
+      prometheus_timezone: 'Europe/Berlin'
+      prometheus_config:
+        global:
+          scrape_interval: '5s'
+          external_labels:
+            cluster: 'molecule'
+            replica: 'receive'
+        remote_write:
+          - url: 'http://10.89.0.55:19291/api/v1/receive'
+    role_vars:
+      thanos_component: 'receive'
+      thanos_version: 'v0.42.5'
+      thanos_home: '/opt/thanos-receive'
+      thanos_ip: '10.89.0.55'
+      thanos_network: 'podman-molecule'
+      thanos_hostname: 'thanos-receive-molecule'
+      thanos_timezone: 'Europe/Berlin'
+    expect:
+      name: 'thanos-receive'
+      component: 'receive'
+      ip: '10.89.0.55'
+      objstore: false

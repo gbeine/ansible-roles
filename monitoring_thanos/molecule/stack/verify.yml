@@ -1,0 +1,47 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Check every instance'
+      ansible.builtin.include_tasks: 'tasks/check_instance.yml'
+      loop: "{{ monitoring_thanos__test_expect }}"
+      loop_control:
+        loop_var: 'monitoring_thanos__expect'
+        label: "{{ monitoring_thanos__expect.name }}"
+
+    # query reads its endpoints from --endpoint.sd-config, the StoreAPIs of sidecar, store and rule
+    - name: 'Wait until query is connected to sidecar, store and rule'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos__test_query_url }}/api/v1/stores"
+        return_content: true
+      register: 'monitoring_thanos__test_stores'
+      until: >-
+        monitoring_thanos__test_stores.json.data is defined
+        and [ 'sidecar', 'store', 'rule' ] | reject('in', monitoring_thanos__test_stores.json.data.keys() | list) | list | length == 0
+      retries: 30
+      delay: 2
+
+    - name: 'Wait until query returns the samples of Prometheus'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos__test_query_url }}/api/v1/query?query=up"
+        return_content: true
+      register: 'monitoring_thanos__test_up'
+      until: monitoring_thanos__test_up.json.data.result | default([]) | length > 0
+      retries: 30
+      delay: 2
+
+    # rule evaluates the recording rule against query, the result is served by its StoreAPI
+    - name: 'Wait until query returns the recording rule of rule'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos__test_query_url }}/api/v1/query?query=thanos:up:count"
+        return_content: true
+      register: 'monitoring_thanos__test_recorded'
+      until: monitoring_thanos__test_recorded.json.data.result | default([]) | length > 0
+      retries: 40
+      delay: 3

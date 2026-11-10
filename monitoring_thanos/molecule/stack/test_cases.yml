@@ -1,0 +1,125 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_thanos__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+
+monitoring_thanos__test_image: 'docker.io/thanosio/thanos:v0.42.5'
+monitoring_thanos__test_prometheus_image: 'docker.io/prom/prometheus:latest'
+monitoring_thanos__test_bucket_dir: '/opt/thanos-bucket'
+monitoring_thanos__test_query_url: 'http://10.89.0.75:10902'
+
+# Prometheus started in prepare.yml with monitoring_prometheus,
+# external labels and equal block durations are required by the sidecar
+monitoring_thanos__test_prometheus:
+  prometheus_home: '/opt/prometheus-stack'
+  prometheus_ip: '10.89.0.70'
+  prometheus_network: 'podman-molecule'
+  prometheus_hostname: 'prometheus-stack'
+  prometheus_timezone: 'Europe/Berlin'
+  prometheus_config:
+    global:
+      scrape_interval: '5s'
+      external_labels:
+        cluster: 'molecule'
+        replica: 'stack'
+  prometheus_container:
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.min-block-duration=2h'
+      - '--storage.tsdb.max-block-duration=2h'
+
+# All components on one host, deployed with tasks/loop.yml,
+# sidecar, store and compact share the bucket in the file system
+monitoring_thanos__test_objstore:
+  type: 'FILESYSTEM'
+  config:
+    directory: '/bucket'
+
+thanos_instances:
+
+  - component: 'sidecar'
+    version: 'v0.42.5'
+    ip: '10.89.0.71'
+    network: 'podman-molecule'
+    hostname: 'thanos-sidecar-stack'
+    timezone: 'Europe/Berlin'
+    prometheus_url: 'http://10.89.0.70:9090'
+    prometheus_data: '/opt/prometheus-stack/data'
+    objstore: "{{ monitoring_thanos__test_objstore }}"
+    container:
+      volumes:
+        - '/etc/localtime:/etc/localtime:ro'
+        - '/etc/timezone:/etc/timezone:ro'
+        - '/opt/prometheus-stack/data:/prometheus'
+        - '/opt/thanos-bucket:/bucket'
+
+  - component: 'store'
+    version: 'v0.42.5'
+    home: '/opt/thanos-store'
+    ip: '10.89.0.72'
+    network: 'podman-molecule'
+    hostname: 'thanos-store-stack'
+    timezone: 'Europe/Berlin'
+    objstore: "{{ monitoring_thanos__test_objstore }}"
+    container:
+      volumes:
+        - '/etc/localtime:/etc/localtime:ro'
+        - '/etc/timezone:/etc/timezone:ro'
+        - '/opt/thanos-store/data:/var/thanos/store'
+        - '/opt/thanos-bucket:/bucket'
+
+  - component: 'compact'
+    version: 'v0.42.5'
+    home: '/opt/thanos-compact'
+    ip: '10.89.0.73'
+    network: 'podman-molecule'
+    hostname: 'thanos-compact-stack'
+    timezone: 'Europe/Berlin'
+    objstore: "{{ monitoring_thanos__test_objstore }}"
+    container:
+      volumes:
+        - '/etc/localtime:/etc/localtime:ro'
+        - '/etc/timezone:/etc/timezone:ro'
+        - '/opt/thanos-compact/data:/var/thanos/compact'
+        - '/opt/thanos-bucket:/bucket'
+
+  # The interval of the group keeps the test short, the default evaluation interval is 1m
+  - component: 'rule'
+    version: 'v0.42.5'
+    home: '/opt/thanos-rule'
+    ip: '10.89.0.74'
+    network: 'podman-molecule'
+    hostname: 'thanos-rule-stack'
+    timezone: 'Europe/Berlin'
+    query_url: "{{ monitoring_thanos__test_query_url }}"
+    rules:
+      stack:
+        groups:
+          - name: 'stack'
+            interval: '5s'
+            rules:
+              - record: 'thanos:up:count'
+                expr: 'count(up)'
+
+  - component: 'query'
+    version: 'v0.42.5'
+    ip: '10.89.0.75'
+    network: 'podman-molecule'
+    hostname: 'thanos-query-stack'
+    timezone: 'Europe/Berlin'
+    query_endpoints:
+      - '10.89.0.71:10901'
+      - '10.89.0.72:10901'
+      - '10.89.0.74:10901'
+
+# Expected state of every instance in verify.yml
+monitoring_thanos__test_expect:
+  - { name: 'thanos-sidecar', component: 'sidecar', ip: '10.89.0.71' }
+  - { name: 'thanos-store', component: 'store', ip: '10.89.0.72' }
+  - { name: 'thanos-compact', component: 'compact', ip: '10.89.0.73' }
+  - { name: 'thanos-rule', component: 'rule', ip: '10.89.0.74', home: '/opt/thanos-rule', hostname: 'thanos-rule-stack' }
+  - { name: 'thanos-query', component: 'query', ip: '10.89.0.75' }
