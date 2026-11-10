@@ -1,33 +1,50 @@
 ---
 
-- name: 'Deploy Jellyfin container'
-  tags: [ 'app_jellyfin' ]
+- name: 'Install Jellyfin'
+  tags: [ 'app', 'app_jellyfin' ]
   block:
 
-    - name: 'Create Jellyfin directories'
+    # A failing template in the variables (e.g. an unknown filter or jellyfin_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_jellyfin__container | length > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_jellyfin__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_jellyfin__invalid: >-
+          {%- set errors = [] -%}
+          {%- if app_jellyfin__home is not string or app_jellyfin__home is not match('^/') -%}
+          {%-   set _ = errors.append('jellyfin_home has to be an absolute path') -%}
+          {%- endif -%}
+          {%- if app_jellyfin__library_dir is not string or app_jellyfin__library_dir is not match('^/') -%}
+          {%-   set _ = errors.append('jellyfin_library has to be an absolute path') -%}
+          {%- endif -%}
+          {%- if app_jellyfin__url is not string or (app_jellyfin__url | length > 0 and app_jellyfin__url is not match('^https?://[^/]+')) -%}
+          {%-   set _ = errors.append('jellyfin_url has to be empty or an http or https URL') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The library is not created, it belongs to the user and may be a mount
+    - name: 'Create the configuration directory'
       ansible.builtin.file:
-        dest: "{{ item }}"
-        state: 'directory'
+        path: "{{ app_jellyfin__podman_home }}"
         owner: "{{ app_jellyfin__uid }}"
         group: "{{ app_jellyfin__gid }}"
-        mode: '750'
-      with_items:
-        - "{{ app_jellyfin__podman_home }}"
+        mode: '0750'
+        state: 'directory'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_jellyfin__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_jellyfin__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_jellyfin__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -38,6 +55,7 @@
         ip6: "{{ app_jellyfin__container.ipv6 | default(omit) }}"
         network: "{{ app_jellyfin__container.network }}"
         timezone: "{{ app_jellyfin__container.timezone }}"
+        command: "{{ app_jellyfin__container.command | default(omit) }}"
         env: "{{ app_jellyfin__container.environment | default(omit) }}"
         etc_hosts: "{{ app_jellyfin__container.etc_hosts | default(omit) }}"
         expose: "{{ app_jellyfin__container.expose | default(omit) }}"
@@ -52,22 +70,33 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if app_jellyfin__container.requires is defined %}
+          Requires={{ app_jellyfin__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_jellyfin__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_jellyfin__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_jellyfin__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_jellyfin__running: >-
+          {{ (ansible_facts.services[app_jellyfin__container.name + '.service'].state | default('')) == 'running' }}
+        app_jellyfin__restart: >-
+          {{ app_jellyfin__running | bool and app_jellyfin__quadlet_result is changed }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'app_jellyfin__autoupdate_enabled'
-      include_role:
+      when: 'app_jellyfin__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_jellyfin__container.name }}"
         container_image: "{{ app_jellyfin__container.image }}"
+        container_schedule: "{{ app_jellyfin__autoupdate_schedule }}"

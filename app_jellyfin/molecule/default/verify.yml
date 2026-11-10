@@ -1,0 +1,92 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_jellyfin__test_case: "{{ app_jellyfin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_jellyfin__expect: "{{ app_jellyfin__test_case.expect }}"
+    app_jellyfin__test_url: "http://{{ app_jellyfin__expect.ip }}:8096"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_jellyfin__test_quadlet_path }}"
+      register: 'app_jellyfin__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_jellyfin__test_image) in app_jellyfin__test_quadlet_lines
+          - ('IP=' + app_jellyfin__expect.ip) in app_jellyfin__test_quadlet_lines
+          - app_jellyfin__expect.ip6 is none or ('IP6=' + app_jellyfin__expect.ip6) in app_jellyfin__test_quadlet_lines
+          - app_jellyfin__expect.ip6 is not none or app_jellyfin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_jellyfin__expect.quadlet | reject('in', app_jellyfin__test_quadlet_lines) | list | length == 0
+        fail_msg: "{{ app_jellyfin__test_quadlet.content | b64decode }}"
+      vars:
+        app_jellyfin__test_quadlet_lines: "{{ (app_jellyfin__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the jellyfin service'
+      ansible.builtin.command: 'systemctl is-active jellyfin'
+      register: 'app_jellyfin__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the configuration directory'
+      ansible.builtin.stat:
+        path: "{{ app_jellyfin__expect.home }}"
+      register: 'app_jellyfin__test_home'
+
+    - name: 'Assert the service and the configuration directory'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__test_service.stdout == 'active'
+          - app_jellyfin__test_home.stat.isdir | default(false)
+          - app_jellyfin__test_home.stat.uid | default(-1) == 911
+        fail_msg: "service {{ app_jellyfin__test_service.stdout }}, configuration directory {{ app_jellyfin__test_home.stat }}"
+
+    - name: 'Inspect the jellyfin container'
+      ansible.builtin.command: 'podman inspect jellyfin'
+      register: 'app_jellyfin__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses and environment'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__test_net.IPAddress == app_jellyfin__expect.ip
+          - app_jellyfin__expect.ip6 is none or app_jellyfin__test_net.GlobalIPv6Address == app_jellyfin__expect.ip6
+          - app_jellyfin__expect.env | reject('in', app_jellyfin__test_env) | list | length == 0
+          - app_jellyfin__test_env | map('regex_replace', '=.*$', '') | select('in', app_jellyfin__expect.absent_env) | list | length == 0
+        fail_msg: "IPv4 {{ app_jellyfin__test_net.IPAddress }}, IPv6 {{ app_jellyfin__test_net.GlobalIPv6Address }}, environment {{ app_jellyfin__test_env | join(', ') }}"
+      vars:
+        app_jellyfin__test_container: "{{ (app_jellyfin__test_inspect.stdout | from_json)[0] }}"
+        app_jellyfin__test_net: "{{ app_jellyfin__test_container.NetworkSettings.Networks[app_jellyfin__test_case.role_vars.jellyfin_network] }}"
+        app_jellyfin__test_env: "{{ app_jellyfin__test_container.Config.Env }}"
+
+    # The first start of Jellyfin creates the database
+    - name: 'Wait until Jellyfin is ready'
+      ansible.builtin.uri:
+        url: "{{ app_jellyfin__test_url }}/health"
+        return_content: true
+      register: 'app_jellyfin__test_ready'
+      until: app_jellyfin__test_ready.status == 200 and app_jellyfin__test_ready.content is search('Healthy')
+      retries: 60
+      delay: 5
+
+    - name: 'Read the public information of the server'
+      ansible.builtin.uri:
+        url: "{{ app_jellyfin__test_url }}/System/Info/Public"
+        return_content: true
+      register: 'app_jellyfin__test_info'
+
+    - name: 'Assert the public information of the server'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__test_info.json.Version is defined
+          - app_jellyfin__expect.url is none or (app_jellyfin__test_info.json.LocalAddress | regex_replace('/$', '')) == app_jellyfin__expect.url
+        fail_msg: "{{ app_jellyfin__test_info.content | default('') }}"

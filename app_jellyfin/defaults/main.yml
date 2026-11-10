@@ -5,28 +5,32 @@
 # https://ansible-roles.org/roles/jellyfin
 #
 
+# Configuration directory, contains the configuration, the database and the cache of Jellyfin
 app_jellyfin__home: "{{ jellyfin_home | mandatory }}"
 app_jellyfin__ip: "{{ jellyfin_ip | mandatory }}"
 app_jellyfin__ipv6: "{{ jellyfin_ipv6 }}"
 app_jellyfin__network: "{{ jellyfin_network | mandatory }}"
 app_jellyfin__hostname: "{{ jellyfin_hostname | mandatory }}"
 app_jellyfin__timezone: "{{ jellyfin_timezone | mandatory }}"
-app_jellyfin__labels: "{{ jellyfin_labels | default({}) }}"
+app_jellyfin__labels: "{{ jellyfin_labels }}"
 
 app_jellyfin__version: "{{ jellyfin_version | default('latest') }}"
 
-app_jellyfin__container: "{{ app_jellyfin__container_default | combine(jellyfin_container | default({})) }}"
-
+# Public URL of Jellyfin, announced to the clients, not set if empty
 app_jellyfin__url: "{{ jellyfin_url | default('') }}"
+# Media library, mounted to /data
 app_jellyfin__library_dir: "{{ jellyfin_library | mandatory }}"
-app_jellyfin__discovery_enable: "{{ jellyfin_discovery | default(false) }}"
+
+app_jellyfin__container: "{{ app_jellyfin__podman_container_default | combine(jellyfin_container | default({})) }}"
 
 app_jellyfin__autoupdate_enabled: "{{ jellyfin_autoupdate_enabled | default(false) }}"
+app_jellyfin__autoupdate_schedule: "{{ jellyfin_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+# User and group abc of the image, the init of the image runs Jellyfin as PUID and PGID
 app_jellyfin__uid: '911'
 app_jellyfin__gid: '911'
 
@@ -36,7 +40,7 @@ app_jellyfin__podman_tag: "{{ app_jellyfin__version }}"
 
 app_jellyfin__podman_home: "{{ app_jellyfin__home }}"
 
-app_jellyfin__container_default:
+app_jellyfin__podman_container_default:
   name: "{{ app_jellyfin__podman_name }}"
   hostname: "{{ app_jellyfin__hostname }}"
   image: "{{ app_jellyfin__podman_image }}:{{ app_jellyfin__podman_tag }}"
@@ -44,15 +48,16 @@ app_jellyfin__container_default:
   ipv6: "{{ app_jellyfin__ipv6 | default(omit) }}"
   network: "{{ app_jellyfin__network }}"
   timezone: "{{ app_jellyfin__timezone }}"
-  environment:
-    PUID: "{{ app_jellyfin__uid }}"
-    PGID: "{{ app_jellyfin__gid }}"
-    TZ: "{{ app_jellyfin__timezone }}"
-    JELLYFIN_PublishedServerUrl: "{{ app_jellyfin__url }}"
-  labels: "{{ app_jellyfin__labels }}"
+  # jellyfin_container.environment replaces the dictionary completely
+  environment: >-
+    {{ {'PUID': app_jellyfin__uid, 'PGID': app_jellyfin__gid, 'TZ': app_jellyfin__timezone}
+       | combine({'JELLYFIN_PublishedServerUrl': app_jellyfin__url} if app_jellyfin__url | length > 0 else {}) }}
+  labels: "{{ app_jellyfin__labels | default(omit) }}"
+  # Client discovery and DLNA, jellyfin_container.publish replaces the list completely
   publish:
     - '7359:7359/udp'
     - '1900:1900/udp'
+  # jellyfin_container.volumes replaces the list completely
   volumes:
     - '/etc/localtime:/etc/localtime:ro'
     - '/etc/timezone:/etc/timezone:ro'

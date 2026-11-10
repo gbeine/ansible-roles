@@ -1,0 +1,37 @@
+---
+# Runs app_jellyfin with the invalid role variables passed as include parameters,
+# the role has to fail before the quadlet unit changes.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run app_jellyfin with invalid variables (expect ERROR): {{ app_jellyfin__test_invalid.message }}"
+  block:
+
+    - name: 'Run app_jellyfin, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'app_jellyfin'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ app_jellyfin__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the quadlet unit after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ app_jellyfin__test_quadlet_path }}"
+        checksum_algorithm: 'md5'
+      register: 'app_jellyfin__test_md5_after'
+
+    - name: 'Assert the run failed before the quadlet unit changed'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__test_failure is search(app_jellyfin__test_invalid.search, multiline=true)
+          - app_jellyfin__test_md5_before.stat.checksum is defined
+          - app_jellyfin__test_md5_after.stat.checksum | default('') == app_jellyfin__test_md5_before.stat.checksum
+        fail_msg: >-
+          Failure: {{ app_jellyfin__test_failure }}
+          Checksum before: {{ app_jellyfin__test_md5_before.stat.checksum | default('') }},
+          after: {{ app_jellyfin__test_md5_after.stat.checksum | default('') }}.
+      vars:
+        # Double quotes, so \n is a line break for the anchors of the searches
+        app_jellyfin__test_failure: "{{ [ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ] | join('\n') }}"
