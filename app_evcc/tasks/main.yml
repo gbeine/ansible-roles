@@ -1,31 +1,42 @@
 ---
 
-- name: 'Deploy FreeScout container'
-  tags: [ 'app_evcc' ]
+- name: 'Install evcc'
+  tags: [ 'app', 'app_evcc' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or evcc_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_evcc__container | length > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_evcc__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_evcc__invalid: >-
+          {%- set errors = [] -%}
+          {%- if app_evcc__podman_home is not string or app_evcc__podman_home is not match('^/') -%}
+          {%-   set _ = errors.append('evcc_home has to be an absolute path') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The container runs as root
+    - name: 'Create the data directory'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        mode: "{{ item.mode | default('0700') }}"
+        path: "{{ app_evcc__podman_home }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_evcc__podman_home }}"
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_evcc__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_evcc__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_evcc__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -36,6 +47,7 @@
         ip6: "{{ app_evcc__container.ipv6 | default(omit) }}"
         network: "{{ app_evcc__container.network }}"
         timezone: "{{ app_evcc__container.timezone }}"
+        command: "{{ app_evcc__container.command | default(omit) }}"
         env: "{{ app_evcc__container.environment | default(omit) }}"
         etc_hosts: "{{ app_evcc__container.etc_hosts | default(omit) }}"
         expose: "{{ app_evcc__container.expose | default(omit) }}"
@@ -46,31 +58,37 @@
         quadlet_options: |
           [Install]
           WantedBy=default.target
-          
+
           [Service]
           RestartSec=5
           Restart=always
-          
+
           [Unit]
           {% if app_evcc__container.requires is defined %}
           Requires={{ app_evcc__container.requires | join(' ') }}
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_evcc__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_evcc__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_evcc__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_evcc__running: >-
+          {{ (ansible_facts.services[app_evcc__container.name + '.service'].state | default('')) == 'running' }}
+        app_evcc__restart: >-
+          {{ app_evcc__running | bool and app_evcc__quadlet_result is changed }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'app_evcc__autoupdate_enabled'
-      include_role:
+      when: 'app_evcc__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_evcc__container.name }}"
         container_image: "{{ app_evcc__container.image }}"
+        container_schedule: "{{ app_evcc__autoupdate_schedule }}"

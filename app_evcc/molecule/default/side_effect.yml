@@ -1,0 +1,87 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_evcc__test_case: "{{ app_evcc__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_evcc__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ app_evcc__test_quadlet_path }}"
+        checksum_algorithm: 'md5'
+      register: 'app_evcc__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_evcc with evcc_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        evcc_container: [ 'environment' ]
+        app_evcc__test_invalid:
+          message: 'evcc_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_evcc with an empty data directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        evcc_home: ''
+        app_evcc__test_invalid:
+          message: 'an empty data directory'
+          search: '^evcc_home has to be an absolute path$'
+
+    - name: 'Run app_evcc with a relative data directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        evcc_home: 'relative/evcc'
+        app_evcc__test_invalid:
+          message: 'a relative data directory'
+          search: '^evcc_home has to be an absolute path$'
+
+    - name: 'Run app_evcc with the changed role variables'
+      when: app_evcc__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'evcc' ]
+          register: 'app_evcc__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ app_evcc__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run app_evcc with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'app_evcc'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'evcc' ]
+          register: 'app_evcc__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_evcc__quadlet_result is changed
+              - app_evcc__test_started_after.stdout | int > app_evcc__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_evcc__quadlet_result is changed }},
+              start before {{ app_evcc__test_started_before.stdout }}, after {{ app_evcc__test_started_after.stdout }}

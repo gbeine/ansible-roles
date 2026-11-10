@@ -1,0 +1,94 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_evcc__test_case: "{{ app_evcc__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_evcc__expect: "{{ app_evcc__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_evcc__test_quadlet_path }}"
+      register: 'app_evcc__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_evcc__test_image) in app_evcc__test_quadlet_lines
+          - ('IP=' + app_evcc__expect.ip) in app_evcc__test_quadlet_lines
+          - app_evcc__expect.ip6 is none or ('IP6=' + app_evcc__expect.ip6) in app_evcc__test_quadlet_lines
+          - app_evcc__expect.ip6 is not none or app_evcc__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_evcc__expect.quadlet | reject('in', app_evcc__test_quadlet_lines) | list | length == 0
+        fail_msg: "{{ app_evcc__test_quadlet.content | b64decode }}"
+      vars:
+        app_evcc__test_quadlet_lines: "{{ (app_evcc__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the evcc service'
+      ansible.builtin.command: 'systemctl is-active evcc'
+      register: 'app_evcc__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ app_evcc__expect.home }}"
+      register: 'app_evcc__test_home'
+
+    - name: 'Assert the service and the data directory'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__test_service.stdout == 'active'
+          - app_evcc__test_home.stat.isdir | default(false)
+          - app_evcc__test_home.stat.mode | default('') == '0700'
+        fail_msg: "service {{ app_evcc__test_service.stdout }}, data directory {{ app_evcc__test_home.stat }}"
+
+    - name: 'Inspect the evcc container'
+      ansible.builtin.command: 'podman inspect evcc'
+      register: 'app_evcc__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__test_net.IPAddress == app_evcc__expect.ip
+          - app_evcc__expect.ip6 is none or app_evcc__test_net.GlobalIPv6Address == app_evcc__expect.ip6
+        fail_msg: "IPv4 {{ app_evcc__test_net.IPAddress }}, IPv6 {{ app_evcc__test_net.GlobalIPv6Address }}"
+      vars:
+        app_evcc__test_container: "{{ (app_evcc__test_inspect.stdout | from_json)[0] }}"
+        app_evcc__test_net: "{{ app_evcc__test_container.NetworkSettings.Networks[app_evcc__test_case.role_vars.evcc_network] }}"
+
+    - name: 'Wait until evcc is ready'
+      ansible.builtin.uri:
+        url: "http://{{ app_evcc__expect.ip }}:7070/api/state"
+        return_content: true
+      register: 'app_evcc__test_ready'
+      until: app_evcc__test_ready.status == 200 and app_evcc__test_ready.json is defined
+      retries: 30
+      delay: 5
+
+    - name: 'Request the API on the published port'
+      ansible.builtin.uri:
+        url: "http://{{ ansible_facts.default_ipv4.address }}:{{ app_evcc__expect.port }}/api/state"
+        return_content: true
+      register: 'app_evcc__test_published'
+
+    - name: 'Read the database'
+      ansible.builtin.stat:
+        path: "{{ app_evcc__expect.home }}/evcc.db"
+      register: 'app_evcc__test_database'
+
+    - name: 'Assert the published port and the database'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__test_published.json is defined
+          - app_evcc__test_database.stat.exists
+        fail_msg: >-
+          published port {{ app_evcc__test_published.status }},
+          database exists {{ app_evcc__test_database.stat.exists }}
