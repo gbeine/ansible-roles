@@ -45,7 +45,7 @@ prometheus_rules:
 ### Container
 
 Ports, volumes and flags are changed with `prometheus_container`, it is merged over the default of the container.
-The merge is not recursive, `publish`, `volumes` and `command` replace the lists of the default completely.
+The merge is not recursive, `publish`, `volumes`, `command` and `environment` replace the values of the default completely.
 The default starts Prometheus with the flags of the image, `--config.file=/etc/prometheus/prometheus.yml` and `--storage.tsdb.path=/prometheus`,
 and mounts `/etc/localtime`, `/etc/timezone`, the configuration, the rule files and the data directory,
 further [flags](https://prometheus.io/docs/prometheus/latest/command-line/prometheus/) or volumes need the complete list:
