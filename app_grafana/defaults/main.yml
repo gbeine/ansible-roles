@@ -11,44 +11,41 @@ app_grafana__ipv6: "{{ grafana_ipv6 }}"
 app_grafana__network: "{{ grafana_network | mandatory }}"
 app_grafana__hostname: "{{ grafana_hostname | mandatory }}"
 app_grafana__timezone: "{{ grafana_timezone | mandatory }}"
-app_grafana__labels: "{{ grafana_labels | default({}) }}"
+app_grafana__labels: "{{ grafana_labels }}"
 
 app_grafana__version: "{{ grafana_version | default('latest') }}"
 
+# Files below /run/secrets in the container, e.g. for $__file{/run/secrets/<name>} in the configuration
+app_grafana__secrets: "{{ grafana_secrets | default([]) }}"
+
+# grafana.ini, sections with their keys, every section replaces the section of the default,
+# keys without section are set in the section DEFAULT
+app_grafana__config: "{{ app_grafana__config_default | combine(grafana_config | default({})) }}"
+
 app_grafana__container: "{{ app_grafana__podman_container_default | combine(grafana_container | default({})) }}"
 
-app_grafana__app_mode: "{{ grafana_app_mode | default('production') }}"
-app_grafana__protocol: "{{ grafana_protocol | default('http') }}"
-app_grafana__http_addr: "{{ grafana_http_addr | default(app_grafana__ip) }}"
-app_grafana__http_port: "{{ grafana_http_port | default(3000) }}"
-app_grafana__domain: "{{ grafana_domain | default('localhost') }}"
-app_grafana__static_root_path: "{{ grafana_static_root_path | default('public') }}"
-
-app_grafana__db_type: "{{ grafana_db_type | default('sqlite3') }}"
-app_grafana__db_host: "{{ grafana_db_host | mandatory }}"
-app_grafana__db_port: "{{ grafana_db_port | mandatory }}"
-app_grafana__db_name: "{{ grafana_db_name | default('grafana') }}"
-app_grafana__db_user: "{{ grafana_db_user | default('grafana') }}"
-app_grafana__db_pass: "{{ grafana_db_pass | mandatory }}"
-app_grafana__db_path: "{{ grafana_db_path | mandatory }}"
-#app_grafana__base_url: "{{ grafana_base_url | mandatory }}"
-
-app_grafana__auth_anonymous: "{{ grafana_auth_anonymous | default(false) }}"
-app_grafana__auth_anonymous_org_name: "{{ grafana_auth_anonymous_org_name | mandatory }}"
-app_grafana__auth_anonymous_org_role: "{{ grafana_auth_anonymous_org_role | default('Viewer') }}"
-
-app_grafana__auth_basic: "{{ grafana_auth_basic | default(false) }}"
-
 app_grafana__autoupdate_enabled: "{{ grafana_autoupdate_enabled | default(false) }}"
+app_grafana__autoupdate_schedule: "{{ grafana_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+# Everything else are the defaults of Grafana (conf/defaults.ini of the image)
+app_grafana__config_default:
+  server:
+    domain: "{{ app_grafana__hostname }}"
+
+# User grafana of the image
 app_grafana__uid: 472
 
+app_grafana__secrets_dir: '/run/secrets'
+
+# Names of secrets
+app_grafana__name_pattern: '^[A-Za-z0-9._-]+$'
+
 app_grafana__podman_name: 'grafana'
-app_grafana__podman_image: 'docker.io/grafana/grafana-oss'
+app_grafana__podman_image: 'docker.io/grafana/grafana'
 app_grafana__podman_tag: "{{ app_grafana__version }}"
 
 app_grafana__podman_home: "{{ app_grafana__home }}"
@@ -56,6 +53,7 @@ app_grafana__podman_home: "{{ app_grafana__home }}"
 app_grafana__podman_etc_dir: "{{ app_grafana__podman_home }}/etc"
 app_grafana__podman_data_dir: "{{ app_grafana__podman_home }}/data"
 app_grafana__podman_log_dir: "{{ app_grafana__podman_home }}/log"
+app_grafana__podman_config_file: "{{ app_grafana__podman_etc_dir }}/grafana.ini"
 
 app_grafana__podman_container_default:
   name: "{{ app_grafana__podman_name }}"
@@ -65,7 +63,13 @@ app_grafana__podman_container_default:
   ipv6: "{{ app_grafana__ipv6 | default(omit) }}"
   network: "{{ app_grafana__network }}"
   timezone: "{{ app_grafana__timezone }}"
-  labels: "{{ app_grafana__labels }}"
+  labels: "{{ app_grafana__labels | default(omit) }}"
+  secrets: >-
+    {{ (app_grafana__secrets | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ app_grafana__secrets_dir ~ '/\1') | list)
+      if (app_grafana__secrets | default([]) | length > 0)
+      else omit }}
+  # grafana_container.volumes replaces the list completely
   volumes:
     - '/etc/timezone:/etc/timezone:ro'
     - '/etc/localtime:/etc/localtime:ro'

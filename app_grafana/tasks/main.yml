@@ -1,42 +1,79 @@
 ---
 
-- name: 'Deploy Grafana container'
-  tags: [ 'app_grafana' ]
+- name: 'Install Grafana'
+  tags: [ 'app', 'app_grafana' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter, grafana_config or grafana_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - (app_grafana__config | to_json | length) + (app_grafana__container | length) > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_grafana__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_grafana__invalid: >-
+          {%- set errors = [] -%}
+          {%- set sections = app_grafana__config | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
+          {%- if sections | length > 0 -%}
+          {%-   set _ = errors.append('grafana_config sections have to be dictionaries: ' ~ sections | join(', ')) -%}
+          {%- endif -%}
+          {%- set secrets = app_grafana__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('grafana_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+                      | map('string') | reject('match', app_grafana__name_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('grafana_secrets entries need name of letters, digits, ., _ or - and data') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        dest: "{{ item }}"
         owner: "{{ app_grafana__uid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_grafana__podman_etc_dir }}"
-        - dest: "{{ app_grafana__podman_data_dir }}"
-        - dest: "{{ app_grafana__podman_log_dir }}"
+      loop:
+        - "{{ app_grafana__podman_etc_dir }}"
+        - "{{ app_grafana__podman_data_dir }}"
+        - "{{ app_grafana__podman_log_dir }}"
 
-    - name: 'Generate Grafana configuration'
-      ansible.builtin.template:
-        src: 'grafana.ini.j2'
-        dest: "{{ app_grafana__podman_etc_dir }}/grafana.ini"
+    - name: 'Generate the configuration'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          {{ app_grafana__config | community.general.to_ini }}
+        dest: "{{ app_grafana__podman_config_file }}"
         owner: "{{ app_grafana__uid }}"
-        mode: '640'
-      when: 'not podman___update_mode | bool'
+        mode: '0640'
+      register: 'app_grafana__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_grafana__secrets }}"
+      register: 'app_grafana__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_grafana__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_grafana__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_grafana__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -47,11 +84,12 @@
         ip6: "{{ app_grafana__container.ipv6 | default(omit) }}"
         network: "{{ app_grafana__container.network }}"
         timezone: "{{ app_grafana__container.timezone }}"
+        command: "{{ app_grafana__container.command | default(omit) }}"
         env: "{{ app_grafana__container.environment | default(omit) }}"
         etc_hosts: "{{ app_grafana__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_grafana__container.expose | default(omit) }}"
         label: "{{ app_grafana__container.labels | default(omit) }}"
         publish: "{{ app_grafana__container.publish | default(omit) }}"
-        expose: "{{ app_grafana__container.expose | default(omit) }}"
         secrets: "{{ app_grafana__container.secrets | default(omit) }}"
         volume: "{{ app_grafana__container.volumes | default(omit) }}"
         quadlet_options: |
@@ -68,20 +106,29 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_grafana__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_grafana__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_grafana__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_grafana__running: >-
+          {{ (ansible_facts.services[app_grafana__container.name + '.service'].state | default('')) == 'running' }}
+        app_grafana__restart: >-
+          {{ app_grafana__running | bool
+             and (app_grafana__config_result is changed
+                  or app_grafana__secrets_result is changed
+                  or app_grafana__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'app_grafana__autoupdate_enabled'
-      include_role:
+      when: 'app_grafana__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_grafana__container.name }}"
         container_image: "{{ app_grafana__container.image }}"
+        container_schedule: "{{ app_grafana__autoupdate_schedule }}"

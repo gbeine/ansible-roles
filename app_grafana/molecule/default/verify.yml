@@ -1,0 +1,111 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_grafana__test_case: "{{ app_grafana__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_grafana__expect: "{{ app_grafana__test_case.expect }}"
+    app_grafana__test_url: "http://{{ app_grafana__expect.ip }}:3000"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_grafana__test_quadlet_path }}"
+      register: 'app_grafana__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_grafana__test_image) in app_grafana__test_quadlet_lines
+          - ('IP=' + app_grafana__expect.ip) in app_grafana__test_quadlet_lines
+          - app_grafana__expect.ip6 is none or ('IP6=' + app_grafana__expect.ip6) in app_grafana__test_quadlet_lines
+          - app_grafana__expect.ip6 is not none or app_grafana__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_grafana__expect.quadlet | reject('in', app_grafana__test_quadlet_lines) | list | length == 0
+        fail_msg: "{{ app_grafana__test_quadlet.content | b64decode }}"
+      vars:
+        app_grafana__test_quadlet_lines: "{{ (app_grafana__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the grafana service'
+      ansible.builtin.command: 'systemctl is-active grafana'
+      register: 'app_grafana__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the configuration file'
+      ansible.builtin.stat:
+        path: "{{ app_grafana__expect.home }}/etc/grafana.ini"
+      register: 'app_grafana__test_config_stat'
+
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "{{ app_grafana__expect.home }}/etc/grafana.ini"
+      register: 'app_grafana__test_config'
+
+    - name: 'Assert the service and the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__test_service.stdout == 'active'
+          - app_grafana__test_config_stat.stat.uid == 472
+          - app_grafana__test_config_stat.stat.mode == '0640'
+          - app_grafana__expect.config | reject('in', app_grafana__test_config_lines) | list | length == 0
+        fail_msg: >-
+          service {{ app_grafana__test_service.stdout }},
+          owner {{ app_grafana__test_config_stat.stat.uid }}, mode {{ app_grafana__test_config_stat.stat.mode }},
+          configuration {{ app_grafana__test_config_lines | join(' | ') }}
+      vars:
+        app_grafana__test_config_lines: "{{ (app_grafana__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Inspect the grafana container'
+      ansible.builtin.command: 'podman inspect grafana'
+      register: 'app_grafana__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__test_net.IPAddress == app_grafana__expect.ip
+          - app_grafana__expect.ip6 is none or app_grafana__test_net.GlobalIPv6Address == app_grafana__expect.ip6
+        fail_msg: "IPv4 {{ app_grafana__test_net.IPAddress }}, IPv6 {{ app_grafana__test_net.GlobalIPv6Address }}"
+      vars:
+        app_grafana__test_container: "{{ (app_grafana__test_inspect.stdout | from_json)[0] }}"
+        app_grafana__test_net: "{{ app_grafana__test_container.NetworkSettings.Networks[app_grafana__test_case.role_vars.grafana_network] }}"
+
+    # The first start of Grafana migrates the database
+    - name: 'Wait until Grafana is ready'
+      ansible.builtin.uri:
+        url: "{{ app_grafana__test_url }}/api/health"
+        return_content: true
+      register: 'app_grafana__test_ready'
+      until: app_grafana__test_ready.status == 200 and (app_grafana__test_ready.json.database | default('')) == 'ok'
+      retries: 30
+      delay: 5
+
+    - name: 'Request the organization without credentials'
+      ansible.builtin.uri:
+        url: "{{ app_grafana__test_url }}/api/org"
+        status_code: [ 200, 401 ]
+      register: 'app_grafana__test_anonymous'
+
+    - name: 'Request the organization with the credentials of the admin'
+      ansible.builtin.uri:
+        url: "{{ app_grafana__test_url }}/api/org"
+        url_username: "{{ app_grafana__expect.username }}"
+        url_password: "{{ app_grafana__expect.password }}"
+        force_basic_auth: true
+        status_code: [ 200, 401 ]
+      register: 'app_grafana__test_admin'
+
+    - name: 'Assert the anonymous access and the login of the admin'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__test_anonymous.status == app_grafana__expect.anonymous_status
+          - app_grafana__test_admin.status == 200
+        fail_msg: >-
+          without credentials {{ app_grafana__test_anonymous.status }} (expected {{ app_grafana__expect.anonymous_status }}),
+          admin {{ app_grafana__expect.username }} {{ app_grafana__test_admin.status }}
