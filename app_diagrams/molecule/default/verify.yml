@@ -1,0 +1,98 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_diagrams__test_case: "{{ app_diagrams__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_diagrams__expect: "{{ app_diagrams__test_case.expect }}"
+    app_diagrams__test_url: "http://{{ app_diagrams__expect.ip }}:8080{{ app_diagrams__expect.context }}"
+    app_diagrams__test_url_https: "https://{{ app_diagrams__expect.ip }}:8443{{ app_diagrams__expect.context }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_diagrams__test_quadlet_path }}"
+      register: 'app_diagrams__test_quadlet'
+
+    # podman may quote values, the lines are searched, not compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__test_quadlet_content is search('^Image=' + (app_diagrams__test_image | regex_escape) + '$', multiline=true)
+          - app_diagrams__test_quadlet_content is search('^IP=' + (app_diagrams__expect.ip | regex_escape) + '$', multiline=true)
+          - app_diagrams__expect.ip6 is none or app_diagrams__test_quadlet_content is search('^IP6=' + (app_diagrams__expect.ip6 | regex_escape) + '$', multiline=true)
+          - app_diagrams__expect.ip6 is not none or app_diagrams__test_quadlet_content is not search('^IP6=', multiline=true)
+          - app_diagrams__test_quadlet_content is search('^Environment=.*DRAWIO_BASE_URL=' + (app_diagrams__expect.base_url | regex_escape), multiline=true)
+          - app_diagrams__test_quadlet_missing | length == 0
+        fail_msg: "{{ app_diagrams__test_quadlet_content }}"
+      vars:
+        app_diagrams__test_quadlet_content: "{{ app_diagrams__test_quadlet.content | b64decode }}"
+        app_diagrams__test_quadlet_missing: >-
+          {{ app_diagrams__expect.quadlet
+             | reject('in', (app_diagrams__test_quadlet_content | regex_replace('"', '')).splitlines())
+             | list }}
+
+    - name: 'Read the state of the diagrams service'
+      ansible.builtin.command: 'systemctl is-active diagrams'
+      register: 'app_diagrams__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__test_service.stdout == 'active'
+        fail_msg: "service {{ app_diagrams__test_service.stdout }}"
+
+    - name: 'Inspect the diagrams container'
+      ansible.builtin.command: 'podman inspect diagrams'
+      register: 'app_diagrams__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses and environment'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__test_net.IPAddress == app_diagrams__expect.ip
+          - app_diagrams__expect.ip6 is none or app_diagrams__test_net.GlobalIPv6Address == app_diagrams__expect.ip6
+          - app_diagrams__expect.env | reject('in', app_diagrams__test_env) | list | length == 0
+        fail_msg: "IPv4 {{ app_diagrams__test_net.IPAddress }}, IPv6 {{ app_diagrams__test_net.GlobalIPv6Address }}, environment {{ app_diagrams__test_env | join(', ') }}"
+      vars:
+        app_diagrams__test_container: "{{ (app_diagrams__test_inspect.stdout | from_json)[0] }}"
+        app_diagrams__test_net: "{{ app_diagrams__test_container.NetworkSettings.Networks[app_diagrams__test_case.role_vars.diagrams_network] }}"
+        app_diagrams__test_env: "{{ app_diagrams__test_container.Config.Env }}"
+
+    # Tomcat deploys the web application after the start of the container
+    - name: 'Wait until draw.io is ready'
+      ansible.builtin.uri:
+        url: "{{ app_diagrams__test_url }}/"
+        return_content: true
+      register: 'app_diagrams__test_ready'
+      until: app_diagrams__test_ready.status == 200 and app_diagrams__test_ready.content is search('draw\.io', ignorecase=true)
+      retries: 30
+      delay: 5
+
+    - name: 'Read the configuration of the editor'
+      ansible.builtin.uri:
+        url: "{{ app_diagrams__test_url }}/js/PreConfig.js"
+        return_content: true
+      register: 'app_diagrams__test_preconfig'
+
+    - name: 'Request draw.io with the self-signed certificate'
+      ansible.builtin.uri:
+        url: "{{ app_diagrams__test_url_https }}/"
+        validate_certs: false
+      register: 'app_diagrams__test_https'
+
+    - name: 'Assert the configuration of the editor and HTTPS'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__test_preconfig.content is search("window.DRAWIO_BASE_URL = '" + (app_diagrams__expect.base_url | regex_escape) + "';")
+          - app_diagrams__test_https.status == 200
+        fail_msg: >-
+          PreConfig.js {{ app_diagrams__test_preconfig.content | default('') | truncate(400) }},
+          HTTPS {{ app_diagrams__test_https.status }}

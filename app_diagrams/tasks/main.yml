@@ -1,19 +1,87 @@
 ---
 
-- name: Deploy diagrams.net container
-  tags: [ 'app_diagrams' ]
+- name: 'Install draw.io'
+  tags: [ 'app', 'app_diagrams' ]
   block:
 
-    - name: Create podman containers
+    # A failing template in the variables (e.g. an unknown filter or diagrams_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_diagrams__container | length > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_diagrams__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_diagrams__invalid: >-
+          {%- set errors = [] -%}
+          {%- if app_diagrams__base_url is not string or app_diagrams__base_url is not match('^https?://[^/]+') -%}
+          {%-   set _ = errors.append('diagrams_base_url has to be an http or https URL') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_diagrams__container.name }}"
         hostname: "{{ app_diagrams__container.hostname }}"
         image: "{{ app_diagrams__container.image }}"
         ip: "{{ app_diagrams__container.ip }}"
+        ip6: "{{ app_diagrams__container.ipv6 | default(omit) }}"
         network: "{{ app_diagrams__container.network }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ app_diagrams__container.restart_policy }}"
-        etc_hosts: "{{ app_diagrams__container.hosts }}"
-        env: "{{ app_diagrams__container.environment }}"
         timezone: "{{ app_diagrams__container.timezone }}"
-      when: app_diagrams__ipv6 | length == 0
+        command: "{{ app_diagrams__container.command | default(omit) }}"
+        env: "{{ app_diagrams__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_diagrams__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_diagrams__container.expose | default(omit) }}"
+        label: "{{ app_diagrams__container.labels | default(omit) }}"
+        publish: "{{ app_diagrams__container.publish | default(omit) }}"
+        secrets: "{{ app_diagrams__container.secrets | default(omit) }}"
+        volume: "{{ app_diagrams__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_diagrams__container.requires is defined %}
+          Requires={{ app_diagrams__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_diagrams__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ app_diagrams__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if app_diagrams__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        app_diagrams__running: >-
+          {{ (ansible_facts.services[app_diagrams__container.name + '.service'].state | default('')) == 'running' }}
+        app_diagrams__restart: >-
+          {{ app_diagrams__running | bool and app_diagrams__quadlet_result is changed }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_diagrams__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_diagrams__container.name }}"
+        container_image: "{{ app_diagrams__container.image }}"
+        container_schedule: "{{ app_diagrams__autoupdate_schedule }}"
