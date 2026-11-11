@@ -1,21 +1,60 @@
 ---
 
-- name: Setup coturn
-  tags: [ 'coturn' ]
+- name: 'Install and configure coturn'
+  tags: [ 'app', 'app_coturn' ]
   block:
 
-    - name: Install coturn packages
-      ansible.builtin.apt:
-        update_cache: yes
-        install_recommends: no
-        pkg: "{{ coturn__packages }}"
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'app_coturn__release_file'
+      changed_when: false
+      check_mode: false
 
-    - name: Generate configuration file
-      ansible.builtin.template:
-        src: turnserver.conf.j2
-        dest: /etc/turnserver.conf
-        owner: root
-        group: root
-        mode: '640'
-      notify:
-        - Restart coturn
+    - name: 'Set the platform'
+      ansible.builtin.set_fact:
+        app_coturn__openwrt: "{{ app_coturn__release_file.stdout is search('DISTRIB_ID=.?OpenWrt') }}"
+
+    - name: 'Include the variables of the platform'
+      ansible.builtin.include_vars:
+        file: "{{ 'OpenWrt.yml' if app_coturn__openwrt | bool else 'Debian.yml' }}"
+
+    # A failing template in the variables (e.g. an unknown filter or coturn_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_coturn__config | to_json | length > 0
+        quiet: true
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_coturn__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_coturn__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_coturn__invalid: >-
+          {%- set errors = [] -%}
+          {%- for key, value in app_coturn__config.items() if value is not none -%}
+          {%-   set values = value if value is sequence and value is not string and value is not mapping else [ value ] -%}
+          {%-   if key is not string or key is not match(app_coturn__name_pattern) -%}
+          {%-     set _ = errors.append('coturn_config has an invalid option name: ' ~ key) -%}
+          {%-   elif key in app_coturn__boolean_options and value is not boolean -%}
+          {%-     set _ = errors.append(key ~ ' has to be a boolean: ' ~ value) -%}
+          {%-   elif value is mapping or values | reject('string') | reject('number') | reject('boolean') | list | length > 0 -%}
+          {%-     set _ = errors.append(key ~ ' has to be a string, a number, a boolean or a list of them') -%}
+          {%-   elif values | map('string') | select('search', '[\n\r]') | list | length > 0 -%}
+          {%-     set _ = errors.append(key ~ ' must not contain line breaks') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ errors }}
+
+    - name: 'Install and configure coturn on Debian'
+      ansible.builtin.include_tasks: 'debian.yml'
+      when: not app_coturn__openwrt | bool
+
+    - name: 'Install and configure coturn on OpenWrt'
+      ansible.builtin.include_tasks: 'openwrt.yml'
+      when: app_coturn__openwrt | bool

@@ -1,0 +1,36 @@
+---
+# Runs app_coturn with the invalid configuration passed as include parameter,
+# the role has to fail before it changes anything.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run app_coturn with an invalid configuration (expect ERROR): {{ app_coturn__test_invalid.message }}"
+  block:
+
+    - name: 'Run app_coturn, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'app_coturn'
+
+    - name: 'Fail because the invalid configuration was accepted'
+      ansible.builtin.fail:
+        msg: "The invalid configuration was accepted: {{ app_coturn__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksums of the configurations after the invalid run'
+      ansible.builtin.raw: "md5sum {{ app_coturn__test_config_file }} /etc/config/turnserver"
+      register: 'app_coturn__test_md5_after'
+      changed_when: false
+
+    # Only the checksums are compared, the raw output differs after community.openwrt.init changed the connection settings
+    - name: 'Assert the run failed with the expected message before any change'
+      vars:
+        app_coturn__test_sums_before: "{{ app_coturn__test_md5_before.stdout | regex_findall('[0-9a-f]{32}') }}"
+        app_coturn__test_sums_after: "{{ app_coturn__test_md5_after.stdout | regex_findall('[0-9a-f]{32}') }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg | default('') is search(app_coturn__test_invalid.search)
+          - app_coturn__test_sums_before | length == 2
+          - app_coturn__test_sums_after == app_coturn__test_sums_before
+        fail_msg: >-
+          Failure: {{ ansible_failed_result.msg | default('') }}
+          Checksums before: {{ app_coturn__test_sums_before | join(', ') }}, after: {{ app_coturn__test_sums_after | join(', ') }}.

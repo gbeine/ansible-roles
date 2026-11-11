@@ -1,0 +1,181 @@
+---
+
+- name: 'Configure coturn on OpenWrt'
+  vars:
+    app_coturn__openwrt_installed: >-
+      {{ (app_coturn__openwrt_apk | default({})) is changed or (app_coturn__openwrt_opkg | default({})) is changed }}
+    app_coturn__openwrt_changed: >-
+      {{ (app_coturn__openwrt_config_result | default({})) is changed
+         or (app_coturn__openwrt_commit_result | default({})) is changed
+         or app_coturn__openwrt_installed | bool }}
+    app_coturn__openwrt_enabled: "{{ app_coturn__config.enabled | default(true) | bool }}"
+    app_coturn__openwrt_content: "{{ lookup('ansible.builtin.template', 'turnserver.conf.j2') }}"
+    app_coturn__openwrt_missing: "{{ 'coturn=no' in app_coturn__openwrt_tools.stdout_lines | map('trim') }}"
+  block:
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check coturn and the package manager'
+      ansible.builtin.raw: >-
+        test -x /usr/bin/turnserver && test -x /etc/init.d/{{ app_coturn__openwrt_service }} && echo 'coturn=yes' || echo 'coturn=no';
+        command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg'
+      register: 'app_coturn__openwrt_tools'
+      changed_when: false
+      check_mode: false
+
+    # coturn is part of the telephony feed
+    - name: 'Install coturn with apk'
+      community.openwrt.apk:
+        name: "{{ app_coturn__openwrt_package }}"
+        state: 'present'
+        update_cache: true
+      register: 'app_coturn__openwrt_apk'
+      when:
+        - app_coturn__openwrt_missing | bool
+        - "'manager=apk' in app_coturn__openwrt_tools.stdout_lines | map('trim')"
+
+    - name: 'Install coturn with opkg'
+      community.openwrt.opkg:
+        name: "{{ app_coturn__openwrt_package }}"
+        state: 'present'
+        update_cache: true
+      register: 'app_coturn__openwrt_opkg'
+      when:
+        - app_coturn__openwrt_missing | bool
+        - "'manager=opkg' in app_coturn__openwrt_tools.stdout_lines | map('trim')"
+
+    # In check mode the package of a first installation is missing, there is no configuration to compare
+    - name: 'Configure coturn'
+      when: not (ansible_check_mode and app_coturn__openwrt_missing | bool)
+      block:
+
+        - name: 'Read the current configurations of coturn'
+          community.openwrt.slurp:
+            src: "{{ item }}"
+          loop:
+            - "{{ app_coturn__config_file }}"
+            - "{{ app_coturn__openwrt_uci_config }}"
+          register: 'app_coturn__openwrt_current'
+          check_mode: false
+
+        # The backup contains the file before this change, it is only written if the file changes
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: app_coturn__openwrt_current.results[0].content | b64decode != app_coturn__openwrt_content
+
+        - name: 'Store the backup of turnserver.conf on the controller'
+          ansible.builtin.copy:
+            content: "{{ app_coturn__openwrt_current.results[0].content | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/turnserver.conf"
+            mode: '0600'
+          delegate_to: 'localhost'
+          check_mode: false
+          diff: false
+          when: app_coturn__openwrt_current.results[0].content | b64decode != app_coturn__openwrt_content
+
+        # turnserver reads the file as root and changes to the user turnserver afterwards
+        - name: 'Write the configuration'
+          community.openwrt.copy:
+            content: "{{ app_coturn__openwrt_content }}"
+            dest: "{{ app_coturn__config_file }}"
+            mode: '0600'
+          # The configuration may contain static-auth-secret
+          diff: false
+          register: 'app_coturn__openwrt_config_result'
+
+        # The init script starts turnserver only with enabled '1', log_stderr, log_stdout and options stay with the package
+        - name: 'Set enabled of the UCI configuration of coturn'
+          community.openwrt.uci:
+            command: 'set'
+            key: 'turnserver.general.enabled'
+            value: "{{ '1' if app_coturn__openwrt_enabled | bool else '0' }}"
+
+        - name: 'Read the pending changes of the UCI configuration of coturn'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'turnserver'
+          register: 'app_coturn__openwrt_pending'
+          check_mode: false
+
+        - name: 'Create the backup directory on the controller for the UCI configuration'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup of the UCI configuration on the controller'
+          ansible.builtin.copy:
+            content: "{{ app_coturn__openwrt_current.results[1].content | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/turnserver"
+            mode: '0600'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Commit the UCI configuration of coturn'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'turnserver'
+          register: 'app_coturn__openwrt_commit_result'
+          when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+
+        # /etc/init.d/turnserver restart starts the new process while the former one still holds the ports,
+        # the role stops turnserver and waits until the process has ended before it starts it again
+        - name: 'Stop coturn to apply the changes'
+          community.openwrt.service:
+            name: "{{ app_coturn__openwrt_service }}"
+            state: 'stopped'
+          register: 'app_coturn__openwrt_stop_result'
+          when:
+            - not ansible_check_mode
+            - app_coturn__openwrt_enabled | bool
+            - app_coturn__openwrt_changed | bool
+
+        - name: 'Wait until turnserver has ended'
+          ansible.builtin.raw: 'pidof turnserver'
+          register: 'app_coturn__openwrt_pidof'
+          until: app_coturn__openwrt_pidof.rc != 0
+          retries: 10
+          delay: 1
+          changed_when: false
+          failed_when: false
+          when: app_coturn__openwrt_stop_result is changed
+
+        - name: 'Assert turnserver has ended'
+          ansible.builtin.assert:
+            that:
+              - app_coturn__openwrt_pidof.rc != 0
+            fail_msg: 'turnserver did not end after stopping the service'
+            quiet: true
+          when: app_coturn__openwrt_stop_result is changed
+
+        - name: 'Start and enable coturn'
+          community.openwrt.service:
+            name: "{{ app_coturn__openwrt_service }}"
+            enabled: true
+            state: 'started'
+          when:
+            - not ansible_check_mode
+            - app_coturn__openwrt_enabled | bool
+
+        - name: 'Stop and disable coturn'
+          community.openwrt.service:
+            name: "{{ app_coturn__openwrt_service }}"
+            enabled: false
+            state: 'stopped'
+          when:
+            - not ansible_check_mode
+            - not app_coturn__openwrt_enabled | bool

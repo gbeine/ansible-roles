@@ -1,0 +1,99 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_coturn__test_case: "{{ app_coturn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_coturn__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the configuration before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ app_coturn__test_config_file }}"
+        checksum_algorithm: 'md5'
+      register: 'app_coturn__test_config_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_coturn with coturn_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config: [ 'realm' ]
+        app_coturn__test_invalid:
+          message: 'coturn_config is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_coturn with an invalid option name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          Listening_Port: 3478
+        app_coturn__test_invalid:
+          message: 'an invalid option name'
+          search: '^coturn_config has an invalid option name: Listening_Port$'
+
+    - name: 'Run app_coturn with a dictionary as value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          realm: { 'name': 'turn.example.org' }
+        app_coturn__test_invalid:
+          message: 'a dictionary as value'
+          search: '^realm has to be a string, a number, a boolean or a list of them$'
+
+    - name: 'Run app_coturn with a line break (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          realm: "turn.example.org\nno-auth"
+        app_coturn__test_invalid:
+          message: 'a line break'
+          search: '^realm must not contain line breaks$'
+
+    - name: 'Run app_coturn with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          enabled: 'yes'
+        app_coturn__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: yes$'
+
+    - name: 'Run app_coturn with the changed configuration'
+      when: app_coturn__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of coturn before the change'
+          ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value coturn'
+          register: 'app_coturn__test_start_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            coturn_config: "{{ app_coturn__test_case.role_vars.coturn_config | combine(app_coturn__test_case.side_effect) }}"
+
+        - name: 'Run app_coturn with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'app_coturn'
+
+        - name: 'Read the start time of coturn after the change'
+          ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value coturn'
+          register: 'app_coturn__test_start_after'
+          changed_when: false
+
+        - name: 'Assert coturn restarted'
+          ansible.builtin.assert:
+            that:
+              - app_coturn__test_start_after.stdout | int > app_coturn__test_start_before.stdout | int
+            fail_msg: "{{ app_coturn__test_start_before.stdout }} -> {{ app_coturn__test_start_after.stdout }}"

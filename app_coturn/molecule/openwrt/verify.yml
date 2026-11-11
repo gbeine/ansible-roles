@@ -1,0 +1,69 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_coturn__test_case: "{{ app_coturn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_coturn__test_expect: "{{ app_coturn__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the configuration, the UCI configuration and the state of coturn'
+      ansible.builtin.raw: >-
+        cat {{ app_coturn__test_config_file }}; echo '@@@';
+        ls -l {{ app_coturn__test_config_file }} | cat; echo '@@@';
+        uci -q get turnserver.general.enabled; echo '@@@';
+        pidof turnserver >/dev/null && echo 'turnserver running'; /etc/init.d/turnserver enabled && echo 'turnserver enabled';
+        netstat -lnu 2>/dev/null | grep -q ':{{ app_coturn__test_expect.port }} ' && echo 'udp listening';
+        netstat -lnt 2>/dev/null | grep -q ':{{ app_coturn__test_expect.port }} ' && echo 'tcp listening'; true
+      register: 'app_coturn__test_state'
+      changed_when: false
+
+    - name: 'Assert the configuration and the state'
+      vars:
+        app_coturn__test_parts: "{{ app_coturn__test_state.stdout.split('@@@') }}"
+        app_coturn__test_lines: "{{ app_coturn__test_parts[0].splitlines() | map('trim') | reject('match', '#') | select | list }}"
+        app_coturn__test_mode: "{{ app_coturn__test_parts[1] | trim }}"
+        app_coturn__test_enabled: "{{ app_coturn__test_parts[2] | trim }}"
+        app_coturn__test_status: "{{ app_coturn__test_parts[3].splitlines() | map('trim') | list }}"
+      ansible.builtin.assert:
+        that:
+          - app_coturn__test_expect.lines | difference(app_coturn__test_lines) | length == 0
+          - app_coturn__test_lines | select('search', '^(' ~ (app_coturn__test_expect.absent | map('regex_escape') | join('|')) ~ ')($|=)') | list | length == 0
+          - app_coturn__test_mode is match('-rw-------\s+\S+\s+root\s')
+          - app_coturn__test_enabled == '1'
+          - "'turnserver running' in app_coturn__test_status"
+          - "'turnserver enabled' in app_coturn__test_status"
+          - "'udp listening' in app_coturn__test_status"
+          - "'tcp listening' in app_coturn__test_status"
+        fail_msg: >-
+          state: {{ app_coturn__test_status | join(', ') }}, file: {{ app_coturn__test_mode }}, enabled: {{ app_coturn__test_enabled }},
+          configuration: {{ app_coturn__test_lines | reject('match', 'static-auth-secret') | list }}
+
+    # A STUN binding request, coturn answers with the reflexive address of the client
+    - name: 'Send a STUN binding request'
+      ansible.builtin.raw: "turnutils_stunclient -p {{ app_coturn__test_expect.port }} 127.0.0.1"
+      register: 'app_coturn__test_stun'
+      changed_when: false
+      until: app_coturn__test_stun.stdout is search('reflexive addr')
+      retries: 5
+      delay: 2
+
+    - name: 'Read the backup of turnserver.conf on the controller'
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/turnserver.conf"
+      delegate_to: 'localhost'
+      register: 'app_coturn__test_backup'
+      when: app_coturn__test_expect.backup is string
+
+    - name: 'Assert the backup contains the configuration before the change'
+      ansible.builtin.assert:
+        that:
+          - (app_coturn__test_backup.content | b64decode).splitlines() is contains(app_coturn__test_expect.backup)
+        fail_msg: "{{ (app_coturn__test_backup.content | b64decode).splitlines() | reject('match', 'static-auth-secret') | list }}"
+      when: app_coturn__test_expect.backup is string

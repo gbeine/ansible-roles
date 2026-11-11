@@ -1,0 +1,109 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_coturn__test_case: "{{ app_coturn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_coturn__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the configurations before the invalid runs'
+      ansible.builtin.raw: "md5sum {{ app_coturn__test_config_file }} /etc/config/turnserver"
+      register: 'app_coturn__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_coturn with coturn_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config: [ 'realm' ]
+        app_coturn__test_invalid:
+          message: 'coturn_config is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_coturn with an invalid option name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          Listening_Port: 3478
+        app_coturn__test_invalid:
+          message: 'an invalid option name'
+          search: '^coturn_config has an invalid option name: Listening_Port$'
+
+    - name: 'Run app_coturn with a dictionary as value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          realm: { 'name': 'turn.example.org' }
+        app_coturn__test_invalid:
+          message: 'a dictionary as value'
+          search: '^realm has to be a string, a number, a boolean or a list of them$'
+
+    - name: 'Run app_coturn with a line break (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          realm: "turn.example.org\nno-auth"
+        app_coturn__test_invalid:
+          message: 'a line break'
+          search: '^realm must not contain line breaks$'
+
+    - name: 'Run app_coturn with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        coturn_config:
+          enabled: 'yes'
+        app_coturn__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: yes$'
+
+    - name: 'Run app_coturn with the changed configuration'
+      when: app_coturn__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the process of coturn before the change'
+          ansible.builtin.raw: 'pidof turnserver'
+          register: 'app_coturn__test_pid_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            coturn_config: "{{ app_coturn__test_case.role_vars.coturn_config | combine(app_coturn__test_case.side_effect) }}"
+
+        - name: 'Run app_coturn with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'app_coturn'
+
+        # The role stops turnserver, waits until it has ended and starts it again, the process has a new PID
+        - name: 'Read the process of coturn after the change'
+          ansible.builtin.raw: 'pidof turnserver'
+          register: 'app_coturn__test_pid_after'
+          until: app_coturn__test_pid_after.rc == 0
+          retries: 5
+          delay: 1
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert coturn restarted'
+          vars:
+            app_coturn__test_pids_before: "{{ app_coturn__test_pid_before.stdout | regex_findall('[0-9]+') }}"
+            app_coturn__test_pids_after: "{{ app_coturn__test_pid_after.stdout | regex_findall('[0-9]+') }}"
+          ansible.builtin.assert:
+            that:
+              - app_coturn__test_pids_before | length > 0
+              - app_coturn__test_pids_after | length > 0
+              - app_coturn__test_pids_after | intersect(app_coturn__test_pids_before) | length == 0
+            fail_msg: "{{ app_coturn__test_pids_before }} -> {{ app_coturn__test_pids_after }}"

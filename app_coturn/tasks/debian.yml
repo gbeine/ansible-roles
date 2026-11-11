@@ -1,0 +1,40 @@
+---
+
+- name: 'Install coturn'
+  ansible.builtin.apt:
+    name: "{{ app_coturn__debian_packages }}"
+    state: 'present'
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+# turnserver has no check of the configuration, the role validates the options before
+- name: 'Write the configuration'
+  ansible.builtin.template:
+    src: 'turnserver.conf.j2'
+    dest: "{{ app_coturn__config_file }}"
+    owner: 'root'
+    group: "{{ app_coturn__debian_group }}"
+    mode: '0640'
+  # The configuration may contain static-auth-secret
+  diff: false
+  register: 'app_coturn__debian_config_result'
+
+- name: 'Start and enable coturn'
+  ansible.builtin.systemd_service:
+    name: "{{ app_coturn__debian_service }}"
+    enabled: true
+    # The package starts coturn with its own configuration, the written configuration needs a restart
+    state: "{{ 'restarted' if app_coturn__debian_config_result is changed else 'started' }}"
+  when:
+    - not ansible_check_mode
+    - app_coturn__config.enabled | default(true) | bool
+
+- name: 'Stop and disable coturn'
+  ansible.builtin.systemd_service:
+    name: "{{ app_coturn__debian_service }}"
+    enabled: false
+    state: 'stopped'
+  when:
+    - not ansible_check_mode
+    - not app_coturn__config.enabled | default(true) | bool
