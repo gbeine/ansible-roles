@@ -1,20 +1,104 @@
 ---
 
-- name: 'Deploy FreeScout container'
-  tags: [ 'app_freescout' ]
+- name: 'Install FreeScout'
+  tags: [ 'app', 'app_freescout' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or freescout_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_freescout__container | length > 0
+        quiet: true
+
+    # The secrets are mounted as files, the environment references them with <VARIABLE>_FILE
+    - name: 'Validate environment'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__environment_missing | length == 0
+        fail_msg: >-
+          FreeScout needs the environment variables {{ app_freescout__environment_required | join(', ') }},
+          missing or empty: {{ app_freescout__environment_missing | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        app_freescout__environment_missing: >-
+          {{ app_freescout__environment_required
+             | reject('in', app_freescout__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_freescout__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_freescout__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_freescout__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('freescout_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('freescout_secrets entries need name and data') -%}
+          {%- else -%}
+          {%-   set prefix = app_freescout__secrets_dir ~ '/' -%}
+          {%-   set referenced = app_freescout__environment | dict2items
+                                 | selectattr('key', 'match', '.*_FILE$')
+                                 | map(attribute='value') | map('string')
+                                 | select('match', prefix | regex_escape)
+                                 | map('regex_replace', '^' ~ prefix | regex_escape, '') | list -%}
+          {%-   set missing = referenced | reject('in', secrets | map(attribute='name') | list) | unique | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('the environment references missing secrets in freescout_secrets: ' ~ missing | join(', ')) -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging freescout_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__environment_unknown | length == 0
+          - app_freescout__secrets_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_freescout__environment_unknown | join(', ') | default('none', true) }}.
+          Unknown secrets: {{ app_freescout__secrets_unknown | join(', ') | default('none', true) }}.
+          Allowed are the variables of the image and the keys of FreeScout as FREESCOUT_<KEY> (app_freescout__environment_allowed),
+          passwords only as <VARIABLE>_FILE, and the secrets {{ app_freescout__secrets_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        # The secrets of the container are omit without secrets
+        app_freescout__container_secrets: >-
+          {{ app_freescout__container.secrets
+             if app_freescout__container.secrets is sequence and app_freescout__container.secrets is not string
+             else [] }}
+        app_freescout__environment_unknown: >-
+          {{ (app_freescout__container.environment | default({})).keys() | reject('in', app_freescout__environment_allowed) | list }}
+        app_freescout__secrets_unknown: >-
+          {{ app_freescout__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1')
+             | map('regex_replace', '^' ~ (app_freescout__secrets_dir ~ '/') | regex_escape, '')
+             | reject('in', app_freescout__secrets_allowed) | list }}
 
     - name: 'Create directories'
       ansible.builtin.file:
         dest: "{{ item.dest }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: "{{ item.mode }}"
         state: 'directory'
-      with_items:
+      loop:
         - dest: "{{ app_freescout__podman_home }}"
-        - dest: "{{ app_freescout__podman_home }}/data"
+          mode: '0700'
+        - dest: "{{ app_freescout__podman_data_dir }}"
           mode: '0750'
-        - dest: "{{ app_freescout__podman_home }}/logs"
+        - dest: "{{ app_freescout__podman_logs_dir }}"
           mode: '0755'
+      loop_control:
+        label: "{{ item.dest }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -22,26 +106,11 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items:
-        - name: 'freescout_admin_password'
-          data: "{{ app_freescout__admin_pass }}"
-        - name: 'freescout_database_password'
-          data: "{{ app_freescout__db_pass }}"
+      loop: "{{ app_freescout__secrets }}"
+      register: 'app_freescout__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_freescout__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_freescout__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_freescout__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -73,20 +142,28 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_freescout__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_freescout__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_freescout__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_freescout__running: >-
+          {{ (ansible_facts.services[app_freescout__container.name + '.service'].state | default('')) == 'running' }}
+        app_freescout__restart: >-
+          {{ app_freescout__running | bool
+             and (app_freescout__secrets_result is changed
+                  or app_freescout__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'app_freescout__autoupdate_enabled'
-      include_role:
+      when: 'app_freescout__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_freescout__container.name }}"
         container_image: "{{ app_freescout__container.image }}"
+        container_schedule: "{{ app_freescout__autoupdate_schedule }}"

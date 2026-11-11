@@ -1,0 +1,127 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_freescout__test_case: "{{ app_freescout__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_freescout__expect: "{{ app_freescout__test_case.expect }}"
+    app_freescout__test_home: "{{ app_freescout__test_case.role_vars.freescout_home }}"
+    app_freescout__test_url: "http://{{ app_freescout__expect.ip }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_freescout__test_quadlet_path }}"
+      register: 'app_freescout__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_freescout__test_image) in app_freescout__test_quadlet_lines
+          - ('IP=' + app_freescout__expect.ip) in app_freescout__test_quadlet_lines
+          - app_freescout__expect.ip6 is none or ('IP6=' + app_freescout__expect.ip6) in app_freescout__test_quadlet_lines
+          - app_freescout__expect.ip6 is not none or app_freescout__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_freescout__expect.quadlet | reject('in', app_freescout__test_quadlet_lines) | list | length == 0
+          # The passwords are mounted as files, they are never part of the environment
+          - app_freescout__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+        fail_msg: "{{ app_freescout__test_quadlet.content | b64decode }}"
+      vars:
+        app_freescout__test_quadlet_lines: "{{ (app_freescout__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the freescout service'
+      ansible.builtin.command: 'systemctl is-active freescout'
+      register: 'app_freescout__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the directories'
+      ansible.builtin.stat:
+        path: "{{ app_freescout__test_home }}{{ item }}"
+      loop: [ '', '/data', '/logs' ]
+      register: 'app_freescout__test_dirs'
+
+    - name: 'Assert the service and the directories'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__test_service.stdout == 'active'
+          - app_freescout__test_dirs.results | map(attribute='stat') | map(attribute='isdir', default=false) | reject | list | length == 0
+          - app_freescout__test_dirs.results[0].stat.mode == '0700'
+        fail_msg: >-
+          service {{ app_freescout__test_service.stdout }},
+          directories {{ app_freescout__test_dirs.results | map(attribute='stat') | map(attribute='path', default='missing') | join(', ') }}
+          modes {{ app_freescout__test_dirs.results | map(attribute='stat') | map(attribute='mode', default='') | join(', ') }}
+
+    - name: 'Inspect the freescout container'
+      ansible.builtin.command: 'podman inspect freescout'
+      register: 'app_freescout__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the container addresses and environment'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__test_net.IPAddress == app_freescout__expect.ip
+          - app_freescout__expect.ip6 is none or app_freescout__test_net.GlobalIPv6Address == app_freescout__expect.ip6
+          - app_freescout__expect.env | reject('in', app_freescout__test_env) | list | length == 0
+          - app_freescout__test_env | select('match', '(ADMIN_PASS|DB_PASS)=') | list | length == 0
+        fail_msg: >-
+          IPv4 {{ app_freescout__test_net.IPAddress }}, IPv6 {{ app_freescout__test_net.GlobalIPv6Address }},
+          environment {{ app_freescout__test_env | reject('search', 'PASS') | join(', ') }}
+      vars:
+        app_freescout__test_container: "{{ (app_freescout__test_inspect.stdout | from_json)[0] }}"
+        app_freescout__test_net: "{{ app_freescout__test_container.NetworkSettings.Networks[app_freescout__test_case.role_vars.freescout_network] }}"
+        app_freescout__test_env: "{{ app_freescout__test_container.Config.Env }}"
+
+    # The first start of FreeScout migrates the database and creates the admin
+    - name: 'Wait until FreeScout is ready'
+      ansible.builtin.uri:
+        url: "{{ app_freescout__test_url }}/login"
+        return_content: true
+      register: 'app_freescout__test_login_page'
+      until:
+        - app_freescout__test_login_page.status | default(0) == 200
+        - app_freescout__test_login_page.content | default('') is search('name="_token"')
+      retries: 60
+      delay: 5
+
+    - name: 'Log in as admin'
+      ansible.builtin.uri:
+        url: "{{ app_freescout__test_url }}/login"
+        method: 'POST'
+        body_format: 'form-urlencoded'
+        body:
+          _token: "{{ app_freescout__test_login_page.content | regex_search('name=\"_token\" value=\"([^\"]+)\"', '\\1') | first }}"
+          email: "{{ app_freescout__expect.email }}"
+          password: "{{ app_freescout__expect.password }}"
+        headers:
+          Cookie: "{{ app_freescout__test_login_page.cookies_string }}"
+        follow_redirects: 'none'
+        status_code: [ 302 ]
+      register: 'app_freescout__test_login'
+
+    - name: 'Read the configuration of FreeScout'
+      ansible.builtin.slurp:
+        src: "{{ app_freescout__test_home }}/data/config/config"
+      register: 'app_freescout__test_config'
+
+    - name: 'Assert the login of the admin and the configuration'
+      ansible.builtin.assert:
+        that:
+          # A failed login redirects back to the login page
+          - app_freescout__test_login.location is not search('/login$')
+          - app_freescout__expect.config | reject('in', app_freescout__test_config_lines) | list | length == 0
+          - app_freescout__expect.config_set | reject('in', app_freescout__test_config_set) | list | length == 0
+        fail_msg: >-
+          login redirected to {{ app_freescout__test_login.location | default('nothing') }},
+          configuration {{ app_freescout__test_config_lines | reject('search', 'PASSWORD|KEY') | join(', ') }},
+          keys set {{ app_freescout__test_config_set | join(', ') }}
+      vars:
+        # The image may quote the values
+        app_freescout__test_config_lines: "{{ (app_freescout__test_config.content | b64decode | regex_replace('\"', '')).splitlines() | map('trim') | list }}"
+        app_freescout__test_config_set: >-
+          {{ app_freescout__test_config_lines | select('match', '^[A-Z0-9_]+=.+$') | map('regex_replace', '=.*$', '') | list }}

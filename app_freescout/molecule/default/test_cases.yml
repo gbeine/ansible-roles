@@ -1,0 +1,128 @@
+---
+# Network created by container_podman in prepare.yml
+app_freescout__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_freescout__test_image: 'ghcr.io/nfrastack/container-freescout:latest'
+app_freescout__test_quadlet_path: '/etc/containers/systemd/freescout.container'
+
+# Database started by prepare.yml, test credentials only
+app_freescout__test_database:
+  name: 'molecule-mariadb'
+  image: 'docker.io/library/mariadb:11'
+  ip: '10.89.0.20'
+  database: 'freescout'
+  user: 'freescout'
+  password: 'molecule-database-password'
+
+app_freescout__test_cases:
+
+  # Only the mandatory variables and the secrets of the passwords
+  - name: 'molecule-freescout-default'
+    role_vars:
+      freescout_home: '/opt/freescout'
+      freescout_ip: '10.89.0.90'
+      freescout_network: 'podman-molecule'
+      freescout_hostname: 'freescout-default'
+      freescout_timezone: 'Europe/Berlin'
+      freescout_secrets:
+        - name: 'freescout_admin_password'
+          data: 'molecule-admin-password'
+        - name: 'freescout_database_password'
+          data: 'molecule-database-password'
+      freescout_environment:
+        APP_URL: 'http://10.89.0.90'
+        ADMIN_EMAIL: 'admin@example.org'
+        DB_HOST: '10.89.0.20'
+        DB_NAME: 'freescout'
+        DB_USER: 'freescout'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      email: 'admin@example.org'
+      password: 'molecule-admin-password'
+      quadlet:
+        - 'Volume=/opt/freescout/data:/data'
+        - 'Volume=/opt/freescout/logs:/logs'
+        - 'Secret=freescout_admin_password,type=mount,target=/run/secrets/freescout_admin_password'
+        - 'Secret=freescout_database_password,type=mount,target=/run/secrets/freescout_database_password'
+      env:
+        - 'TIMEZONE=Europe/Berlin'
+        - 'APP_URL=http://10.89.0.90'
+        - 'ADMIN_PASS_FILE=/run/secrets/freescout_admin_password'
+        - 'DB_PASS_FILE=/run/secrets/freescout_database_password'
+      config:
+        - 'APP_TIMEZONE=Europe/Berlin'
+      config_set: []
+
+  # IPv6, labels, keys of FreeScout and the password of the mail server from a secret
+  - name: 'molecule-freescout'
+    role_vars:
+      freescout_home: '/srv/freescout'
+      freescout_ip: '10.89.0.91'
+      freescout_ipv6: 'fd00:89::91'
+      freescout_network: 'podman-molecule'
+      freescout_hostname: 'freescout-molecule'
+      freescout_timezone: 'Europe/Berlin'
+      freescout_labels:
+        traefik.enable: 'true'
+      freescout_secrets:
+        - name: 'freescout_admin_password'
+          data: 'molecule-admin-password'
+        - name: 'freescout_database_password'
+          data: 'molecule-database-password'
+        - name: 'freescout_mail_password'
+          data: 'molecule-mail-password'
+      freescout_environment:
+        APP_URL: 'http://10.89.0.91'
+        ADMIN_EMAIL: 'molecule@example.org'
+        ADMIN_FIRST_NAME: 'Molecule'
+        DB_HOST: '10.89.0.20'
+        DB_NAME: 'freescout'
+        DB_USER: 'freescout'
+        FREESCOUT_APP_LOCALE: 'de'
+        FREESCOUT_MAIL_DRIVER: 'smtp'
+        FREESCOUT_MAIL_HOST: 'mail.example.org'
+        FREESCOUT_MAIL_PASSWORD_FILE: '/run/secrets/freescout_mail_password'
+    # side_effect changes the locale, the quadlet unit changes and FreeScout has to restart
+    side_effect:
+      role_vars:
+        freescout_environment:
+          APP_URL: 'http://10.89.0.91'
+          ADMIN_EMAIL: 'molecule@example.org'
+          ADMIN_FIRST_NAME: 'Molecule'
+          DB_HOST: '10.89.0.20'
+          DB_NAME: 'freescout'
+          DB_USER: 'freescout'
+          FREESCOUT_APP_LOCALE: 'fr'
+          FREESCOUT_MAIL_DRIVER: 'smtp'
+          FREESCOUT_MAIL_HOST: 'mail.example.org'
+          FREESCOUT_MAIL_PASSWORD_FILE: '/run/secrets/freescout_mail_password'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      email: 'molecule@example.org'
+      password: 'molecule-admin-password'
+      quadlet:
+        - 'Volume=/srv/freescout/data:/data'
+        - 'Secret=freescout_mail_password,type=mount,target=/run/secrets/freescout_mail_password'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TIMEZONE=Europe/Berlin'
+        - 'APP_URL=http://10.89.0.91'
+        - 'FREESCOUT_APP_LOCALE=fr'
+        - 'FREESCOUT_MAIL_HOST=mail.example.org'
+        - 'FREESCOUT_MAIL_PASSWORD_FILE=/run/secrets/freescout_mail_password'
+      config:
+        - 'APP_TIMEZONE=Europe/Berlin'
+        - 'APP_LOCALE=fr'
+        - 'MAIL_HOST=mail.example.org'
+      # Keys that have to be set with any value in the .env file
+      config_set:
+        - 'MAIL_PASSWORD'
