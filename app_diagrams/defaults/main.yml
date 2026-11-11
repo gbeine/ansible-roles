@@ -14,8 +14,8 @@ app_diagrams__labels: "{{ diagrams_labels }}"
 
 app_diagrams__version: "{{ diagrams_version | default('latest') }}"
 
-# Public URL of draw.io, a path in the URL sets the context path of Tomcat
-app_diagrams__base_url: "{{ diagrams_base_url | mandatory }}"
+app_diagrams__environment: "{{ app_diagrams__environment_default | combine(diagrams_environment | default({})) }}"
+app_diagrams__secrets: "{{ diagrams_secrets | default([]) }}"
 
 app_diagrams__container: "{{ app_diagrams__podman_container_default | combine(diagrams_container | default({})) }}"
 
@@ -30,6 +30,54 @@ app_diagrams__podman_name: 'diagrams'
 app_diagrams__podman_image: 'docker.io/jgraph/drawio'
 app_diagrams__podman_tag: "{{ app_diagrams__version }}"
 
+# draw.io serves HTTP on port 8080, TLS is terminated by the reverse proxy
+app_diagrams__environment_default:
+  TZ: "{{ app_diagrams__timezone }}"
+  # The entrypoint of the image compares the value with 'false'
+  LETS_ENCRYPT_ENABLED: 'false'
+
+# DRAWIO_BASE_URL is the public URL of draw.io, a path in the URL sets the context path of Tomcat
+app_diagrams__environment_required:
+  - 'DRAWIO_BASE_URL'
+
+app_diagrams__secrets_required: []
+
+# Environment variables read by the entrypoint of the image
+app_diagrams__environment_allowed:
+  - 'TZ'
+  - 'LETS_ENCRYPT_ENABLED'
+  - 'PUBLIC_DNS'
+  - 'ORGANISATION_UNIT'
+  - 'ORGANISATION'
+  - 'CITY'
+  - 'STATE'
+  - 'COUNTRY_CODE'
+  - 'DRAWIO_CSP_HEADER'
+  - 'DRAWIO_SERVER_URL'
+  - 'DRAWIO_BASE_URL'
+  - 'DRAWIO_VIEWER_URL'
+  - 'DRAWIO_LIGHTBOX_URL'
+  - 'DRAWIO_CONFIG'
+  - 'DRAWIO_CONFIG_FILE'
+  - 'DRAWIO_LANG'
+  - 'DRAWIO_GOOGLE_CLIENT_ID'
+  - 'DRAWIO_GOOGLE_APP_ID'
+  - 'DRAWIO_GOOGLE_VIEWER_CLIENT_ID'
+  - 'DRAWIO_GOOGLE_VIEWER_APP_ID'
+  - 'DRAWIO_MSGRAPH_CLIENT_ID'
+  - 'DRAWIO_MSGRAPH_TENANT_ID'
+  - 'DRAWIO_GITLAB_ID'
+  - 'DRAWIO_GITLAB_URL'
+
+# Targets of the secrets in diagrams_secrets
+app_diagrams__secrets_allowed:
+  - 'KEYSTORE_PASS'
+  - 'KEY_PASS'
+  - 'DRAWIO_GOOGLE_CLIENT_SECRET'
+  - 'DRAWIO_GOOGLE_VIEWER_CLIENT_SECRET'
+  - 'DRAWIO_MSGRAPH_CLIENT_SECRET'
+  - 'DRAWIO_GITLAB_SECRET'
+
 app_diagrams__podman_container_default:
   name: "{{ app_diagrams__podman_name }}"
   hostname: "{{ app_diagrams__hostname }}"
@@ -38,14 +86,13 @@ app_diagrams__podman_container_default:
   ipv6: "{{ app_diagrams__ipv6 | default(omit) }}"
   network: "{{ app_diagrams__network }}"
   timezone: "{{ app_diagrams__timezone }}"
-  # diagrams_container.environment replaces the dictionary completely,
-  # draw.io serves HTTP on port 8080, TLS is terminated by the reverse proxy
-  environment:
-    TZ: "{{ app_diagrams__timezone }}"
-    DRAWIO_BASE_URL: "{{ app_diagrams__base_url }}"
-    # The entrypoint of the image compares the value with 'false'
-    LETS_ENCRYPT_ENABLED: 'false'
+  # Set with diagrams_environment, merged over the default
+  environment: "{{ app_diagrams__environment }}"
   labels: "{{ app_diagrams__labels | default(omit) }}"
+  secrets: >-
+    {{ (app_diagrams__secrets | map(attribute='name') | zip(app_diagrams__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
+      if (app_diagrams__secrets | default([]) | length > 0)
+      else omit }}
   # diagrams_container.volumes replaces the list completely
   volumes:
     - '/etc/localtime:/etc/localtime:ro'

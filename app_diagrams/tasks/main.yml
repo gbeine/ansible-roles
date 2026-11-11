@@ -13,20 +13,71 @@
           - app_diagrams__container | length > 0
         quiet: true
 
-    - name: 'Validate the role variables'
+    - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - app_diagrams__invalid | length == 0
-        # Only the failing checks are reported
-        fail_msg: "{{ app_diagrams__invalid | join('. ') }}"
+          - app_diagrams__environment_missing | length == 0
+          - app_diagrams__secrets | rejectattr('name', 'defined') | list | length == 0
+          - app_diagrams__secrets | rejectattr('data', 'defined') | list | length == 0
+          - app_diagrams__secrets | rejectattr('target', 'defined') | list | length == 0
+          - app_diagrams__secrets_missing | length == 0
+          - app_diagrams__secrets_in_environment | length == 0
+        fail_msg: >-
+          draw.io needs the environment variables {{ app_diagrams__environment_required | join(', ') }},
+          missing or empty: {{ app_diagrams__environment_missing | join(', ') | default('none', true) }}.
+          {% if app_diagrams__secrets_required | length > 0 %}
+          draw.io needs the secrets {{ app_diagrams__secrets_required | join(', ') }},
+          missing: {{ app_diagrams__secrets_missing | join(', ') | default('none', true) }}.
+          {% endif %}
+          Every secret needs name, data and target, secret targets must not be set in diagrams_environment:
+          {{ app_diagrams__secrets_in_environment | join(', ') | default('none', true) }}.
         quiet: true
       vars:
-        app_diagrams__invalid: >-
-          {%- set errors = [] -%}
-          {%- if app_diagrams__base_url is not string or app_diagrams__base_url is not match('^https?://[^/]+') -%}
-          {%-   set _ = errors.append('diagrams_base_url has to be an http or https URL') -%}
-          {%- endif -%}
-          {{ errors }}
+        app_diagrams__environment_missing: >-
+          {{ app_diagrams__environment_required
+             | reject('in', app_diagrams__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        app_diagrams__secrets_missing: >-
+          {{ app_diagrams__secrets_required
+             | reject('in', app_diagrams__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        app_diagrams__secrets_in_environment: >-
+          {{ app_diagrams__secrets | selectattr('target', 'defined') | map(attribute='target')
+             | select('in', app_diagrams__environment.keys() | list) | list }}
+
+    # Checks the environment and the secrets of the container after merging diagrams_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__environment_unknown | length == 0
+          - app_diagrams__secrets_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_diagrams__environment_unknown | join(', ') | default('none', true) }}.
+          Unknown secrets: {{ app_diagrams__secrets_unknown | join(', ') | default('none', true) }}.
+          Allowed are the environment variables {{ app_diagrams__environment_allowed | join(', ') }}
+          and the secrets {{ app_diagrams__secrets_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        # The secrets of the container are omit without secrets
+        app_diagrams__container_secrets: >-
+          {{ app_diagrams__container.secrets
+             if app_diagrams__container.secrets is sequence and app_diagrams__container.secrets is not string
+             else [] }}
+        app_diagrams__environment_unknown: >-
+          {{ (app_diagrams__container.environment | default({})).keys() | reject('in', app_diagrams__environment_allowed) | list }}
+        app_diagrams__secrets_unknown: >-
+          {{ app_diagrams__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_diagrams__secrets_allowed) | list }}
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_diagrams__secrets }}"
+      register: 'app_diagrams__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -74,7 +125,9 @@
         app_diagrams__running: >-
           {{ (ansible_facts.services[app_diagrams__container.name + '.service'].state | default('')) == 'running' }}
         app_diagrams__restart: >-
-          {{ app_diagrams__running | bool and app_diagrams__quadlet_result is changed }}
+          {{ app_diagrams__running | bool
+             and (app_diagrams__secrets_result is changed
+                  or app_diagrams__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
