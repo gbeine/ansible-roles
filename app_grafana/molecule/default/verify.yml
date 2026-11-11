@@ -27,6 +27,8 @@
           - app_grafana__expect.ip6 is none or ('IP6=' + app_grafana__expect.ip6) in app_grafana__test_quadlet_lines
           - app_grafana__expect.ip6 is not none or app_grafana__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - app_grafana__expect.quadlet | reject('in', app_grafana__test_quadlet_lines) | list | length == 0
+          # The configuration of the image is used, /etc/grafana is not mounted
+          - app_grafana__test_quadlet_lines | select('search', ':/etc/grafana$') | list | length == 0
         fail_msg: "{{ app_grafana__test_quadlet.content | b64decode }}"
       vars:
         app_grafana__test_quadlet_lines: "{{ (app_grafana__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -37,44 +39,42 @@
       changed_when: false
       failed_when: false
 
-    - name: 'Read the configuration file'
+    - name: 'Read the data and log directories'
       ansible.builtin.stat:
-        path: "{{ app_grafana__expect.home }}/etc/grafana.ini"
-      register: 'app_grafana__test_config_stat'
+        path: "{{ app_grafana__expect.home }}/{{ item }}"
+      loop: [ 'data', 'log' ]
+      register: 'app_grafana__test_dirs'
 
-    - name: 'Read the configuration'
-      ansible.builtin.slurp:
-        src: "{{ app_grafana__expect.home }}/etc/grafana.ini"
-      register: 'app_grafana__test_config'
-
-    - name: 'Assert the service and the configuration'
+    - name: 'Assert the service and the directories'
       ansible.builtin.assert:
         that:
           - app_grafana__test_service.stdout == 'active'
-          - app_grafana__test_config_stat.stat.uid == 472
-          - app_grafana__test_config_stat.stat.mode == '0640'
-          - app_grafana__expect.config | reject('in', app_grafana__test_config_lines) | list | length == 0
+          - app_grafana__test_dirs.results | map(attribute='stat') | rejectattr('uid', 'eq', 472) | list | length == 0
+          - app_grafana__test_dirs.results | map(attribute='stat') | rejectattr('mode', 'eq', '0700') | list | length == 0
         fail_msg: >-
           service {{ app_grafana__test_service.stdout }},
-          owner {{ app_grafana__test_config_stat.stat.uid }}, mode {{ app_grafana__test_config_stat.stat.mode }},
-          configuration {{ app_grafana__test_config_lines | join(' | ') }}
-      vars:
-        app_grafana__test_config_lines: "{{ (app_grafana__test_config.content | b64decode).splitlines() }}"
+          directories {{ app_grafana__test_dirs.results | map(attribute='stat') | map(attribute='path') | join(', ') }}
+          owners {{ app_grafana__test_dirs.results | map(attribute='stat') | map(attribute='uid') | join(', ') }}
+          modes {{ app_grafana__test_dirs.results | map(attribute='stat') | map(attribute='mode') | join(', ') }}
 
     - name: 'Inspect the grafana container'
       ansible.builtin.command: 'podman inspect grafana'
       register: 'app_grafana__test_inspect'
       changed_when: false
 
-    - name: 'Assert the container addresses'
+    - name: 'Assert the container addresses and environment'
       ansible.builtin.assert:
         that:
           - app_grafana__test_net.IPAddress == app_grafana__expect.ip
           - app_grafana__expect.ip6 is none or app_grafana__test_net.GlobalIPv6Address == app_grafana__expect.ip6
-        fail_msg: "IPv4 {{ app_grafana__test_net.IPAddress }}, IPv6 {{ app_grafana__test_net.GlobalIPv6Address }}"
+          - app_grafana__expect.env | reject('in', app_grafana__test_env) | list | length == 0
+        fail_msg: >-
+          IPv4 {{ app_grafana__test_net.IPAddress }}, IPv6 {{ app_grafana__test_net.GlobalIPv6Address }},
+          environment {{ app_grafana__test_env | join(', ') }}
       vars:
         app_grafana__test_container: "{{ (app_grafana__test_inspect.stdout | from_json)[0] }}"
         app_grafana__test_net: "{{ app_grafana__test_container.NetworkSettings.Networks[app_grafana__test_case.role_vars.grafana_network] }}"
+        app_grafana__test_env: "{{ app_grafana__test_container.Config.Env }}"
 
     # The first start of Grafana migrates the database
     - name: 'Wait until Grafana is ready'

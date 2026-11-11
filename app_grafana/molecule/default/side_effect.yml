@@ -10,7 +10,6 @@
     app_grafana__test_case: "{{ app_grafana__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     app_grafana__test_checked_files:
       - "{{ app_grafana__test_quadlet_path }}"
-      - "{{ app_grafana__test_case.role_vars.grafana_home }}/etc/grafana.ini"
 
   tasks:
 
@@ -21,7 +20,7 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the checksums of the quadlet unit and the configuration before the invalid runs'
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
       ansible.builtin.stat:
         path: "{{ item }}"
         checksum_algorithm: 'md5'
@@ -38,15 +37,6 @@
           # combine of the defaults fails before the role checks anything
           search: 'failed to combine variables, expected dicts'
 
-    - name: 'Run app_grafana with a section of grafana_config not a dictionary (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        grafana_config:
-          server: 'x'
-        app_grafana__test_invalid:
-          message: 'a section of grafana_config is not a dictionary'
-          search: '^grafana_config sections have to be dictionaries: server$'
-
     - name: 'Run app_grafana with an invalid name of a secret (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
@@ -55,7 +45,36 @@
             data: 'x'
         app_grafana__test_invalid:
           message: 'an invalid name of a secret'
-          search: '^grafana_secrets entries need name of letters, digits, ., _ or - and data$'
+          search: 'Unknown secrets: a/b\.'
+
+    - name: 'Run app_grafana with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_environment:
+          GF_FOO: 'bar'
+        app_grafana__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: GF_FOO\.'
+
+    - name: 'Run app_grafana with an unknown environment variable in grafana_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_container:
+          environment:
+            FOO: 'bar'
+        app_grafana__test_invalid:
+          message: 'an unknown environment variable in grafana_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run app_grafana with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_secrets:
+          - name: 'grafana_unknown'
+            data: 'secret'
+        app_grafana__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: grafana_unknown\.'
 
     - name: 'Run app_grafana with the changed role variables'
       when: app_grafana__test_case.side_effect is defined
@@ -84,13 +103,11 @@
           register: 'app_grafana__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed configuration and the restart of the service'
+        - name: 'Assert the changed quadlet unit and the restart of the service'
           ansible.builtin.assert:
             that:
-              - app_grafana__config_result is changed
-              - app_grafana__quadlet_result is not changed
+              - app_grafana__quadlet_result is changed
               - app_grafana__test_started_after.stdout | int > app_grafana__test_started_before.stdout | int
             fail_msg: >-
-              configuration changed: {{ app_grafana__config_result is changed }},
               quadlet changed: {{ app_grafana__quadlet_result is changed }},
               start before {{ app_grafana__test_started_before.stdout }}, after {{ app_grafana__test_started_after.stdout }}

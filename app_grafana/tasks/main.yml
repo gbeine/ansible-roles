@@ -4,14 +4,29 @@
   tags: [ 'app', 'app_grafana' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter, grafana_config or grafana_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter or grafana_container not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
-          - (app_grafana__config | to_json | length) + (app_grafana__container | length) > 0
+          - app_grafana__container | length > 0
         quiet: true
+
+    # The secrets are mounted as files, they have no target in the environment
+    - name: 'Validate environment'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__environment_missing | length == 0
+        fail_msg: >-
+          Grafana needs the environment variables {{ app_grafana__environment_required | join(', ') }},
+          missing or empty: {{ app_grafana__environment_missing | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        app_grafana__environment_missing: >-
+          {{ app_grafana__environment_required
+             | reject('in', app_grafana__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
 
     - name: 'Validate the role variables'
       ansible.builtin.assert:
@@ -23,21 +38,41 @@
       vars:
         app_grafana__invalid: >-
           {%- set errors = [] -%}
-          {%- set sections = app_grafana__config | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
-          {%- if sections | length > 0 -%}
-          {%-   set _ = errors.append('grafana_config sections have to be dictionaries: ' ~ sections | join(', ')) -%}
-          {%- endif -%}
           {%- set secrets = app_grafana__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
           {%-   set _ = errors.append('grafana_secrets has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
-                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
-                   or secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
-                      | map('string') | reject('match', app_grafana__name_pattern) | list | length > 0 -%}
-          {%-   set _ = errors.append('grafana_secrets entries need name of letters, digits, ., _ or - and data') -%}
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('grafana_secrets entries need name and data') -%}
           {%- endif -%}
           {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging grafana_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__environment_unknown | length == 0
+          - app_grafana__secrets_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_grafana__environment_unknown | join(', ') | default('none', true) }}.
+          Unknown secrets: {{ app_grafana__secrets_unknown | join(', ') | default('none', true) }}.
+          Allowed are the options of grafana.ini as GF_<SECTION>_<KEY> (app_grafana__environment_allowed)
+          and the secrets {{ app_grafana__secrets_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        # The secrets of the container are omit without secrets
+        app_grafana__container_secrets: >-
+          {{ app_grafana__container.secrets
+             if app_grafana__container.secrets is sequence and app_grafana__container.secrets is not string
+             else [] }}
+        app_grafana__environment_unknown: >-
+          {{ (app_grafana__container.environment | default({})).keys() | reject('in', app_grafana__environment_allowed) | list }}
+        app_grafana__secrets_unknown: >-
+          {{ app_grafana__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1')
+             | map('regex_replace', '^' ~ (app_grafana__secrets_dir ~ '/') | regex_escape, '')
+             | reject('in', app_grafana__secrets_allowed) | list }}
 
     - name: 'Create directories'
       ansible.builtin.file:
@@ -46,22 +81,8 @@
         mode: '0700'
         state: 'directory'
       loop:
-        - "{{ app_grafana__podman_etc_dir }}"
         - "{{ app_grafana__podman_data_dir }}"
         - "{{ app_grafana__podman_log_dir }}"
-
-    - name: 'Generate the configuration'
-      ansible.builtin.copy:
-        content: |
-          #
-          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
-          #
-
-          {{ app_grafana__config | community.general.to_ini }}
-        dest: "{{ app_grafana__podman_config_file }}"
-        owner: "{{ app_grafana__uid }}"
-        mode: '0640'
-      register: 'app_grafana__config_result'
 
     - name: 'Create secrets'
       no_log: true
@@ -119,8 +140,7 @@
           {{ (ansible_facts.services[app_grafana__container.name + '.service'].state | default('')) == 'running' }}
         app_grafana__restart: >-
           {{ app_grafana__running | bool
-             and (app_grafana__config_result is changed
-                  or app_grafana__secrets_result is changed
+             and (app_grafana__secrets_result is changed
                   or app_grafana__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
