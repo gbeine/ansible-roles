@@ -14,9 +14,8 @@ app_collabora__labels: "{{ collabora_labels }}"
 
 app_collabora__version: "{{ collabora_version | default('latest') }}"
 
-# Credentials of the admin console, the password is passed as podman secret
-app_collabora__username: "{{ collabora_username | default('admin') }}"
-app_collabora__password: "{{ collabora_password | mandatory }}"
+app_collabora__environment: "{{ app_collabora__environment_default | combine(collabora_environment | default({})) }}"
+app_collabora__secrets: "{{ collabora_secrets | default([]) }}"
 
 app_collabora__container: "{{ app_collabora__podman_container_default | combine(collabora_container | default({})) }}"
 
@@ -31,6 +30,43 @@ app_collabora__podman_name: 'collabora'
 app_collabora__podman_image: 'docker.io/collabora/code'
 app_collabora__podman_tag: "{{ app_collabora__version }}"
 
+# Collabora serves HTTP, TLS is terminated by the reverse proxy
+app_collabora__environment_default:
+  TZ: "{{ app_collabora__timezone }}"
+  username: 'admin'
+  extra_params: '--o:ssl.enable=false --o:ssl.termination=true'
+
+app_collabora__environment_required:
+  - 'username'
+
+# The password of the admin console
+app_collabora__secrets_required:
+  - 'password'
+
+# Environment variables read by start-collabora-online.sh and coolwsd --use-env-vars
+app_collabora__environment_allowed:
+  - 'TZ'
+  - 'username'
+  - 'extra_params'
+  - 'domain'
+  - 'server_name'
+  - 'dictionaries'
+  - 'DONT_GEN_SSL_CERT'
+  - 'cert_domain'
+  - 'aliasgroup1'
+  - 'aliasgroup2'
+  - 'aliasgroup3'
+  - 'aliasgroup4'
+  - 'aliasgroup5'
+  - 'aliasgroup6'
+  - 'aliasgroup7'
+  - 'aliasgroup8'
+  - 'aliasgroup9'
+
+# Targets of the secrets in collabora_secrets
+app_collabora__secrets_allowed:
+  - 'password'
+
 app_collabora__podman_container_default:
   name: "{{ app_collabora__podman_name }}"
   hostname: "{{ app_collabora__hostname }}"
@@ -39,15 +75,13 @@ app_collabora__podman_container_default:
   ipv6: "{{ app_collabora__ipv6 | default(omit) }}"
   network: "{{ app_collabora__network }}"
   timezone: "{{ app_collabora__timezone }}"
-  # collabora_container.environment replaces the dictionary completely,
-  # Collabora serves HTTP, TLS is terminated by the reverse proxy
-  environment:
-    TZ: "{{ app_collabora__timezone }}"
-    username: "{{ app_collabora__username }}"
-    extra_params: '--o:ssl.enable=false --o:ssl.termination=true'
+  # Set with collabora_environment, merged over the default
+  environment: "{{ app_collabora__environment }}"
   labels: "{{ app_collabora__labels | default(omit) }}"
-  secrets:
-    - 'collabora_password,type=env,target=password'
+  secrets: >-
+    {{ (app_collabora__secrets | map(attribute='name') | zip(app_collabora__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
+      if (app_collabora__secrets | default([]) | length > 0)
+      else omit }}
   # collabora_container.volumes replaces the list completely
   volumes:
     - '/etc/localtime:/etc/localtime:ro'

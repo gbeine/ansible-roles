@@ -24,7 +24,7 @@
           - ('IP=' + app_collabora__expect.ip) in app_collabora__test_quadlet_lines
           - app_collabora__expect.ip6 is none or ('IP6=' + app_collabora__expect.ip6) in app_collabora__test_quadlet_lines
           - app_collabora__expect.ip6 is not none or app_collabora__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
-          - ('Secret=collabora_password,type=env,target=password') in app_collabora__test_quadlet_lines
+          - app_collabora__expect.secrets | map('regex_replace', '^', 'Secret=') | reject('in', app_collabora__test_quadlet_lines) | list | length == 0
           - ('PodmanArgs=--no-healthcheck') in app_collabora__test_quadlet_lines
           - app_collabora__test_capabilities_expected | reject('in', app_collabora__test_capabilities) | list | length == 0
         fail_msg: "{{ app_collabora__test_quadlet.content | b64decode }}"
@@ -42,19 +42,22 @@
       changed_when: false
       failed_when: false
 
-    - name: 'Read the secret of the password'
+    - name: 'Read the secrets'
       ansible.builtin.command:
-        argv: [ 'podman', 'secret', 'exists', 'collabora_password' ]
+        argv: [ 'podman', 'secret', 'exists', "{{ item | regex_replace(',.*$', '') }}" ]
+      loop: "{{ app_collabora__expect.secrets }}"
       register: 'app_collabora__test_secret'
       changed_when: false
       failed_when: false
 
-    - name: 'Assert the service and the secret'
+    - name: 'Assert the service and the secrets'
       ansible.builtin.assert:
         that:
           - app_collabora__test_service.stdout == 'active'
-          - app_collabora__test_secret.rc == 0
-        fail_msg: "service {{ app_collabora__test_service.stdout }}, secret exists {{ app_collabora__test_secret.rc == 0 }}"
+          - app_collabora__test_secret.results | rejectattr('rc', 'eq', 0) | list | length == 0
+        fail_msg: >-
+          service {{ app_collabora__test_service.stdout }},
+          missing secrets {{ app_collabora__test_secret.results | rejectattr('rc', 'eq', 0) | map(attribute='item') | join(', ') }}
 
     - name: 'Inspect the collabora container'
       ansible.builtin.command: 'podman inspect collabora'

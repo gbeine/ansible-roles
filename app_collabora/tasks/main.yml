@@ -13,30 +13,68 @@
           - app_collabora__container | length > 0
         quiet: true
 
-    - name: 'Validate the role variables'
+    - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - app_collabora__invalid | length == 0
-        # Only the failing checks are reported
-        fail_msg: "{{ app_collabora__invalid | join('. ') }}"
+          - app_collabora__environment_missing | length == 0
+          - app_collabora__secrets | rejectattr('name', 'defined') | list | length == 0
+          - app_collabora__secrets | rejectattr('data', 'defined') | list | length == 0
+          - app_collabora__secrets | rejectattr('target', 'defined') | list | length == 0
+          - app_collabora__secrets_missing | length == 0
+          - app_collabora__secrets_in_environment | length == 0
+        fail_msg: >-
+          Collabora needs the environment variables {{ app_collabora__environment_required | join(', ') }},
+          missing or empty: {{ app_collabora__environment_missing | join(', ') | default('none', true) }}.
+          Collabora needs the secrets {{ app_collabora__secrets_required | join(', ') }},
+          missing: {{ app_collabora__secrets_missing | join(', ') | default('none', true) }}.
+          Every secret needs name, data and target, secret targets must not be set in collabora_environment:
+          {{ app_collabora__secrets_in_environment | join(', ') | default('none', true) }}.
         quiet: true
       vars:
-        app_collabora__invalid: >-
-          {%- set errors = [] -%}
-          {%- if app_collabora__username is not string or app_collabora__username | length == 0 -%}
-          {%-   set _ = errors.append('collabora_username has to be a non-empty string') -%}
-          {%- endif -%}
-          {%- if app_collabora__password is not string or app_collabora__password | length == 0 -%}
-          {%-   set _ = errors.append('collabora_password has to be a non-empty string') -%}
-          {%- endif -%}
-          {{ errors }}
+        app_collabora__environment_missing: >-
+          {{ app_collabora__environment_required
+             | reject('in', app_collabora__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        app_collabora__secrets_missing: >-
+          {{ app_collabora__secrets_required
+             | reject('in', app_collabora__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        app_collabora__secrets_in_environment: >-
+          {{ app_collabora__secrets | selectattr('target', 'defined') | map(attribute='target')
+             | select('in', app_collabora__environment.keys() | list) | list }}
+
+    # Checks the environment and the secrets of the container after merging collabora_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_collabora__environment_unknown | length == 0
+          - app_collabora__secrets_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_collabora__environment_unknown | join(', ') | default('none', true) }}.
+          Unknown secrets: {{ app_collabora__secrets_unknown | join(', ') | default('none', true) }}.
+          Allowed are the environment variables {{ app_collabora__environment_allowed | join(', ') }}
+          and the secrets {{ app_collabora__secrets_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        # The secrets of the container are omit without secrets
+        app_collabora__container_secrets: >-
+          {{ app_collabora__container.secrets
+             if app_collabora__container.secrets is sequence and app_collabora__container.secrets is not string
+             else [] }}
+        app_collabora__environment_unknown: >-
+          {{ (app_collabora__container.environment | default({})).keys() | reject('in', app_collabora__environment_allowed) | list }}
+        app_collabora__secrets_unknown: >-
+          {{ app_collabora__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_collabora__secrets_allowed) | list }}
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'collabora_password'
-        data: "{{ app_collabora__password }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_collabora__secrets }}"
       register: 'app_collabora__secrets_result'
 
     - name: 'Gathering facts about services...'
