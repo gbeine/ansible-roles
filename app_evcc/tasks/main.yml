@@ -13,6 +13,40 @@
           - app_evcc__container | length > 0
         quiet: true
 
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__environment_missing | length == 0
+          - app_evcc__secrets | rejectattr('name', 'defined') | list | length == 0
+          - app_evcc__secrets | rejectattr('data', 'defined') | list | length == 0
+          - app_evcc__secrets | rejectattr('target', 'defined') | list | length == 0
+          - app_evcc__secrets_missing | length == 0
+          - app_evcc__secrets_in_environment | length == 0
+        fail_msg: >-
+          {% if app_evcc__environment_required | length > 0 %}
+          evcc needs the environment variables {{ app_evcc__environment_required | join(', ') }},
+          missing or empty: {{ app_evcc__environment_missing | join(', ') | default('none', true) }}.
+          {% endif %}
+          {% if app_evcc__secrets_required | length > 0 %}
+          evcc needs the secrets {{ app_evcc__secrets_required | join(', ') }},
+          missing: {{ app_evcc__secrets_missing | join(', ') | default('none', true) }}.
+          {% endif %}
+          Every secret needs name, data and target, secret targets must not be set in evcc_environment:
+          {{ app_evcc__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        app_evcc__environment_missing: >-
+          {{ app_evcc__environment_required
+             | reject('in', app_evcc__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        app_evcc__secrets_missing: >-
+          {{ app_evcc__secrets_required
+             | reject('in', app_evcc__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        app_evcc__secrets_in_environment: >-
+          {{ app_evcc__secrets | selectattr('target', 'defined') | map(attribute='target')
+             | select('in', app_evcc__environment.keys() | list) | list }}
+
     - name: 'Validate the role variables'
       ansible.builtin.assert:
         that:
@@ -28,12 +62,46 @@
           {%- endif -%}
           {{ errors }}
 
+    # Checks the environment and the secrets of the container after merging evcc_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__environment_unknown | length == 0
+          - app_evcc__secrets_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_evcc__environment_unknown | join(', ') | default('none', true) }}.
+          Unknown secrets: {{ app_evcc__secrets_unknown | join(', ') | default('none', true) }}.
+          Allowed are the environment variables {{ app_evcc__environment_allowed | join(', ') }}
+          and the secrets {{ app_evcc__secrets_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        # The secrets of the container are omit without secrets
+        app_evcc__container_secrets: >-
+          {{ app_evcc__container.secrets
+             if app_evcc__container.secrets is sequence and app_evcc__container.secrets is not string
+             else [] }}
+        app_evcc__environment_unknown: >-
+          {{ (app_evcc__container.environment | default({})).keys() | reject('in', app_evcc__environment_allowed) | list }}
+        app_evcc__secrets_unknown: >-
+          {{ app_evcc__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_evcc__secrets_allowed) | list }}
+
     # The container runs as root
     - name: 'Create the data directory'
       ansible.builtin.file:
         path: "{{ app_evcc__podman_home }}"
         mode: '0700'
         state: 'directory'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_evcc__secrets }}"
+      register: 'app_evcc__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -81,7 +149,9 @@
         app_evcc__running: >-
           {{ (ansible_facts.services[app_evcc__container.name + '.service'].state | default('')) == 'running' }}
         app_evcc__restart: >-
-          {{ app_evcc__running | bool and app_evcc__quadlet_result is changed }}
+          {{ app_evcc__running | bool
+             and (app_evcc__secrets_result is changed
+                  or app_evcc__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'

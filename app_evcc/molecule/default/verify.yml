@@ -54,15 +54,29 @@
       register: 'app_evcc__test_inspect'
       changed_when: false
 
-    - name: 'Assert the container addresses'
+    - name: 'Read the secrets'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', "{{ item }}" ]
+      loop: "{{ app_evcc__expect.secrets }}"
+      register: 'app_evcc__test_secret'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the container addresses, environment and secrets'
       ansible.builtin.assert:
         that:
           - app_evcc__test_net.IPAddress == app_evcc__expect.ip
           - app_evcc__expect.ip6 is none or app_evcc__test_net.GlobalIPv6Address == app_evcc__expect.ip6
-        fail_msg: "IPv4 {{ app_evcc__test_net.IPAddress }}, IPv6 {{ app_evcc__test_net.GlobalIPv6Address }}"
+          - app_evcc__expect.env | reject('in', app_evcc__test_env) | list | length == 0
+          - app_evcc__test_secret.results | rejectattr('rc', 'eq', 0) | list | length == 0
+        fail_msg: >-
+          IPv4 {{ app_evcc__test_net.IPAddress }}, IPv6 {{ app_evcc__test_net.GlobalIPv6Address }},
+          environment {{ app_evcc__test_env | join(', ') }},
+          missing secrets {{ app_evcc__test_secret.results | rejectattr('rc', 'eq', 0) | map(attribute='item') | join(', ') }}
       vars:
         app_evcc__test_container: "{{ (app_evcc__test_inspect.stdout | from_json)[0] }}"
         app_evcc__test_net: "{{ app_evcc__test_container.NetworkSettings.Networks[app_evcc__test_case.role_vars.evcc_network] }}"
+        app_evcc__test_env: "{{ app_evcc__test_container.Config.Env }}"
 
     - name: 'Wait until evcc is ready'
       ansible.builtin.uri:
