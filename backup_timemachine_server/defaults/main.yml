@@ -6,18 +6,17 @@
 #
 
 backup_timemachine_server__home: "{{ timemachine_server_home | mandatory }}"
-backup_timemachine_server__ip: "{{ timemachine_server_ip }}"
+backup_timemachine_server__ip: "{{ timemachine_server_ip | mandatory }}"
 backup_timemachine_server__ipv6: "{{ timemachine_server_ipv6 }}"
-backup_timemachine_server__network: "{{ timemachine_server_network }}"
+backup_timemachine_server__network: "{{ timemachine_server_network | mandatory }}"
 backup_timemachine_server__hostname: "{{ timemachine_server_hostname | mandatory }}"
 backup_timemachine_server__timezone: "{{ timemachine_server_timezone | mandatory }}"
-
-backup_timemachine_server__environment: "{{ backup_timemachine_server__environment_default | combine(timemachine_server_environment | default({})) }}"
-backup_timemachine_server__secrets: "{{ timemachine_server_secrets | default([]) }}"
 
 backup_timemachine_server__version: "{{ timemachine_server_version | default('latest') }}"
 
 backup_timemachine_server__container: "{{ backup_timemachine_server__podman_container_default | combine(timemachine_server_container | default({})) }}"
+backup_timemachine_server__environment: "{{ backup_timemachine_server__environment_default | combine(timemachine_server_environment | default({})) }}"
+backup_timemachine_server__secrets: "{{ timemachine_server_secrets | default([]) }}"
 
 backup_timemachine_server__autoupdate_enabled: "{{ timemachine_server_autoupdate_enabled | default(false) }}"
 backup_timemachine_server__autoupdate_schedule: "{{ timemachine_server_autoupdate_schedule }}"
@@ -61,20 +60,74 @@ backup_timemachine_server__user_keys_required:
   - 'TM_UID'
   - 'TM_GID'
 
+# The secrets are mounted as files, the image reads the variable target from the file variable
+backup_timemachine_server__secret_files:
+  PASSWORD: 'PASSWORD_FILE'
+
+backup_timemachine_server__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+backup_timemachine_server__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if backup_timemachine_server__secrets is sequence and backup_timemachine_server__secrets is not string and backup_timemachine_server__secrets is not mapping -%}
+  {%-   for secret in backup_timemachine_server__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in backup_timemachine_server__secret_files -%}
+  {%-     set _ = environment.update({ backup_timemachine_server__secret_files[secret.target]: backup_timemachine_server__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The variables of the image for SMB without PASSWORD and PASSWORD_FILE, from entrypoint.sh and the README of mbentley/docker-timemachine,
+# EXTERNAL_CONF is set by the role with timemachine_server_users
+backup_timemachine_server__environment_allowed:
+  - 'ADVERTISED_HOSTNAME'
+  - 'CUSTOM_SMB_AUTH'
+  - 'CUSTOM_SMB_CONF'
+  - 'CUSTOM_SMB_PROTO'
+  - 'CUSTOM_USER'
+  - 'DEBUG_LEVEL'
+  - 'EXTERNAL_CONF'
+  - 'EXTRA_SHARES'
+  - 'HIDE_SHARES'
+  - 'IGNORE_DOS_ATTRIBUTES'
+  - 'MIMIC_MODEL'
+  - 'PUID'
+  - 'PGID'
+  - 'SET_PERMISSIONS'
+  - 'SHARE_NAME'
+  - 'SHARE_PATH'
+  - 'SMB_INHERIT_PERMISSIONS'
+  - 'SMB_METADATA'
+  - 'SMB_NFS_ACES'
+  - 'SMB_PORT'
+  - 'SMB_VFS_OBJECTS'
+  - 'TM_ENABLED'
+  - 'TM_GID'
+  - 'TM_GROUPNAME'
+  - 'TM_UID'
+  - 'TM_USERNAME'
+  - 'VOLUME_SIZE_LIMIT'
+  - 'WORKGROUP'
+  # The file variables of the secrets, set by the role
+  - 'PASSWORD_FILE'
+
 backup_timemachine_server__podman_container_default:
   name: "{{ backup_timemachine_server__podman_name }}"
   hostname: "{{ backup_timemachine_server__hostname }}"
   image: "{{ backup_timemachine_server__podman_image }}:{{ backup_timemachine_server__podman_tag }}"
-  ip: "{{ backup_timemachine_server__ip | default(omit) }}"
+  ip: "{{ backup_timemachine_server__ip }}"
   ipv6: "{{ backup_timemachine_server__ipv6 | default(omit) }}"
   network: "{{ backup_timemachine_server__network | default('host') }}"
   timezone: "{{ backup_timemachine_server__timezone }}"
+  # Set with timemachine_server_environment and timemachine_server_secrets, merged over the default
   environment: >-
     {{ backup_timemachine_server__environment
-       | combine({ 'EXTERNAL_CONF': backup_timemachine_server__external_dir } if (backup_timemachine_server__users | length > 0) else {}) }}
+       | combine({ 'EXTERNAL_CONF': backup_timemachine_server__external_dir } if (backup_timemachine_server__users | length > 0) else {})
+       | combine(backup_timemachine_server__environment_secrets_files) }}
   secrets: >-
-    {{ (backup_timemachine_server__secrets | map(attribute='name') | zip(backup_timemachine_server__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
-      if (backup_timemachine_server__secrets | default([]) | length > 0)
+    {{ (backup_timemachine_server__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ backup_timemachine_server__secrets_dir ~ '/\1') | list)
+      if (backup_timemachine_server__secrets is sequence and backup_timemachine_server__secrets is not string and backup_timemachine_server__secrets | length > 0)
       else omit }}
   tmpfs:
     /run/samba: ''
@@ -98,9 +151,3 @@ backup_timemachine_server__podman_container_default:
         else []
       )
     }}
-
-#  publish:
-#    - "137:137/udp"
-#    - "138:138/udp"
-#    - "139:139"
-#    - "445:445"

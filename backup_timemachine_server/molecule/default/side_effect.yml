@@ -7,7 +7,8 @@
     - 'test_cases.yml'
 
   vars:
-    podman___update_mode: false
+    backup_timemachine_server__test_checked_files:
+      - '/etc/containers/systemd/timemachine.container'
 
   tasks:
 
@@ -15,6 +16,89 @@
       ansible.builtin.include_tasks: 'tasks/check_state.yml'
       vars:
         backup_timemachine_server__test_expect: "{{ backup_timemachine_server__test_converge.expect }}"
+
+    - name: 'Set the role variables of the first run'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ backup_timemachine_server__test_common | combine(backup_timemachine_server__test_converge.role_vars) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ backup_timemachine_server__test_checked_files }}"
+      register: 'backup_timemachine_server__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run backup_timemachine_server with timemachine_server_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_container: [ 'environment' ]
+        backup_timemachine_server__test_invalid:
+          message: 'timemachine_server_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run backup_timemachine_server with timemachine_server_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_secrets:
+          PASSWORD: 'molecule'
+        backup_timemachine_server__test_invalid:
+          message: 'timemachine_server_secrets not a list'
+          search: '^timemachine_server_secrets has to be a list$'
+
+    - name: 'Run backup_timemachine_server with the secret of the password and users (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_secrets:
+          - name: 'timemachine_molecule_password'
+            data: 'molecule'
+            target: 'PASSWORD'
+        backup_timemachine_server__test_invalid:
+          message: 'the secret of the password and users'
+          search: '^the secret with target PASSWORD is only allowed without timemachine_server_users'
+
+    - name: 'Run backup_timemachine_server with the file variable of the password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_environment:
+          PASSWORD_FILE: '/run/secrets/timemachine_molecule_password'
+        backup_timemachine_server__test_invalid:
+          message: 'the file variable of the password in the environment'
+          search: 'must not be set in timemachine_server_environment:\s+PASSWORD_FILE\.'
+
+    - name: 'Run backup_timemachine_server with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_environment:
+          SMB_FOO: 'bar'
+        backup_timemachine_server__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: SMB_FOO\.'
+
+    - name: 'Run backup_timemachine_server with an unknown environment variable in timemachine_server_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_container:
+          environment:
+            FOO: 'bar'
+        backup_timemachine_server__test_invalid:
+          message: 'an unknown environment variable in timemachine_server_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run backup_timemachine_server with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        timemachine_server_secrets:
+          - name: 'timemachine_molecule_token'
+            data: 'molecule'
+            target: 'TOKEN'
+        backup_timemachine_server__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: TOKEN\.'
 
     - name: 'Set the role variables of the second run'
       ansible.builtin.set_fact:

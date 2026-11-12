@@ -18,6 +18,9 @@ The role checks the required variables before it changes anything:
 | `SET_PERMISSIONS` | `false` |
 
 Variables carrying secrets are passed as podman secrets with `timemachine_server_secrets` (`name`, `data`, `target`) and must not be set in `timemachine_server_environment`.
+`target` is the usual name of the variable, the only secret of the image is `PASSWORD`.
+The role creates the secret with `podman secret create`, mounts it to `/run/secrets/<name>` and sets `PASSWORD_FILE`,
+so the password is neither part of the quadlet unit nor of the environment of the container.
 
 ### Single user mode
 
@@ -73,11 +76,33 @@ With a podman network and `timemachine_server_ip` the shares are not discovered 
 `timemachine_server_interfaces` restricts the interfaces Avahi uses.
 
 The storage below `timemachine_server_home/opt` must support extended attributes.
+The users have their own passwords, a secret with the target `PASSWORD` is not allowed in the multi user mode,
+the image would use it for every user without own password.
 
-### Restarts
+### Allowed variables
+
+The role only allows the environment variables in `backup_timemachine_server__environment_allowed` and the secret with the target `PASSWORD`,
+it stops before any change if unknown variables or secrets are set.
+This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
+The check uses the environment and the secrets of the container after merging `timemachine_server_container`,
+so variables set with `timemachine_server_container.environment` are checked as well.
+The allowed variables are the variables of the image for SMB (`entrypoint.sh` and README of mbentley/docker-timemachine) without `PASSWORD`, and the file variable `PASSWORD_FILE`.
+The role sets `PASSWORD_FILE` from `timemachine_server_secrets`, it must not be set in `timemachine_server_environment`.
+The variables of the AFP variant of the image are not allowed.
+
+### Validation
+
+The role checks before any change that `timemachine_server_secrets` is a list of entries with `name`, `data` and `target` and unique names,
+that the required variables are set, that neither a secret nor its file variable is set in `timemachine_server_environment`,
+that the password is a secret in the single user mode and not in the multi user mode, that every user is complete
+and that only allowed variables and secrets are used.
+If `timemachine_server_container` is no dictionary, merging it with the default fails before anything changes.
+
+### Restarts and updates
 
 A running container is restarted when users, passwords, secrets, the Avahi configuration or the quadlet unit changed.
 The first start of the container does not trigger an additional restart.
+Updates of the image are done by `container_update` with `timemachine_server_autoupdate_enabled: true` and `timemachine_server_autoupdate_schedule`.
 
 ### Migration from the single variables
 
@@ -92,6 +117,11 @@ The first start of the container does not trigger an additional restart.
 In the single user mode a secret with the target `PASSWORD` is required now.
 In the multi user mode the passwords from `timemachine_server_passwords` were written to `.pw` files, but not used by the image; they are used now via `PASSWORD_FILE`.
 
+The secret of the password is mounted as file and read with `PASSWORD_FILE`, before it was passed as environment variable `PASSWORD`, `timemachine_server_secrets` stays the same.
+`podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container,
+the configuration files are always written.
+The tags are `backup` and `backup_timemachine_server`.
+
 ### Tests
 
 The molecule scenario `default` runs the role in one [tart](https://tart.run) VM `molecule-timemachine` on a macOS controller, the base VM has to be Debian 13.
@@ -102,10 +132,10 @@ The playbooks creating and destroying the VM are shared by all tart scenarios an
 |---|---|
 | `prepare` | sets up podman and the network `podman-molecule` with the role `container_podman`, pulls the image and installs `smbclient` |
 | `converge`, `idempotence` | multi user mode with the users `alice` and `bob` in the podman network on `10.89.0.10` |
-| `side_effect` | checks the multi user mode, then runs the role again in the single user mode with the user `molecule` and the password as secret |
+| `side_effect` | checks the multi user mode, runs the role with `timemachine_server_container` not a dictionary, `timemachine_server_secrets` not a list, the secret of the password together with users, `PASSWORD_FILE` in the environment, an unknown environment variable in `timemachine_server_environment` and in `timemachine_server_container.environment` and an unknown secret and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`), then runs the role again in the single user mode with the user `molecule` and the password as secret |
 | `verify` | checks the single user mode |
 
-Both checks cover the quadlet unit, the user files, the service, the environment of the container,
+Both checks cover the quadlet unit with the mounted secret, the user files, the service, the environment of the container with `PASSWORD_FILE` and without password,
 a login with `smbclient` that has to list the shares, and a login with invalid credentials that has to be rejected.
 The passwords in `molecule/default/test_cases.yml` are test passwords only.
 The VM needs access to Docker Hub.

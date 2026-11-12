@@ -1,38 +1,59 @@
 ---
 
 - name: 'Deploy Time Machine container'
-  tags: [ 'backup_timemachine_server' ]
+  tags: [ 'backup', 'backup_timemachine_server' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or timemachine_server_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - backup_timemachine_server__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - backup_timemachine_server__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ backup_timemachine_server__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        backup_timemachine_server__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = backup_timemachine_server__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('timemachine_server_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('timemachine_server_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of timemachine_server_secrets have to be unique') -%}
+          {%- elif backup_timemachine_server__users | length > 0 and 'PASSWORD' in secrets | map(attribute='target') | list -%}
+          {%-   set _ = errors.append('the secret with target PASSWORD is only allowed without timemachine_server_users, the users have their own passwords') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Validate environment, secrets and users'
       ansible.builtin.assert:
         that:
-          - backup_timemachine_server__environment_missing | length == 0
-          - backup_timemachine_server__secrets | rejectattr('name', 'defined') | list | length == 0
-          - backup_timemachine_server__secrets | rejectattr('data', 'defined') | list | length == 0
-          - backup_timemachine_server__secrets | rejectattr('target', 'defined') | list | length == 0
-          - backup_timemachine_server__secrets_in_environment | length == 0
-          - backup_timemachine_server__users | length > 0 or 'PASSWORD' in backup_timemachine_server__secret_targets
-          - backup_timemachine_server__users_incomplete | length == 0
-          - backup_timemachine_server__usernames | unique | length == backup_timemachine_server__usernames | length
-        fail_msg: >-
-          Time Machine needs the environment variables {{ backup_timemachine_server__environment_required | join(', ') }},
-          missing or empty: {{ backup_timemachine_server__environment_missing | join(', ') | default('none', true) }}.
-          Every secret needs name, data and target, secret targets must not be set in timemachine_server_environment:
-          {{ backup_timemachine_server__secrets_in_environment | join(', ') | default('none', true) }}.
-          Without timemachine_server_users the password has to be a secret with target PASSWORD.
-          Every user needs {{ backup_timemachine_server__user_keys_required | join(', ') }} and a password
-          (PASSWORD, PASSWORD_FILE or an entry in timemachine_server_passwords), usernames must be unique,
-          incomplete users: {{ backup_timemachine_server__users_incomplete | join(', ') | default('none', true) }}.
+          - backup_timemachine_server__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ backup_timemachine_server__errors | join(' ') }}"
         quiet: true
       vars:
         backup_timemachine_server__environment_missing: >-
           {{ backup_timemachine_server__environment_required
              | reject('in', backup_timemachine_server__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
              | list }}
-        backup_timemachine_server__secret_targets: "{{ backup_timemachine_server__secrets | selectattr('target', 'defined') | map(attribute='target') | list }}"
+        backup_timemachine_server__secret_targets: "{{ backup_timemachine_server__secrets | map(attribute='target') | list }}"
         backup_timemachine_server__secrets_in_environment: >-
-          {{ backup_timemachine_server__secret_targets | select('in', backup_timemachine_server__environment.keys() | list) | list }}
+          {{ (backup_timemachine_server__secret_targets + backup_timemachine_server__secret_files.keys() | list + backup_timemachine_server__secret_files.values() | list)
+             | select('in', backup_timemachine_server__environment.keys() | list) | unique | list }}
         backup_timemachine_server__usernames: "{{ backup_timemachine_server__users | map(attribute='TM_USERNAME', default='?') | list }}"
         backup_timemachine_server__users_incomplete: "{{ backup_timemachine_server__users_incomplete_json | trim | from_json }}"
         backup_timemachine_server__users_incomplete_json: >-
@@ -45,6 +66,52 @@
           {%   endif %}
           {% endfor %}
           {{ result | to_json }}
+        backup_timemachine_server__errors: >-
+          {%- set errors = [] -%}
+          {%- if backup_timemachine_server__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('Time Machine needs the environment variables ' ~ (backup_timemachine_server__environment_required | join(', ')) ~ ', missing or empty: ' ~ (backup_timemachine_server__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if backup_timemachine_server__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in timemachine_server_environment: ' ~ (backup_timemachine_server__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if backup_timemachine_server__users | length == 0 and 'PASSWORD' not in backup_timemachine_server__secret_targets -%}
+          {%-   set _ = errors.append('Without timemachine_server_users the password has to be a secret with target PASSWORD.') -%}
+          {%- endif -%}
+          {%- if backup_timemachine_server__users_incomplete | length > 0 -%}
+          {%-   set _ = errors.append('Every user needs ' ~ (backup_timemachine_server__user_keys_required | join(', ')) ~ ' and a password (PASSWORD, PASSWORD_FILE or an entry in timemachine_server_passwords), incomplete users: ' ~ (backup_timemachine_server__users_incomplete | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if backup_timemachine_server__usernames | unique | length != backup_timemachine_server__usernames | length -%}
+          {%-   set _ = errors.append('The usernames of timemachine_server_users have to be unique.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging timemachine_server_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - backup_timemachine_server__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ backup_timemachine_server__errors | join(' ') }}"
+        quiet: true
+      vars:
+        backup_timemachine_server__environment_unknown: >-
+          {{ (backup_timemachine_server__container.environment | default({})).keys()
+             | reject('in', backup_timemachine_server__environment_allowed) | list }}
+        backup_timemachine_server__secrets_unknown: >-
+          {{ backup_timemachine_server__secrets | map(attribute='target') | reject('in', backup_timemachine_server__secret_files.keys() | list) | list }}
+        backup_timemachine_server__errors: >-
+          {%- set errors = [] -%}
+          {%- if backup_timemachine_server__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (backup_timemachine_server__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if backup_timemachine_server__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (backup_timemachine_server__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (backup_timemachine_server__environment_allowed) and the secrets ' ~ (backup_timemachine_server__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
@@ -78,7 +145,7 @@
         group: 'root'
         mode: '0644'
       register: 'backup_timemachine_server__avahi_result'
-      when: 'not podman___update_mode | bool and backup_timemachine_server__interfaces | length > 0'
+      when: 'backup_timemachine_server__interfaces | length > 0'
 
     - name: 'Create user configuration'
       ansible.builtin.copy:
@@ -96,7 +163,6 @@
       no_log: true
       loop: "{{ backup_timemachine_server__users }}"
       register: 'backup_timemachine_server__users_result'
-      when: 'not podman___update_mode | bool'
 
     - name: 'Create user passwords'
       no_log: true
@@ -108,7 +174,7 @@
         mode: '0400'
       loop: "{{ backup_timemachine_server__passwords | dict2items }}"
       register: 'backup_timemachine_server__passwords_result'
-      when: 'not podman___update_mode | bool and backup_timemachine_server__users | length > 0'
+      when: 'backup_timemachine_server__users | length > 0'
 
     - name: 'Find user configuration files'
       ansible.builtin.find:
@@ -134,18 +200,6 @@
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ backup_timemachine_server__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[backup_timemachine_server__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ backup_timemachine_server__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -178,11 +232,10 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
       register: 'backup_timemachine_server__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ backup_timemachine_server__container.name }}"
         daemon_reload: true
         state: "{{ 'restarted' if backup_timemachine_server__restart | bool else 'started' }}"
@@ -191,18 +244,17 @@
         backup_timemachine_server__running: >-
           {{ (ansible_facts.services[backup_timemachine_server__container.name + '.service'].state | default('')) == 'running' }}
         backup_timemachine_server__restart: >-
-          {{ podman___update_mode | bool
-             or (backup_timemachine_server__running | bool
-                 and (backup_timemachine_server__secrets_result is changed
-                      or backup_timemachine_server__avahi_result is changed
-                      or backup_timemachine_server__users_result is changed
-                      or backup_timemachine_server__passwords_result is changed
-                      or backup_timemachine_server__external_removed is changed
-                      or backup_timemachine_server__quadlet_result is changed)) }}
+          {{ backup_timemachine_server__running | bool
+             and (backup_timemachine_server__secrets_result is changed
+                  or backup_timemachine_server__avahi_result is changed
+                  or backup_timemachine_server__users_result is changed
+                  or backup_timemachine_server__passwords_result is changed
+                  or backup_timemachine_server__external_removed is changed
+                  or backup_timemachine_server__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'backup_timemachine_server__autoupdate_enabled'
+      when: 'backup_timemachine_server__autoupdate_enabled | bool'
       ansible.builtin.include_role:
         name: 'container_update'
       vars:

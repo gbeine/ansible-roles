@@ -1,0 +1,40 @@
+---
+# Runs backup_timemachine_server with the invalid role variables passed as include parameters,
+# the role has to fail before the quadlet unit changes.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run backup_timemachine_server with invalid variables (expect ERROR): {{ backup_timemachine_server__test_invalid.message }}"
+  block:
+
+    - name: 'Run backup_timemachine_server, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'backup_timemachine_server'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ backup_timemachine_server__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the quadlet unit after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ backup_timemachine_server__test_checked_files }}"
+      register: 'backup_timemachine_server__test_md5_after'
+
+    - name: 'Assert the run failed before the quadlet unit changed'
+      ansible.builtin.assert:
+        that:
+          - backup_timemachine_server__test_failure is search(backup_timemachine_server__test_invalid.search, multiline=true)
+          - backup_timemachine_server__test_before | select('equalto', '') | list | length == 0
+          - backup_timemachine_server__test_after == backup_timemachine_server__test_before
+        fail_msg: >-
+          Failure: {{ backup_timemachine_server__test_failure }}
+          Checksums before: {{ backup_timemachine_server__test_before | join(', ') }},
+          after: {{ backup_timemachine_server__test_after | join(', ') }}.
+      vars:
+        # Double quotes, so \n is a line break for the anchors of the searches
+        backup_timemachine_server__test_failure: "{{ [ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ] | join('\n') }}"
+        backup_timemachine_server__test_before: "{{ backup_timemachine_server__test_md5_before.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+        backup_timemachine_server__test_after: "{{ backup_timemachine_server__test_md5_after.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
