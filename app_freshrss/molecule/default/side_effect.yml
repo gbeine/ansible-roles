@@ -1,0 +1,173 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_freshrss__test_case: "{{ app_freshrss__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_freshrss__test_vars: "{{ app_freshrss__test_case.role_vars }}"
+    app_freshrss__test_users: "{{ app_freshrss__test_vars.freshrss_users }}"
+    app_freshrss__test_passwords: "{{ app_freshrss__test_vars.freshrss_passwords }}"
+    app_freshrss__test_checked_files:
+      - "{{ app_freshrss__test_quadlet_path }}"
+      - "{{ app_freshrss__test_vars.freshrss_home }}/www/freshrss/data/config.php"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_freshrss__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_freshrss__test_checked_files }}"
+      register: 'app_freshrss__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_freshrss with freshrss_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_container: [ 'environment' ]
+        app_freshrss__test_invalid:
+          message: 'freshrss_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_freshrss with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_secrets: [ { name: 'freshrss_db_password', data: 'x' } ]
+        app_freshrss__test_invalid:
+          message: 'a secret without target'
+          search: '^freshrss_secrets entries need name, data and target$'
+
+    - name: 'Run app_freshrss with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_config: { titel: 'News' }
+        app_freshrss__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in freshrss_config: titel\. Allowed are the options of FreshRSS'
+
+    - name: 'Run app_freshrss with the salt in freshrss_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_config: { salt: 'molecule' }
+        app_freshrss__test_invalid:
+          message: 'the salt in freshrss_config'
+          search: '^Options set by the role must not be set in freshrss_config: salt, passwords are set with freshrss_secrets\.$'
+
+    - name: 'Run app_freshrss with the database password in freshrss_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_config: { db: { password: 'molecule' } }
+        app_freshrss__test_invalid:
+          message: 'the database password in freshrss_config'
+          search: '^Options set by the role must not be set in freshrss_config: db\.password, passwords are set with freshrss_secrets\.$'
+
+    - name: 'Run app_freshrss with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_config:
+          title: |
+            Molecule
+            News
+        app_freshrss__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: title\.$'
+
+    - name: 'Run app_freshrss with an invalid authentication (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_config: { auth_type: 'ldap' }
+        app_freshrss__test_invalid:
+          message: 'an invalid authentication'
+          search: '^Invalid values in freshrss_config: auth_type \(form, http_auth, none\)\.$'
+
+    - name: 'Run app_freshrss with a user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_users: "{{ app_freshrss__test_users + [ { 'name': 'carol' } ] }}"
+        app_freshrss__test_invalid:
+          message: 'a user without password'
+          search: '^Users without password in freshrss_passwords: carol\.$'
+
+    - name: 'Run app_freshrss with a short password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_passwords: "{{ app_freshrss__test_passwords | combine({ app_freshrss__test_users[0].name: 'short' }) }}"
+        app_freshrss__test_invalid:
+          message: 'a short password'
+          search: '^Passwords in freshrss_passwords need at least 7 characters: '
+
+    - name: 'Run app_freshrss with the password of an unknown user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_passwords: "{{ app_freshrss__test_passwords | combine({ 'carol': 'molecule-carol-password' }) }}"
+        app_freshrss__test_invalid:
+          message: 'the password of an unknown user'
+          search: '^Passwords of unknown users in freshrss_passwords: carol\.$'
+
+    - name: 'Run app_freshrss with an unknown default user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_config: { default_user: 'carol' }
+        app_freshrss__test_invalid:
+          message: 'an unknown default user'
+          search: '^default_user of freshrss_config has to be in freshrss_users, got carol\.$'
+
+    - name: 'Run app_freshrss with an unknown environment variable in freshrss_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_container: { environment: { FOO: 'bar' } }
+        app_freshrss__test_invalid:
+          message: 'an unknown environment variable in freshrss_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run app_freshrss with the changed environment and configuration'
+      when: app_freshrss__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'freshrss' ]
+          register: 'app_freshrss__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment and configuration'
+          ansible.builtin.set_fact:
+            freshrss_environment: "{{ app_freshrss__test_case.side_effect.environment }}"
+            freshrss_config: "{{ app_freshrss__test_vars.freshrss_config | combine(app_freshrss__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run app_freshrss with the changed environment and configuration'
+          ansible.builtin.include_role:
+            name: 'app_freshrss'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'freshrss' ]
+          register: 'app_freshrss__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart, the changed config.php and no second installation'
+          ansible.builtin.assert:
+            that:
+              - app_freshrss__quadlet_result is changed
+              - app_freshrss__config_result is changed
+              - not app_freshrss__config_result.installed
+              - app_freshrss__config_result.changed_options == [ 'title' ]
+              - app_freshrss__test_started_after.stdout | int > app_freshrss__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_freshrss__quadlet_result is changed }},
+              config.php: {{ app_freshrss__config_result.changed_options | default([]) }},
+              installed: {{ app_freshrss__config_result.installed | default('') }},
+              start before {{ app_freshrss__test_started_before.stdout }}, after {{ app_freshrss__test_started_after.stdout }}

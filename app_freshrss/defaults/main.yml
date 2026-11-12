@@ -11,43 +11,173 @@ app_freshrss__ipv6: "{{ freshrss_ipv6 }}"
 app_freshrss__network: "{{ freshrss_network | mandatory }}"
 app_freshrss__hostname: "{{ freshrss_hostname | mandatory }}"
 app_freshrss__timezone: "{{ freshrss_timezone | mandatory }}"
-app_freshrss__labels: "{{ freshrss_labels | default({}) }}"
+app_freshrss__labels: "{{ freshrss_labels }}"
+
+# The user and group of /config, the image runs FreshRSS as this user
+app_freshrss__uid: "{{ freshrss_uid | mandatory }}"
+app_freshrss__gid: "{{ freshrss_gid | default(app_freshrss__uid) }}"
 
 app_freshrss__version: "{{ freshrss_version | default('latest') }}"
 
-app_freshrss__container: "{{ app_freshrss__container_default | combine(freshrss_container | default({})) }}"
+app_freshrss__container: "{{ app_freshrss__podman_container_default | combine(freshrss_container | default({})) }}"
+
+# Variables of the image, e.g. UMASK, the role sets PUID, PGID and TZ
+app_freshrss__environment: "{{ app_freshrss__environment_default | combine(freshrss_environment | default({})) }}"
+
+# The passwords of config.php with name, data and target, the targets are DB_PASSWORD and SMTP_PASSWORD
+app_freshrss__secrets: "{{ freshrss_secrets | default([]) }}"
+
+# The options of data/config.php, merged recursively over the default, a dictionary is a section, null removes the option
+app_freshrss__config: "{{ app_freshrss__config_default | combine(freshrss_config | default({}), recursive=true) }}"
+
+# Users with name, language, email and admin, the passwords and the API passwords of the users
+app_freshrss__users: "{{ freshrss_users | default([]) }}"
+app_freshrss__passwords: "{{ freshrss_passwords | default({}) }}"
+app_freshrss__api_passwords: "{{ freshrss_api_passwords | default({}) }}"
 
 app_freshrss__autoupdate_enabled: "{{ freshrss_autoupdate_enabled | default(false) }}"
+app_freshrss__autoupdate_schedule: "{{ freshrss_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-app_freshrss__uid: "{{ freshrss_uid | mandatory }}"
-app_freshrss__gid: "{{ freshrss_gid | default(app_freshrss__uid) }}"
+app_freshrss__config_default: {}
+
+# The options set by the role, the image disables the update of FreshRSS, the passwords are set with freshrss_secrets
+app_freshrss__config_role:
+  disable_update: true
+
+# The paths of the options set by the role, they must not be set in freshrss_config
+app_freshrss__config_role_paths: [ 'salt', 'disable_update', 'db.password', 'smtp.password' ]
+
+# The allowed values of options of FreshRSS (config.default.php and cli/do-install.php)
+app_freshrss__config_values:
+  environment: [ 'production', 'development', 'silent' ]
+  auth_type: [ 'form', 'http_auth', 'none' ]
+  mailer: [ 'mail', 'smtp' ]
+  db.type: [ 'sqlite', 'mysql', 'pgsql' ]
+
+# The passwords of config.php, they are written by the role and not created as podman secrets, the image cannot read them
+app_freshrss__secret_config:
+  DB_PASSWORD: 'db.password'
+  SMTP_PASSWORD: 'smtp.password'
+
+app_freshrss__secret_variables: "{{ app_freshrss__secret_config.keys() | list }}"
+
+# The data of a secret by its target
+app_freshrss__secret_data: >-
+  {%- set data = {} -%}
+  {%- if app_freshrss__secrets is sequence and app_freshrss__secrets is not string and app_freshrss__secrets is not mapping -%}
+  {%-   for secret in app_freshrss__secrets if secret is mapping and secret.target is defined and secret.data is defined -%}
+  {%-     set _ = data.update({ secret.target: secret.data }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ data }}
+
+# The default user of FreshRSS, the first user of freshrss_users without default_user in freshrss_config
+app_freshrss__default_user: >-
+  {{ (app_freshrss__config.default_user | default(none, true))
+     or ((app_freshrss__users | first).name if app_freshrss__users is sequence and app_freshrss__users | length > 0
+         and (app_freshrss__users | first) is mapping else '') }}
+
+# The names of the users, FreshRSS_user_Controller::USERNAME_PATTERN of FreshRSS 1.30.4
+app_freshrss__user_name_pattern: '^([0-9a-zA-Z_][0-9a-zA-Z_.@-]{1,38}|[0-9a-zA-Z])$'
+
+# FreshRSS_password_Util::check of FreshRSS 1.30.4
+app_freshrss__password_length: 7
+
+app_freshrss__environment_default:
+  PUID: "{{ app_freshrss__uid | string }}"
+  PGID: "{{ app_freshrss__gid | string }}"
+  TZ: "{{ app_freshrss__timezone }}"
+
+# The variables of the linuxserver image (readme-vars.yml of linuxserver/docker-freshrss and the base image),
+# FreshRSS itself reads its configuration from data/config.php
+app_freshrss__environment_allowed: [ 'PUID', 'PGID', 'TZ', 'UMASK' ]
 
 app_freshrss__podman_name: 'freshrss'
 app_freshrss__podman_image: 'lscr.io/linuxserver/freshrss'
-app_freshrss__podman_tag: "{{ app_freshrss__version }}"
 
-app_freshrss__podman_home: "{{ app_freshrss__home }}"
-
-app_freshrss__config_dir: "{{ app_freshrss__home }}/www"
-
-app_freshrss__container_default:
-  name: '{{ app_freshrss__podman_name }}'
+app_freshrss__podman_container_default:
+  name: "{{ app_freshrss__podman_name }}"
   hostname: "{{ app_freshrss__hostname }}"
-  image: "{{ app_freshrss__podman_image }}:{{ app_freshrss__podman_tag }}"
+  image: "{{ app_freshrss__podman_image }}:{{ app_freshrss__version }}"
   ip: "{{ app_freshrss__ip }}"
   ipv6: "{{ app_freshrss__ipv6 | default(omit) }}"
   network: "{{ app_freshrss__network }}"
   timezone: "{{ app_freshrss__timezone }}"
-  environment:
-    PUID: "{{ app_freshrss__uid }}"
-    PGID: "{{ app_freshrss__gid }}"
-    TZ:  "{{ app_freshrss__timezone }}"
-  labels: "{{ app_freshrss__labels }}"
+  labels: "{{ app_freshrss__labels | default(omit) }}"
+  environment: "{{ app_freshrss__environment }}"
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ app_freshrss__podman_home }}:/config"
+    - "{{ app_freshrss__home }}:/config"
+
+# Generated from config.default.php of FreshRSS 1.30.4, the sections db, limits, smtp and auto_sqlite_export are paths,
+# without salt and curl_options (keys are PHP constants) and db.pdo_options (keys are PHP constants)
+app_freshrss__config_allowed:
+  - 'environment'
+  - 'log_level'
+  - 'base_url'
+  - 'auto_update_url'
+  - 'language'
+  - 'title'
+  - 'meta_description'
+  - 'logo_html'
+  - 'default_user'
+  - 'force_email_validation'
+  - 'allow_anonymous'
+  - 'allow_anonymous_refresh'
+  - 'auth_type'
+  - 'reauth_required'
+  - 'reauth_time'
+  - 'http_auth_auto_register'
+  - 'http_auth_auto_register_email_field'
+  - 'api_enabled'
+  - 'suppress_csp_warning'
+  - 'csp.frame-ancestors'
+  - 'simplepie_syslog_enabled'
+  - 'pubsubhubbub_enabled'
+  - 'allow_robots'
+  - 'allow_referrer'
+  - 'nb_parallel_refresh'
+  - 'limits.cookie_duration'
+  - 'limits.cache_duration'
+  - 'limits.cache_duration_min'
+  - 'limits.cache_duration_max'
+  - 'limits.retry_after_default'
+  - 'limits.retry_after_max'
+  - 'limits.timeout'
+  - 'limits.max_inactivity'
+  - 'limits.max_feeds'
+  - 'limits.max_categories'
+  - 'limits.max_registrations'
+  - 'limits.max_favicon_upload_size'
+  - 'limits.regex_backtrack_limit'
+  - 'limits.regex_recursion_limit'
+  - 'limits.max_search_length'
+  - 'limits.max_search_parentheses_depth'
+  - 'db.type'
+  - 'db.host'
+  - 'db.user'
+  - 'db.password'
+  - 'db.base'
+  - 'db.prefix'
+  - 'db.connection_uri_params'
+  - 'mailer'
+  - 'smtp.hostname'
+  - 'smtp.host'
+  - 'smtp.port'
+  - 'smtp.auth'
+  - 'smtp.auth_type'
+  - 'smtp.username'
+  - 'smtp.password'
+  - 'smtp.secure'
+  - 'smtp.auto_tls'
+  - 'smtp.from'
+  - 'auto_sqlite_export.enabled'
+  - 'auto_sqlite_export.retention'
+  - 'extensions_enabled'
+  - 'extensions'
+  - 'disable_update'
+  - 'trusted_sources'
+  - 'internal_host_allowlist'

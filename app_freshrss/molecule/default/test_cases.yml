@@ -1,0 +1,109 @@
+---
+# Network created by container_podman in prepare.yml
+app_freshrss__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_freshrss__test_image: 'lscr.io/linuxserver/freshrss:latest'
+app_freshrss__test_quadlet_path: '/etc/containers/systemd/freshrss.container'
+
+# Database started by prepare.yml on molecule-freshrss, test credentials only
+app_freshrss__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  database: 'freshrss'
+  user: 'freshrss'
+  password: 'molecule-db-password'
+
+app_freshrss__test_cases:
+
+  # Only the mandatory variables and one user, sqlite
+  - name: 'molecule-freshrss-default'
+    role_vars:
+      freshrss_home: '/opt/freshrss'
+      freshrss_ip: '10.89.0.90'
+      freshrss_network: 'podman-molecule'
+      freshrss_hostname: 'freshrss-default'
+      freshrss_timezone: 'Europe/Berlin'
+      freshrss_uid: 1000
+      freshrss_users:
+        - name: 'admin'
+      freshrss_passwords:
+        admin: 'molecule-admin-password'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/freshrss:/config'
+      env:
+        - 'PUID=1000'
+        - 'PGID=1000'
+        - 'TZ=Europe/Berlin'
+      title: 'FreshRSS'
+      db_type: 'sqlite'
+      users: [ 'admin' ]
+      admins: []
+      api_user: ~
+
+  # IPv6, labels, PostgreSQL, options, two users, an administrator and an API password
+  - name: 'molecule-freshrss'
+    role_vars:
+      freshrss_home: '/opt/freshrss'
+      freshrss_ip: '10.89.0.91'
+      freshrss_ipv6: 'fd00:89::91'
+      freshrss_network: 'podman-molecule'
+      freshrss_hostname: 'freshrss-molecule'
+      freshrss_timezone: 'Europe/Berlin'
+      freshrss_uid: 1000
+      freshrss_labels:
+        traefik.enable: 'false'
+      freshrss_config:
+        title: 'Molecule News'
+        base_url: 'http://10.89.0.91'
+        api_enabled: true
+        db:
+          type: 'pgsql'
+          host: '10.89.0.20'
+          user: 'freshrss'
+          base: 'freshrss'
+      freshrss_secrets:
+        - name: 'freshrss_db_password'
+          data: 'molecule-db-password'
+          target: 'DB_PASSWORD'
+      freshrss_users:
+        - name: 'alice'
+          admin: true
+          email: 'alice@example.org'
+        - name: 'bob'
+          language: 'de'
+      freshrss_passwords:
+        alice: 'molecule-alice-password'
+        bob: 'molecule-bob-password'
+      freshrss_api_passwords:
+        bob: 'molecule-bob-api-password'
+    # The quadlet unit changes and FreshRSS has to restart, config.php changes without a second installation
+    side_effect:
+      environment:
+        UMASK: '022'
+      config:
+        title: 'Molecule Changed'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/freshrss:/config'
+        - 'Label=traefik.enable=false'
+      env:
+        - 'PUID=1000'
+        - 'UMASK=022'
+      title: 'Molecule Changed'
+      db_type: 'pgsql'
+      users: [ 'alice', 'bob' ]
+      admins: [ 'alice' ]
+      api_user: { name: 'bob', password: 'molecule-bob-api-password' }

@@ -1,35 +1,212 @@
 ---
 
-- name: 'Deploy FreshRSS container'
-  tags: [ 'app_freshrss' ]
+- name: 'Deploy FreshRSS'
+  tags: [ 'app', 'app_freshrss' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or freshrss_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_freshrss__container | length > 0
+          - app_freshrss__config is mapping
+        fail_msg: 'freshrss_config has to be a dictionary.'
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_freshrss__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_freshrss__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_freshrss__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('freshrss_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('freshrss_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of freshrss_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of freshrss_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_freshrss__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_freshrss__secrets_in_environment: >-
+          {{ (app_freshrss__secrets | map(attribute='target') | list + app_freshrss__secret_variables)
+             | select('in', app_freshrss__environment.keys() | list) | unique | list }}
+        app_freshrss__secrets_lines: >-
+          {{ app_freshrss__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='target') | list }}
+        app_freshrss__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_freshrss__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in freshrss_environment: ' ~ (app_freshrss__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_freshrss__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_freshrss__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The paths of the options are the keys joined with dots, e.g. db.type or limits.timeout,
+    # an allowed path is an option even if its value is a dictionary or a list (e.g. extensions_enabled)
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_freshrss__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_freshrss__errors: >-
+          {%- macro walk(options, prefix, ns) -%}
+          {%-   for key, value in options.items() -%}
+          {%-     set path = prefix ~ (key | string) -%}
+          {%-     if path in app_freshrss__config_role_paths -%}
+          {%-       set ns.role = ns.role + [ path ] -%}
+          {%-     elif path in app_freshrss__config_allowed -%}
+          {%-       for item in (value if value is sequence and value is not string else [ value ]) if item is string -%}
+          {%-         if (item ~ '.').splitlines() | length > 1 -%}
+          {%-           set ns.lines = ns.lines + [ path ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-       if path in app_freshrss__config_values and value is not none and value not in app_freshrss__config_values[path] -%}
+          {%-         set ns.values = ns.values + [ path ~ ' (' ~ (app_freshrss__config_values[path] | join(', ')) ~ ')' ] -%}
+          {%-       endif -%}
+          {%-     elif value is mapping and app_freshrss__config_allowed | select('match', (path ~ '.') | regex_escape) | list | length > 0 -%}
+          {%-       set _ = walk(value, path ~ '.', ns) -%}
+          {%-     elif value is not none -%}
+          {%-       set ns.unknown = ns.unknown + [ path ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endmacro -%}
+          {%- set errors = [] -%}
+          {%- set ns = namespace(unknown=[], role=[], lines=[], values=[]) -%}
+          {%- set _ = walk(app_freshrss__config, '', ns) -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in freshrss_config: ' ~ (ns.unknown | join(', ')) ~ '. Allowed are the options of FreshRSS (app_freshrss__config_allowed).') -%}
+          {%- endif -%}
+          {%- if ns.role | length > 0 -%}
+          {%-   set _ = errors.append('Options set by the role must not be set in freshrss_config: ' ~ (ns.role | join(', ')) ~ ', passwords are set with freshrss_secrets.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('Invalid values in freshrss_config: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the users'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_freshrss__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_freshrss__errors: >-
+          {%- set errors = [] -%}
+          {%- set users = app_freshrss__users -%}
+          {%- if users is not sequence or users is string or users is mapping or users | length == 0 -%}
+          {%-   set _ = errors.append('freshrss_users has to be a list with at least one user.') -%}
+          {%- elif users | reject('mapping') | list | length > 0 or users | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('freshrss_users entries need name.') -%}
+          {%- else -%}
+          {%-   set names = users | map(attribute='name') | map('string') | list -%}
+          {%-   set invalid = names | reject('match', app_freshrss__user_name_pattern) | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('Invalid names in freshrss_users: ' ~ (invalid | join(', ')) ~ ', allowed are up to 39 letters, digits and _ . @ - starting with a letter, a digit or _.') -%}
+          {%-   endif -%}
+          {%-   if names | map('lower') | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of freshrss_users have to be unique, FreshRSS ignores the case.') -%}
+          {%-   endif -%}
+          {%-   set admins = users | selectattr('admin', 'defined') | rejectattr('admin', 'boolean') | map(attribute='name') | list -%}
+          {%-   if admins | length > 0 -%}
+          {%-     set _ = errors.append('admin of freshrss_users has to be a boolean: ' ~ (admins | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if app_freshrss__default_user not in names -%}
+          {%-     set _ = errors.append('default_user of freshrss_config has to be in freshrss_users, got ' ~ app_freshrss__default_user ~ '.') -%}
+          {%-   endif -%}
+          {%-   for variable, passwords in { 'freshrss_passwords': app_freshrss__passwords, 'freshrss_api_passwords': app_freshrss__api_passwords }.items() -%}
+          {%-     if passwords is not mapping -%}
+          {%-       set _ = errors.append(variable ~ ' has to be a dictionary.') -%}
+          {%-     else -%}
+          {%-       set unknown = passwords.keys() | map('string') | reject('in', names) | list -%}
+          {%-       if unknown | length > 0 -%}
+          {%-         set _ = errors.append('Passwords of unknown users in ' ~ variable ~ ': ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-       endif -%}
+          {%-       set short = passwords | dict2items | rejectattr('value', 'none') | selectattr('value', 'string')
+                         | rejectattr('value', 'search', '^.{' ~ app_freshrss__password_length ~ ',}$') | map(attribute='key') | list -%}
+          {%-       if short | length > 0 -%}
+          {%-         set _ = errors.append('Passwords in ' ~ variable ~ ' need at least ' ~ app_freshrss__password_length ~ ' characters: ' ~ (short | join(', ')) ~ '.') -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if app_freshrss__passwords is mapping -%}
+          {%-     set missing = names | reject('in', app_freshrss__passwords.keys() | map('string') | list) | list -%}
+          {%-     if missing | length > 0 -%}
+          {%-       set _ = errors.append('Users without password in freshrss_passwords: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging freshrss_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_freshrss__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_freshrss__environment_unknown: >-
+          {{ (app_freshrss__container.environment | default({})).keys() | reject('in', app_freshrss__environment_allowed) | list }}
+        app_freshrss__secrets_unknown: >-
+          {{ app_freshrss__secrets | map(attribute='target') | reject('in', app_freshrss__secret_variables) | list }}
+        app_freshrss__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_freshrss__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_freshrss__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_freshrss__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_freshrss__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (app_freshrss__environment_allowed) and the secrets ' ~ (app_freshrss__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image changes the owner of /config to PUID and PGID on every start
+    - name: 'Create the directory of FreshRSS'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ app_freshrss__home }}"
         owner: "{{ app_freshrss__uid }}"
         group: "{{ app_freshrss__gid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_freshrss__podman_home }}"
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_freshrss__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_freshrss__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_freshrss__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name:  'Install container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_freshrss__container.name }}"
         hostname: "{{ app_freshrss__container.hostname }}"
@@ -38,12 +215,12 @@
         ip6: "{{ app_freshrss__container.ipv6 | default(omit) }}"
         network: "{{ app_freshrss__container.network }}"
         timezone: "{{ app_freshrss__container.timezone }}"
+        command: "{{ app_freshrss__container.command | default(omit) }}"
         env: "{{ app_freshrss__container.environment | default(omit) }}"
         etc_hosts: "{{ app_freshrss__container.etc_hosts | default(omit) }}"
         expose: "{{ app_freshrss__container.expose | default(omit) }}"
         label: "{{ app_freshrss__container.labels | default(omit) }}"
         publish: "{{ app_freshrss__container.publish | default(omit) }}"
-        secrets: "{{ app_freshrss__container.secrets | default(omit) }}"
         volume: "{{ app_freshrss__container.volumes | default(omit) }}"
         quadlet_options: |
           [Install]
@@ -59,20 +236,87 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_freshrss__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_freshrss__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_freshrss__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_freshrss__running: >-
+          {{ (ansible_facts.services[app_freshrss__container.name + '.service'].state | default('')) == 'running' }}
+        app_freshrss__restart: "{{ app_freshrss__running | bool and app_freshrss__quadlet_result is changed }}"
       when: 'not ansible_check_mode'
 
+    # nginx starts after the init of the image linked /app/www/data to /config/www/freshrss/data
+    - name: 'Wait for FreshRSS'
+      ansible.builtin.uri:
+        url: "http://{{ app_freshrss__ip }}/"
+        follow_redirects: 'none'
+        status_code: [ 200, 301, 302, 303, 307 ]
+      register: 'app_freshrss__ready'
+      until: app_freshrss__ready.status | default(-1) in [ 200, 301, 302, 303, 307 ]
+      retries: 90
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of FreshRSS'
+      when:
+        - not ansible_check_mode
+        - app_freshrss__ready.status | default(-1) not in [ 200, 301, 302, 303, 307 ]
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_freshrss__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_freshrss__journal'
+      changed_when: false
+
+    - name: 'Assert that FreshRSS answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__journal is skipped
+        fail_msg: "{{ app_freshrss__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Install and configure FreshRSS and manage the users'
+      when: 'not ansible_check_mode'
+      block:
+
+        # Installs FreshRSS on the first run, the passwords of config.php are options of the module and never logged
+        - name: 'Install and configure FreshRSS'
+          app_freshrss_config:
+            container: "{{ app_freshrss__container.name }}"
+            default_user: "{{ app_freshrss__default_user }}"
+            config: "{{ app_freshrss__config | combine({ 'default_user': app_freshrss__default_user }, app_freshrss__config_role, recursive=true) }}"
+            secrets: >-
+              {%- set secrets = {} -%}
+              {%- for target, path in app_freshrss__secret_config.items() if target in app_freshrss__secret_data -%}
+              {%-   set _ = secrets.update({ path: app_freshrss__secret_data[target] | string }) -%}
+              {%- endfor -%}
+              {{ secrets }}
+          register: 'app_freshrss__config_result'
+
+        # The passwords are only set if they differ, the module checks them with password_verify
+        - name: 'Create the users'
+          app_freshrss_user:
+            container: "{{ app_freshrss__container.name }}"
+            name: "{{ item.name | string }}"
+            password: "{{ app_freshrss__passwords[item.name] | string }}"
+            api_password: "{{ app_freshrss__api_passwords[item.name] | default(omit) }}"
+            language: "{{ item.language | default(omit) }}"
+            email: "{{ item.email | default(omit) }}"
+            admin: "{{ item.admin | default(false) }}"
+          loop: "{{ app_freshrss__users }}"
+          loop_control:
+            label: "{{ item.name }}"
+
     - name: 'Enable autoupdate on container'
-      when: 'app_freshrss__autoupdate_enabled'
-      include_role:
+      when: 'app_freshrss__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_freshrss__container.name }}"
         container_image: "{{ app_freshrss__container.image }}"
+        container_schedule: "{{ app_freshrss__autoupdate_schedule }}"

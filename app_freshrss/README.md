@@ -8,4 +8,4 @@ container_repository: https://github.com/linuxserver/docker-freshrss
 documentation_link: https://freshrss.github.io/FreshRSS/
 ---
 
-Installs and configures FreshRSS as a podman quadlet.
+Installs and configures FreshRSS as a podman quadlet, including its users.

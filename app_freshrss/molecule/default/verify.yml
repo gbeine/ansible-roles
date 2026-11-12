@@ -1,0 +1,156 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_freshrss__test_case: "{{ app_freshrss__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_freshrss__expect: "{{ app_freshrss__test_case.expect }}"
+    app_freshrss__test_home: "{{ app_freshrss__test_case.role_vars.freshrss_home }}"
+    # The passwords of the test case, they must not be part of the unit or the environment
+    app_freshrss__test_plain: >-
+      {{ app_freshrss__test_case.role_vars.freshrss_passwords.values() | list
+         + (app_freshrss__test_case.role_vars.freshrss_api_passwords | default({})).values() | list
+         + (app_freshrss__test_case.role_vars.freshrss_secrets | default([])) | map(attribute='data') | list }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_freshrss__test_quadlet_path }}"
+      register: 'app_freshrss__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_freshrss__test_image) in app_freshrss__test_quadlet_lines
+          - ('IP=' + app_freshrss__expect.ip) in app_freshrss__test_quadlet_lines
+          - app_freshrss__expect.ip6 is none or ('IP6=' + app_freshrss__expect.ip6) in app_freshrss__test_quadlet_lines
+          - app_freshrss__expect.ip6 is not none or app_freshrss__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_freshrss__expect.quadlet | reject('in', app_freshrss__test_quadlet_lines) | list | length == 0
+          - app_freshrss__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_freshrss__test_quadlet_lines | select('match', 'Secret=') | list | length == 0
+          - app_freshrss__test_plain | select('in', app_freshrss__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_freshrss__test_quadlet.content | b64decode }}"
+      vars:
+        app_freshrss__test_quadlet_lines: "{{ (app_freshrss__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the freshrss service'
+      ansible.builtin.command: 'systemctl is-active freshrss'
+      register: 'app_freshrss__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the freshrss container'
+      ansible.builtin.command: 'podman inspect freshrss'
+      register: 'app_freshrss__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__test_service.stdout == 'active'
+          - app_freshrss__test_net.IPAddress == app_freshrss__expect.ip
+          - app_freshrss__expect.ip6 is none or app_freshrss__test_net.GlobalIPv6Address == app_freshrss__expect.ip6
+          - app_freshrss__expect.env | reject('in', app_freshrss__test_env) | list | length == 0
+          - app_freshrss__test_plain | select('in', app_freshrss__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_freshrss__test_service.stdout }},
+          IPv4 {{ app_freshrss__test_net.IPAddress }}, IPv6 {{ app_freshrss__test_net.GlobalIPv6Address }},
+          environment {{ app_freshrss__test_env | join(', ') }}
+      vars:
+        app_freshrss__test_container: "{{ (app_freshrss__test_inspect.stdout | from_json)[0] }}"
+        app_freshrss__test_net: "{{ app_freshrss__test_container.NetworkSettings.Networks[app_freshrss__test_case.role_vars.freshrss_network] }}"
+        app_freshrss__test_env: "{{ app_freshrss__test_container.Config.Env }}"
+
+    - name: 'Read the owner of config.php'
+      ansible.builtin.stat:
+        path: "{{ app_freshrss__test_home }}/www/freshrss/data/config.php"
+      register: 'app_freshrss__test_config_stat'
+
+    - name: 'Read the owner and the mode of the home of FreshRSS'
+      ansible.builtin.stat:
+        path: "{{ app_freshrss__test_home }}"
+      register: 'app_freshrss__test_home_stat'
+
+    - name: 'Read config.php'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '--user', 'abc', 'freshrss', 'php', '-r', 'echo json_encode(include "/app/www/data/config.php");' ]
+      register: 'app_freshrss__test_config'
+      changed_when: false
+      no_log: true
+
+    - name: 'Read the users'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '--user', 'abc', 'freshrss', 'php', '/app/www/cli/user-info.php', '--json', '--no-db-size', '--no-db-counts' ]
+      register: 'app_freshrss__test_users'
+      changed_when: false
+
+    - name: 'Assert config.php and the users'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__test_config_stat.stat.exists
+          - app_freshrss__test_config_stat.stat.uid == 1000
+          - app_freshrss__test_home_stat.stat.uid == 1000
+          - app_freshrss__test_home_stat.stat.mode == '0700'
+          # without title in config.php FreshRSS uses the default of config.default.php
+          - app_freshrss__test_conf.title | default('FreshRSS') == app_freshrss__expect.title
+          - app_freshrss__test_conf.db.type == app_freshrss__expect.db_type
+          - app_freshrss__test_conf.disable_update
+          - app_freshrss__test_conf.default_user == app_freshrss__expect.users[0]
+          - app_freshrss__test_conf.salt | length > 0
+          - app_freshrss__test_user_list | map(attribute='user') | sort == app_freshrss__expect.users | sort
+          - app_freshrss__test_user_list | selectattr('admin') | map(attribute='user') | list == app_freshrss__expect.admins
+        fail_msg: >-
+          home mode {{ app_freshrss__test_home_stat.stat.mode | default('') }}, title {{ app_freshrss__test_conf.title | default('') }},
+          db {{ app_freshrss__test_conf.db.type | default('') }}, default user {{ app_freshrss__test_conf.default_user | default('') }},
+          users {{ app_freshrss__test_user_list | to_json }}
+      vars:
+        app_freshrss__test_conf: "{{ app_freshrss__test_config.stdout | from_json }}"
+        app_freshrss__test_user_list: "{{ app_freshrss__test_users.stdout | from_json }}"
+
+    - name: 'Read the page of FreshRSS'
+      ansible.builtin.uri:
+        url: "http://{{ app_freshrss__expect.ip }}/i/"
+        return_content: true
+      register: 'app_freshrss__test_page'
+
+    - name: 'Assert the title of the page'
+      ansible.builtin.assert:
+        that:
+          - app_freshrss__expect.title in app_freshrss__test_page.content
+        fail_msg: "{{ app_freshrss__test_page.content | truncate(500) }}"
+
+    - name: 'Log in to the Google Reader API'
+      when: app_freshrss__expect.api_user is not none
+      ansible.builtin.uri:
+        url: "http://{{ app_freshrss__expect.ip }}/api/greader.php/accounts/ClientLogin"
+        method: 'POST'
+        body_format: 'form-urlencoded'
+        body:
+          Email: "{{ app_freshrss__expect.api_user.name }}"
+          Passwd: "{{ item.password }}"
+        return_content: true
+        status_code: [ 200, 401, 403 ]
+      loop:
+        - { password: "{{ app_freshrss__expect.api_user.password | default('') }}", allowed: true }
+        - { password: 'wrong-api-password', allowed: false }
+      loop_control:
+        label: "{{ 'API password' if item.allowed else 'wrong password' }}"
+      register: 'app_freshrss__test_api'
+      no_log: true
+
+    - name: 'Assert the logins of the Google Reader API'
+      when: app_freshrss__expect.api_user is not none
+      ansible.builtin.assert:
+        that:
+          - (item.status == 200 and 'Auth=' in item.content) == item.item.allowed
+        fail_msg: "{{ 'API password' if item.item.allowed else 'wrong password' }}: status {{ item.status }}"
+        quiet: true
+      loop: "{{ app_freshrss__test_api.results }}"
+      loop_control:
+        label: "{{ 'API password' if item.item.allowed else 'wrong password' }}"
