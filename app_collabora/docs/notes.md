@@ -85,7 +85,7 @@ The merge is not recursive, `publish` and `volumes` replace the values of the de
 ### Validation
 
 The role checks before any change that only allowed environment variables and secrets are set in the container, that the required environment variables are set and not empty,
-every secret has `name`, `data` and `target`, the required secrets exist and no secret target is set in `collabora_environment`.
+`collabora_secrets` is a list of entries with `name`, `data` and `target` and unique names, the required secrets exist and no secret target is set in `collabora_environment`.
 If `collabora_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
@@ -116,7 +116,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-collabora` | IPv6, `collabora_environment` with an own user, `aliasgroup1` and an empty `extra_params`, HTTPS with the self-signed certificate |
 
 `prepare` creates the podman network and pulls the image.
-`side_effect` runs the role with `collabora_container` not a dictionary, an empty username, without the secret of the password and with the password in the environment, an unknown environment variable in `collabora_environment` and in `collabora_container.environment` and an unknown secret and checks that it fails with the expected message
+`side_effect` runs the role with `collabora_container` not a dictionary, a secret without target, an empty username, without the secret of the password and with the password in the environment, an unknown environment variable in `collabora_environment` and in `collabora_container.environment` and an unknown secret and checks that it fails with the expected message
 and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes the data of the secret on `molecule-collabora`, Collabora has to restart.
 `verify` checks the quadlet unit with the secrets, the capabilities and the disabled health check, the service, the secrets, the addresses and the environment of the container,
