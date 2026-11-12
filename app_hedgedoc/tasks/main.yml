@@ -1,41 +1,158 @@
 ---
 
-- name: 'Deploy HedgeDoc container'
-  tags: [ 'app_hedgedoc' ]
+- name: 'Deploy HedgeDoc'
+  tags: [ 'app', 'app_hedgedoc' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or hedgedoc_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_hedgedoc__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_hedgedoc__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_hedgedoc__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_hedgedoc__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('hedgedoc_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('hedgedoc_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of hedgedoc_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image builds CMD_DB_URL from DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME and CMD_DB_DIALECT, without DB_HOST HedgeDoc uses sqlite
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_hedgedoc__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_hedgedoc__set: "{{ app_hedgedoc__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_hedgedoc__environment_missing: "{{ app_hedgedoc__environment_required | reject('in', app_hedgedoc__set) | list }}"
+        app_hedgedoc__secret_targets: "{{ app_hedgedoc__secrets | map(attribute='target') | list }}"
+        app_hedgedoc__secrets_missing: "{{ app_hedgedoc__secrets_required | reject('in', app_hedgedoc__secret_targets) | list }}"
+        app_hedgedoc__database_missing: >-
+          {{ (app_hedgedoc__environment_database | reject('in', app_hedgedoc__set) | list)
+             + ([] if 'DB_PASS' in app_hedgedoc__secret_targets else [ 'DB_PASS' ]) }}
+        app_hedgedoc__secrets_in_environment: >-
+          {{ (app_hedgedoc__secret_targets + app_hedgedoc__secret_variables + app_hedgedoc__secret_files.values() | list)
+             | select('in', app_hedgedoc__environment.keys() | list) | unique | list }}
+        app_hedgedoc__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_hedgedoc__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('HedgeDoc needs the environment variables ' ~ (app_hedgedoc__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_hedgedoc__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_hedgedoc__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('HedgeDoc needs the secrets ' ~ (app_hedgedoc__secrets_required | join(', ')) ~ ', missing: ' ~ (app_hedgedoc__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if 'DB_HOST' in app_hedgedoc__set -%}
+          {%-   if app_hedgedoc__database_missing | length > 0 -%}
+          {%-     set _ = errors.append('DB_HOST needs ' ~ (app_hedgedoc__environment_database | join(', ')) ~ ' and the secret DB_PASS, missing: ' ~ (app_hedgedoc__database_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if 'CMD_DB_DIALECT' in app_hedgedoc__set and app_hedgedoc__environment.CMD_DB_DIALECT not in app_hedgedoc__database_dialects -%}
+          {%-     set _ = errors.append('CMD_DB_DIALECT has to be one of ' ~ (app_hedgedoc__database_dialects | join(', ')) ~ ' with DB_HOST.') -%}
+          {%-   endif -%}
+          {%-   if (app_hedgedoc__secret_data.DB_PASS | default('') | string) is not match(app_hedgedoc__database_password_pattern) and 'DB_PASS' in app_hedgedoc__secret_targets -%}
+          {%-     set _ = errors.append('DB_PASS may only contain letters, digits and . _ ~ -, the image puts it into the URL of the database without encoding.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if app_hedgedoc__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in hedgedoc_environment: ' ~ (app_hedgedoc__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # HedgeDoc reads the booleans with toBooleanConfig, only true and false are booleans
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_hedgedoc__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_hedgedoc__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_hedgedoc__environment.items() if value is not none -%}
+          {%-   if key in app_hedgedoc__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging hedgedoc_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_hedgedoc__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_hedgedoc__environment_unknown: >-
+          {{ (app_hedgedoc__container.environment | default({})).keys() | reject('in', app_hedgedoc__environment_allowed) | list }}
+        app_hedgedoc__secrets_unknown: >-
+          {{ app_hedgedoc__secrets | map(attribute='target') | reject('in', app_hedgedoc__secret_variables) | list }}
+        app_hedgedoc__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_hedgedoc__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_hedgedoc__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_hedgedoc__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_hedgedoc__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image and HedgeDoc (app_hedgedoc__environment_allowed) and the secrets ' ~ (app_hedgedoc__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image changes the owner of /config to PUID and PGID on every start
+    - name: 'Create the directory of HedgeDoc'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ app_hedgedoc__home }}"
         owner: "{{ app_hedgedoc__uid }}"
         group: "{{ app_hedgedoc__gid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_hedgedoc__podman_uploads_dir }}"
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: "{{ item.key }}"
-        data: "{{ item.value }}"
-      with_dict: "{{ app_hedgedoc__secrets }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_hedgedoc__secrets }}"
+      register: 'app_hedgedoc__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_hedgedoc__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_hedgedoc__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_hedgedoc__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -46,6 +163,7 @@
         ip6: "{{ app_hedgedoc__container.ipv6 | default(omit) }}"
         network: "{{ app_hedgedoc__container.network }}"
         timezone: "{{ app_hedgedoc__container.timezone }}"
+        command: "{{ app_hedgedoc__container.command | default(omit) }}"
         env: "{{ app_hedgedoc__container.environment | default(omit) }}"
         etc_hosts: "{{ app_hedgedoc__container.etc_hosts | default(omit) }}"
         expose: "{{ app_hedgedoc__container.expose | default(omit) }}"
@@ -67,20 +185,55 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_hedgedoc__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_hedgedoc__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_hedgedoc__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_hedgedoc__running: >-
+          {{ (ansible_facts.services[app_hedgedoc__container.name + '.service'].state | default('')) == 'running' }}
+        app_hedgedoc__restart: >-
+          {{ app_hedgedoc__running | bool
+             and (app_hedgedoc__secrets_result is changed or app_hedgedoc__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
+    # HedgeDoc migrates the database on the first start
+    - name: 'Wait for HedgeDoc'
+      ansible.builtin.uri:
+        url: "http://{{ app_hedgedoc__ip }}:{{ app_hedgedoc__port }}/status"
+      register: 'app_hedgedoc__ready'
+      until: app_hedgedoc__ready.status | default(-1) == 200
+      retries: 90
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of HedgeDoc'
+      when:
+        - not ansible_check_mode
+        - app_hedgedoc__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_hedgedoc__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_hedgedoc__journal'
+      changed_when: false
+
+    - name: 'Assert that HedgeDoc answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__journal is skipped
+        fail_msg: "{{ app_hedgedoc__journal.stdout_lines | default([]) }}"
+        quiet: true
+
     - name: 'Enable autoupdate on container'
-      when: 'app_hedgedoc__autoupdate_enabled'
-      include_role:
+      when: 'app_hedgedoc__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_hedgedoc__container.name }}"
         container_image: "{{ app_hedgedoc__container.image }}"
+        container_schedule: "{{ app_hedgedoc__autoupdate_schedule }}"

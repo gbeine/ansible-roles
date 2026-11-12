@@ -1,0 +1,121 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_hedgedoc__test_case: "{{ app_hedgedoc__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_hedgedoc__expect: "{{ app_hedgedoc__test_case.expect }}"
+    app_hedgedoc__test_url: "http://{{ app_hedgedoc__expect.ip }}:3000"
+    # The secrets of the test case, they must not be part of the unit or the environment
+    app_hedgedoc__test_plain: "{{ app_hedgedoc__test_case.role_vars.hedgedoc_secrets | map(attribute='data') | list }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_hedgedoc__test_quadlet_path }}"
+      register: 'app_hedgedoc__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_hedgedoc__test_image) in app_hedgedoc__test_quadlet_lines
+          - ('IP=' + app_hedgedoc__expect.ip) in app_hedgedoc__test_quadlet_lines
+          - app_hedgedoc__expect.ip6 is none or ('IP6=' + app_hedgedoc__expect.ip6) in app_hedgedoc__test_quadlet_lines
+          - app_hedgedoc__expect.ip6 is not none or app_hedgedoc__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_hedgedoc__expect.quadlet | reject('in', app_hedgedoc__test_quadlet_lines) | list | length == 0
+          - app_hedgedoc__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_hedgedoc__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_hedgedoc__test_plain | select('in', app_hedgedoc__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_hedgedoc__test_quadlet.content | b64decode }}"
+      vars:
+        app_hedgedoc__test_quadlet_lines: "{{ (app_hedgedoc__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the hedgedoc service'
+      ansible.builtin.command: 'systemctl is-active hedgedoc'
+      register: 'app_hedgedoc__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the hedgedoc container'
+      ansible.builtin.command: 'podman inspect hedgedoc'
+      register: 'app_hedgedoc__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__test_service.stdout == 'active'
+          - app_hedgedoc__test_net.IPAddress == app_hedgedoc__expect.ip
+          - app_hedgedoc__expect.ip6 is none or app_hedgedoc__test_net.GlobalIPv6Address == app_hedgedoc__expect.ip6
+          - app_hedgedoc__expect.env | reject('in', app_hedgedoc__test_env) | list | length == 0
+          - app_hedgedoc__test_plain | select('in', app_hedgedoc__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_hedgedoc__test_service.stdout }},
+          IPv4 {{ app_hedgedoc__test_net.IPAddress }}, IPv6 {{ app_hedgedoc__test_net.GlobalIPv6Address }},
+          environment {{ app_hedgedoc__test_env | join(', ') }}
+      vars:
+        app_hedgedoc__test_container: "{{ (app_hedgedoc__test_inspect.stdout | from_json)[0] }}"
+        app_hedgedoc__test_net: "{{ app_hedgedoc__test_container.NetworkSettings.Networks[app_hedgedoc__test_case.role_vars.hedgedoc_network] }}"
+        app_hedgedoc__test_env: "{{ app_hedgedoc__test_container.Config.Env }}"
+
+    - name: 'Read the status of HedgeDoc'
+      ansible.builtin.uri:
+        url: "{{ app_hedgedoc__test_url }}/status"
+        return_content: true
+      register: 'app_hedgedoc__test_status'
+
+    - name: 'Read the start page of HedgeDoc'
+      ansible.builtin.uri:
+        url: "{{ app_hedgedoc__test_url }}/"
+        return_content: true
+      register: 'app_hedgedoc__test_page'
+
+    # The redirect points to CMD_DOMAIN without the port, the path is read from it
+    - name: 'Create a note without login'
+      ansible.builtin.uri:
+        url: "{{ app_hedgedoc__test_url }}/new"
+        follow_redirects: 'none'
+        status_code: [ 302, 403 ]
+      register: 'app_hedgedoc__test_new'
+
+    - name: 'Read the new note'
+      when: app_hedgedoc__expect.anonymous
+      ansible.builtin.uri:
+        url: "{{ app_hedgedoc__test_url }}{{ app_hedgedoc__test_new.location | urlsplit('path') }}"
+        return_content: true
+      register: 'app_hedgedoc__test_note'
+
+    - name: 'Assert the status, the login and the notes'
+      ansible.builtin.assert:
+        that:
+          - app_hedgedoc__test_status.json.onlineNotes is defined
+          - app_hedgedoc__expect.provider is none or app_hedgedoc__expect.provider in app_hedgedoc__test_page.content
+          - (app_hedgedoc__test_note_path | length > 1) == app_hedgedoc__expect.anonymous
+          - not app_hedgedoc__expect.anonymous or app_hedgedoc__test_note.status == 200
+        fail_msg: >-
+          status {{ app_hedgedoc__test_status.json | default({}) | to_json }},
+          new note: {{ app_hedgedoc__test_new.status }} {{ app_hedgedoc__test_new.location | default('') }}
+      vars:
+        app_hedgedoc__test_note_path: "{{ app_hedgedoc__test_new.location | default('/') | urlsplit('path') }}"
+
+    - name: 'Read the tables of HedgeDoc in PostgreSQL'
+      when: app_hedgedoc__expect.postgres
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ app_hedgedoc__test_database.name }}", 'psql', '-U', "{{ app_hedgedoc__test_database.user }}",
+                '-d', "{{ app_hedgedoc__test_database.database }}", '-tAc', "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'" ]
+      register: 'app_hedgedoc__test_tables'
+      changed_when: false
+
+    - name: 'Assert the tables of HedgeDoc in PostgreSQL'
+      when: app_hedgedoc__expect.postgres
+      ansible.builtin.assert:
+        that:
+          - "'Users' in app_hedgedoc__test_tables.stdout_lines"
+          - "'Notes' in app_hedgedoc__test_tables.stdout_lines"
+        fail_msg: "{{ app_hedgedoc__test_tables.stdout_lines }}"

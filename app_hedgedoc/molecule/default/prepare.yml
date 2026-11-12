@@ -1,0 +1,48 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_hedgedoc__test_network }}"
+    podman_default_network: "{{ app_hedgedoc__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_hedgedoc__test_case: "{{ app_hedgedoc__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_hedgedoc__test_postgres: "{{ (app_hedgedoc__test_case.role_vars.hedgedoc_environment | default({})).DB_HOST is defined }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ app_hedgedoc__test_image }}"
+
+    - name: 'Start PostgreSQL for HedgeDoc'
+      when: 'app_hedgedoc__test_postgres | bool'
+      block:
+
+        - name: 'Start the database'
+          containers.podman.podman_container:
+            name: "{{ app_hedgedoc__test_database.name }}"
+            image: "{{ app_hedgedoc__test_database.image }}"
+            network: "{{ app_hedgedoc__test_network.name }}"
+            ip: "{{ app_hedgedoc__test_database.ip }}"
+            env:
+              POSTGRES_DB: "{{ app_hedgedoc__test_database.database }}"
+              POSTGRES_USER: "{{ app_hedgedoc__test_database.user }}"
+              POSTGRES_PASSWORD: "{{ app_hedgedoc__test_database.password }}"
+            state: 'started'
+
+        - name: 'Wait for the database'
+          ansible.builtin.wait_for:
+            host: "{{ app_hedgedoc__test_database.ip }}"
+            port: 5432
+            timeout: 120

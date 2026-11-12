@@ -1,0 +1,119 @@
+---
+# Network created by container_podman in prepare.yml
+app_hedgedoc__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_hedgedoc__test_image: 'lscr.io/linuxserver/hedgedoc:latest'
+app_hedgedoc__test_quadlet_path: '/etc/containers/systemd/hedgedoc.container'
+
+# Database started by prepare.yml on molecule-hedgedoc, test credentials only
+app_hedgedoc__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  database: 'hedgedoc'
+  user: 'hedgedoc'
+  password: 'molecule-db-password'
+
+# Test secrets only
+app_hedgedoc__test_session_secret:
+  name: 'hedgedoc_session_secret'
+  data: 'molecule-session-secret'
+  target: 'CMD_SESSION_SECRET'
+
+app_hedgedoc__test_cases:
+
+  # Only the mandatory variables, sqlite
+  - name: 'molecule-hedgedoc-default'
+    role_vars:
+      hedgedoc_home: '/opt/hedgedoc'
+      hedgedoc_ip: '10.89.0.90'
+      hedgedoc_network: 'podman-molecule'
+      hedgedoc_hostname: 'hedgedoc-default'
+      hedgedoc_timezone: 'Europe/Berlin'
+      hedgedoc_uid: 1000
+      hedgedoc_environment:
+        CMD_DOMAIN: '10.89.0.90'
+      hedgedoc_secrets:
+        - "{{ app_hedgedoc__test_session_secret }}"
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/hedgedoc:/config'
+        - 'Secret=hedgedoc_session_secret,type=mount,target=/run/secrets/hedgedoc_session_secret'
+      env:
+        - 'PUID=1000'
+        - 'PGID=1000'
+        - 'TZ=Europe/Berlin'
+        - 'CMD_DOMAIN=10.89.0.90'
+        - 'FILE__CMD_SESSION_SECRET=/run/secrets/hedgedoc_session_secret'
+      anonymous: true
+      provider: ~
+      postgres: false
+
+  # IPv6, labels, PostgreSQL, no anonymous notes, OAuth2
+  - name: 'molecule-hedgedoc'
+    role_vars:
+      hedgedoc_home: '/opt/hedgedoc'
+      hedgedoc_ip: '10.89.0.91'
+      hedgedoc_ipv6: 'fd00:89::91'
+      hedgedoc_network: 'podman-molecule'
+      hedgedoc_hostname: 'hedgedoc-molecule'
+      hedgedoc_timezone: 'Europe/Berlin'
+      hedgedoc_uid: 1000
+      hedgedoc_labels:
+        traefik.enable: 'false'
+      hedgedoc_environment:
+        CMD_DOMAIN: '10.89.0.91'
+        CMD_ALLOW_ANONYMOUS: false
+        CMD_ALLOW_GRAVATAR: true
+        DB_HOST: '10.89.0.20'
+        DB_PORT: 5432
+        DB_USER: 'hedgedoc'
+        DB_NAME: 'hedgedoc'
+        CMD_DB_DIALECT: 'postgres'
+        CMD_OAUTH2_PROVIDERNAME: 'Molecule SSO'
+        CMD_OAUTH2_CLIENT_ID: 'hedgedoc'
+        CMD_OAUTH2_AUTHORIZATION_URL: 'https://sso.example.org/authorize'
+        CMD_OAUTH2_TOKEN_URL: 'https://sso.example.org/token'
+        CMD_OAUTH2_USER_PROFILE_URL: 'https://sso.example.org/userinfo'
+        CMD_OAUTH2_USER_PROFILE_USERNAME_ATTR: 'preferred_username'
+        CMD_OAUTH2_USER_PROFILE_DISPLAY_NAME_ATTR: 'name'
+        CMD_OAUTH2_USER_PROFILE_EMAIL_ATTR: 'email'
+        CMD_OAUTH2_SCOPE: 'openid email profile'
+      hedgedoc_secrets:
+        - "{{ app_hedgedoc__test_session_secret }}"
+        - name: 'hedgedoc_db_pass'
+          data: 'molecule-db-password'
+          target: 'DB_PASS'
+        - name: 'hedgedoc_oauth2_client_secret'
+          data: 'molecule-oauth2-secret'
+          target: 'CMD_OAUTH2_CLIENT_SECRET'
+    # The quadlet unit changes and HedgeDoc has to restart
+    side_effect:
+      environment:
+        CMD_ALLOW_GRAVATAR: false
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/hedgedoc:/config'
+        - 'Label=traefik.enable=false'
+        - 'Secret=hedgedoc_db_pass,type=mount,target=/run/secrets/hedgedoc_db_pass'
+      env:
+        - 'CMD_ALLOW_ANONYMOUS=false'
+        - 'CMD_ALLOW_GRAVATAR=false'
+        - 'CMD_DB_DIALECT=postgres'
+        - 'DB_PORT=5432'
+        - 'FILE__DB_PASS=/run/secrets/hedgedoc_db_pass'
+        - 'FILE__CMD_OAUTH2_CLIENT_SECRET=/run/secrets/hedgedoc_oauth2_client_secret'
+      anonymous: false
+      provider: 'Molecule SSO'
+      postgres: true

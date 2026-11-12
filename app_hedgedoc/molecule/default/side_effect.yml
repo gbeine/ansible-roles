@@ -1,0 +1,158 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_hedgedoc__test_case: "{{ app_hedgedoc__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_hedgedoc__test_vars: "{{ app_hedgedoc__test_case.role_vars }}"
+    app_hedgedoc__test_environment: "{{ app_hedgedoc__test_vars.hedgedoc_environment }}"
+    app_hedgedoc__test_secrets: "{{ app_hedgedoc__test_vars.hedgedoc_secrets }}"
+    app_hedgedoc__test_checked_files:
+      - "{{ app_hedgedoc__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_hedgedoc__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_hedgedoc__test_checked_files }}"
+      register: 'app_hedgedoc__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_hedgedoc with hedgedoc_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_container: [ 'environment' ]
+        app_hedgedoc__test_invalid:
+          message: 'hedgedoc_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_hedgedoc with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_secrets: [ { name: 'hedgedoc_session_secret', data: 'x' } ]
+        app_hedgedoc__test_invalid:
+          message: 'a secret without target'
+          search: '^hedgedoc_secrets entries need name, data and target$'
+
+    - name: 'Run app_hedgedoc without the session secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_secrets: "{{ app_hedgedoc__test_secrets | rejectattr('target', 'eq', 'CMD_SESSION_SECRET') | list }}"
+        app_hedgedoc__test_invalid:
+          message: 'without the session secret'
+          search: '^HedgeDoc needs the secrets CMD_SESSION_SECRET, missing: CMD_SESSION_SECRET\.'
+
+    - name: 'Run app_hedgedoc with the session secret in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'CMD_SESSION_SECRET': 'molecule' }) }}"
+        app_hedgedoc__test_invalid:
+          message: 'the session secret in the environment'
+          search: 'Secrets and their file variables must not be set in hedgedoc_environment: CMD_SESSION_SECRET\.$'
+
+    - name: 'Run app_hedgedoc without CMD_DOMAIN (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'CMD_DOMAIN': '' }) }}"
+        app_hedgedoc__test_invalid:
+          message: 'without CMD_DOMAIN'
+          search: '^HedgeDoc needs the environment variables CMD_DOMAIN, missing or empty: CMD_DOMAIN\.$'
+
+    - name: 'Run app_hedgedoc with DB_HOST without the database password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'DB_HOST': '10.89.0.20', 'DB_PORT': 5432, 'DB_USER': 'hedgedoc', 'DB_NAME': 'hedgedoc', 'CMD_DB_DIALECT': 'postgres' }) }}"
+        hedgedoc_secrets: "{{ app_hedgedoc__test_secrets | rejectattr('target', 'eq', 'DB_PASS') | list }}"
+        app_hedgedoc__test_invalid:
+          message: 'DB_HOST without the database password'
+          search: '^DB_HOST needs CMD_DB_DIALECT, DB_PORT, DB_USER, DB_NAME and the secret DB_PASS, missing: DB_PASS\.$'
+
+    - name: 'Run app_hedgedoc with DB_HOST without CMD_DB_DIALECT (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'DB_HOST': '10.89.0.20', 'DB_PORT': 5432, 'DB_USER': 'hedgedoc', 'DB_NAME': 'hedgedoc', 'CMD_DB_DIALECT': none }) }}"
+        hedgedoc_secrets: "{{ app_hedgedoc__test_secrets + ([] if 'DB_PASS' in app_hedgedoc__test_secrets | map(attribute='target') else [ { 'name': 'hedgedoc_db_pass', 'data': 'molecule', 'target': 'DB_PASS' } ]) }}"
+        app_hedgedoc__test_invalid:
+          message: 'DB_HOST without CMD_DB_DIALECT'
+          search: '^DB_HOST needs CMD_DB_DIALECT, DB_PORT, DB_USER, DB_NAME and the secret DB_PASS, missing: CMD_DB_DIALECT\.$'
+
+    - name: 'Run app_hedgedoc with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'CMD_ALLOW_ANONYMOUS': 'yes' }) }}"
+        app_hedgedoc__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: CMD_ALLOW_ANONYMOUS\.$'
+
+    - name: 'Run app_hedgedoc with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'CMD_FORBIDDEN_NOTE_IDS': 'robots.txt\nfavicon.ico' }) }}"
+        app_hedgedoc__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: CMD_FORBIDDEN_NOTE_IDS\.$'
+
+    - name: 'Run app_hedgedoc with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine({ 'CMD_ALLOW_ANONYMUS': 'true' }) }}"
+        app_hedgedoc__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: CMD_ALLOW_ANONYMUS\.'
+
+    - name: 'Run app_hedgedoc with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        hedgedoc_secrets: "{{ app_hedgedoc__test_secrets + [ { 'name': 'hedgedoc_unknown', 'data': 'molecule', 'target': 'CMD_UNKNOWN_SECRET' } ] }}"
+        app_hedgedoc__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: CMD_UNKNOWN_SECRET\.'
+
+    - name: 'Run app_hedgedoc with the changed environment'
+      when: app_hedgedoc__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'hedgedoc' ]
+          register: 'app_hedgedoc__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            hedgedoc_environment: "{{ app_hedgedoc__test_environment | combine(app_hedgedoc__test_case.side_effect.environment) }}"
+
+        - name: 'Run app_hedgedoc with the changed environment'
+          ansible.builtin.include_role:
+            name: 'app_hedgedoc'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'hedgedoc' ]
+          register: 'app_hedgedoc__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_hedgedoc__quadlet_result is changed
+              - app_hedgedoc__secrets_result is not changed
+              - app_hedgedoc__test_started_after.stdout | int > app_hedgedoc__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_hedgedoc__quadlet_result is changed }}, secrets changed: {{ app_hedgedoc__secrets_result is changed }},
+              start before {{ app_hedgedoc__test_started_before.stdout }}, after {{ app_hedgedoc__test_started_after.stdout }}
