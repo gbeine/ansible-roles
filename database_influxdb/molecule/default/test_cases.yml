@@ -1,0 +1,188 @@
+---
+# Network created by container_podman in prepare.yml
+database_influxdb__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_influxdb__test_images:
+  - 'docker.io/library/influxdb:2.9-alpine'
+  - 'docker.io/library/influxdb:1.13-alpine'
+
+database_influxdb__test_quadlet_path: '/etc/containers/systemd/influxdb.container'
+
+# The secrets required by the major versions, test passwords and tokens only
+database_influxdb__test_secrets_2:
+  - name: 'influxdb_password'
+    data: 'molecule-admin-password'
+    target: 'DOCKER_INFLUXDB_INIT_PASSWORD'
+  - name: 'influxdb_admin_token'
+    data: 'molecule-admin-token'
+    target: 'DOCKER_INFLUXDB_INIT_ADMIN_TOKEN'
+database_influxdb__test_secrets_1:
+  - name: 'influxdb_admin_password'
+    data: 'molecule-admin-password'
+    target: 'INFLUXDB_ADMIN_PASSWORD'
+
+database_influxdb__test_cases:
+
+  # InfluxDB 2.9 with the mandatory variables, the organization of the setup and the secrets of the setup
+  - name: 'molecule-influxdb-default'
+    role_vars:
+      influxdb_home: '/opt/influxdb'
+      influxdb_ip: '10.89.0.80'
+      influxdb_network: 'podman-molecule'
+      influxdb_hostname: 'influxdb-default'
+      influxdb_timezone: 'Europe/Berlin'
+      influxdb_environment:
+        DOCKER_INFLUXDB_INIT_ORG: 'molecule'
+      influxdb_secrets: "{{ database_influxdb__test_secrets_2 }}"
+    expect:
+      major: '2'
+      image: 'docker.io/library/influxdb:2.9-alpine'
+      ip: '10.89.0.80'
+      ip6: ~
+      owner: 1000
+      quadlet:
+        - 'Volume=/opt/influxdb/etc:/etc/influxdb2'
+        - 'Volume=/opt/influxdb/data:/var/lib/influxdb2'
+        - 'Volume=/opt/influxdb/backup:/backup'
+        - 'Secret=influxdb_password,type=mount,target=/run/secrets/influxdb_password,uid=1000,gid=1000,mode=0400'
+        - 'Secret=influxdb_admin_token,type=mount,target=/run/secrets/influxdb_admin_token,uid=1000,gid=1000,mode=0400'
+      env:
+        - 'DOCKER_INFLUXDB_INIT_MODE=setup'
+        - 'DOCKER_INFLUXDB_INIT_ORG=molecule'
+        - 'DOCKER_INFLUXDB_INIT_PASSWORD_FILE=/run/secrets/influxdb_password'
+        - 'DOCKER_INFLUXDB_INIT_ADMIN_TOKEN_FILE=/run/secrets/influxdb_admin_token'
+      buckets:
+        - { name: 'default', seconds: 0 }
+      users: []
+      owners: []
+
+  # InfluxDB 2.9 with IPv6, labels, a log level, buckets with retention, users and a second organization
+  - name: 'molecule-influxdb'
+    role_vars:
+      influxdb_home: '/opt/influxdb'
+      influxdb_ip: '10.89.0.81'
+      influxdb_ipv6: 'fd00:89::81'
+      influxdb_network: 'podman-molecule'
+      influxdb_hostname: 'influxdb-molecule'
+      influxdb_timezone: 'Europe/Berlin'
+      influxdb_labels:
+        traefik.enable: 'false'
+      influxdb_environment:
+        DOCKER_INFLUXDB_INIT_ORG: 'molecule'
+        INFLUXD_LOG_LEVEL: 'warn'
+      influxdb_secrets: "{{ database_influxdb__test_secrets_2 }}"
+      influxdb_buckets:
+        - name: 'metrics'
+          retention: '7d'
+        - name: 'logs'
+        - name: 'other'
+          org: 'second'
+          retention: '1w2d'
+      influxdb_users:
+        - name: 'molecule'
+        - name: 'owner'
+          role: 'owner'
+        - name: 'second'
+          org: 'second'
+      influxdb_passwords:
+        molecule: 'molecule-user-password'
+        owner: 'molecule-owner-password'
+        second: 'molecule-second-password'
+    # The service restarts with the changed environment, a bucket is added and a password changed
+    side_effect:
+      environment:
+        INFLUXD_LOG_LEVEL: 'error'
+      buckets:
+        - name: 'extra'
+          retention: '12h'
+      passwords:
+        molecule: 'molecule-changed-password'
+    expect:
+      major: '2'
+      image: 'docker.io/library/influxdb:2.9-alpine'
+      ip: '10.89.0.81'
+      ip6: 'fd00:89::81'
+      owner: 1000
+      quadlet:
+        - 'Volume=/opt/influxdb/data:/var/lib/influxdb2'
+        - 'Secret=influxdb_admin_token,type=mount,target=/run/secrets/influxdb_admin_token,uid=1000,gid=1000,mode=0400'
+        - 'Label=traefik.enable=false'
+      env:
+        - 'INFLUXD_LOG_LEVEL=error'
+        - 'DOCKER_INFLUXDB_INIT_ORG=molecule'
+      buckets:
+        - { name: 'metrics', seconds: 604800 }
+        - { name: 'logs', seconds: 0 }
+        - { name: 'other', seconds: 777600 }
+        - { name: 'extra', seconds: 43200 }
+      users:
+        - { name: 'molecule', password: 'molecule-changed-password' }
+        - { name: 'owner', password: 'molecule-owner-password' }
+        - { name: 'second', password: 'molecule-second-password' }
+      owners: [ 'owner' ]
+
+  # InfluxDB 1.13 with databases with retention, users with privileges and an admin
+  - name: 'molecule-influxdb-1'
+    role_vars:
+      influxdb_home: '/opt/influxdb'
+      influxdb_ip: '10.89.0.82'
+      influxdb_network: 'podman-molecule'
+      influxdb_hostname: 'influxdb-1'
+      influxdb_timezone: 'Europe/Berlin'
+      influxdb_release: '1.13'
+      influxdb_secrets: "{{ database_influxdb__test_secrets_1 }}"
+      influxdb_databases:
+        - name: 'telegraf'
+          retention: '30d'
+        - name: 'app'
+      influxdb_users:
+        - name: 'writer'
+          grants:
+            - { database: 'telegraf', privilege: 'WRITE' }
+        - name: 'reader'
+          grants:
+            - { database: 'telegraf', privilege: 'READ' }
+            - { database: 'app', privilege: 'ALL' }
+        - name: 'admin2'
+          admin: true
+      influxdb_passwords:
+        writer: 'molecule-writer-password'
+        reader: "molecule-reader-pass'word"
+        admin2: 'molecule-admin2-password'
+    side_effect:
+      environment:
+        INFLUXDB_LOGGING_LEVEL: 'warn'
+      databases:
+        - name: 'extra'
+          retention: '2d'
+      passwords:
+        reader: 'molecule-reader-changed'
+    expect:
+      major: '1'
+      image: 'docker.io/library/influxdb:1.13-alpine'
+      ip: '10.89.0.82'
+      ip6: ~
+      owner: 1500
+      quadlet:
+        - 'Volume=/opt/influxdb/data:/var/lib/influxdb'
+        - 'Volume=/opt/influxdb/backup:/backup'
+        - 'Secret=influxdb_admin_password,type=env,target=INFLUXDB_ADMIN_PASSWORD'
+      env:
+        - 'INFLUXDB_HTTP_AUTH_ENABLED=true'
+        - 'INFLUXDB_ADMIN_USER=admin'
+        - 'INFLUXDB_LOGGING_LEVEL=warn'
+      databases:
+        - { name: 'telegraf', duration: '720h0m0s' }
+        - { name: 'app', duration: '0s' }
+        - { name: 'extra', duration: '48h0m0s' }
+      users:
+        - { name: 'writer', password: 'molecule-writer-password' }
+        - { name: 'reader', password: 'molecule-reader-changed' }
+        - { name: 'admin2', password: 'molecule-admin2-password' }

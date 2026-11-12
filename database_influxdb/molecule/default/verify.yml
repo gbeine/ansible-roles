@@ -1,0 +1,283 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_influxdb__test_case: "{{ database_influxdb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_influxdb__expect: "{{ database_influxdb__test_case.expect }}"
+    database_influxdb__test_home: "{{ database_influxdb__test_case.role_vars.influxdb_home }}"
+    database_influxdb__test_url: "http://{{ database_influxdb__expect.ip }}:8086"
+    database_influxdb__test_admin_password: 'molecule-admin-password'
+    database_influxdb__test_admin_token: 'molecule-admin-token'
+    # The passwords and tokens of the test case, they must not be part of the unit or the environment
+    database_influxdb__test_plain: >-
+      {{ (database_influxdb__test_case.role_vars.influxdb_passwords | default({})).values() | list
+         + [ database_influxdb__test_admin_password, database_influxdb__test_admin_token ] }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_influxdb__test_quadlet_path }}"
+      register: 'database_influxdb__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_influxdb__expect.image) in database_influxdb__test_quadlet_lines
+          - ('IP=' + database_influxdb__expect.ip) in database_influxdb__test_quadlet_lines
+          - database_influxdb__expect.ip6 is none or ('IP6=' + database_influxdb__expect.ip6) in database_influxdb__test_quadlet_lines
+          - database_influxdb__expect.ip6 is not none or database_influxdb__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_influxdb__expect.quadlet | reject('in', database_influxdb__test_quadlet_lines) | list | length == 0
+          - database_influxdb__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - database_influxdb__test_quadlet_lines | select('match', 'PublishPort=') | list | length == 0
+          - database_influxdb__test_plain | select('in', database_influxdb__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ database_influxdb__test_quadlet.content | b64decode }}"
+      vars:
+        database_influxdb__test_quadlet_lines: "{{ (database_influxdb__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the influxdb service'
+      ansible.builtin.command: 'systemctl is-active influxdb'
+      register: 'database_influxdb__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the influxdb container'
+      ansible.builtin.command: 'podman inspect influxdb'
+      register: 'database_influxdb__test_inspect'
+      changed_when: false
+      no_log: true
+
+    # Secrets of 1.x are passed in the environment of the container, they are checked in the unit and in the variables of the role only
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__test_service.stdout == 'active'
+          - database_influxdb__test_net.IPAddress == database_influxdb__expect.ip
+          - database_influxdb__expect.ip6 is none or database_influxdb__test_net.GlobalIPv6Address == database_influxdb__expect.ip6
+          - database_influxdb__expect.env | reject('in', database_influxdb__test_env) | list | length == 0
+          - database_influxdb__test_env | select('match', '(DOCKER_INFLUXDB_INIT_PASSWORD|DOCKER_INFLUXDB_INIT_ADMIN_TOKEN)=') | list | length == 0
+        fail_msg: >-
+          service {{ database_influxdb__test_service.stdout }},
+          IPv4 {{ database_influxdb__test_net.IPAddress }}, IPv6 {{ database_influxdb__test_net.GlobalIPv6Address }},
+          environment {{ database_influxdb__test_env | reject('search', 'PASSWORD=|TOKEN=') | join(', ') }}
+      vars:
+        database_influxdb__test_container: "{{ (database_influxdb__test_inspect.stdout | from_json)[0] }}"
+        database_influxdb__test_net: "{{ database_influxdb__test_container.NetworkSettings.Networks[database_influxdb__test_case.role_vars.influxdb_network] }}"
+        database_influxdb__test_env: "{{ database_influxdb__test_container.Config.Env }}"
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ database_influxdb__test_home }}/data"
+      register: 'database_influxdb__test_data'
+
+    - name: 'Assert the owner of the data directory'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__test_data.stat.isdir | default(false)
+          - database_influxdb__test_data.stat.uid == database_influxdb__expect.owner
+        fail_msg: "uid {{ database_influxdb__test_data.stat.uid | default('missing') }}"
+
+    - name: 'Ping InfluxDB'
+      ansible.builtin.uri:
+        url: "{{ database_influxdb__test_url }}/ping"
+        status_code: [ 204 ]
+
+    - name: 'Check InfluxDB 2.x'
+      when: database_influxdb__expect.major == '2'
+      block:
+
+        - name: 'Read the buckets with the admin token'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/buckets?limit=100"
+            headers:
+              Authorization: "Token {{ database_influxdb__test_admin_token }}"
+          register: 'database_influxdb__test_buckets'
+
+        - name: 'Assert the buckets and their retention'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb__test_found | length == database_influxdb__expect.buckets | length
+            fail_msg: "expected {{ database_influxdb__expect.buckets }}, found {{ database_influxdb__test_found }}"
+          vars:
+            database_influxdb__test_found: >-
+              {%- set found = [] -%}
+              {%- for expected in database_influxdb__expect.buckets -%}
+              {%-   for bucket in database_influxdb__test_buckets.json.buckets if bucket.name == expected.name
+                      and ((bucket.retentionRules | default([]) | first | default({})).everySeconds | default(0) | int) == expected.seconds -%}
+              {%-     set _ = found.append(bucket.name) -%}
+              {%-   endfor -%}
+              {%- endfor -%}
+              {{ found }}
+
+        - name: 'Sign in as the users'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/signin"
+            method: 'POST'
+            url_username: "{{ item.name }}"
+            url_password: "{{ item.password }}"
+            force_basic_auth: true
+            status_code: [ 204 ]
+          loop: "{{ database_influxdb__expect.users }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: 'Sign in with a wrong password'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/signin"
+            method: 'POST'
+            url_username: "{{ item.name }}"
+            url_password: 'wrong-password'
+            force_basic_auth: true
+            status_code: [ 401 ]
+          loop: "{{ database_influxdb__expect.users[:1] }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: 'Read the organizations'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/orgs?org=molecule"
+            headers:
+              Authorization: "Token {{ database_influxdb__test_admin_token }}"
+          register: 'database_influxdb__test_org'
+
+        - name: 'Read the owners of the organization of the setup'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/orgs/{{ database_influxdb__test_org.json.orgs[0].id }}/owners"
+            headers:
+              Authorization: "Token {{ database_influxdb__test_admin_token }}"
+          register: 'database_influxdb__test_owners'
+
+        - name: 'Assert the owners of the organization'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb__expect.owners | reject('in', database_influxdb__test_owners.json.users | map(attribute='name') | list) | list | length == 0
+            fail_msg: "owners {{ database_influxdb__test_owners.json.users | map(attribute='name') | list }}"
+
+        - name: 'Write a point with the admin token'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/write?org=molecule&bucket=default&precision=s"
+            method: 'POST'
+            headers:
+              Authorization: "Token {{ database_influxdb__test_admin_token }}"
+              Content-Type: 'text/plain'
+            body: 'molecule value=42'
+            status_code: [ 204 ]
+
+        - name: 'Query the point with the admin token'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/query?org=molecule"
+            method: 'POST'
+            headers:
+              Authorization: "Token {{ database_influxdb__test_admin_token }}"
+              Content-Type: 'application/vnd.flux'
+              Accept: 'application/csv'
+            body: 'from(bucket: "default") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "molecule")'
+            return_content: true
+          register: 'database_influxdb__test_query'
+          until: database_influxdb__test_query.content is search(',42,')
+          retries: 10
+          delay: 2
+
+    - name: 'Check InfluxDB 1.x'
+      when: database_influxdb__expect.major == '1'
+      block:
+
+        - name: 'Read the retention policies as the admin'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/query"
+            method: 'POST'
+            body_format: 'form-urlencoded'
+            body:
+              q: "SHOW RETENTION POLICIES ON \"{{ item.name }}\""
+            url_username: 'admin'
+            url_password: "{{ database_influxdb__test_admin_password }}"
+            force_basic_auth: true
+          loop: "{{ database_influxdb__expect.databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'database_influxdb__test_policies'
+
+        - name: 'Assert the databases and their retention'
+          ansible.builtin.assert:
+            that:
+              - item.json.results[0].error is not defined
+              - item.json.results[0].series[0]['values'] | selectattr(database_influxdb__test_columns.index('default'), 'sameas', true)
+                | map(attribute=database_influxdb__test_columns.index('duration')) | first == item.item.duration
+            fail_msg: "{{ item.item.name }}: {{ item.json.results[0] }}"
+          loop: "{{ database_influxdb__test_policies.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          vars:
+            database_influxdb__test_columns: "{{ item.json.results[0].series[0].columns }}"
+
+        - name: 'Read the users as the admin'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/query"
+            method: 'POST'
+            body_format: 'form-urlencoded'
+            body:
+              q: 'SHOW USERS'
+            url_username: 'admin'
+            url_password: "{{ database_influxdb__test_admin_password }}"
+            force_basic_auth: true
+          register: 'database_influxdb__test_users'
+
+        - name: 'Assert the admins'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb__test_admins == [ 'admin', 'admin2' ]
+            fail_msg: "admins {{ database_influxdb__test_admins }}"
+          vars:
+            database_influxdb__test_admins: >-
+              {{ database_influxdb__test_users.json.results[0].series[0]['values'] | selectattr(1, 'sameas', true) | map('first') | sort }}
+
+        # writer may only write to telegraf, reader may only read from telegraf and has all privileges on app
+        - name: 'Write and read as the users'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/{{ item.path }}"
+            method: 'POST'
+            body_format: "{{ 'form-urlencoded' if item.path.startswith('query') else 'raw' }}"
+            body: "{{ { 'q': 'SELECT * FROM molecule' } if item.path.startswith('query') else 'molecule value=42' }}"
+            url_username: "{{ item.user }}"
+            url_password: "{{ (database_influxdb__expect.users | selectattr('name', 'eq', item.user) | first).password }}"
+            force_basic_auth: true
+            status_code: [ 200, 204, 403 ]
+          loop:
+            - { user: 'writer', path: 'write?db=telegraf', allowed: true }
+            - { user: 'writer', path: 'query?db=telegraf', allowed: false }
+            - { user: 'reader', path: 'write?db=telegraf', allowed: false }
+            - { user: 'reader', path: 'query?db=telegraf', allowed: true }
+            - { user: 'reader', path: 'write?db=app', allowed: true }
+          loop_control:
+            label: "{{ item.user }} {{ item.path }}"
+          register: 'database_influxdb__test_access'
+
+        # A query without privileges answers 200 with an error, a write 403
+        - name: 'Assert the privileges of the users'
+          ansible.builtin.assert:
+            that:
+              - >-
+                (item.status in [ 200, 204 ] and (item.json.results[0].error | default('')) == '')
+                == item.item.allowed
+            fail_msg: "{{ item.item.user }} {{ item.item.path }}: {{ item.status }} {{ item.json | default('') }}"
+          loop: "{{ database_influxdb__test_access.results }}"
+          loop_control:
+            label: "{{ item.item.user }} {{ item.item.path }}"
+
+        - name: 'Query with a wrong password'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/query"
+            method: 'POST'
+            body_format: 'form-urlencoded'
+            body:
+              q: 'SHOW DATABASES'
+            url_username: 'reader'
+            url_password: 'wrong-password'
+            force_basic_auth: true
+            status_code: [ 401 ]

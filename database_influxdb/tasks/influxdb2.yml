@@ -1,0 +1,319 @@
+---
+# Manages the organizations, buckets and users of InfluxDB 2.x over the HTTP API with the admin token of the setup.
+# Buckets, users and memberships that are not listed are not changed.
+# The token is part of the headers, the tasks do not log their parameters,
+# the tasks changing InfluxDB are checked afterwards with the status and the message of InfluxDB.
+
+- name: 'Read the organizations'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/orgs?limit=100"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    validate_certs: false
+  register: 'database_influxdb__v2_orgs'
+
+- name: 'Create the organizations'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/orgs"
+    method: 'POST'
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    body_format: 'json'
+    body:
+      name: "{{ item }}"
+    status_code: [ 201 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__v2_org_names | reject('in', database_influxdb__v2_orgs.json.orgs | map(attribute='name') | list) | list }}"
+  register: 'database_influxdb__v2_orgs_created'
+  changed_when: true
+  failed_when: false
+  vars:
+    database_influxdb__v2_org_names: >-
+      {{ (database_influxdb__buckets + database_influxdb__users) | map(attribute='org', default=database_influxdb__organization)
+         | map('string') | unique | list }}
+
+- name: 'Assert the responses of creating the organizations'
+  ansible.builtin.assert:
+    that:
+      - database_influxdb__v2_failed | length == 0
+    fail_msg: "{{ database_influxdb__v2_failed | join(' ') }}"
+    quiet: true
+  vars:
+    database_influxdb__v2_failed: >-
+      {%- set failed = [] -%}
+      {%- for result in database_influxdb__v2_orgs_created.results | default([]) if result.status | default(0) != 201 -%}
+      {%-   set _ = failed.append('Organization ' ~ result.item ~ ': ' ~ (result.status | default('no answer')) ~ ' ' ~ (result.json.message | default(result.msg | default(''))) ~ '.') -%}
+      {%- endfor -%}
+      {{ failed }}
+
+- name: 'Read the organizations again'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/orgs?limit=100"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    validate_certs: false
+  register: 'database_influxdb__v2_orgs'
+
+- name: 'Read the buckets'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/buckets?limit=100"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    validate_certs: false
+  register: 'database_influxdb__v2_buckets'
+
+# A retention of INF or 0 keeps the data infinitely, InfluxDB stores it without retention rules
+- name: 'Create the buckets and change their retention'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/buckets{{ ('/' ~ item.id) if item.id else '' }}"
+    method: "{{ 'PATCH' if item.id else 'POST' }}"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    body_format: 'json'
+    body: >-
+      {{ { 'retentionRules': item.rules } if item.id
+         else { 'orgID': item.org_id, 'name': item.name, 'retentionRules': item.rules } }}
+    status_code: [ 200, 201 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__v2_bucket_changes }}"
+  register: 'database_influxdb__v2_buckets_changed'
+  changed_when: true
+  failed_when: false
+  vars:
+    database_influxdb__v2_org_ids: "{{ database_influxdb__v2_orgs.json.orgs | items2dict(key_name='name', value_name='id') }}"
+    database_influxdb__v2_bucket_changes: >-
+      {%- set changes = [] -%}
+      {%- for bucket in database_influxdb__buckets -%}
+      {%-   set org_id = database_influxdb__v2_org_ids[bucket.org | default(database_influxdb__organization) | string] -%}
+      {%-   set ns = namespace(desired=0) -%}
+      {%-   for number, unit in bucket.retention | default('0') | string | regex_findall('([0-9]+)([wdhms])') -%}
+      {%-     set ns.desired = ns.desired + (number | int) * database_influxdb__duration_seconds[unit] -%}
+      {%-   endfor -%}
+      {%-   set rules = [ { 'type': 'expire', 'everySeconds': ns.desired } ] if ns.desired > 0 else [] -%}
+      {%-   set existing = database_influxdb__v2_buckets.json.buckets | selectattr('orgID', 'eq', org_id) | selectattr('name', 'eq', bucket.name | string) | list -%}
+      {%-   if existing | length == 0 -%}
+      {%-     set _ = changes.append({ 'id': '', 'org_id': org_id, 'name': bucket.name | string, 'rules': rules }) -%}
+      {%-   elif ((existing[0].retentionRules | default([]) | first | default({})).everySeconds | default(0) | int) != ns.desired -%}
+      {%-     set _ = changes.append({ 'id': existing[0].id, 'org_id': org_id, 'name': bucket.name | string, 'rules': rules }) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ changes }}
+
+- name: 'Assert the responses of changing the buckets'
+  ansible.builtin.assert:
+    that:
+      - database_influxdb__v2_failed | length == 0
+    fail_msg: "{{ database_influxdb__v2_failed | join(' ') }}"
+    quiet: true
+  vars:
+    database_influxdb__v2_failed: >-
+      {%- set failed = [] -%}
+      {%- for result in database_influxdb__v2_buckets_changed.results | default([]) if result.status | default(0) not in [ 200, 201 ] -%}
+      {%-   set _ = failed.append('Bucket ' ~ result.item.name ~ ': ' ~ (result.status | default('no answer')) ~ ' ' ~ (result.json.message | default(result.msg | default(''))) ~ '.') -%}
+      {%- endfor -%}
+      {{ failed }}
+
+- name: 'Read the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/users?limit=100"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    validate_certs: false
+  register: 'database_influxdb__v2_users'
+
+- name: 'Create the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/users"
+    method: 'POST'
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    body_format: 'json'
+    body:
+      name: "{{ item }}"
+      status: 'active'
+    status_code: [ 201 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__users | map(attribute='name') | map('string') | reject('in', database_influxdb__v2_users.json.users | map(attribute='name') | list) | list }}"
+  register: 'database_influxdb__v2_users_created'
+  changed_when: true
+  failed_when: false
+
+- name: 'Assert the responses of creating the users'
+  ansible.builtin.assert:
+    that:
+      - database_influxdb__v2_failed | length == 0
+    fail_msg: "{{ database_influxdb__v2_failed | join(' ') }}"
+    quiet: true
+  vars:
+    database_influxdb__v2_failed: >-
+      {%- set failed = [] -%}
+      {%- for result in database_influxdb__v2_users_created.results | default([]) if result.status | default(0) != 201 -%}
+      {%-   set _ = failed.append('User ' ~ result.item ~ ': ' ~ (result.status | default('no answer')) ~ ' ' ~ (result.json.message | default(result.msg | default(''))) ~ '.') -%}
+      {%- endfor -%}
+      {{ failed }}
+
+- name: 'Read the users again'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/users?limit=100"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    validate_certs: false
+  register: 'database_influxdb__v2_users'
+
+# A user whose password does not work gets the password of influxdb_passwords, new users have no password
+- name: 'Check the passwords of the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/signin"
+    method: 'POST'
+    url_username: "{{ item.name }}"
+    url_password: "{{ database_influxdb__passwords[item.name] }}"
+    force_basic_auth: true
+    status_code: [ 204, 401 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__users }}"
+  register: 'database_influxdb__v2_logins'
+
+- name: 'Change the passwords of the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/users/{{ database_influxdb__v2_user_ids[item.item.name | string] }}/password"
+    method: 'POST'
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    body_format: 'json'
+    body:
+      password: "{{ database_influxdb__passwords[item.item.name] | string }}"
+    status_code: [ 204 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__v2_logins.results | selectattr('status', 'eq', 401) | list }}"
+  register: 'database_influxdb__v2_passwords'
+  changed_when: true
+  failed_when: false
+  vars:
+    database_influxdb__v2_user_ids: "{{ database_influxdb__v2_users.json.users | items2dict(key_name='name', value_name='id') }}"
+
+# Only the name of the user is reported, the message of InfluxDB does not contain the password
+- name: 'Assert the responses of changing the passwords'
+  ansible.builtin.assert:
+    that:
+      - database_influxdb__v2_failed | length == 0
+    fail_msg: "{{ database_influxdb__v2_failed | join(' ') }}"
+    quiet: true
+  vars:
+    database_influxdb__v2_failed: >-
+      {%- set failed = [] -%}
+      {%- for result in database_influxdb__v2_passwords.results | default([]) if result.status | default(0) != 204 -%}
+      {%-   set _ = failed.append('Password of ' ~ result.item.item.name ~ ': ' ~ (result.status | default('no answer')) ~ ' ' ~ (result.json.message | default('')) ~ '.') -%}
+      {%- endfor -%}
+      {{ failed }}
+
+- name: 'Read the members and owners of the organizations'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/orgs/{{ item.org_id }}/{{ item.kind }}"
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    validate_certs: false
+  loop: >-
+    {%- set requests = [] -%}
+    {%- for org in database_influxdb__v2_orgs.json.orgs -%}
+    {%-   for kind in [ 'members', 'owners' ] -%}
+    {%-     set _ = requests.append({ 'org_id': org.id, 'kind': kind }) -%}
+    {%-   endfor -%}
+    {%- endfor -%}
+    {{ requests }}
+  register: 'database_influxdb__v2_memberships'
+
+# InfluxDB maps a user to an organization only once, as member or as owner,
+# a user with the other role loses it before the user gets the role of influxdb_users
+- name: 'Compute the changes of the roles of the users'
+  ansible.builtin.set_fact:
+    database_influxdb__v2_role_changes: >-
+      {%- set changes = [] -%}
+      {%- for user in database_influxdb__users -%}
+      {%-   set org_id = database_influxdb__v2_org_ids[user.org | default(database_influxdb__organization) | string] -%}
+      {%-   set user_id = database_influxdb__v2_user_ids[user.name | string] -%}
+      {%-   set add = 'owners' if user.role | default('member') == 'owner' else 'members' -%}
+      {%-   set other = 'members' if add == 'owners' else 'owners' -%}
+      {%-   set ids = {} -%}
+      {%-   for kind in [ 'members', 'owners' ] -%}
+      {%-     set result = database_influxdb__v2_memberships.results | selectattr('item.org_id', 'eq', org_id) | selectattr('item.kind', 'eq', kind) | first -%}
+      {%-     set _ = ids.update({ kind: result.json.users | map(attribute='id') | list }) -%}
+      {%-   endfor -%}
+      {%-   if user_id not in ids[add] -%}
+      {%-     set _ = changes.append({ 'name': user.name | string, 'org_id': org_id, 'user_id': user_id,
+                                       'remove': other if user_id in ids[other] else '', 'add': add }) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ changes }}
+  vars:
+    database_influxdb__v2_org_ids: "{{ database_influxdb__v2_orgs.json.orgs | items2dict(key_name='name', value_name='id') }}"
+    database_influxdb__v2_user_ids: "{{ database_influxdb__v2_users.json.users | items2dict(key_name='name', value_name='id') }}"
+
+- name: 'Remove the former role of the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/orgs/{{ item.org_id }}/{{ item.remove }}/{{ item.user_id }}"
+    method: 'DELETE'
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    status_code: [ 204 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__v2_role_changes | rejectattr('remove', 'eq', '') | list }}"
+  register: 'database_influxdb__v2_roles_removed'
+  changed_when: true
+  failed_when: false
+
+- name: 'Assert the responses of removing the former roles'
+  ansible.builtin.assert:
+    that:
+      - database_influxdb__v2_failed | length == 0
+    fail_msg: "{{ database_influxdb__v2_failed | join(' ') }}"
+    quiet: true
+  vars:
+    database_influxdb__v2_failed: >-
+      {%- set failed = [] -%}
+      {%- for result in database_influxdb__v2_roles_removed.results | default([]) if result.status | default(0) != 204 -%}
+      {%-   set _ = failed.append(result.item.remove ~ ' of ' ~ result.item.name ~ ': ' ~ (result.status | default('no answer')) ~ ' ' ~ (result.json.message | default(result.msg | default(''))) ~ '.') -%}
+      {%- endfor -%}
+      {{ failed }}
+
+- name: 'Add the users to their organizations'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/api/v2/orgs/{{ item.org_id }}/{{ item.add }}"
+    method: 'POST'
+    headers:
+      Authorization: "Token {{ database_influxdb__admin_token }}"
+    body_format: 'json'
+    body:
+      id: "{{ item.user_id }}"
+    status_code: [ 201 ]
+    validate_certs: false
+  loop: "{{ database_influxdb__v2_role_changes }}"
+  register: 'database_influxdb__v2_roles_added'
+  changed_when: true
+  failed_when: false
+
+- name: 'Assert the responses of adding the users to their organizations'
+  ansible.builtin.assert:
+    that:
+      - database_influxdb__v2_failed | length == 0
+    fail_msg: "{{ database_influxdb__v2_failed | join(' ') }}"
+    quiet: true
+  vars:
+    database_influxdb__v2_failed: >-
+      {%- set failed = [] -%}
+      {%- for result in database_influxdb__v2_roles_added.results | default([]) if result.status | default(0) != 201 -%}
+      {%-   set _ = failed.append(result.item.add ~ ' ' ~ result.item.name ~ ': ' ~ (result.status | default('no answer')) ~ ' ' ~ (result.json.message | default(result.msg | default(''))) ~ '.') -%}
+      {%- endfor -%}
+      {{ failed }}

@@ -8,4 +8,4 @@ container_repository: https://github.com/influxdata/influxdata-docker
 documentation_link: https://docs.influxdata.com/influxdb/
 ---
 
-Installs and configures InfluxDB 2 or 3 as a podman container.
+Installs and configures InfluxDB 1.x or 2.x with its databases, buckets and users as podman quadlet.

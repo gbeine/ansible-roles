@@ -1,0 +1,271 @@
+---
+# Manages the databases and users of InfluxDB 1.x with InfluxQL over the HTTP API, authenticated as the admin of the image.
+# Databases and users that are not listed are not changed.
+
+- name: 'Read the databases'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: 'SHOW DATABASES'
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  register: 'database_influxdb__v1_databases'
+  failed_when: >-
+    database_influxdb__v1_databases.status != 200
+    or database_influxdb__v1_databases.json.results | selectattr('error', 'defined') | list | length > 0
+
+- name: 'Create the databases'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: "CREATE DATABASE \"{{ item }}\""
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__databases | map(attribute='name') | map('string') | reject('in', database_influxdb__v1_existing) | list }}"
+  register: 'database_influxdb__v1_created'
+  changed_when: true
+  failed_when: >-
+    database_influxdb__v1_created.status != 200
+    or database_influxdb__v1_created.json.results | selectattr('error', 'defined') | list | length > 0
+  vars:
+    database_influxdb__v1_existing: >-
+      {{ (database_influxdb__v1_databases.json.results[0].series | default([{}]))[0].get('values', []) | map('first') | list }}
+
+- name: 'Read the retention policies of the databases'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: "SHOW RETENTION POLICIES ON \"{{ item.name }}\""
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__databases | selectattr('retention', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: 'database_influxdb__v1_policies'
+  failed_when: >-
+    database_influxdb__v1_policies.status != 200
+    or database_influxdb__v1_policies.json.results | selectattr('error', 'defined') | list | length > 0
+
+# The default policy of the database gets the duration, the shard duration follows the rules of InfluxDB for new policies
+- name: 'Change the retention of the databases'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: >-
+        ALTER RETENTION POLICY "{{ item.policy }}" ON "{{ item.database }}"
+        DURATION {{ item.duration }} SHARD DURATION {{ item.shard_duration }}
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__v1_alter }}"
+  loop_control:
+    label: "{{ item.database }}: {{ item.duration }}"
+  register: 'database_influxdb__v1_altered'
+  changed_when: true
+  failed_when: >-
+    database_influxdb__v1_altered.status != 200
+    or database_influxdb__v1_altered.json.results | selectattr('error', 'defined') | list | length > 0
+  vars:
+    database_influxdb__v1_alter: >-
+      {%- set statements = [] -%}
+      {%- for result in database_influxdb__v1_policies.results | default([]) -%}
+      {%-   set columns = result.json.results[0].series[0].columns -%}
+      {%-   set policy = result.json.results[0].series[0]['values'] | selectattr(columns.index('default'), 'sameas', true) | first -%}
+      {%-   set ns = namespace(current=0, desired=0) -%}
+      {%-   for number, unit in policy[columns.index('duration')] | string | regex_findall('([0-9]+)([wdhms])') -%}
+      {%-     set ns.current = ns.current + (number | int) * database_influxdb__duration_seconds[unit] -%}
+      {%-   endfor -%}
+      {%-   set desired = result.item.retention | string -%}
+      {%-   for number, unit in desired | regex_findall('([0-9]+)([wdhms])') -%}
+      {%-     set ns.desired = ns.desired + (number | int) * database_influxdb__duration_seconds[unit] -%}
+      {%-   endfor -%}
+      {%-   if ns.current != ns.desired -%}
+      {%-     set shard = '168h' if ns.desired == 0 else ('1h' if ns.desired < 172800 else ('1d' if ns.desired <= 15552000 else '168h')) -%}
+      {%-     set _ = statements.append({ 'database': result.item.name, 'policy': policy[columns.index('name')],
+                                          'duration': 'INF' if ns.desired == 0 else desired, 'shard_duration': shard }) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ statements }}
+
+- name: 'Read the users'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: 'SHOW USERS'
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  register: 'database_influxdb__v1_users'
+  failed_when: >-
+    database_influxdb__v1_users.status != 200
+    or database_influxdb__v1_users.json.results | selectattr('error', 'defined') | list | length > 0
+
+# The password is part of the statement, the single quotes and backslashes of InfluxQL are escaped
+- name: 'Create the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: >-
+        {%- set bs = '\\' | first -%}
+        CREATE USER "{{ item.name }}" WITH PASSWORD
+        '{{ database_influxdb__passwords[item.name] | string | replace(bs, bs ~ bs) | replace("'", bs ~ "'") }}'
+        {{- ' WITH ALL PRIVILEGES' if item.admin | default(false) else '' }}
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__users | rejectattr('name', 'in', database_influxdb__v1_existing) | list }}"
+  register: 'database_influxdb__v1_users_created'
+  changed_when: true
+  failed_when: >-
+    database_influxdb__v1_users_created.status != 200
+    or database_influxdb__v1_users_created.json.results | selectattr('error', 'defined') | list | length > 0
+  vars:
+    database_influxdb__v1_existing: >-
+      {{ (database_influxdb__v1_users.json.results[0].series | default([{}]))[0].get('values', []) | map('first') | list }}
+
+# A user whose password does not work gets the password of influxdb_passwords
+- name: 'Check the passwords of the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: 'SHOW DATABASES'
+    url_username: "{{ item.name }}"
+    url_password: "{{ database_influxdb__passwords[item.name] }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: [ 200, 401 ]
+  loop: "{{ database_influxdb__users }}"
+  register: 'database_influxdb__v1_logins'
+
+- name: 'Change the passwords of the users'
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: >-
+        {%- set bs = '\\' | first -%}
+        SET PASSWORD FOR "{{ item.item.name }}" =
+        '{{ database_influxdb__passwords[item.item.name] | string | replace(bs, bs ~ bs) | replace("'", bs ~ "'") }}'
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__v1_logins.results | selectattr('status', 'eq', 401) | list }}"
+  register: 'database_influxdb__v1_passwords'
+  changed_when: true
+  failed_when: >-
+    database_influxdb__v1_passwords.status != 200
+    or database_influxdb__v1_passwords.json.results | selectattr('error', 'defined') | list | length > 0
+
+# Users created before are read again with their admin flag
+- name: 'Read the users again'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: 'SHOW USERS'
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  register: 'database_influxdb__v1_users'
+  failed_when: >-
+    database_influxdb__v1_users.status != 200
+    or database_influxdb__v1_users.json.results | selectattr('error', 'defined') | list | length > 0
+
+- name: 'Read the privileges of the users'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: "SHOW GRANTS FOR \"{{ item.name }}\""
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: 'database_influxdb__v1_grants'
+  failed_when: >-
+    database_influxdb__v1_grants.status != 200
+    or database_influxdb__v1_grants.json.results | selectattr('error', 'defined') | list | length > 0
+
+# GRANT replaces the privilege of a user on a database, REVOKE ALL removes the privileges on databases not in grants
+- name: 'Change the privileges of the users'
+  ansible.builtin.uri:
+    url: "{{ database_influxdb__api_url }}/query"
+    method: 'POST'
+    body_format: 'form-urlencoded'
+    body:
+      q: "{{ item }}"
+    url_username: "{{ database_influxdb__admin_user }}"
+    url_password: "{{ database_influxdb__admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  loop: "{{ database_influxdb__v1_statements }}"
+  register: 'database_influxdb__v1_privileges'
+  changed_when: true
+  failed_when: >-
+    database_influxdb__v1_privileges.status != 200
+    or database_influxdb__v1_privileges.json.results | selectattr('error', 'defined') | list | length > 0
+  vars:
+    database_influxdb__v1_admins: >-
+      {{ (database_influxdb__v1_users.json.results[0].series | default([{}]))[0].get('values', [])
+         | selectattr(1, 'sameas', true) | map('first') | list }}
+    database_influxdb__v1_statements: >-
+      {%- set statements = [] -%}
+      {%- for result in database_influxdb__v1_grants.results -%}
+      {%-   set user = result.item -%}
+      {%-   set admin = user.admin | default(false) -%}
+      {%-   if admin and user.name not in database_influxdb__v1_admins -%}
+      {%-     set _ = statements.append('GRANT ALL PRIVILEGES TO "' ~ user.name ~ '"') -%}
+      {%-   elif not admin and user.name in database_influxdb__v1_admins -%}
+      {%-     set _ = statements.append('REVOKE ALL PRIVILEGES FROM "' ~ user.name ~ '"') -%}
+      {%-   endif -%}
+      {%-   set current = {} -%}
+      {%-   for row in (result.json.results[0].series | default([{}]))[0].get('values', []) -%}
+      {%-     set _ = current.update({ row[0]: row[1] }) -%}
+      {%-   endfor -%}
+      {%-   set desired = {} -%}
+      {%-   for grant in user.grants | default([]) -%}
+      {%-     set privilege = grant.privilege | string | upper -%}
+      {%-     set _ = desired.update({ grant.database | string: 'ALL PRIVILEGES' if privilege == 'ALL' else privilege }) -%}
+      {%-   endfor -%}
+      {%-   for database, privilege in desired.items() if current[database] | default('NO PRIVILEGES') != privilege -%}
+      {%-     set _ = statements.append('GRANT ' ~ (privilege | replace(' PRIVILEGES', '')) ~ ' ON "' ~ database ~ '" TO "' ~ user.name ~ '"') -%}
+      {%-   endfor -%}
+      {%-   for database, privilege in current.items() if database not in desired and privilege != 'NO PRIVILEGES' -%}
+      {%-     set _ = statements.append('REVOKE ALL ON "' ~ database ~ '" FROM "' ~ user.name ~ '"') -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ statements }}

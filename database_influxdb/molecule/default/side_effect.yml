@@ -1,0 +1,259 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_influxdb__test_case: "{{ database_influxdb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_influxdb__test_vars: "{{ database_influxdb__test_case.role_vars }}"
+    database_influxdb__test_env: "{{ database_influxdb__test_vars.influxdb_environment | default({}) }}"
+    database_influxdb__test_secrets: "{{ database_influxdb__test_vars.influxdb_secrets | default([]) }}"
+    database_influxdb__test_users: "{{ database_influxdb__test_vars.influxdb_users | default([]) }}"
+    # The variable of the password of the admin of the major version of the test case
+    database_influxdb__test_password_variable: >-
+      {{ 'INFLUXDB_ADMIN_PASSWORD' if database_influxdb__test_case.expect.major == '1' else 'DOCKER_INFLUXDB_INIT_PASSWORD' }}
+    database_influxdb__test_checked_files:
+      - "{{ database_influxdb__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_influxdb__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_influxdb__test_checked_files }}"
+      register: 'database_influxdb__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include,
+    # the cases of one major version set all variables of the role that differ between the versions
+
+    - name: 'Run database_influxdb with influxdb_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_container: [ 'environment' ]
+        database_influxdb__test_invalid:
+          message: 'influxdb_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_influxdb with InfluxDB 3 (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '3'
+        database_influxdb__test_invalid:
+          message: 'InfluxDB 3'
+          search: '^influxdb_release has to be one of 1\.11, 1\.12, 1\.13, 2\.7, 2\.8, 2\.9, got 3,'
+
+    - name: 'Run database_influxdb with the former major version as tag (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_version: '2'
+        database_influxdb__test_invalid:
+          message: 'the former major version as tag'
+          search: 'influxdb_version is the tag of the image and has to start with the release, got 2\.'
+
+    - name: 'Run database_influxdb with a variable of another major version (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_environment: >-
+          {{ database_influxdb__test_env | combine({ 'INFLUXD_LOG_LEVEL' if database_influxdb__test_case.expect.major == '1' else 'INFLUXDB_LOGGING_LEVEL': 'debug' }) }}
+        database_influxdb__test_invalid:
+          message: 'a variable of another major version'
+          search: '^Unknown environment variables: (INFLUXD_LOG_LEVEL|INFLUXDB_LOGGING_LEVEL)\. Allowed are the variables of InfluxDB'
+
+    - name: 'Run database_influxdb with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_secrets: [ { name: 'influxdb_password', data: 'x' } ]
+        database_influxdb__test_invalid:
+          message: 'a secret without target'
+          search: '^influxdb_secrets entries need name, data and target$'
+
+    - name: 'Run database_influxdb without the secrets of the admin (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_secrets: []
+        database_influxdb__test_invalid:
+          message: 'without the secrets of the admin'
+          search: 'InfluxDB [12]\.x needs the secrets [A-Z_, ]+, missing: '
+
+    - name: 'Run database_influxdb with the password of the admin in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_environment: "{{ database_influxdb__test_env | combine({ database_influxdb__test_password_variable: 'molecule' }) }}"
+        database_influxdb__test_invalid:
+          message: 'the password of the admin in the environment'
+          search: 'Secrets and their file variables must not be set in influxdb_environment: (INFLUXDB_ADMIN_PASSWORD|DOCKER_INFLUXDB_INIT_PASSWORD)\.'
+
+    - name: 'Run database_influxdb with a user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_users: "{{ database_influxdb__test_users + [ { 'name': 'worker' } ] }}"
+        database_influxdb__test_invalid:
+          message: 'a user without password'
+          search: 'Users without password in influxdb_passwords: worker\.'
+
+    - name: 'Run database_influxdb with the admin in the users (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_users: [ { name: 'admin' } ]
+        influxdb_passwords: { admin: 'molecule' }
+        database_influxdb__test_invalid:
+          message: 'the admin in the users'
+          search: '^The admin admin is created by the image with its secret and must not be in influxdb_users\.$'
+
+    - name: 'Run database_influxdb with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_secrets: "{{ database_influxdb__test_secrets + [ { 'name': 'influxdb_unknown', 'data': 'x', 'target': 'INFLUXDB_SHARED_SECRET' } ] }}"
+        database_influxdb__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: INFLUXDB_SHARED_SECRET\.'
+
+    - name: 'Run database_influxdb 2.9 with the upgrade mode (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '2.9'
+        influxdb_environment: { DOCKER_INFLUXDB_INIT_ORG: 'molecule', DOCKER_INFLUXDB_INIT_MODE: 'upgrade' }
+        influxdb_secrets: "{{ database_influxdb__test_secrets_2 }}"
+        influxdb_databases: []
+        influxdb_buckets: []
+        influxdb_users: []
+        influxdb_passwords: {}
+        database_influxdb__test_invalid:
+          message: 'the upgrade mode'
+          search: '^DOCKER_INFLUXDB_INIT_MODE has to be setup, the upgrade from InfluxDB 1\.x is not supported by the role\.$'
+
+    - name: 'Run database_influxdb 2.9 with databases (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '2.9'
+        influxdb_environment: { DOCKER_INFLUXDB_INIT_ORG: 'molecule' }
+        influxdb_secrets: "{{ database_influxdb__test_secrets_2 }}"
+        influxdb_databases: [ { name: 'telegraf' } ]
+        influxdb_buckets: []
+        influxdb_users: []
+        influxdb_passwords: {}
+        database_influxdb__test_invalid:
+          message: 'databases with 2.9'
+          search: '^influxdb_databases is only supported by InfluxDB 1\.x, use influxdb_buckets\.$'
+
+    - name: 'Run database_influxdb 1.13 without authentication (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '1.13'
+        influxdb_environment: { INFLUXDB_HTTP_AUTH_ENABLED: 'false' }
+        influxdb_secrets: "{{ database_influxdb__test_secrets_1 }}"
+        influxdb_databases: []
+        influxdb_buckets: []
+        influxdb_users: []
+        influxdb_passwords: {}
+        database_influxdb__test_invalid:
+          message: 'authentication disabled with 1.13'
+          search: '^INFLUXDB_HTTP_AUTH_ENABLED has to be true, the role manages databases and users with the admin\.$'
+
+    - name: 'Run database_influxdb 1.13 with a user of the image (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '1.13'
+        influxdb_environment: { INFLUXDB_DB: 'telegraf', INFLUXDB_USER: 'telegraf' }
+        influxdb_secrets: "{{ database_influxdb__test_secrets_1 }}"
+        influxdb_databases: []
+        influxdb_buckets: []
+        influxdb_users: []
+        influxdb_passwords: {}
+        database_influxdb__test_invalid:
+          message: 'a user of the image with 1.13'
+          search: '^Databases and users are managed with influxdb_databases, influxdb_users and influxdb_passwords, not with INFLUXDB_DB, INFLUXDB_USER\.$'
+
+    - name: 'Run database_influxdb 1.13 with a grant on an unknown database (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '1.13'
+        influxdb_environment: {}
+        influxdb_secrets: "{{ database_influxdb__test_secrets_1 }}"
+        influxdb_databases: [ { name: 'app' } ]
+        influxdb_buckets: []
+        influxdb_users: [ { name: 'worker', grants: [ { database: 'missing', privilege: 'READ' } ] } ]
+        influxdb_passwords: { worker: 'molecule' }
+        database_influxdb__test_invalid:
+          message: 'a grant on an unknown database with 1.13'
+          search: '^Grants of worker on databases not in influxdb_databases: missing\.$'
+
+    - name: 'Run database_influxdb 1.13 with an unknown privilege (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '1.13'
+        influxdb_environment: {}
+        influxdb_secrets: "{{ database_influxdb__test_secrets_1 }}"
+        influxdb_databases: [ { name: 'app' } ]
+        influxdb_buckets: []
+        influxdb_users: [ { name: 'worker', grants: [ { database: 'app', privilege: 'OWNER' } ] } ]
+        influxdb_passwords: { worker: 'molecule' }
+        database_influxdb__test_invalid:
+          message: 'an unknown privilege with 1.13'
+          search: '^Unknown privileges of worker: OWNER, allowed are READ, WRITE, ALL\.$'
+
+    - name: 'Run database_influxdb 1.13 with buckets (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_release: '1.13'
+        influxdb_environment: {}
+        influxdb_secrets: "{{ database_influxdb__test_secrets_1 }}"
+        influxdb_databases: []
+        influxdb_buckets: [ { name: 'metrics', retention: '30x' } ]
+        influxdb_users: []
+        influxdb_passwords: {}
+        database_influxdb__test_invalid:
+          message: 'buckets with 1.13'
+          search: '^The retention has to be a duration like 30d, 12h or 1w2d, INF or 0 is infinite: metrics\.$'
+
+    - name: 'Run database_influxdb with the changed configuration'
+      when: database_influxdb__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'influxdb' ]
+          register: 'database_influxdb__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            influxdb_environment: "{{ database_influxdb__test_env | combine(database_influxdb__test_case.side_effect.environment) }}"
+            influxdb_databases: "{{ database_influxdb__test_vars.influxdb_databases | default([]) + database_influxdb__test_case.side_effect.databases | default([]) }}"
+            influxdb_buckets: "{{ database_influxdb__test_vars.influxdb_buckets | default([]) + database_influxdb__test_case.side_effect.buckets | default([]) }}"
+            influxdb_passwords: "{{ database_influxdb__test_vars.influxdb_passwords | combine(database_influxdb__test_case.side_effect.passwords) }}"
+
+        - name: 'Run database_influxdb with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'database_influxdb'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'influxdb' ]
+          register: 'database_influxdb__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart of the service and the changed databases or buckets and passwords'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb__quadlet_result is changed
+              - database_influxdb__test_started_after.stdout | int > database_influxdb__test_started_before.stdout | int
+              - (database_influxdb__v1_created | default({})) is changed or (database_influxdb__v2_buckets_changed | default({})) is changed
+              - (database_influxdb__v1_passwords | default({})) is changed or (database_influxdb__v2_passwords | default({})) is changed
+            fail_msg: >-
+              quadlet changed: {{ database_influxdb__quadlet_result is changed }},
+              start before {{ database_influxdb__test_started_before.stdout }}, after {{ database_influxdb__test_started_after.stdout }},
+              databases or buckets changed: {{ (database_influxdb__v1_created | default({})) is changed or (database_influxdb__v2_buckets_changed | default({})) is changed }},
+              passwords changed: {{ (database_influxdb__v1_passwords | default({})) is changed or (database_influxdb__v2_passwords | default({})) is changed }}

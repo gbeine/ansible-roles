@@ -1,26 +1,368 @@
 ---
 
 - name: 'Install InfluxDB'
-  tags: [ 'database_influxdb'  ]
+  tags: [ 'database', 'database_influxdb' ]
   block:
 
-    - name: 'Include OS-specific variables (podman)'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        files:
-          - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}-podman.yml"
-          - "{{ ansible_facts['distribution'] }}-podman.yml"
-        skip: true
-      when: 'database_influxdb__use_podman'
+    # The former influxdb_version was the major version 2 or 3, now it is the tag of the image
+    - name: 'Validate the release'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__release | string in database_influxdb__releases
+          - >-
+            database_influxdb__version | string == database_influxdb__release | string
+            or (database_influxdb__version | string).startswith(database_influxdb__release | string ~ '.')
+            or (database_influxdb__version | string).startswith(database_influxdb__release | string ~ '-')
+        fail_msg: >-
+          influxdb_release has to be one of {{ database_influxdb__releases | join(', ') }}, got {{ database_influxdb__release }},
+          and influxdb_version is the tag of the image and has to start with the release, got {{ database_influxdb__version }}.
+          InfluxDB 3 Core is installed with the role database_influxdb_core.
+        quiet: true
 
-    - name: 'Include InfluxDB version dependent configuration'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "podman-{{ database_influxdb__version }}.yml"
-      when: 'database_influxdb__use_podman'
+    # Every run includes the values of its release, they replace the values of former runs on the host
+    - name: 'Include the values of the major version and the variables of the release'
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - "influxdb{{ database_influxdb__major }}.yml"
+        - "environment-{{ database_influxdb__release }}.yml"
 
-    - name: 'Install InfluxDB'
-      ansible.builtin.include_tasks: "{{ item }}"
-      with_first_found:
-        - "podman-{{ database_influxdb__version }}.yml"
-      when: 'database_influxdb__use_podman'
+    # A failing template in the variables (e.g. an unknown filter or influxdb_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_influxdb__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_influxdb__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_influxdb__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('influxdb_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('influxdb_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of influxdb_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_influxdb__secret_targets: "{{ database_influxdb__secrets | map(attribute='target') | list }}"
+        database_influxdb__environment_set: >-
+          {{ database_influxdb__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        database_influxdb__environment_missing: >-
+          {{ database_influxdb__environment_required | reject('in', database_influxdb__environment_set) | list }}
+        database_influxdb__environment_managed_set: >-
+          {{ database_influxdb__environment_managed | select('in', database_influxdb__environment.keys() | list) | list }}
+        database_influxdb__secrets_missing: >-
+          {{ database_influxdb__secrets_required | reject('in', database_influxdb__secret_targets) | list }}
+        database_influxdb__secrets_in_environment: >-
+          {{ (database_influxdb__secret_targets + database_influxdb__secret_variables + database_influxdb__secret_files.values() | list)
+             | select('in', database_influxdb__environment.keys() | list) | unique | list }}
+        database_influxdb__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_influxdb__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append(database_influxdb__product_name ~ ' needs the environment variables ' ~ (database_influxdb__environment_required | join(', ')) ~ ', missing or empty: ' ~ (database_influxdb__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_influxdb__major == '1' and (database_influxdb__environment.INFLUXDB_HTTP_AUTH_ENABLED | default('') | string | lower) != 'true' -%}
+          {%-   set _ = errors.append('INFLUXDB_HTTP_AUTH_ENABLED has to be true, the role manages databases and users with the admin.') -%}
+          {%- endif -%}
+          {%- if database_influxdb__major == '2' and (database_influxdb__environment.DOCKER_INFLUXDB_INIT_MODE | default('')) != 'setup' -%}
+          {%-   set _ = errors.append('DOCKER_INFLUXDB_INIT_MODE has to be setup, the upgrade from InfluxDB 1.x is not supported by the role.') -%}
+          {%- endif -%}
+          {%- if database_influxdb__environment_managed_set | length > 0 -%}
+          {%-   set _ = errors.append('Databases and users are managed with influxdb_databases, influxdb_users and influxdb_passwords, not with ' ~ (database_influxdb__environment_managed_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_influxdb__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append(database_influxdb__product_name ~ ' needs the secrets ' ~ (database_influxdb__secrets_required | join(', ')) ~ ', missing: ' ~ (database_influxdb__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_influxdb__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in influxdb_environment: ' ~ (database_influxdb__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the databases, buckets and users'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_influxdb__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(names=[]) -%}
+          {%- set lists = { 'influxdb_databases': database_influxdb__databases, 'influxdb_buckets': database_influxdb__buckets, 'influxdb_users': database_influxdb__users } -%}
+          {%- for variable, entries in lists.items() -%}
+          {%-   if entries is not sequence or entries is string or entries is mapping -%}
+          {%-     set _ = errors.append(variable ~ ' has to be a list.') -%}
+          {%-   elif entries | reject('mapping') | list | length > 0 or entries | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-     set _ = errors.append(variable ~ ' entries need name.') -%}
+          {%-   else -%}
+          {%-     set names = entries | map(attribute='name') | map('string') | list -%}
+          {%-     if names | unique | list | length != names | length -%}
+          {%-       set _ = errors.append('The names of ' ~ variable ~ ' have to be unique.') -%}
+          {%-     endif -%}
+          {%-     set invalid = names | reject('match', database_influxdb__object_name_pattern) | list -%}
+          {%-     if invalid | length > 0 -%}
+          {%-       set _ = errors.append('Invalid names in ' ~ variable ~ ': ' ~ (invalid | join(', ')) ~ ', allowed are letters, digits and _ . -.') -%}
+          {%-     endif -%}
+          {%-     set retentions = [] -%}
+          {%-     for entry in entries if entry.retention is defined and entry.retention | string is not match(database_influxdb__duration_pattern) -%}
+          {%-       set _ = retentions.append(entry.name | string) -%}
+          {%-     endfor -%}
+          {%-     if retentions | length > 0 -%}
+          {%-       set _ = errors.append('The retention has to be a duration like 30d, 12h or 1w2d, INF or 0 is infinite: ' ~ (retentions | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if errors | length == 0 -%}
+          {%-   set users = database_influxdb__users -%}
+          {%-   set user_names = users | map(attribute='name') | map('string') | list -%}
+          {%-   if database_influxdb__admin_user in user_names -%}
+          {%-     set _ = errors.append('The admin ' ~ database_influxdb__admin_user ~ ' is created by the image with its secret and must not be in influxdb_users.') -%}
+          {%-   endif -%}
+          {%-   if database_influxdb__major == '1' -%}
+          {%-     if database_influxdb__buckets | length > 0 -%}
+          {%-       set _ = errors.append('influxdb_buckets is only supported by InfluxDB 2.x, use influxdb_databases.') -%}
+          {%-     endif -%}
+          {%-     set database_names = database_influxdb__databases | map(attribute='name') | map('string') | list -%}
+          {%-     for user in users -%}
+          {%-       if user.org is defined or user.role is defined -%}
+          {%-         set _ = errors.append('org and role of influxdb_users are only supported by InfluxDB 2.x: ' ~ user.name ~ '.') -%}
+          {%-       endif -%}
+          {%-       if user.admin is defined and user.admin is not boolean -%}
+          {%-         set _ = errors.append('admin of influxdb_users has to be a boolean: ' ~ user.name ~ '.') -%}
+          {%-       endif -%}
+          {%-       set grants = user.grants | default([]) -%}
+          {%-       if grants is not sequence or grants is string or grants is mapping
+                       or grants | reject('mapping') | list | length > 0
+                       or grants | select('mapping') | rejectattr('database', 'defined') | list | length > 0
+                       or grants | select('mapping') | rejectattr('privilege', 'defined') | list | length > 0 -%}
+          {%-         set _ = errors.append('grants of influxdb_users have to be a list of entries with database and privilege: ' ~ user.name ~ '.') -%}
+          {%-       else -%}
+          {%-         set unknown = grants | map(attribute='database') | map('string') | reject('in', database_names) | list -%}
+          {%-         if unknown | length > 0 -%}
+          {%-           set _ = errors.append('Grants of ' ~ user.name ~ ' on databases not in influxdb_databases: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-         endif -%}
+          {%-         set privileges = grants | map(attribute='privilege') | map('string') | map('upper') | reject('in', database_influxdb__privileges) | list -%}
+          {%-         if privileges | length > 0 -%}
+          {%-           set _ = errors.append('Unknown privileges of ' ~ user.name ~ ': ' ~ (privileges | join(', ')) ~ ', allowed are ' ~ (database_influxdb__privileges | join(', ')) ~ '.') -%}
+          {%-         endif -%}
+          {%-         if grants | map(attribute='database') | list | unique | list | length != grants | length -%}
+          {%-           set _ = errors.append('Every database may only be granted once to ' ~ user.name ~ '.') -%}
+          {%-         endif -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   else -%}
+          {%-     if database_influxdb__databases | length > 0 -%}
+          {%-       set _ = errors.append('influxdb_databases is only supported by InfluxDB 1.x, use influxdb_buckets.') -%}
+          {%-     endif -%}
+          {%-     for user in users -%}
+          {%-       if user.admin is defined or user.grants is defined -%}
+          {%-         set _ = errors.append('admin and grants of influxdb_users are only supported by InfluxDB 1.x: ' ~ user.name ~ '.') -%}
+          {%-       endif -%}
+          {%-       if (user.role | default('member')) not in database_influxdb__roles -%}
+          {%-         set _ = errors.append('Unknown role of ' ~ user.name ~ ': ' ~ user.role ~ ', allowed are ' ~ (database_influxdb__roles | join(', ')) ~ '.') -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%-   set passwords = database_influxdb__passwords -%}
+          {%-   if passwords is not mapping -%}
+          {%-     set _ = errors.append('influxdb_passwords has to be a dictionary.') -%}
+          {%-   else -%}
+          {%-     set missing = user_names | reject('in', passwords.keys() | list) | list -%}
+          {%-     if missing | length > 0 -%}
+          {%-       set _ = errors.append('Users without password in influxdb_passwords: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set unknown = passwords.keys() | reject('in', user_names) | list -%}
+          {%-     if unknown | length > 0 -%}
+          {%-       set _ = errors.append('Passwords of unknown users in influxdb_passwords: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set empty = passwords | dict2items | selectattr('value', 'in', ['', none]) | map(attribute='key') | list -%}
+          {%-     if empty | length > 0 -%}
+          {%-       set _ = errors.append('Empty passwords in influxdb_passwords: ' ~ (empty | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging influxdb_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_influxdb__environment_unknown: >-
+          {{ (database_influxdb__container.environment | default({})).keys()
+             | reject('in', database_influxdb__environment_allowed)
+             | reject('in', database_influxdb__environment_managed) | list }}
+        database_influxdb__secrets_unknown: >-
+          {{ database_influxdb__secrets | map(attribute='target') | reject('in', database_influxdb__secret_variables) | list }}
+        database_influxdb__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_influxdb__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_influxdb__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_influxdb__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_influxdb__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of InfluxDB ' ~ database_influxdb__release ~ ' and of the image (vars/environment-' ~ database_influxdb__release ~ '.yml) and the secrets ' ~ (database_influxdb__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of InfluxDB'
+      ansible.builtin.file:
+        path: "{{ database_influxdb__home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+
+    # InfluxDB 1.x runs as the user of the image, the entrypoint of 2.x fixes the owner itself
+    - name: 'Create the directories of the data'
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ database_influxdb__data_owner }}"
+        group: "{{ database_influxdb__data_group }}"
+        mode: "{{ item.mode }}"
+        state: 'directory'
+      loop: "{{ database_influxdb__directories }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_influxdb__secrets }}"
+      register: 'database_influxdb__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_influxdb__container.name }}"
+        hostname: "{{ database_influxdb__container.hostname }}"
+        image: "{{ database_influxdb__container.image }}"
+        ip: "{{ database_influxdb__container.ip }}"
+        ip6: "{{ database_influxdb__container.ipv6 | default(omit) }}"
+        network: "{{ database_influxdb__container.network }}"
+        timezone: "{{ database_influxdb__container.timezone }}"
+        command: "{{ database_influxdb__container.command | default(omit) }}"
+        env: "{{ database_influxdb__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_influxdb__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_influxdb__container.expose | default(omit) }}"
+        label: "{{ database_influxdb__container.labels | default(omit) }}"
+        publish: "{{ database_influxdb__container.publish | default(omit) }}"
+        secrets: "{{ database_influxdb__container.secrets | default(omit) }}"
+        volume: "{{ database_influxdb__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if database_influxdb__container.requires is defined %}
+          Requires={{ database_influxdb__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'database_influxdb__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_influxdb__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if database_influxdb__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        database_influxdb__running: >-
+          {{ (ansible_facts.services[database_influxdb__container.name + '.service'].state | default('')) == 'running' }}
+        database_influxdb__restart: >-
+          {{ database_influxdb__running | bool
+             and (database_influxdb__secrets_result is changed
+                  or database_influxdb__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    # The setup of the image runs on the first start, the API answers afterwards
+    - name: 'Wait for InfluxDB'
+      ansible.builtin.uri:
+        url: "{{ database_influxdb__api_url }}/ping"
+        status_code: [ 204 ]
+        validate_certs: false
+      register: 'database_influxdb__ping'
+      until: database_influxdb__ping.status | default(0) == 204
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of InfluxDB'
+      when:
+        - not ansible_check_mode
+        - database_influxdb__ping.status | default(0) != 204
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ database_influxdb__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'database_influxdb__journal'
+      changed_when: false
+
+    - name: 'Assert that InfluxDB answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__ping.status | default(0) == 204
+        fail_msg: "{{ database_influxdb__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Manage the databases and users of InfluxDB 1.x'
+      when:
+        - not ansible_check_mode
+        - database_influxdb__major == '1'
+      ansible.builtin.include_tasks: 'influxdb1.yml'
+
+    - name: 'Manage the buckets and users of InfluxDB 2.x'
+      when:
+        - not ansible_check_mode
+        - database_influxdb__major == '2'
+      ansible.builtin.include_tasks: 'influxdb2.yml'
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_influxdb__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_influxdb__container.name }}"
+        container_image: "{{ database_influxdb__container.image }}"
+        container_schedule: "{{ database_influxdb__autoupdate_schedule }}"
