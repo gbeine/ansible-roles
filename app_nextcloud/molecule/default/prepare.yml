@@ -1,0 +1,53 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_nextcloud__test_network }}"
+    podman_default_network: "{{ app_nextcloud__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_nextcloud__test_case: "{{ app_nextcloud__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nextcloud__test_database: "{{ app_nextcloud__test_databases[app_nextcloud__test_case.database] }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ app_nextcloud__test_image }}"
+        - "{{ app_nextcloud__test_database.image }}"
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ app_nextcloud__test_database.name }}"
+        image: "{{ app_nextcloud__test_database.image }}"
+        network: "{{ app_nextcloud__test_network.name }}"
+        ip: "{{ app_nextcloud__test_database.ip }}"
+        env: "{{ app_nextcloud__test_database.env }}"
+        state: 'started'
+
+    - name: 'Wait for the database'
+      ansible.builtin.wait_for:
+        host: "{{ app_nextcloud__test_database.ip }}"
+        port: "{{ app_nextcloud__test_database.port }}"
+        timeout: 120
+
+    - name: 'Wait for the initialization of the database'
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ app_nextcloud__test_database.password, app_nextcloud__test_database.name ] + app_nextcloud__test_database.ready }}"
+      register: 'app_nextcloud__test_ready'
+      until: app_nextcloud__test_ready.rc == 0
+      retries: 60
+      delay: 2
+      changed_when: false

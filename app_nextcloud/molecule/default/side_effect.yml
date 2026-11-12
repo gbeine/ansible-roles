@@ -1,0 +1,184 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_nextcloud__test_case: "{{ app_nextcloud__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nextcloud__test_vars: "{{ app_nextcloud__test_case.role_vars }}"
+    app_nextcloud__test_config: "{{ app_nextcloud__test_vars.nextcloud_config | default({}) }}"
+    app_nextcloud__test_secrets: "{{ app_nextcloud__test_vars.nextcloud_secrets | default([]) }}"
+    app_nextcloud__test_users: "{{ app_nextcloud__test_vars.nextcloud_users | default([]) }}"
+    app_nextcloud__test_passwords: "{{ app_nextcloud__test_vars.nextcloud_passwords | default({}) }}"
+    app_nextcloud__test_checked_files:
+      - "{{ app_nextcloud__test_quadlet_path }}"
+      - "{{ app_nextcloud__test_config_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_nextcloud__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_nextcloud__test_checked_files }}"
+      register: 'app_nextcloud__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_nextcloud with nextcloud_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_container: [ 'environment' ]
+        app_nextcloud__test_invalid:
+          message: 'nextcloud_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_nextcloud with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_secrets: [ { name: 'nextcloud_db_password', data: 'x' } ]
+        app_nextcloud__test_invalid:
+          message: 'a secret without target'
+          search: '^nextcloud_secrets entries need name, data and target$'
+
+    - name: 'Run app_nextcloud without the database password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_secrets: "{{ app_nextcloud__test_secrets | rejectattr('target', 'eq', 'dbpassword') | list }}"
+        app_nextcloud__test_invalid:
+          message: 'no database password'
+          search: '^Nextcloud needs the secrets dbpassword, missing: dbpassword\.$'
+
+    - name: 'Run app_nextcloud with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_secrets: "{{ app_nextcloud__test_secrets + [ { 'name': 'nextcloud_unknown', 'data': 'molecule', 'target': 'redis_password' } ] }}"
+        app_nextcloud__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: redis_password\.'
+
+    - name: 'Run app_nextcloud with an unknown value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_config: "{{ app_nextcloud__test_config | combine({ 'trusted_domain': [ 'cloud.example.org' ] }) }}"
+        app_nextcloud__test_invalid:
+          message: 'an unknown value'
+          search: '^Unknown values in nextcloud_config: trusted_domain\.'
+
+    - name: 'Run app_nextcloud with the database password in nextcloud_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_config: "{{ app_nextcloud__test_config | combine({ 'dbpassword': 'molecule', 'passwordsalt': 'molecule' }) }}"
+        app_nextcloud__test_invalid:
+          message: 'the database password in nextcloud_config'
+          search: '^Values set by Nextcloud or the role must not be set in nextcloud_config: dbpassword, passwordsalt, passwords are set with nextcloud_secrets\.$'
+
+    - name: 'Run app_nextcloud with sqlite (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_config: "{{ app_nextcloud__test_config | combine({ 'dbtype': 'sqlite3' }) }}"
+        app_nextcloud__test_invalid:
+          message: 'sqlite'
+          search: '^Invalid values in nextcloud_config: dbtype \(mysql, pgsql\)\.$'
+
+    - name: 'Run app_nextcloud without the database host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_config: "{{ app_nextcloud__test_config | combine({ 'dbhost': none }) }}"
+        app_nextcloud__test_invalid:
+          message: 'no database host'
+          search: '^The database needs dbhost, dbname, dbuser in nextcloud_config, missing: dbhost\.$'
+
+    - name: 'Run app_nextcloud with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_config: "{{ app_nextcloud__test_config | combine({ 'mail_domain': \"example.org\nmolecule\" }) }}"
+        app_nextcloud__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: mail_domain\.$'
+
+    - name: 'Run app_nextcloud without an administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_users: [ { name: 'molecule' } ]
+        nextcloud_passwords: { molecule: 'molecule-password' }
+        app_nextcloud__test_invalid:
+          message: 'no administrator'
+          search: '^nextcloud_users needs at least one administrator \(admin: true\)\.$'
+
+    - name: 'Run app_nextcloud with a user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_users: "{{ app_nextcloud__test_users + [ { 'name': 'molecule' } ] }}"
+        nextcloud_passwords: "{{ app_nextcloud__test_passwords }}"
+        app_nextcloud__test_invalid:
+          message: 'a user without password'
+          search: '^Users without password in nextcloud_passwords: molecule\.$'
+
+    - name: 'Run app_nextcloud with a short password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_users: "{{ app_nextcloud__test_users + [ { 'name': 'molecule' } ] }}"
+        nextcloud_passwords: "{{ app_nextcloud__test_passwords | combine({ 'molecule': 'short' }) }}"
+        app_nextcloud__test_invalid:
+          message: 'a short password'
+          search: '^Passwords in nextcloud_passwords need at least 10 characters: molecule\.$'
+
+    - name: 'Run app_nextcloud with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_environment: { NC_dbpassword: 'molecule' }
+        app_nextcloud__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: NC_dbpassword\.'
+
+    - name: 'Run app_nextcloud with the changed values'
+      when: app_nextcloud__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nextcloud' ]
+          register: 'app_nextcloud__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            nextcloud_environment: "{{ app_nextcloud__test_case.side_effect.environment }}"
+            nextcloud_config: "{{ app_nextcloud__test_config | combine(app_nextcloud__test_case.side_effect.config) }}"
+            nextcloud_passwords: "{{ app_nextcloud__test_passwords | combine(app_nextcloud__test_case.side_effect.passwords) }}"
+
+        - name: 'Run app_nextcloud with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_nextcloud'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nextcloud' ]
+          register: 'app_nextcloud__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart, the changed configuration and password and no second installation'
+          ansible.builtin.assert:
+            that:
+              - app_nextcloud__quadlet_result is changed
+              - app_nextcloud__install_result is not changed
+              - app_nextcloud__config_result.changed_keys == [ 'default_language' ]
+              - app_nextcloud__users_result.results | selectattr('changed') | map(attribute='item.name') | list == [ 'alice' ]
+              - app_nextcloud__test_started_after.stdout | int > app_nextcloud__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_nextcloud__quadlet_result is changed }}, installed: {{ app_nextcloud__install_result is changed }},
+              changed values: {{ app_nextcloud__config_result.changed_keys | default([]) }},
+              changed users: {{ app_nextcloud__users_result.results | default([]) | selectattr('changed') | map(attribute='item.name') | list }},
+              start before {{ app_nextcloud__test_started_before.stdout }}, after {{ app_nextcloud__test_started_after.stdout }}

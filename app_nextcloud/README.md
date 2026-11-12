@@ -8,4 +8,4 @@ container_repository: https://github.com/linuxserver/docker-nextcloud
 documentation_link: https://docs.nextcloud.com/
 ---
 
-Installs and configures Nextcloud as a podman quadlet.
+Installs and configures Nextcloud, including its installation, configuration and users, as a podman quadlet.

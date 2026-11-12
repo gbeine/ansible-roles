@@ -12,47 +12,361 @@ app_nextcloud__network: "{{ nextcloud_network | mandatory }}"
 app_nextcloud__hostname: "{{ nextcloud_hostname | mandatory }}"
 app_nextcloud__timezone: "{{ nextcloud_timezone | mandatory }}"
 app_nextcloud__labels: "{{ nextcloud_labels | default({}) }}"
-app_nextcloud__publish: "{{ nextcloud_publish | default([]) }}"
+
+# The user and group of /config and /data, the image runs Nextcloud as this user
+app_nextcloud__uid: "{{ nextcloud_uid | mandatory }}"
+app_nextcloud__gid: "{{ nextcloud_gid | default(app_nextcloud__uid) }}"
 
 app_nextcloud__version: "{{ nextcloud_version | default('latest') }}"
 
-app_nextcloud__container: "{{ app_nextcloud__container_default | combine(nextcloud_container | default({})) }}"
+app_nextcloud__container: "{{ app_nextcloud__podman_container_default | combine(nextcloud_container | default({})) }}"
+
+# Variables of the image, e.g. UMASK, the role sets PUID, PGID and TZ
+app_nextcloud__environment: "{{ app_nextcloud__environment_default | combine(nextcloud_environment | default({})) }}"
+
+# The passwords of config.php with name, data and target, the targets are dbpassword and mail_smtppassword
+app_nextcloud__secrets: "{{ nextcloud_secrets | default([]) }}"
+
+# The system values of config.php, merged over the default, null removes the value
+app_nextcloud__config: "{{ app_nextcloud__config_default | combine(nextcloud_config | default({})) }}"
+
+# Users with name, display_name, email, groups and admin, the passwords of the users
+app_nextcloud__users: "{{ nextcloud_users | default([]) }}"
+app_nextcloud__passwords: "{{ nextcloud_passwords | default({}) }}"
 
 app_nextcloud__autoupdate_enabled: "{{ nextcloud_autoupdate_enabled | default(false) }}"
-app_nextcloud__autoupdate_schedule: "{{ nextcloud_autoupdate_schedule | default('*-*-* 00/4:00:00') }}"
-
-app_nextcloud__config: "{{ nextcloud_config | default('') }}"
+app_nextcloud__autoupdate_schedule: "{{ nextcloud_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-app_nextcloud__uid: "{{ nextcloud_uid | mandatory }}"
-app_nextcloud__gid: "{{ nextcloud_gid | default(app_nextcloud__uid) }}"
+app_nextcloud__config_default:
+  dbtype: 'mysql'
+  trusted_domains: [ "{{ app_nextcloud__hostname }}" ]
+  overwrite.cli.url: "https://{{ app_nextcloud__hostname }}"
+  upgrade.disable-web: true
+
+# The values set by Nextcloud, the installation and the role, the passwords are set with nextcloud_secrets
+app_nextcloud__config_role:
+  - 'installed'
+  - 'version'
+  - 'instanceid'
+  - 'passwordsalt'
+  - 'secret'
+  - 'datadirectory'
+  - 'data-fingerprint'
+  - 'copied_sample_config'
+  - 'dbpassword'
+  - 'mail_smtppassword'
+
+# The allowed values, sqlite is not supported by the role
+app_nextcloud__config_values:
+  dbtype: [ 'mysql', 'pgsql' ]
+
+# The database needs these values and the secret dbpassword
+app_nextcloud__config_database: [ 'dbhost', 'dbname', 'dbuser' ]
+
+# The passwords of config.php, they are written by the role and not created as podman secrets,
+# Nextcloud reads them only from config.php
+app_nextcloud__secret_variables: [ 'dbpassword', 'mail_smtppassword' ]
+app_nextcloud__secrets_required: [ 'dbpassword' ]
+
+# The data of a secret by its target
+app_nextcloud__secret_data: >-
+  {%- set data = {} -%}
+  {%- if app_nextcloud__secrets is sequence and app_nextcloud__secrets is not string and app_nextcloud__secrets is not mapping -%}
+  {%-   for secret in app_nextcloud__secrets if secret is mapping and secret.target is defined and secret.data is defined -%}
+  {%-     set _ = data.update({ secret.target: secret.data | string }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ data }}
+
+# The first administrator of nextcloud_users, created by the installation
+app_nextcloud__admin: >-
+  {{ (app_nextcloud__users | select('mapping') | selectattr('admin', 'defined') | selectattr('admin', 'equalto', true) | first | default({}))
+     if app_nextcloud__users is sequence and app_nextcloud__users is not string and app_nextcloud__users is not mapping else {} }}
+
+# The names of the users, stricter than Nextcloud: no spaces and no quotes
+app_nextcloud__user_name_pattern: '^[a-zA-Z0-9_.@-]{1,64}$'
+app_nextcloud__user_keys: [ 'name', 'display_name', 'email', 'groups', 'admin' ]
+
+# The minimal length of the password policy of Nextcloud
+app_nextcloud__password_length: 10
+
+app_nextcloud__environment_default:
+  PUID: "{{ app_nextcloud__uid | string }}"
+  PGID: "{{ app_nextcloud__gid | string }}"
+  TZ: "{{ app_nextcloud__timezone }}"
+
+# The variables of the linuxserver image (readme-vars.yml of linuxserver/docker-nextcloud and the base image),
+# Nextcloud itself reads its configuration from config.php
+app_nextcloud__environment_allowed: [ 'PUID', 'PGID', 'TZ', 'UMASK' ]
 
 app_nextcloud__podman_name: 'nextcloud'
 app_nextcloud__podman_image: 'lscr.io/linuxserver/nextcloud'
-app_nextcloud__podman_tag: "{{ app_nextcloud__version }}"
 
-app_nextcloud__podman_home: "{{ app_nextcloud__home }}"
-app_nextcloud__podman_config_dir: "{{ app_nextcloud__podman_home }}/config"
-app_nextcloud__podman_data_dir: "{{ app_nextcloud__podman_home }}/data"
-app_nextcloud__podman_redis_dir: "{{ app_nextcloud__podman_home }}/redis"
-
-app_nextcloud__container_default:
+app_nextcloud__podman_container_default:
   name: "{{ app_nextcloud__podman_name }}"
   hostname: "{{ app_nextcloud__hostname }}"
-  image: "{{ app_nextcloud__podman_image }}:{{ app_nextcloud__podman_tag }}"
+  image: "{{ app_nextcloud__podman_image }}:{{ app_nextcloud__version }}"
   ip: "{{ app_nextcloud__ip }}"
   ipv6: "{{ app_nextcloud__ipv6 | default(omit) }}"
   network: "{{ app_nextcloud__network }}"
   timezone: "{{ app_nextcloud__timezone }}"
-  environment:
-    PUID: "{{ app_nextcloud__uid }}"
-    PGID: "{{ app_nextcloud__gid }}"
-    TZ: "{{ app_nextcloud__timezone }}"
-  labels: "{{ app_nextcloud__labels }}"
+  labels: "{{ app_nextcloud__labels | default(omit) }}"
+  environment: "{{ app_nextcloud__environment }}"
   volumes:
     - "{{ app_nextcloud__home }}/config:/config"
     - "{{ app_nextcloud__home }}/data:/data"
-    - '/usr/local/share/ca-certificates:/usr/local/share/ca-certificates'
+    - '/usr/local/share/ca-certificates:/usr/local/share/ca-certificates:ro'
+
+# Generated from the keys of the first level of config/config.sample.php of Nextcloud 35.0.2,
+# without the values set by the role (app_nextcloud__config_role), plus dbport of Nextcloud and filelocking.enabled set by the image
+app_nextcloud__config_allowed:
+  - 'serverid'
+  - 'trusted_domains'
+  - 'cookie_domain'
+  - 'dbtype'
+  - 'dbhost'
+  - 'dbname'
+  - 'dbuser'
+  - 'dbtableprefix'
+  - 'dbpersistent'
+  - 'dbreplica'
+  - 'db.log_request_id'
+  - 'default_language'
+  - 'force_language'
+  - 'default_locale'
+  - 'reduce_to_languages'
+  - 'default_phone_region'
+  - 'force_locale'
+  - 'default_timezone'
+  - 'knowledgebaseenabled'
+  - 'knowledgebase.embedded'
+  - 'allow_user_to_change_display_name'
+  - 'skeletondirectory'
+  - 'templatedirectory'
+  - 'remember_login_cookie_lifetime'
+  - 'session_lifetime'
+  - 'davstorage.request_timeout'
+  - 'carddav_sync_request_timeout'
+  - 'carddav_sync_request_truncation'
+  - 'session_relaxed_expiry'
+  - 'session_keepalive'
+  - 'auto_logout'
+  - 'token_auth_enforced'
+  - 'token_auth_activity_update'
+  - 'auth.bruteforce.protection.enabled'
+  - 'auth.bruteforce.protection.force.database'
+  - 'auth.bruteforce.protection.testing'
+  - 'auth.bruteforce.max-attempts'
+  - 'ratelimit.protection.enabled'
+  - 'ratelimit_overwrite'
+  - 'security.ipv6_normalized_subnet_size'
+  - 'auth.webauthn.enabled'
+  - 'auth.storeCryptedPassword'
+  - 'hide_login_form'
+  - 'lost_password_link'
+  - 'logo_url'
+  - 'mail_domain'
+  - 'mail_from_address'
+  - 'mail_smtpdebug'
+  - 'mail_smtpmode'
+  - 'mail_smtphost'
+  - 'mail_smtpport'
+  - 'mail_smtptimeout'
+  - 'mail_smtpsecure'
+  - 'mail_smtpauth'
+  - 'mail_smtpname'
+  - 'mail_template_class'
+  - 'mail_send_plaintext_only'
+  - 'mail_smtpstreamoptions'
+  - 'mail_sendmailmode'
+  - 'overwritehost'
+  - 'overwriteprotocol'
+  - 'overwritewebroot'
+  - 'overwritecondaddr'
+  - 'overwrite.cli.url'
+  - 'htaccess.RewriteBase'
+  - 'htaccess.IgnoreFrontController'
+  - 'proxy'
+  - 'proxyuserpwd'
+  - 'proxyexclude'
+  - 'allow_local_remote_servers'
+  - 'http_client_add_user_agent_url'
+  - 'trashbin_retention_obligation'
+  - 'versions_retention_obligation'
+  - 'appcodechecker'
+  - 'updatechecker'
+  - 'integrity.check.scheduled'
+  - 'updater.server.url'
+  - 'updater.release.channel'
+  - 'has_internet_connection'
+  - 'connectivity_check_domains'
+  - 'check_for_working_wellknown_setup'
+  - 'check_for_working_htaccess'
+  - 'check_data_directory_permissions'
+  - 'config_is_read_only'
+  - 'log_type'
+  - 'log_type_audit'
+  - 'logfile'
+  - 'logfile_audit'
+  - 'logfilemode'
+  - 'loglevel'
+  - 'loglevel_frontend'
+  - 'loglevel_dirty_database_queries'
+  - 'syslog_tag'
+  - 'syslog_tag_audit'
+  - 'log.condition'
+  - 'log.backtrace'
+  - 'logdateformat'
+  - 'logtimezone'
+  - 'log_query'
+  - 'log_rotate_size'
+  - 'profiler'
+  - 'profiling.request'
+  - 'profiling.request.rate'
+  - 'profiling.secret'
+  - 'profiling.sample'
+  - 'profiling.sample.rate'
+  - 'profiling.sample.rotation'
+  - 'profiling.path'
+  - 'activity_expire_days'
+  - 'activity_use_cached_mountpoints'
+  - 'defaultapp'
+  - 'appstoreenabled'
+  - 'appstoreurl'
+  - 'appsallowlist'
+  - 'apps_paths'
+  - 'enable_previews'
+  - 'preview_concurrency_all'
+  - 'preview_concurrency_new'
+  - 'preview_max_x'
+  - 'preview_max_y'
+  - 'preview_max_filesize_image'
+  - 'preview_max_memory'
+  - 'preview_libreoffice_path'
+  - 'preview_ffmpeg_path'
+  - 'preview_ffprobe_path'
+  - 'preview_imaginary_url'
+  - 'preview_imaginary_key'
+  - 'enabledPreviewProviders'
+  - 'metadata_max_filesize'
+  - 'max_file_conversion_filesize'
+  - 'ldapUserCleanupInterval'
+  - 'sort_groups_by_name'
+  - 'comments.managerFactory'
+  - 'maintenance'
+  - 'maintenance_window_start'
+  - 'ldap_log_file'
+  - 'openssl'
+  - 'memcache.local'
+  - 'memcache.distributed'
+  - 'memcache_customprefix'
+  - 'memcache.kvstore'
+  - 'redis'
+  - 'redis.cluster'
+  - 'memcached_servers'
+  - 'memcached_options'
+  - 'cache_path'
+  - 'cache_chunk_gc_ttl'
+  - 'cache_app_config'
+  - 'objectstore'
+  - 'objectstore.multibucket.preview-distribution'
+  - 'sharing.managerFactory'
+  - 'sharing.enable_mail_link_password_expiration'
+  - 'sharing.mail_link_password_expiration_interval'
+  - 'sharing.maxAutocompleteResults'
+  - 'sharing.minSearchStringLength'
+  - 'sharing.enable_share_accept'
+  - 'sharing.force_share_accept'
+  - 'sharing.allow_custom_share_folder'
+  - 'share_folder'
+  - 'sharing.enable_share_mail'
+  - 'sharing.allow_disabled_password_enforcement_groups'
+  - 'transferIncomingShares'
+  - 'sharing.federation.allowSelfSignedCertificates'
+  - 'hashing_default_password'
+  - 'hashingThreads'
+  - 'hashingMemoryCost'
+  - 'hashingTimeCost'
+  - 'hashingCost'
+  - 'dbdriveroptions'
+  - 'sqlite.journal_mode'
+  - 'mysql.utf8mb4'
+  - 'mysql.collation'
+  - 'pgsql_ssl'
+  - 'supportedDatabases'
+  - 'tempdirectory'
+  - 'updatedirectory'
+  - 'forbidden_filenames'
+  - 'forbidden_filename_basenames'
+  - 'forbidden_filename_characters'
+  - 'forbidden_filename_extensions'
+  - 'theme'
+  - 'enforce_theme'
+  - 'theming.standalone_window.enabled'
+  - 'cipher'
+  - 'encryption.use_legacy_base64_encoding'
+  - 'minimum.supported.desktop.version'
+  - 'maximum.supported.desktop.version'
+  - 'localstorage.allowsymlinks'
+  - 'localstorage.umask'
+  - 'localstorage.unlink_on_truncate'
+  - 'quota_include_external_storage'
+  - 'external_storage.auth_availability_delay'
+  - 'files_external_allow_create_new_local'
+  - 'filesystem_check_changes'
+  - 'part_file_in_storage'
+  - 'filesystem_cache_readonly'
+  - 'trusted_proxies'
+  - 'forwarded_for_headers'
+  - 'allowed_admin_ranges'
+  - 'allowed_no_password_confirmation_ranges'
+  - 'max_filesize_animated_gifs_public_sharing'
+  - 'filelocking.ttl'
+  - 'memcache.locking'
+  - 'filelocking.debug'
+  - 'upgrade.disable-web'
+  - 'upgrade.cli-upgrade-link'
+  - 'user_ini_additional_lines'
+  - 'documentation_url.server_logs'
+  - 'debug'
+  - 'configfilemode'
+  - 'lookup_server'
+  - 'gs.enabled'
+  - 'gs.federation'
+  - 'csrf.optout'
+  - 'core.login_flow_v2.allowed_user_agents'
+  - 'simpleSignUpLink.shown'
+  - 'login_form_autocomplete'
+  - 'login_form_timeout'
+  - 'no_unsupported_browser_warning'
+  - 'files_no_background_scan'
+  - 'query_log_file'
+  - 'query_log_file_requestid'
+  - 'query_log_file_parameters'
+  - 'query_log_file_backtrace'
+  - 'redis_log_file'
+  - 'diagnostics.logging'
+  - 'diagnostics.logging.threshold'
+  - 'profile.enabled'
+  - 'account_manager.default_property_scope'
+  - 'projects.enabled'
+  - 'bulkupload.enabled'
+  - 'reference_opengraph'
+  - 'unified_search.enabled'
+  - 'enable_non-accessible_features'
+  - 'binary_search_paths'
+  - 'files.chunked_upload.max_size'
+  - 'files.chunked_upload.max_parallel_count'
+  - 'files.trash.delete'
+  - 'enable_lazy_objects'
+  - 'default_certificates_bundle_path'
+  - 'openmetrics_skipped_classes'
+  - 'openmetrics_allowed_clients'
+  - 'preview_expiration_days'
+  - 'background_jobs_expiration_days'
+  - 'dbport'
+  - 'filelocking.enabled'

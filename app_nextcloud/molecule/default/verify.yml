@@ -1,0 +1,177 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_nextcloud__test_case: "{{ app_nextcloud__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nextcloud__expect: "{{ app_nextcloud__test_case.expect }}"
+    app_nextcloud__test_database: "{{ app_nextcloud__test_databases[app_nextcloud__test_case.database] }}"
+    app_nextcloud__test_url: "http://{{ app_nextcloud__expect.ip }}"
+    app_nextcloud__test_occ: [ 'podman', 'exec', '--user', 'abc', 'nextcloud', 'php', '/app/www/public/occ' ]
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_nextcloud__test_plain: >-
+      {{ (app_nextcloud__test_case.role_vars.nextcloud_secrets | default([])) | map(attribute='data') | list
+         + (app_nextcloud__test_case.role_vars.nextcloud_passwords | default({})).values() | list
+         + (app_nextcloud__test_case.side_effect.passwords | default({})).values() | list }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_nextcloud__test_quadlet_path }}"
+      register: 'app_nextcloud__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_nextcloud__test_image) in app_nextcloud__test_quadlet_lines
+          - ('IP=' + app_nextcloud__expect.ip) in app_nextcloud__test_quadlet_lines
+          - app_nextcloud__expect.ip6 is none or ('IP6=' + app_nextcloud__expect.ip6) in app_nextcloud__test_quadlet_lines
+          - app_nextcloud__expect.ip6 is not none or app_nextcloud__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_nextcloud__expect.quadlet | reject('in', app_nextcloud__test_quadlet_lines) | list | length == 0
+          - app_nextcloud__test_quadlet_lines | select('match', 'Secret=') | list | length == 0
+          - app_nextcloud__test_plain | select('in', app_nextcloud__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_nextcloud__test_quadlet.content | b64decode }}"
+      vars:
+        app_nextcloud__test_quadlet_lines: "{{ (app_nextcloud__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the Nextcloud service'
+      ansible.builtin.command: 'systemctl is-active nextcloud'
+      register: 'app_nextcloud__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the Nextcloud container'
+      ansible.builtin.command: 'podman inspect nextcloud'
+      register: 'app_nextcloud__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__test_service.stdout == 'active'
+          - app_nextcloud__test_net.IPAddress == app_nextcloud__expect.ip
+          - app_nextcloud__expect.ip6 is none or app_nextcloud__test_net.GlobalIPv6Address == app_nextcloud__expect.ip6
+          - app_nextcloud__expect.env | reject('in', app_nextcloud__test_env) | list | length == 0
+          - app_nextcloud__test_plain | select('in', app_nextcloud__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_nextcloud__test_service.stdout }},
+          IPv4 {{ app_nextcloud__test_net.IPAddress }}, IPv6 {{ app_nextcloud__test_net.GlobalIPv6Address }},
+          environment {{ app_nextcloud__test_env | join(', ') }}
+      vars:
+        app_nextcloud__test_container: "{{ (app_nextcloud__test_inspect.stdout | from_json)[0] }}"
+        app_nextcloud__test_net: "{{ app_nextcloud__test_container.NetworkSettings.Networks[app_nextcloud__test_case.role_vars.nextcloud_network] }}"
+        app_nextcloud__test_env: "{{ app_nextcloud__test_container.Config.Env }}"
+
+    - name: 'Read the state of config.php'
+      ansible.builtin.stat:
+        path: "{{ app_nextcloud__test_config_path }}"
+      register: 'app_nextcloud__test_config_stat'
+
+    - name: 'Read the values of config.php'
+      ansible.builtin.command:
+        argv: "{{ app_nextcloud__test_occ + [ 'config:system:get', item, '--output=json' ] }}"
+      loop: "{{ app_nextcloud__expect.config.keys() | list + [ 'installed', 'dbpassword' ] }}"
+      register: 'app_nextcloud__test_values'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert config.php'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__test_config_stat.stat.mode == '0640'
+          - app_nextcloud__test_config_stat.stat.uid == app_nextcloud__test_case.role_vars.nextcloud_uid
+          - app_nextcloud__test_differ | length == 0
+          - app_nextcloud__test_actual.installed == true
+          - app_nextcloud__test_actual.dbpassword == app_nextcloud__test_database.password
+        fail_msg: >-
+          mode {{ app_nextcloud__test_config_stat.stat.mode }}, uid {{ app_nextcloud__test_config_stat.stat.uid }},
+          differing values {{ app_nextcloud__test_differ }}, installed {{ app_nextcloud__test_actual.installed | default('') }}
+      vars:
+        app_nextcloud__test_actual: >-
+          {%- set actual = {} -%}
+          {%- for result in app_nextcloud__test_values.results if result.rc == 0 -%}
+          {%-   set _ = actual.update({ result.item: result.stdout | from_json }) -%}
+          {%- endfor -%}
+          {{ actual }}
+        app_nextcloud__test_differ: >-
+          {%- set differ = [] -%}
+          {%- for key, value in app_nextcloud__expect.config.items() if app_nextcloud__test_actual[key] is not defined or app_nextcloud__test_actual[key] != value -%}
+          {%-   set _ = differ.append(key ~ '=' ~ (app_nextcloud__test_actual[key] | default('') | to_json)) -%}
+          {%- endfor -%}
+          {{ differ }}
+
+    - name: 'Read the status of Nextcloud'
+      ansible.builtin.uri:
+        url: "{{ app_nextcloud__test_url }}/status.php"
+        headers:
+          Host: "{{ app_nextcloud__test_case.role_vars.nextcloud_hostname }}"
+        return_content: true
+      register: 'app_nextcloud__test_status'
+
+    # The host has to be a trusted domain, the OCS API answers 401 for a wrong password
+    - name: 'Log in to the OCS API'
+      ansible.builtin.uri:
+        url: "{{ app_nextcloud__test_url }}/ocs/v1.php/cloud/user?format=json"
+        url_username: "{{ item.name }}"
+        url_password: "{{ item.password }}"
+        force_basic_auth: true
+        headers:
+          Host: "{{ app_nextcloud__test_case.role_vars.nextcloud_hostname }}"
+          OCS-APIRequest: 'true'
+        status_code: [ 200, 401 ]
+        return_content: true
+      loop: >-
+        {%- set logins = [] -%}
+        {%- for user in app_nextcloud__expect.users -%}
+        {%-   set _ = logins.append({ 'name': user.name, 'password': user.password, 'allowed': true }) -%}
+        {%-   if user.former_password is defined -%}
+        {%-     set _ = logins.append({ 'name': user.name, 'password': user.former_password, 'allowed': false }) -%}
+        {%-   endif -%}
+        {%- endfor -%}
+        {{ logins }}
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'app_nextcloud__test_login'
+      no_log: true
+
+    - name: 'Read the users'
+      ansible.builtin.command:
+        argv: "{{ app_nextcloud__test_occ + [ 'user:info', item.name, '--output=json' ] }}"
+      loop: "{{ app_nextcloud__expect.users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'app_nextcloud__test_users'
+      changed_when: false
+
+    - name: 'Assert the status, the logins and the groups'
+      ansible.builtin.assert:
+        that:
+          - (app_nextcloud__test_status.content | from_json).installed
+          - app_nextcloud__test_logins == app_nextcloud__test_logins_expected
+          - app_nextcloud__test_groups == app_nextcloud__expect.users | map(attribute='groups') | list
+        fail_msg: >-
+          status {{ app_nextcloud__test_status.content }},
+          logins {{ app_nextcloud__test_logins }}, expected {{ app_nextcloud__test_logins_expected }},
+          groups {{ app_nextcloud__test_groups }}
+      vars:
+        app_nextcloud__test_logins: "{{ app_nextcloud__test_login.results | map(attribute='status') | list }}"
+        app_nextcloud__test_logins_expected: "{{ app_nextcloud__test_login.results | map(attribute='item.allowed') | map('ternary', 200, 401) | list }}"
+        app_nextcloud__test_groups: "{{ app_nextcloud__test_users.results | map(attribute='stdout') | map('from_json') | map(attribute='groups') | map('sort') | list }}"
+
+    - name: 'Read the tables of Nextcloud in the database'
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ app_nextcloud__test_database.password, app_nextcloud__test_database.name ] + app_nextcloud__test_database.tables }}"
+      register: 'app_nextcloud__test_tables'
+      changed_when: false
+
+    - name: 'Assert the tables of Nextcloud in the database'
+      ansible.builtin.assert:
+        that:
+          - "'oc_users' in app_nextcloud__test_tables.stdout_lines"
+        fail_msg: "{{ app_nextcloud__test_tables.stdout_lines }}"

@@ -1,0 +1,159 @@
+---
+# Network created by container_podman in prepare.yml
+app_nextcloud__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_nextcloud__test_image: 'lscr.io/linuxserver/nextcloud:latest'
+app_nextcloud__test_quadlet_path: '/etc/containers/systemd/nextcloud.container'
+app_nextcloud__test_config_path: '/opt/nextcloud/config/www/nextcloud/config/config.php'
+
+# Databases started by prepare.yml, test credentials only
+app_nextcloud__test_databases:
+  mysql:
+    name: 'molecule-mariadb'
+    image: 'docker.io/library/mariadb:11'
+    ip: '10.89.0.20'
+    port: 3306
+    database: 'nextcloud'
+    user: 'nextcloud'
+    password: 'molecule-db-password'
+    env:
+      MARIADB_DATABASE: 'nextcloud'
+      MARIADB_USER: 'nextcloud'
+      MARIADB_PASSWORD: 'molecule-db-password'
+      MARIADB_RANDOM_ROOT_PASSWORD: '1'
+    # The query succeeds after the initialization, the server restarts during the initialization
+    ready: [ 'mariadb', '-h', '127.0.0.1', '-u', 'nextcloud', '-pmolecule-db-password', '-e', 'SELECT 1', 'nextcloud' ]
+    tables: [ 'mariadb', '-h', '127.0.0.1', '-u', 'nextcloud', '-pmolecule-db-password', '-N', '-e', 'SHOW TABLES', 'nextcloud' ]
+  pgsql:
+    name: 'molecule-postgres'
+    image: 'docker.io/library/postgres:17'
+    ip: '10.89.0.20'
+    port: 5432
+    database: 'nextcloud'
+    user: 'nextcloud'
+    password: 'molecule-db-password'
+    env:
+      POSTGRES_DB: 'nextcloud'
+      POSTGRES_USER: 'nextcloud'
+      POSTGRES_PASSWORD: 'molecule-db-password'
+    # The server listens on TCP after the initialization
+    ready: [ 'psql', '-h', '127.0.0.1', '-U', 'nextcloud', '-d', 'nextcloud', '-c', 'SELECT 1' ]
+    tables: [ 'psql', '-h', '127.0.0.1', '-U', 'nextcloud', '-d', 'nextcloud', '-tAc', "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'" ]
+
+app_nextcloud__test_cases:
+
+  # Only the mandatory variables, MariaDB and one administrator
+  - name: 'molecule-nextcloud-default'
+    database: 'mysql'
+    role_vars:
+      nextcloud_home: '/opt/nextcloud'
+      nextcloud_ip: '10.89.0.90'
+      nextcloud_network: 'podman-molecule'
+      nextcloud_hostname: 'nextcloud-default'
+      nextcloud_timezone: 'Europe/Berlin'
+      nextcloud_uid: 1000
+      nextcloud_config:
+        dbhost: '10.89.0.20'
+        dbname: 'nextcloud'
+        dbuser: 'nextcloud'
+      nextcloud_secrets:
+        - name: 'nextcloud_db_password'
+          data: 'molecule-db-password'
+          target: 'dbpassword'
+      nextcloud_users:
+        - name: 'admin'
+          admin: true
+      nextcloud_passwords:
+        admin: 'molecule-admin-password'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/nextcloud/config:/config'
+        - 'Volume=/opt/nextcloud/data:/data'
+      env:
+        - 'PUID=1000'
+        - 'PGID=1000'
+        - 'TZ=Europe/Berlin'
+      config:
+        dbtype: 'mysql'
+        trusted_domains: [ 'nextcloud-default' ]
+        overwrite.cli.url: 'https://nextcloud-default'
+      users:
+        - { name: 'admin', password: 'molecule-admin-password', admin: true, groups: [ 'admin' ] }
+
+  # IPv6, labels, PostgreSQL, values of config.php, the SMTP password, an administrator and a user with a group
+  - name: 'molecule-nextcloud'
+    database: 'pgsql'
+    role_vars:
+      nextcloud_home: '/opt/nextcloud'
+      nextcloud_ip: '10.89.0.91'
+      nextcloud_ipv6: 'fd00:89::91'
+      nextcloud_network: 'podman-molecule'
+      nextcloud_hostname: 'nextcloud-molecule'
+      nextcloud_timezone: 'Europe/Berlin'
+      nextcloud_uid: 1000
+      nextcloud_labels:
+        traefik.enable: 'false'
+      nextcloud_config:
+        dbtype: 'pgsql'
+        dbhost: '10.89.0.20'
+        dbname: 'nextcloud'
+        dbuser: 'nextcloud'
+        trusted_domains: [ 'nextcloud-molecule', 'cloud.example.org' ]
+        default_language: 'de'
+        mail_smtpmode: 'smtp'
+        mail_smtphost: 'mail.example.org'
+        mail_smtpauth: true
+        mail_smtpname: 'nextcloud'
+      nextcloud_secrets:
+        - name: 'nextcloud_db_password'
+          data: 'molecule-db-password'
+          target: 'dbpassword'
+        - name: 'nextcloud_smtp_password'
+          data: 'molecule-smtp-password'
+          target: 'mail_smtppassword'
+      nextcloud_users:
+        - name: 'admin'
+          admin: true
+          email: 'admin@example.org'
+        - name: 'alice'
+          display_name: 'Alice Molecule'
+          email: 'alice@example.org'
+          groups: [ 'family' ]
+      nextcloud_passwords:
+        admin: 'molecule-admin-password'
+        alice: 'molecule-alice-password'
+    # The quadlet unit changes and Nextcloud has to restart, config.php and the password change without a second installation
+    side_effect:
+      environment:
+        UMASK: '022'
+      config:
+        default_language: 'en'
+      passwords:
+        alice: 'molecule-alice-changed'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/nextcloud/config:/config'
+        - 'Volume=/opt/nextcloud/data:/data'
+        - 'Label=traefik.enable=false'
+      env:
+        - 'PUID=1000'
+        - 'UMASK=022'
+      config:
+        dbtype: 'pgsql'
+        trusted_domains: [ 'nextcloud-molecule', 'cloud.example.org' ]
+        default_language: 'en'
+        mail_smtpauth: true
+      users:
+        - { name: 'admin', password: 'molecule-admin-password', admin: true, groups: [ 'admin' ] }
+        - { name: 'alice', password: 'molecule-alice-changed', former_password: 'molecule-alice-password', admin: false, groups: [ 'family' ] }

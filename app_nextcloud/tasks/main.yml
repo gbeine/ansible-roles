@@ -1,49 +1,238 @@
 ---
 
-- name: 'Deploy nextcloud container'
-  tags: [ 'app_nextcloud' ]
+- name: 'Deploy Nextcloud'
+  tags: [ 'app', 'app_nextcloud' ]
   block:
 
-    - name: 'Create nextcloud directories'
+    # A failing template in the variables (e.g. an unknown filter, nextcloud_container or nextcloud_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_nextcloud__container | length > 0
+          - app_nextcloud__config is mapping
+        fail_msg: 'nextcloud_config has to be a dictionary.'
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nextcloud__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_nextcloud__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_nextcloud__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('nextcloud_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('nextcloud_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of nextcloud_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of nextcloud_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nextcloud__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nextcloud__targets: "{{ app_nextcloud__secrets | map(attribute='target') | list }}"
+        app_nextcloud__secrets_missing: "{{ app_nextcloud__secrets_required | reject('in', app_nextcloud__targets) | list }}"
+        app_nextcloud__secrets_in_environment: >-
+          {{ (app_nextcloud__targets + app_nextcloud__secret_variables) | select('in', app_nextcloud__environment.keys() | list) | unique | list }}
+        app_nextcloud__secrets_lines: >-
+          {{ app_nextcloud__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='target') | list }}
+        app_nextcloud__environment_lines: >-
+          {{ app_nextcloud__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+        app_nextcloud__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_nextcloud__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Nextcloud needs the secrets ' ~ (app_nextcloud__secrets_required | join(', ')) ~ ', missing: ' ~ (app_nextcloud__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_nextcloud__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in nextcloud_environment: ' ~ (app_nextcloud__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_nextcloud__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_nextcloud__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_nextcloud__environment_lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (app_nextcloud__environment_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nextcloud__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nextcloud__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = app_nextcloud__config -%}
+          {%- set ns = namespace(unknown=[], role=[], lines=[], values=[], database=[]) -%}
+          {%- for key, value in config.items() -%}
+          {%-   if key in app_nextcloud__config_role -%}
+          {%-     set ns.role = ns.role + [ key ] -%}
+          {%-   elif key not in app_nextcloud__config_allowed -%}
+          {%-     set ns.unknown = ns.unknown + [ key ] -%}
+          {%-   elif value | to_json is search('(?<!\\\\)(\\\\\\\\)*\\\\[nr]') -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%-   if key in app_nextcloud__config_values and value not in app_nextcloud__config_values[key] -%}
+          {%-     set ns.values = ns.values + [ key ~ ' (' ~ (app_nextcloud__config_values[key] | join(', ')) ~ ')' ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- for key in app_nextcloud__config_database if config[key] | default('', true) | string | length == 0 -%}
+          {%-   set ns.database = ns.database + [ key ] -%}
+          {%- endfor -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown values in nextcloud_config: ' ~ (ns.unknown | join(', ')) ~ '. Allowed are the values of config.sample.php of Nextcloud (app_nextcloud__config_allowed).') -%}
+          {%- endif -%}
+          {%- if ns.role | length > 0 -%}
+          {%-   set _ = errors.append('Values set by Nextcloud or the role must not be set in nextcloud_config: ' ~ (ns.role | join(', ')) ~ ', passwords are set with nextcloud_secrets.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('Invalid values in nextcloud_config: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.database | length > 0 -%}
+          {%-   set _ = errors.append('The database needs ' ~ (app_nextcloud__config_database | join(', ')) ~ ' in nextcloud_config, missing: ' ~ (ns.database | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the users'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nextcloud__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nextcloud__errors: >-
+          {%- set errors = [] -%}
+          {%- set users = app_nextcloud__users -%}
+          {%- set passwords = app_nextcloud__passwords -%}
+          {%- if users is not sequence or users is string or users is mapping or users | length == 0 -%}
+          {%-   set _ = errors.append('nextcloud_users has to be a list with at least one administrator.') -%}
+          {%- elif users | reject('mapping') | list | length > 0 or users | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('nextcloud_users entries need name.') -%}
+          {%- elif passwords is not mapping -%}
+          {%-   set _ = errors.append('nextcloud_passwords has to be a dictionary of the passwords by name.') -%}
+          {%- else -%}
+          {%-   set names = users | map(attribute='name') | map('string') | list -%}
+          {%-   set invalid = names | reject('match', app_nextcloud__user_name_pattern) | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('Invalid names in nextcloud_users: ' ~ (invalid | join(', ')) ~ ', allowed are up to 64 letters, digits and _ . @ -.') -%}
+          {%-   endif -%}
+          {%-   if names | map('lower') | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of nextcloud_users have to be unique.') -%}
+          {%-   endif -%}
+          {%-   set ns = namespace(keys=[], admins=[], groups=[], lines=[]) -%}
+          {%-   for user in users -%}
+          {%-     set ns.keys = ns.keys + (user.keys() | reject('in', app_nextcloud__user_keys) | list) -%}
+          {%-     if user.admin is defined and user.admin is not boolean -%}
+          {%-       set ns.admins = ns.admins + [ user.name ] -%}
+          {%-     endif -%}
+          {%-     if user.groups is defined and (user.groups is not sequence or user.groups is string or user.groups is mapping
+                     or user.groups | map('string') | select('equalto', 'admin') | list | length > 0) -%}
+          {%-       set ns.groups = ns.groups + [ user.name ] -%}
+          {%-     endif -%}
+          {%-     if [ user.display_name | default(''), user.email | default('') ] | map('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-       set ns.lines = ns.lines + [ user.name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.keys | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in nextcloud_users: ' ~ (ns.keys | unique | join(', ')) ~ ', allowed are ' ~ (app_nextcloud__user_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.admins | length > 0 -%}
+          {%-     set _ = errors.append('admin of nextcloud_users has to be a boolean: ' ~ (ns.admins | join(', ')) ~ '.') -%}
+          {%-   elif users | selectattr('admin', 'defined') | selectattr('admin', 'equalto', true) | list | length == 0 -%}
+          {%-     set _ = errors.append('nextcloud_users needs at least one administrator (admin: true).') -%}
+          {%-   endif -%}
+          {%-   if ns.groups | length > 0 -%}
+          {%-     set _ = errors.append('groups of nextcloud_users has to be a list without admin, admin is set with admin: ' ~ (ns.groups | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('display_name and email must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set missing = names | reject('in', passwords | dict2items | rejectattr('value', 'none') | map(attribute='key') | map('string') | list) | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('Users without password in nextcloud_passwords: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set short = [] -%}
+          {%-   for name, password in passwords.items() if password is not none and (password | string | length) < app_nextcloud__password_length -%}
+          {%-     set _ = short.append(name | string) -%}
+          {%-   endfor -%}
+          {%-   if short | length > 0 -%}
+          {%-     set _ = errors.append('Passwords in nextcloud_passwords need at least ' ~ app_nextcloud__password_length ~ ' characters: ' ~ (short | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set unknown = passwords.keys() | map('string') | reject('in', names) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Passwords of unknown users in nextcloud_passwords: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging nextcloud_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nextcloud__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nextcloud__environment_unknown: >-
+          {{ (app_nextcloud__container.environment | default({})).keys() | reject('in', app_nextcloud__environment_allowed) | list }}
+        app_nextcloud__secrets_unknown: >-
+          {{ app_nextcloud__secrets | map(attribute='target') | reject('in', app_nextcloud__secret_variables) | list }}
+        app_nextcloud__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_nextcloud__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_nextcloud__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_nextcloud__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_nextcloud__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (' ~ (app_nextcloud__environment_allowed | join(', ')) ~ ') and the secrets ' ~ (app_nextcloud__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image changes the owner of /config and /data to PUID and PGID on start
+    - name: 'Create the directories of Nextcloud'
       ansible.builtin.file:
         path: "{{ item }}"
         owner: "{{ app_nextcloud__uid }}"
         group: "{{ app_nextcloud__gid }}"
-        mode: "{{ item.mode | default('0750') }}"
+        mode: '0750'
         state: 'directory'
-      with_items:
-        - "{{ app_nextcloud__podman_config_dir }}"
-        - "{{ app_nextcloud__podman_config_dir }}/www/nextcloud/config"
-        - "{{ app_nextcloud__podman_data_dir }}"
-
-    - name: 'Write nextcloud config file'
-      no_log: true
-      ansible.builtin.copy:
-        dest: "{{ app_nextcloud__podman_config_dir }}/www/nextcloud/config/config.php"
-        owner: "{{ app_nextcloud__uid }}"
-        group: "{{ app_nextcloud__gid }}"
-        mode: '600'
-        force: false
-        content: |
-          {{ app_nextcloud__config }}
-      when: 'not podman___update_mode | bool'
+      loop:
+        - "{{ app_nextcloud__home }}"
+        - "{{ app_nextcloud__home }}/config"
+        - "{{ app_nextcloud__home }}/data"
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_nextcloud__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_nextcloud__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_nextcloud__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name:  'Install container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_nextcloud__container.name }}"
         hostname: "{{ app_nextcloud__container.hostname }}"
@@ -52,12 +241,12 @@
         ip6: "{{ app_nextcloud__container.ipv6 | default(omit) }}"
         network: "{{ app_nextcloud__container.network }}"
         timezone: "{{ app_nextcloud__container.timezone }}"
+        command: "{{ app_nextcloud__container.command | default(omit) }}"
         env: "{{ app_nextcloud__container.environment | default(omit) }}"
-        etc_hosts: "{{ app_nextcloud__container.hosts | default(omit) }}"
+        etc_hosts: "{{ app_nextcloud__container.etc_hosts | default(omit) }}"
         expose: "{{ app_nextcloud__container.expose | default(omit) }}"
         label: "{{ app_nextcloud__container.labels | default(omit) }}"
         publish: "{{ app_nextcloud__container.publish | default(omit) }}"
-        secrets: "{{ app_nextcloud__container.secrets | default(omit) }}"
         volume: "{{ app_nextcloud__container.volumes | default(omit) }}"
         quadlet_options: |
           [Install]
@@ -73,19 +262,92 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_nextcloud__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_nextcloud__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_nextcloud__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_nextcloud__running: >-
+          {{ (ansible_facts.services[app_nextcloud__container.name + '.service'].state | default('')) == 'running' }}
+        app_nextcloud__restart: "{{ app_nextcloud__running | bool and app_nextcloud__quadlet_result is changed }}"
       when: 'not ansible_check_mode'
 
+    # nginx starts after the init of the image copied Nextcloud and upgraded an existing installation,
+    # an installed Nextcloud answers 400 if the host is no trusted domain, both answers come from PHP behind nginx
+    - name: 'Wait for Nextcloud'
+      ansible.builtin.uri:
+        url: "http://{{ app_nextcloud__ip }}/status.php"
+        headers:
+          Host: "{{ app_nextcloud__hostname }}"
+        status_code: [ 200, 400 ]
+      register: 'app_nextcloud__ready'
+      until: app_nextcloud__ready.status | default(-1) in [ 200, 400 ]
+      retries: 150
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Nextcloud'
+      when:
+        - not ansible_check_mode
+        - app_nextcloud__ready.status | default(-1) not in [ 200, 400 ]
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_nextcloud__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_nextcloud__journal'
+      changed_when: false
+
+    - name: 'Assert that Nextcloud answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__journal is skipped
+        fail_msg: "{{ app_nextcloud__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Install and configure Nextcloud and manage the users'
+      when: 'not ansible_check_mode'
+      block:
+
+        # Installs Nextcloud on the first run with the first administrator, the passwords are options of the module and never logged
+        - name: 'Install Nextcloud'
+          app_nextcloud_install:
+            container: "{{ app_nextcloud__container.name }}"
+            database: "{{ app_nextcloud__config }}"
+            database_password: "{{ app_nextcloud__secret_data.dbpassword }}"
+            admin_user: "{{ app_nextcloud__admin.name | string }}"
+            admin_password: "{{ app_nextcloud__passwords[app_nextcloud__admin.name] | string }}"
+            admin_email: "{{ app_nextcloud__admin.email | default(omit) }}"
+          register: 'app_nextcloud__install_result'
+
+        - name: 'Configure Nextcloud'
+          app_nextcloud_config:
+            container: "{{ app_nextcloud__container.name }}"
+            config: "{{ app_nextcloud__config }}"
+            secrets: "{{ app_nextcloud__secret_data }}"
+          register: 'app_nextcloud__config_result'
+
+        # The passwords are only set if they differ, the module checks them with the user manager of Nextcloud
+        - name: 'Create the users'
+          app_nextcloud_user:
+            container: "{{ app_nextcloud__container.name }}"
+            name: "{{ item.name | string }}"
+            password: "{{ app_nextcloud__passwords[item.name] | string }}"
+            display_name: "{{ item.display_name | default(omit) }}"
+            email: "{{ item.email | default(omit) }}"
+            groups: "{{ item.groups | default(omit) }}"
+            admin: "{{ item.admin | default(false) }}"
+          loop: "{{ app_nextcloud__users }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'app_nextcloud__users_result'
+
     - name: 'Enable autoupdate on container'
-      when: 'app_nextcloud__autoupdate_enabled'
-      include_role:
+      when: 'app_nextcloud__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_nextcloud__container.name }}"
