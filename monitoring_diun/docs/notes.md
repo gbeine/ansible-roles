@@ -11,7 +11,7 @@ The role creates the secret with `podman secret create`, mounts it to `/run/secr
 so the secret is neither part of the quadlet unit nor of the environment of the container.
 Every option of diun with a file variant (`passwordFile`, `tokenFile`, `webhookURLFile`, `usernameFile`, …) can be a secret, see `monitoring_diun__secret_files`,
 the passwords and usernames of the registries as well, e.g. `DIUN_REGOPTS_GHCR_PASSWORD` with `DIUN_REGOPTS_GHCR_PASSWORDFILE` (see Options with keys).
-Passwords, tokens and webhook URLs must be secrets, usernames, recipients and chat IDs can be set in `diun_environment` as well.
+Every option of `monitoring_diun__secret_files` is a secret, also usernames, recipients and chat IDs, it must not be set in `diun_environment`.
 diun uses the file as it is, `data` must not end with a line break.
 Options without file variant, e.g. `DIUN_NOTIF_WEBHOOK_HEADERS_<KEY>` or `DIUN_PROVIDERS_NOMAD_SECRETID`, can only be set in `diun_environment`.
 
@@ -20,11 +20,13 @@ diun_environment:
   DIUN_WATCH_SCHEDULE: '0 */6 * * *'
   DIUN_NOTIF_MAIL_HOST: 'smtp.example.org'
   DIUN_NOTIF_MAIL_PORT: '587'
-  DIUN_NOTIF_MAIL_USERNAME: 'diun'
   DIUN_NOTIF_MAIL_FROM: 'diun@example.org'
   DIUN_NOTIF_MAIL_TO: 'admin@example.org'
   DIUN_NOTIF_GOTIFY_ENDPOINT: 'https://gotify.example.org'
 diun_secrets:
+  - name: 'diun_mail_username'
+    data: 'diun'
+    target: 'DIUN_NOTIF_MAIL_USERNAME'
   - name: 'diun_mail_password'
     data: "{{ vault_diun_mail_password }}"
     target: 'DIUN_NOTIF_MAIL_PASSWORD'
@@ -57,7 +59,7 @@ The keys are declared in `diun_keys`, the role generates the exact names of the 
 
 | Entry of `diun_keys` | Generated options |
 |---|---|
-| `regopts` | `DIUN_REGOPTS_<KEY>_NAME`, `_SELECTOR`, `_USERNAME`, `_TIMEOUT`, `_INSECURETLS`, the secrets `DIUN_REGOPTS_<KEY>_USERNAME` and `DIUN_REGOPTS_<KEY>_PASSWORD` with the file variables `_USERNAMEFILE` and `_PASSWORDFILE` |
+| `regopts` | `DIUN_REGOPTS_<KEY>_NAME`, `_SELECTOR`, `_TIMEOUT`, `_INSECURETLS`, the secrets `DIUN_REGOPTS_<KEY>_USERNAME` and `DIUN_REGOPTS_<KEY>_PASSWORD` with the file variables `_USERNAMEFILE` and `_PASSWORDFILE` |
 | `notif_webhook_headers` | `DIUN_NOTIF_WEBHOOK_HEADERS_<KEY>` |
 | `notif_signalrest_recipients` | `DIUN_NOTIF_SIGNALREST_RECIPIENTS_<KEY>` |
 | `notif_signalrest_headers` | `DIUN_NOTIF_SIGNALREST_HEADERS_<KEY>` |
@@ -97,7 +99,7 @@ it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
 The check uses the environment and the secrets of the container after merging `diun_container`,
 so variables set with `diun_container.environment` are checked as well.
-The allowed variables are the options of diun v4.33.1 from its documentation without the passwords, tokens and webhook URLs,
+The allowed variables are the options of diun v4.33.1 from its documentation without the targets of the secrets,
 and the file variables of the secrets. The role sets the file variables from `diun_secrets`, they must not be set in `diun_environment`.
 All names are exact, the options with keys are generated from `diun_keys` (see Options with keys).
 
@@ -127,9 +129,9 @@ Earlier versions of the role generated `<diun_home>/etc/diun.yml`, the role remo
 |---|---|
 | `diun_net` | `diun_network` |
 | `diun_workers`, `diun_schedule`, `diun_jitter`, `diun_first_check_notif`, `diun_run_on_startup`, `diun_compare_digest` | `DIUN_WATCH_WORKERS`, `DIUN_WATCH_SCHEDULE`, `DIUN_WATCH_JITTER`, `DIUN_WATCH_FIRSTCHECKNOTIF`, `DIUN_WATCH_RUNONSTARTUP`, `DIUN_WATCH_COMPAREDIGEST` |
-| `diun_healthchecks` | `DIUN_WATCH_HEALTHCHECKS_BASEURL`, `DIUN_WATCH_HEALTHCHECKS_UUID` |
+| `diun_healthchecks` | `DIUN_WATCH_HEALTHCHECKS_BASEURL`, `diun_secrets` with target `DIUN_WATCH_HEALTHCHECKS_UUID` |
 | `diun_watch_repo`, `diun_notify_on`, `diun_max_tags`, `diun_sort_tags`, `diun_include_tags`, `diun_exclude_tags`, `diun_metadata` | `DIUN_DEFAULTS_WATCHREPO`, `DIUN_DEFAULTS_NOTIFYON` (comma separated), `DIUN_DEFAULTS_MAXTAGS`, `DIUN_DEFAULTS_SORTTAGS`, `DIUN_DEFAULTS_INCLUDETAGS`, `DIUN_DEFAULTS_EXCLUDETAGS`, `DIUN_DEFAULTS_METADATA_<KEY>` |
-| `diun_notify_mail` and `diun_mail_host`, `diun_mail_port`, `diun_mail_ssl`, `diun_mail_insecure_skip_verify`, `diun_mail_local_name`, `diun_mail_username`, `diun_mail_from`, `diun_mail_to`, `diun_mail_template_title`, `diun_mail_template_body` | `DIUN_NOTIF_MAIL_HOST`, `DIUN_NOTIF_MAIL_PORT`, `DIUN_NOTIF_MAIL_SSL`, `DIUN_NOTIF_MAIL_INSECURESKIPVERIFY`, `DIUN_NOTIF_MAIL_LOCALNAME`, `DIUN_NOTIF_MAIL_USERNAME`, `DIUN_NOTIF_MAIL_FROM`, `DIUN_NOTIF_MAIL_TO`, `DIUN_NOTIF_MAIL_TEMPLATETITLE`, `DIUN_NOTIF_MAIL_TEMPLATEBODY` |
+| `diun_notify_mail` and `diun_mail_host`, `diun_mail_port`, `diun_mail_ssl`, `diun_mail_insecure_skip_verify`, `diun_mail_local_name`, `diun_mail_username`, `diun_mail_from`, `diun_mail_to`, `diun_mail_template_title`, `diun_mail_template_body` | `DIUN_NOTIF_MAIL_HOST`, `DIUN_NOTIF_MAIL_PORT`, `DIUN_NOTIF_MAIL_SSL`, `DIUN_NOTIF_MAIL_INSECURESKIPVERIFY`, `DIUN_NOTIF_MAIL_LOCALNAME`, `diun_secrets` with target `DIUN_NOTIF_MAIL_USERNAME`, `DIUN_NOTIF_MAIL_FROM`, `DIUN_NOTIF_MAIL_TO`, `DIUN_NOTIF_MAIL_TEMPLATETITLE`, `DIUN_NOTIF_MAIL_TEMPLATEBODY` |
 | `diun_mail_password`, `diun_mail_password_file` | `diun_secrets` with target `DIUN_NOTIF_MAIL_PASSWORD` |
 | `diun_provider_docker` and `diun_docker_*` | `diun_provider_podman` or `DIUN_PROVIDERS_DOCKER_*` |
 | `podman___update_mode` | `diun_autoupdate_enabled` |
@@ -137,6 +139,7 @@ Earlier versions of the role generated `<diun_home>/etc/diun.yml`, the role remo
 | secrets as environment variable `target` | secrets mounted as file and the file option, `diun_secrets` stays the same |
 | `diun_environment` checked for `PASSWORD`, `TOKEN`, `SECRET` and `WEBHOOKURL` | allowed variables |
 | options with keys, e.g. `DIUN_REGOPTS_<KEY>_NAME`, accepted for any key | the keys are declared in `diun_keys` |
+| usernames, recipients and chat IDs with file variant in `diun_environment`, e.g. `DIUN_NOTIF_MAIL_USERNAME`, `DIUN_NOTIF_TELEGRAM_CHATIDS`, `DIUN_REGOPTS_<KEY>_USERNAME` | only as secret with `diun_secrets`, every target of `monitoring_diun__secret_files` |
 | tag `monitoring_diun` | tags `monitoring` and `monitoring_diun` |
 
 ### Tests
@@ -145,7 +148,7 @@ The molecule scenario `default` uses tart with one VM `molecule-diun`.
 `prepare` enables the podman socket, starts [mailpit](https://mailpit.axllent.org) and a container with the label `diun.enable=true`.
 `side_effect` runs the role with `diun_container` not a dictionary, a secret without target, the password and its file variable in the environment,
 an unknown environment variable in `diun_environment` and in `diun_container.environment`, an unknown secret,
-a registry option without its key in `diun_keys`, the registry password in the environment, an invalid key and an unknown entry in `diun_keys`
+a registry option without its key in `diun_keys`, the registry password and the user of the mail server in the environment, an invalid key and an unknown entry in `diun_keys`
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `DIUN_WATCH_WORKERS` and checks that Diun was restarted.
 `verify` checks the quadlet unit with the mounted secrets, `DIUN_NOTIF_MAIL_PASSWORDFILE` and the options of the registry key `MOLECULE` of `diun_keys`
