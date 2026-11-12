@@ -5,7 +5,10 @@ It runs in the container image `ghcr.io/lovelaze/nebula-sync`, synchronizes once
 
 All variables are set with `nebula_sync_environment`, which is merged over the defaults of the role, see the [configuration of nebula-sync](https://github.com/lovelaze/nebula-sync#configuration).
 `PRIMARY` and `REPLICAS` contain the passwords of the Pi-hole instances and are passed as podman secrets with `nebula_sync_secrets`, they must not be set in `nebula_sync_environment`.
-Every secret is created with `podman secret create` and passed into the container as environment variable `target`.
+Every secret has a `name`, the `data` and the `target`, the usual name of the variable.
+The role creates the secret with `podman secret create`, mounts it to `/run/secrets/<name>` and sets the file variable of nebula-sync,
+`PRIMARY_FILE` for `PRIMARY` and `REPLICAS_FILE` for `REPLICAS`,
+so the passwords are neither part of the quadlet unit nor of the environment of the container.
 
 The role requires the following variables and checks them before it changes anything:
 
@@ -49,6 +52,25 @@ nebula_sync_environment:
 
 Settings that a replica gets by environment variables (`FTLCONF_*`) are read-only in Pi-hole and cannot be synchronized, set them on the primary only or exclude them.
 
+### Allowed variables
+
+The role only allows the environment variables in `dns_nebula_sync__environment_allowed` and the secrets with the targets `PRIMARY` and `REPLICAS`,
+it stops before any change if unknown variables or secrets are set.
+This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
+The check uses the environment and the secrets of the container after merging `nebula_sync_container`,
+so variables set with `nebula_sync_container.environment` are checked as well.
+The allowed variables are the variables of nebula-sync v0.11.3 (README and `internal/config`) without `PRIMARY`, `REPLICAS`
+and the internal variables `API_ENABLED` and `NS_DEBUG`,
+and the file variables of the secrets. The role sets them from `nebula_sync_secrets`, they must not be set in `nebula_sync_environment`.
+The webhooks have no file variables, a token in `WEBHOOK_*_URL` or `WEBHOOK_*_HEADERS` is part of the environment.
+
+### Validation
+
+The role checks before any change that `nebula_sync_secrets` is a list of entries with `name`, `data` and `target` and unique names,
+that `FULL_SYNC` and the secrets `PRIMARY` and `REPLICAS` are set, that neither a secret nor its file variable is set in `nebula_sync_environment`
+and that only allowed variables and secrets are used.
+If `nebula_sync_container` is no dictionary, merging it with the default fails before anything changes.
+
 ### Changes and restarts
 
 A running container is restarted when a secret or the quadlet unit changed, e.g. after changing `nebula_sync_environment`, and synchronizes again on start.
@@ -72,6 +94,8 @@ Former versions of the role had a variable for every setting, they were replaced
 
 The former role set all `SYNC_*` and `CLIENT_*` variables explicitly to the defaults of nebula-sync, the role does not set them anymore.
 Former versions put the passwords in `PRIMARY` and `REPLICAS` into the environment of the quadlet unit, the secrets keep them out of it.
+The secrets are mounted as files and read with `PRIMARY_FILE` and `REPLICAS_FILE`, before they were passed as environment variables, `nebula_sync_secrets` stays the same.
+The tags are `dns` and `dns_nebula_sync`.
 
 ### Tests
 
@@ -82,8 +106,11 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 `prepare` sets up podman and the network `podman-molecule` with the role `container_podman`, pulls the images
 and starts two Pi-hole containers, the primary with the upstream `9.9.9.9` and a replica with the default upstreams.
 `converge` runs nebula-sync with a selective synchronization of the DNS upstreams and the Pi-hole URLs and passwords as secrets.
-`side_effect` changes `CLIENT_TIMEOUT_SECONDS` and checks that the running service is restarted.
-`verify` checks the quadlet unit including the secrets and no passwords in the environment, the podman secrets and the service,
+`side_effect` runs the role with `nebula_sync_container` not a dictionary, `nebula_sync_secrets` not a list, without the secret of the replicas,
+the file variable of the primary in the environment, an unknown environment variable in `nebula_sync_environment` and in `nebula_sync_container.environment` and an unknown secret
+and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
+then it changes `CLIENT_TIMEOUT_SECONDS` and checks that the running service is restarted.
+`verify` checks the quadlet unit with the mounted secrets, `PRIMARY_FILE` and `REPLICAS_FILE` and no passwords in the environment, the podman secrets and the service,
 and checks with the API of the replica that the upstreams of the primary were synchronized.
 The VM needs access to the GitHub container registry and Docker Hub.
 

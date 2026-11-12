@@ -6,7 +6,86 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    dns_nebula_sync__test_checked_files:
+      - '/etc/containers/systemd/nebula-sync.container'
+
   tasks:
+
+    - name: 'Set the role variables of the test'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_nebula_sync__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ dns_nebula_sync__test_checked_files }}"
+      register: 'dns_nebula_sync__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_nebula_sync with nebula_sync_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_container: [ 'environment' ]
+        dns_nebula_sync__test_invalid:
+          message: 'nebula_sync_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run dns_nebula_sync with nebula_sync_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_secrets:
+          PRIMARY: 'http://10.89.0.20|molecule-pihole-password'
+        dns_nebula_sync__test_invalid:
+          message: 'nebula_sync_secrets not a list'
+          search: '^nebula_sync_secrets has to be a list$'
+
+    - name: 'Run dns_nebula_sync without the secret of the replicas (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_secrets: "{{ dns_nebula_sync__test_vars.nebula_sync_secrets | selectattr('target', 'eq', 'PRIMARY') | list }}"
+        dns_nebula_sync__test_invalid:
+          message: 'no secret of the replicas'
+          search: 'needs the secrets PRIMARY, REPLICAS,\s+missing: REPLICAS\.'
+
+    - name: 'Run dns_nebula_sync with the file variable of the primary in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_environment: "{{ dns_nebula_sync__test_vars.nebula_sync_environment | combine({'PRIMARY_FILE': '/run/secrets/nebula_sync_primary'}) }}"
+        dns_nebula_sync__test_invalid:
+          message: 'the file variable of the primary in the environment'
+          search: 'must not be set in nebula_sync_environment:\s+PRIMARY_FILE\.'
+
+    - name: 'Run dns_nebula_sync with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_environment: "{{ dns_nebula_sync__test_vars.nebula_sync_environment | combine({'SYNC_CONFIG_FOO': 'true'}) }}"
+        dns_nebula_sync__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: SYNC_CONFIG_FOO\.'
+
+    - name: 'Run dns_nebula_sync with an unknown environment variable in nebula_sync_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_container:
+          environment:
+            FOO: 'bar'
+        dns_nebula_sync__test_invalid:
+          message: 'an unknown environment variable in nebula_sync_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run dns_nebula_sync with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nebula_sync_secrets: "{{ dns_nebula_sync__test_vars.nebula_sync_secrets + [{'name': 'nebula_sync_molecule_token', 'data': 'x', 'target': 'API_TOKEN'}] }}"
+        dns_nebula_sync__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: API_TOKEN\.'
 
     - name: 'Read the start time of the service before the change'
       ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value nebula-sync'
@@ -15,13 +94,7 @@
 
     - name: 'Set the role variables with changed environment'
       ansible.builtin.set_fact:
-        "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ dns_nebula_sync__test_vars
-           | combine({'nebula_sync_environment': dns_nebula_sync__test_vars.nebula_sync_environment | combine(dns_nebula_sync__test_side_effect_environment)})
-           | dict2items }}
-      loop_control:
-        label: "{{ item.key }}"
+        nebula_sync_environment: "{{ dns_nebula_sync__test_vars.nebula_sync_environment | combine(dns_nebula_sync__test_side_effect_environment) }}"
 
     - name: 'Run dns_nebula_sync with changed environment'
       ansible.builtin.include_role:

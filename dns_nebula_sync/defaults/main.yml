@@ -14,10 +14,9 @@ dns_nebula_sync__labels: "{{ nebula_sync_labels }}"
 
 dns_nebula_sync__version: "{{ nebula_sync_version | default('latest') }}"
 
+dns_nebula_sync__container: "{{ dns_nebula_sync__podman_container_default | combine(nebula_sync_container | default({})) }}"
 dns_nebula_sync__environment: "{{ dns_nebula_sync__environment_default | combine(nebula_sync_environment | default({})) }}"
 dns_nebula_sync__secrets: "{{ nebula_sync_secrets | default([]) }}"
-
-dns_nebula_sync__container: "{{ dns_nebula_sync__container_default | combine(nebula_sync_container | default({})) }}"
 
 dns_nebula_sync__autoupdate_enabled: "{{ nebula_sync_autoupdate_enabled | default(false) }}"
 dns_nebula_sync__autoupdate_schedule: "{{ nebula_sync_autoupdate_schedule }}"
@@ -40,16 +39,84 @@ dns_nebula_sync__secrets_required:
   - 'PRIMARY'
   - 'REPLICAS'
 
-# Variables carrying secrets (the Pi-hole passwords), they must be passed with nebula_sync_secrets
-dns_nebula_sync__secret_variables:
-  - 'PRIMARY'
-  - 'REPLICAS'
+# The targets of the secrets, they must not be set in nebula_sync_environment
+dns_nebula_sync__secret_variables: "{{ dns_nebula_sync__secret_files.keys() | list }}"
+
+# The secrets are mounted as files, the image reads the variable target from the file variable
+dns_nebula_sync__secret_files:
+  PRIMARY: 'PRIMARY_FILE'
+  REPLICAS: 'REPLICAS_FILE'
+
+dns_nebula_sync__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+dns_nebula_sync__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if dns_nebula_sync__secrets is sequence and dns_nebula_sync__secrets is not string and dns_nebula_sync__secrets is not mapping -%}
+  {%-   for secret in dns_nebula_sync__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in dns_nebula_sync__secret_files -%}
+  {%-     set _ = environment.update({ dns_nebula_sync__secret_files[secret.target]: dns_nebula_sync__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The variables of nebula-sync without PRIMARY and REPLICAS, from the README and internal/config of lovelaze/nebula-sync v0.11.3,
+# without API_ENABLED and NS_DEBUG (internal use)
+dns_nebula_sync__environment_allowed:
+  - 'TZ'
+  - 'FULL_SYNC'
+  - 'RUN_GRAVITY'
+  - 'CRON'
+  - 'CLIENT_SKIP_TLS_VERIFICATION'
+  - 'CLIENT_RETRY_DELAY_SECONDS'
+  - 'CLIENT_TIMEOUT_SECONDS'
+  - 'SYNC_CONFIG_DNS'
+  - 'SYNC_CONFIG_DNS_INCLUDE'
+  - 'SYNC_CONFIG_DNS_EXCLUDE'
+  - 'SYNC_CONFIG_DHCP'
+  - 'SYNC_CONFIG_DHCP_INCLUDE'
+  - 'SYNC_CONFIG_DHCP_EXCLUDE'
+  - 'SYNC_CONFIG_NTP'
+  - 'SYNC_CONFIG_NTP_INCLUDE'
+  - 'SYNC_CONFIG_NTP_EXCLUDE'
+  - 'SYNC_CONFIG_RESOLVER'
+  - 'SYNC_CONFIG_RESOLVER_INCLUDE'
+  - 'SYNC_CONFIG_RESOLVER_EXCLUDE'
+  - 'SYNC_CONFIG_DATABASE'
+  - 'SYNC_CONFIG_DATABASE_INCLUDE'
+  - 'SYNC_CONFIG_DATABASE_EXCLUDE'
+  - 'SYNC_CONFIG_MISC'
+  - 'SYNC_CONFIG_MISC_INCLUDE'
+  - 'SYNC_CONFIG_MISC_EXCLUDE'
+  - 'SYNC_CONFIG_DEBUG'
+  - 'SYNC_CONFIG_DEBUG_INCLUDE'
+  - 'SYNC_CONFIG_DEBUG_EXCLUDE'
+  - 'SYNC_GRAVITY_DHCP_LEASES'
+  - 'SYNC_GRAVITY_GROUP'
+  - 'SYNC_GRAVITY_AD_LIST'
+  - 'SYNC_GRAVITY_AD_LIST_BY_GROUP'
+  - 'SYNC_GRAVITY_DOMAIN_LIST'
+  - 'SYNC_GRAVITY_DOMAIN_LIST_BY_GROUP'
+  - 'SYNC_GRAVITY_CLIENT'
+  - 'SYNC_GRAVITY_CLIENT_BY_GROUP'
+  - 'WEBHOOK_SYNC_SUCCESS_URL'
+  - 'WEBHOOK_SYNC_SUCCESS_METHOD'
+  - 'WEBHOOK_SYNC_SUCCESS_BODY'
+  - 'WEBHOOK_SYNC_SUCCESS_HEADERS'
+  - 'WEBHOOK_SYNC_FAILURE_URL'
+  - 'WEBHOOK_SYNC_FAILURE_METHOD'
+  - 'WEBHOOK_SYNC_FAILURE_BODY'
+  - 'WEBHOOK_SYNC_FAILURE_HEADERS'
+  - 'WEBHOOK_CLIENT_SKIP_TLS_VERIFICATION'
+  # The file variables of the secrets, set by the role
+  - 'PRIMARY_FILE'
+  - 'REPLICAS_FILE'
 
 dns_nebula_sync__podman_name: 'nebula-sync'
 dns_nebula_sync__podman_image: 'ghcr.io/lovelaze/nebula-sync'
 dns_nebula_sync__podman_tag: "{{ dns_nebula_sync__version }}"
 
-dns_nebula_sync__container_default:
+dns_nebula_sync__podman_container_default:
   name: "{{ dns_nebula_sync__podman_name }}"
   hostname: "{{ dns_nebula_sync__hostname }}"
   image: "{{ dns_nebula_sync__podman_image }}:{{ dns_nebula_sync__podman_tag }}"
@@ -57,11 +124,13 @@ dns_nebula_sync__container_default:
   ipv6: "{{ dns_nebula_sync__ipv6 | default(omit) }}"
   network: "{{ dns_nebula_sync__network }}"
   timezone: "{{ dns_nebula_sync__timezone }}"
-  environment: "{{ dns_nebula_sync__environment }}"
+  # Set with nebula_sync_environment and nebula_sync_secrets, merged over the default
+  environment: "{{ dns_nebula_sync__environment | combine(dns_nebula_sync__environment_secrets_files) }}"
   labels: "{{ dns_nebula_sync__labels | default(omit) }}"
   secrets: >-
-    {{ (dns_nebula_sync__secrets | map(attribute='name') | zip(dns_nebula_sync__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
-      if (dns_nebula_sync__secrets | default([]) | length > 0)
+    {{ (dns_nebula_sync__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ dns_nebula_sync__secrets_dir ~ '/\1') | list)
+      if (dns_nebula_sync__secrets is sequence and dns_nebula_sync__secrets is not string and dns_nebula_sync__secrets | length > 0)
       else omit }}
   volumes:
     - '/etc/localtime:/etc/localtime:ro'
