@@ -16,23 +16,9 @@
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - app_evcc__environment_missing | length == 0
-          - app_evcc__secrets | rejectattr('name', 'defined') | list | length == 0
-          - app_evcc__secrets | rejectattr('data', 'defined') | list | length == 0
-          - app_evcc__secrets | rejectattr('target', 'defined') | list | length == 0
-          - app_evcc__secrets_missing | length == 0
-          - app_evcc__secrets_in_environment | length == 0
-        fail_msg: >-
-          {% if app_evcc__environment_required | length > 0 %}
-          evcc needs the environment variables {{ app_evcc__environment_required | join(', ') }},
-          missing or empty: {{ app_evcc__environment_missing | join(', ') | default('none', true) }}.
-          {% endif %}
-          {% if app_evcc__secrets_required | length > 0 %}
-          evcc needs the secrets {{ app_evcc__secrets_required | join(', ') }},
-          missing: {{ app_evcc__secrets_missing | join(', ') | default('none', true) }}.
-          {% endif %}
-          Every secret needs name, data and target, secret targets must not be set in evcc_environment:
-          {{ app_evcc__secrets_in_environment | join(', ') | default('none', true) }}.
+          - app_evcc__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_evcc__errors | join(' ') }}"
         quiet: true
       vars:
         app_evcc__environment_missing: >-
@@ -46,6 +32,21 @@
         app_evcc__secrets_in_environment: >-
           {{ app_evcc__secrets | selectattr('target', 'defined') | map(attribute='target')
              | select('in', app_evcc__environment.keys() | list) | list }}
+        app_evcc__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_evcc__secrets | rejectattr('name', 'defined') | list | length > 0 or app_evcc__secrets | rejectattr('data', 'defined') | list | length > 0 or app_evcc__secrets | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('evcc_secrets entries need name, data and target.') -%}
+          {%- endif -%}
+          {%- if app_evcc__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('evcc needs the environment variables ' ~ (app_evcc__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_evcc__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_evcc__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('evcc needs the secrets ' ~ (app_evcc__secrets_required | join(', ')) ~ ', missing: ' ~ (app_evcc__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_evcc__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secret targets must not be set in evcc_environment: ' ~ (app_evcc__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Validate the role variables'
       ansible.builtin.assert:
@@ -67,13 +68,9 @@
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
-          - app_evcc__environment_unknown | length == 0
-          - app_evcc__secrets_unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ app_evcc__environment_unknown | join(', ') | default('none', true) }}.
-          Unknown secrets: {{ app_evcc__secrets_unknown | join(', ') | default('none', true) }}.
-          Allowed are the environment variables {{ app_evcc__environment_allowed | join(', ') }}
-          and the secrets {{ app_evcc__secrets_allowed | join(', ') }}.
+          - app_evcc__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_evcc__errors | join(' ') }}"
         quiet: true
       vars:
         # The secrets of the container are omit without secrets
@@ -86,6 +83,18 @@
         app_evcc__secrets_unknown: >-
           {{ app_evcc__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
              | reject('in', app_evcc__secrets_allowed) | list }}
+        app_evcc__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_evcc__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_evcc__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_evcc__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_evcc__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_evcc__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_evcc__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     # The container runs as root
     - name: 'Create the data directory'
