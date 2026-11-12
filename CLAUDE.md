@@ -24,12 +24,15 @@ The roles are migrated and modernized one at a time. These rules apply to every 
 - A configuration is one dictionary in one line:
   `<role>__config: "{{ <role>__config_default | combine(<short>_config | default({})) }}"`.
   - No intermediate variables and no own check for a mapping, `combine` fails by itself.
+    If the default is empty, `combine` does not fail on every Ansible version, the role checks then that the configuration is a dictionary.
   - Additional sources (e.g. `common_globals`) are additional `combine` in the same line.
   - An inventory variable with another name (e.g. `_settings`) is renamed to `_config`.
 - Values of a configuration dictionary follow `time_chrony`:
   a string or number writes `key=value`, a list writes one line per element, `true` writes the option without value,
   `false` or `null` removes the option.
 - Options of the role itself (e.g. `enabled`) are listed in `<role>__role_options` in `vars/main.yml` and never written to the file.
+- `vars/` is only used for variants of a role, e.g. releases or platforms (`vars/<variant>.yml` included after validating the variant).
+  Generated lists of a role without variants live at the end of `defaults/main.yml` below "Defaults - do not change".
 - Single variables for options are removed, the migration in `docs/notes.md` maps the former variables.
 
 ## Podman roles
@@ -83,6 +86,15 @@ Secrets in the environment (only if the image cannot read a file):
   and reports unknown targets as "Unknown secrets: …".
 - The section Secrets of `docs/notes.md` explains why the image cannot read the secrets from files.
 
+Mixed secrets (the image reads some secrets from files, others only from the environment):
+
+- Targets with a file variable are in `<role>__secret_files` and mounted as files, the others are listed in `<role>__secrets_env`
+  and passed with `type=env,target=<target>`.
+- The allowed targets are the keys of `<role>__secret_files` and `<role>__secrets_env`,
+  `<role>__secret_variables` contains both, none of them may be set in `<short>_environment`.
+- The expression for `secrets` in the container default chooses `type=mount` or `type=env` per entry.
+- The section Secrets of `docs/notes.md` names the secrets passed in the environment and explains why.
+
 ### Composed names
 
 - If an image composes names from a free key (e.g. `<PREFIX>_<KEY>_<OPTION>`), the inventory declares the keys in `<short>_keys`,
@@ -95,6 +107,17 @@ Secrets in the environment (only if the image cannot read a file):
   `<role>__secret_files` is the fixed mapping `<role>__secret_files_options` combined with the generated `<role>__secret_files_keys`.
 - The message about unknown variables says that options with keys in their names need the keys in `<short>_keys`.
 - `docs/notes.md` has a section "Options with keys" with a table of the families and the generated names and an example.
+
+### Initialization
+
+- If an image initializes the application only on the first start with variables or secrets that are not needed afterwards
+  (e.g. the root user of a database), the initialization runs exactly once in its own container `<name>-init`, not in the quadlet unit.
+- The role detects an initialized application by the files the image checks itself (e.g. `WiredTiger` in `/data/db`) and skips the initialization then.
+- `<name>-init` uses the image, the volumes and the configuration of the quadlet unit, gets the secrets of the initialization as files and no network
+  if the initialization needs none. The role waits for the end of the initialization (e.g. a message in the log) and removes `<name>-init`
+  in an `always` block, also if the initialization failed. A failed initialization names what has to be removed before the next run.
+- The quadlet unit never contains the variables or secrets of the initialization.
+- `side_effect` checks that a restart does not run the initialization again, `verify` that `<name>-init` does not exist (see `database_mongodb`).
 
 ### Multiple instances
 
@@ -117,6 +140,16 @@ Secrets in the environment (only if the image cannot read a file):
 - Before any change the role stores the file and the UCI configuration on the controller in `<playbook_dir>/backups/<inventory_hostname>/`.
 - In check mode the role stops after the installation if the package is missing.
 - Do not restart with `restarted` if the old process may still hold the ports: stop, wait until the process has ended, then start (see `app_coturn`).
+
+## Modules
+
+- Python code of a role is an Ansible module in `library/` of the role, never a script run with `command`, `shell` or `script`.
+  Modules of molecule tests live in `molecule/<scenario>/library/`.
+- Modules are named `<role>_<purpose>` (e.g. `database_mongodb_logins`), so they do not collide with modules of collections.
+- Modules have `DOCUMENTATION`, `EXAMPLES` and `RETURN`, options carrying passwords are `no_log: true`,
+  so the tasks need no `no_log` and errors stay visible. Missing libraries are reported with `missing_required_lib`.
+- Modules running code in a container (e.g. `podman exec`) pass data and passwords on stdin, never as arguments.
+- Modules only report `changed` for real changes, e.g. after comparing passwords with `password_verify`, so the role stays idempotent.
 
 ## Validation
 
