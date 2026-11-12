@@ -1,0 +1,88 @@
+---
+# Network created by container_podman in prepare.yml
+database_questdb__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_questdb__test_image: 'docker.io/questdb/questdb:latest'
+database_questdb__test_quadlet_path: '/etc/containers/systemd/questdb.container'
+
+# The PostgreSQL client of verify
+database_questdb__test_psql_image: 'docker.io/library/postgres:17'
+
+# A valid change of the side effect, the quadlet unit changes and QuestDB has to restart
+database_questdb__test_side_effect_environment:
+  QDB_SHARED_WORKER_COUNT: '2'
+
+database_questdb__test_cases:
+
+  # Only the mandatory variables and the password of the PostgreSQL user, HTTP without authentication
+  - name: 'molecule-questdb-default'
+    role_vars:
+      questdb_home: '/opt/questdb'
+      questdb_ip: '10.89.0.60'
+      questdb_network: 'podman-molecule'
+      questdb_hostname: 'questdb-default'
+      questdb_timezone: 'Europe/Berlin'
+      questdb_secrets:
+        - name: 'questdb_pg_password'
+          data: 'molecule-pg-password'
+          target: 'QDB_PG_PASSWORD'
+    expect:
+      ip: '10.89.0.60'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/questdb:/var/lib/questdb'
+        - 'Secret=questdb_pg_password,type=mount,target=/run/secrets/questdb_pg_password,uid=10001,gid=10001,mode=0400'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'QDB_PG_PASSWORD_FILE=/run/secrets/questdb_pg_password'
+      pg_password: 'molecule-pg-password'
+      http: ~
+
+  # IPv6, labels, the HTTP authentication with the password from a secret, without telemetry
+  - name: 'molecule-questdb'
+    role_vars:
+      questdb_home: '/opt/questdb'
+      questdb_ip: '10.89.0.61'
+      questdb_ipv6: 'fd00:89::61'
+      questdb_network: 'podman-molecule'
+      questdb_hostname: 'questdb-molecule'
+      questdb_timezone: 'Europe/Berlin'
+      questdb_labels:
+        traefik.enable: 'true'
+      questdb_environment:
+        QDB_HTTP_USER: 'molecule'
+        QDB_TELEMETRY_ENABLED: 'false'
+      questdb_secrets:
+        - name: 'questdb_pg_password'
+          data: 'molecule-pg-password'
+          target: 'QDB_PG_PASSWORD'
+        - name: 'questdb_http_password'
+          data: 'molecule-http-password'
+          target: 'QDB_HTTP_PASSWORD'
+    side_effect: true
+    expect:
+      ip: '10.89.0.61'
+      ip6: 'fd00:89::61'
+      quadlet:
+        - 'Volume=/opt/questdb:/var/lib/questdb'
+        - 'Secret=questdb_pg_password,type=mount,target=/run/secrets/questdb_pg_password,uid=10001,gid=10001,mode=0400'
+        - 'Secret=questdb_http_password,type=mount,target=/run/secrets/questdb_http_password,uid=10001,gid=10001,mode=0400'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'QDB_HTTP_USER=molecule'
+        - 'QDB_TELEMETRY_ENABLED=false'
+        - 'QDB_SHARED_WORKER_COUNT=2'
+        - 'QDB_PG_PASSWORD_FILE=/run/secrets/questdb_pg_password'
+        - 'QDB_HTTP_PASSWORD_FILE=/run/secrets/questdb_http_password'
+      pg_password: 'molecule-pg-password'
+      http:
+        user: 'molecule'
+        password: 'molecule-http-password'

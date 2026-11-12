@@ -1,0 +1,141 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_questdb__test_case: "{{ database_questdb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_questdb__expect: "{{ database_questdb__test_case.expect }}"
+    database_questdb__test_home: "{{ database_questdb__test_case.role_vars.questdb_home }}"
+    database_questdb__test_url: "http://{{ database_questdb__expect.ip }}:9000"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_questdb__test_quadlet_path }}"
+      register: 'database_questdb__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_questdb__test_image) in database_questdb__test_quadlet_lines
+          - ('IP=' + database_questdb__expect.ip) in database_questdb__test_quadlet_lines
+          - database_questdb__expect.ip6 is none or ('IP6=' + database_questdb__expect.ip6) in database_questdb__test_quadlet_lines
+          - database_questdb__expect.ip6 is not none or database_questdb__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_questdb__expect.quadlet | reject('in', database_questdb__test_quadlet_lines) | list | length == 0
+          # The passwords are mounted as files, they are never part of the environment
+          - database_questdb__test_quadlet_lines | select('search', 'type=env|molecule-pg-password|molecule-http-password') | list | length == 0
+        fail_msg: "{{ database_questdb__test_quadlet.content | b64decode }}"
+      vars:
+        database_questdb__test_quadlet_lines: "{{ (database_questdb__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the questdb service'
+      ansible.builtin.command: 'systemctl is-active questdb'
+      register: 'database_questdb__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the questdb container'
+      ansible.builtin.command: 'podman inspect questdb'
+      register: 'database_questdb__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_questdb__test_service.stdout == 'active'
+          - database_questdb__test_net.IPAddress == database_questdb__expect.ip
+          - database_questdb__expect.ip6 is none or database_questdb__test_net.GlobalIPv6Address == database_questdb__expect.ip6
+          - database_questdb__expect.env | reject('in', database_questdb__test_env) | list | length == 0
+          - database_questdb__test_env | select('match', 'QDB_(PG|HTTP|PG_READONLY)_PASSWORD=') | list | length == 0
+        fail_msg: >-
+          service {{ database_questdb__test_service.stdout }},
+          IPv4 {{ database_questdb__test_net.IPAddress }}, IPv6 {{ database_questdb__test_net.GlobalIPv6Address }},
+          environment {{ database_questdb__test_env | reject('search', 'PASSWORD=') | join(', ') }}
+      vars:
+        database_questdb__test_container: "{{ (database_questdb__test_inspect.stdout | from_json)[0] }}"
+        database_questdb__test_net: "{{ database_questdb__test_container.NetworkSettings.Networks[database_questdb__test_case.role_vars.questdb_network] }}"
+        database_questdb__test_env: "{{ database_questdb__test_container.Config.Env }}"
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ database_questdb__test_home }}"
+      register: 'database_questdb__test_data'
+
+    - name: 'Assert the data directory'
+      ansible.builtin.assert:
+        that:
+          - database_questdb__test_data.stat.isdir | default(false)
+          - database_questdb__test_data.stat.uid == 10001
+        fail_msg: "uid {{ database_questdb__test_data.stat.uid | default('missing') }}"
+
+    - name: 'Wait until QuestDB answers'
+      ansible.builtin.uri:
+        url: "{{ database_questdb__test_url }}/"
+        status_code: [ 200, 401 ]
+      register: 'database_questdb__test_ready'
+      until: database_questdb__test_ready.status | default(0) in [ 200, 401 ]
+      retries: 30
+      delay: 5
+      failed_when: false
+
+    - name: 'Read the log of QuestDB'
+      when: database_questdb__test_ready.status | default(0) not in [ 200, 401 ]
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'questdb', '-n', '50', '--no-pager' ]
+      register: 'database_questdb__test_journal'
+      changed_when: false
+
+    - name: 'Assert that QuestDB runs'
+      ansible.builtin.assert:
+        that:
+          - database_questdb__test_ready.status | default(0) in [ 200, 401 ]
+        fail_msg: "{{ database_questdb__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Run a query over HTTP without authentication'
+      ansible.builtin.uri:
+        url: "{{ database_questdb__test_url }}/exec?query={{ 'SELECT 1' | urlencode }}"
+        status_code: [ 200, 401 ]
+      register: 'database_questdb__test_anonymous'
+
+    - name: 'Run a query over HTTP with the user and the password of the secret'
+      when: database_questdb__expect.http is not none
+      ansible.builtin.uri:
+        url: "{{ database_questdb__test_url }}/exec?query={{ 'SELECT 1' | urlencode }}"
+        url_username: "{{ database_questdb__expect.http.user }}"
+        url_password: "{{ database_questdb__expect.http.password }}"
+        force_basic_auth: true
+      register: 'database_questdb__test_authenticated'
+      no_log: true
+
+    - name: 'Assert the HTTP authentication'
+      ansible.builtin.assert:
+        that:
+          - database_questdb__test_anonymous.status == (401 if database_questdb__expect.http else 200)
+          - database_questdb__expect.http is none or database_questdb__test_authenticated.status == 200
+        fail_msg: >-
+          without authentication {{ database_questdb__test_anonymous.status }},
+          with authentication {{ database_questdb__test_authenticated.status | default('skipped') }}
+
+    # The PostgreSQL wire protocol accepts the password QuestDB reads from the file of the secret
+    - name: 'Run a query over the PostgreSQL wire protocol with the password of the secret'
+      ansible.builtin.command:
+        argv: [ 'podman', 'run', '--rm', '--network', "{{ database_questdb__test_case.role_vars.questdb_network }}",
+                '--env', "PGPASSWORD={{ database_questdb__expect.pg_password }}",
+                "{{ database_questdb__test_psql_image }}",
+                'psql', '--host', "{{ database_questdb__expect.ip }}", '--port', '8812', '--username', 'admin', '--dbname', 'qdb',
+                '--tuples-only', '--no-align', '--command', 'SELECT 42' ]
+      register: 'database_questdb__test_psql'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert the query over the PostgreSQL wire protocol'
+      ansible.builtin.assert:
+        that:
+          - database_questdb__test_psql.stdout | trim == '42'
+        fail_msg: "psql {{ database_questdb__test_psql.stdout }} {{ database_questdb__test_psql.stderr }}"

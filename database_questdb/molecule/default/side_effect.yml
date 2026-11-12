@@ -1,0 +1,172 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_questdb__test_case: "{{ database_questdb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_questdb__test_vars: "{{ database_questdb__test_case.role_vars }}"
+    database_questdb__test_env: "{{ database_questdb__test_vars.questdb_environment | default({}) }}"
+    database_questdb__test_secrets: "{{ database_questdb__test_vars.questdb_secrets | default([]) }}"
+    database_questdb__test_checked_files:
+      - "{{ database_questdb__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_questdb__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_questdb__test_checked_files }}"
+      register: 'database_questdb__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_questdb with questdb_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_container: [ 'environment' ]
+        database_questdb__test_invalid:
+          message: 'questdb_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_questdb with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_secrets: [ { name: 'questdb_pg_password', data: 'x' } ]
+        database_questdb__test_invalid:
+          message: 'a secret without target'
+          search: '^questdb_secrets entries need name, data and target$'
+
+    - name: 'Run database_questdb with without the password of the PostgreSQL user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_secrets: []
+        database_questdb__test_invalid:
+          message: 'without the password of the PostgreSQL user'
+          search: 'QuestDB needs the secrets QDB_PG_PASSWORD, missing: QDB_PG_PASSWORD\.'
+
+    - name: 'Run database_questdb with the password of the PostgreSQL user in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_environment: "{{ database_questdb__test_env | combine({'QDB_PG_PASSWORD': 'quest'}) }}"
+        database_questdb__test_invalid:
+          message: 'the password of the PostgreSQL user in the environment'
+          search: '^Secrets and their file variables must not be set in questdb_environment: QDB_PG_PASSWORD\.$'
+
+    - name: 'Run database_questdb with the file variable of the HTTP password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_environment: "{{ database_questdb__test_env | combine({'QDB_HTTP_PASSWORD_FILE': '/run/secrets/x'}) }}"
+        database_questdb__test_invalid:
+          message: 'the file variable of the HTTP password in the environment'
+          search: 'Secrets and their file variables must not be set in questdb_environment: QDB_HTTP_PASSWORD_FILE\.'
+
+    - name: 'Run database_questdb with the HTTP user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_environment: { QDB_HTTP_USER: 'molecule' }
+        questdb_secrets: [ { name: 'questdb_pg_password', data: 'x', target: 'QDB_PG_PASSWORD' } ]
+        database_questdb__test_invalid:
+          message: 'the HTTP user without password'
+          search: '^QDB_HTTP_USER and the secret QDB_HTTP_PASSWORD have to be set together\.$'
+
+    - name: 'Run database_questdb with the read only user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_environment: "{{ database_questdb__test_env | combine({'QDB_PG_READONLY_USER_ENABLED': 'true'}) }}"
+        database_questdb__test_invalid:
+          message: 'the read only user without password'
+          search: '^QDB_PG_READONLY_USER_ENABLED needs the secret QDB_PG_READONLY_PASSWORD\.$'
+
+    - name: 'Run database_questdb with an unknown key of QuestDB (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_environment: "{{ database_questdb__test_env | combine({'QDB_FOO': 'bar'}) }}"
+        database_questdb__test_invalid:
+          message: 'an unknown key of QuestDB'
+          search: '^Unknown environment variables: QDB_FOO\.'
+
+    - name: 'Run database_questdb with an unknown environment variable in questdb_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_container: { environment: { FOO: 'bar' } }
+        database_questdb__test_invalid:
+          message: 'an unknown environment variable in questdb_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_questdb with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        questdb_secrets: "{{ database_questdb__test_secrets + [{'name': 'questdb_unknown', 'data': 'x', 'target': 'QDB_ADMIN_PASSWORD'}] }}"
+        database_questdb__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: QDB_ADMIN_PASSWORD\.'
+
+    - name: 'Run database_questdb with the changed environment'
+      when: database_questdb__test_case.side_effect | default(false)
+      block:
+
+        # The change is only a restart if QuestDB runs
+        - name: 'Wait until QuestDB answers'
+          ansible.builtin.uri:
+            url: "http://{{ database_questdb__test_vars.questdb_ip }}:9000/"
+            status_code: [ 200, 401 ]
+          register: 'database_questdb__test_ready'
+          until: database_questdb__test_ready.status | default(0) in [ 200, 401 ]
+          retries: 30
+          delay: 5
+          failed_when: false
+
+        - name: 'Read the log of QuestDB'
+          when: database_questdb__test_ready.status | default(0) not in [ 200, 401 ]
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', 'questdb', '-n', '50', '--no-pager' ]
+          register: 'database_questdb__test_journal'
+          changed_when: false
+
+        - name: 'Assert that QuestDB runs'
+          ansible.builtin.assert:
+            that:
+              - database_questdb__test_ready.status | default(0) in [ 200, 401 ]
+            fail_msg: "{{ database_questdb__test_journal.stdout_lines | default([]) }}"
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'questdb' ]
+          register: 'database_questdb__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            questdb_environment: "{{ database_questdb__test_env | combine(database_questdb__test_side_effect_environment) }}"
+
+        - name: 'Run database_questdb with the changed environment'
+          ansible.builtin.include_role:
+            name: 'database_questdb'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'questdb' ]
+          register: 'database_questdb__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_questdb__quadlet_result is changed
+              - database_questdb__test_started_after.stdout | int > database_questdb__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ database_questdb__quadlet_result is changed }},
+              start before {{ database_questdb__test_started_before.stdout }}, after {{ database_questdb__test_started_after.stdout }}
