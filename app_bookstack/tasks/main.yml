@@ -1,16 +1,45 @@
 ---
 
 - name: 'Deploy BookStack container'
-  tags: [ 'app_bookstack' ]
+  tags: [ 'app', 'app_bookstack' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or bookstack_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_bookstack__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_bookstack__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_bookstack__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_bookstack__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_bookstack__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('bookstack_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('bookstack_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of bookstack_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
           - app_bookstack__environment_missing | length == 0
-          - app_bookstack__secrets | rejectattr('name', 'defined') | list | length == 0
-          - app_bookstack__secrets | rejectattr('data', 'defined') | list | length == 0
-          - app_bookstack__secrets | rejectattr('target', 'defined') | list | length == 0
           - app_bookstack__secrets_missing | length == 0
           - app_bookstack__secrets_in_environment | length == 0
         fail_msg: >-
@@ -18,7 +47,7 @@
           missing or empty: {{ app_bookstack__environment_missing | join(', ') | default('none', true) }}.
           BookStack needs the secrets {{ app_bookstack__secrets_required | join(', ') }},
           missing: {{ app_bookstack__secrets_missing | join(', ') | default('none', true) }}.
-          Every secret needs name, data and target, secret targets must not be set in bookstack_environment:
+          Secrets and their file variables must not be set in bookstack_environment:
           {{ app_bookstack__secrets_in_environment | join(', ') | default('none', true) }}.
         quiet: true
       vars:
@@ -28,11 +57,32 @@
              | list }}
         app_bookstack__secrets_missing: >-
           {{ app_bookstack__secrets_required
-             | reject('in', app_bookstack__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | reject('in', app_bookstack__secrets | map(attribute='target') | list)
              | list }}
         app_bookstack__secrets_in_environment: >-
-          {{ app_bookstack__secrets | selectattr('target', 'defined') | map(attribute='target')
-             | select('in', app_bookstack__environment.keys() | list) | list }}
+          {{ (app_bookstack__secrets | map(attribute='target') | list
+              + app_bookstack__secret_variables + app_bookstack__secret_files.values() | list)
+             | select('in', app_bookstack__environment.keys() | list) | unique | list }}
+
+    # Checks the environment and the secrets of the container after merging bookstack_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_bookstack__environment_unknown | length == 0
+          - app_bookstack__secrets_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_bookstack__environment_unknown | join(', ') | default('none', true) }}.
+          Unknown secrets: {{ app_bookstack__secrets_unknown | join(', ') | default('none', true) }}.
+          Allowed are the variables of the image (app_bookstack__environment_allowed)
+          and the secrets {{ app_bookstack__secret_files.keys() | join(', ') }}.
+        quiet: true
+      vars:
+        app_bookstack__environment_unknown: >-
+          {{ (app_bookstack__container.environment | default({})).keys()
+             | reject('in', app_bookstack__environment_allowed) | list }}
+        app_bookstack__secrets_unknown: >-
+          {{ app_bookstack__secrets | map(attribute='target') | reject('in', app_bookstack__secret_files.keys() | list) | list }}
 
     - name: 'Create directories'
       ansible.builtin.file:
@@ -41,7 +91,7 @@
         group: "{{ app_bookstack__gid }}"
         mode: "{{ item.mode | default('0700') }}"
         state: 'directory'
-      with_items:
+      loop:
         - dest: "{{ app_bookstack__podman_config_dir }}"
 
     - name: 'Create secrets'
@@ -55,18 +105,6 @@
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_bookstack__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_bookstack__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_bookstack__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -98,11 +136,10 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
       register: 'app_bookstack__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_bookstack__container.name }}"
         daemon_reload: true
         state: "{{ 'restarted' if app_bookstack__restart | bool else 'started' }}"
@@ -111,15 +148,15 @@
         app_bookstack__running: >-
           {{ (ansible_facts.services[app_bookstack__container.name + '.service'].state | default('')) == 'running' }}
         app_bookstack__restart: >-
-          {{ podman___update_mode | bool
-             or (app_bookstack__running | bool
-                 and (app_bookstack__secrets_result is changed or app_bookstack__quadlet_result is changed)) }}
+          {{ app_bookstack__running | bool
+             and (app_bookstack__secrets_result is changed or app_bookstack__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'app_bookstack__autoupdate_enabled'
-      include_role:
+      when: 'app_bookstack__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_bookstack__container.name }}"
         container_image: "{{ app_bookstack__container.image }}"
+        container_schedule: "{{ app_bookstack__autoupdate_schedule }}"

@@ -5,7 +5,11 @@ See the [BookStack documentation](https://www.bookstackapp.com/docs/) and its `.
 
 All variables are set with `bookstack_environment`, which is merged over the defaults of the role.
 Variables carrying secrets are passed as podman secrets with `bookstack_secrets` and must not be set in `bookstack_environment`.
-Every secret is created with `podman secret create` and passed into the container as environment variable `target`.
+Every secret has a `name`, the `data` and the `target`, the usual name of the variable, e.g. `DB_PASSWORD`.
+The role creates the secret with `podman secret create`, mounts it to `/run/secrets/<name>` and sets `FILE__<target>`,
+the linuxserver image reads the variable from this file at the start, so the secret is neither part of the quadlet unit nor of the environment of the container.
+Allowed targets are `APP_KEY`, `DB_PASSWORD`, `DATABASE_URL`, `MYSQL_PASSWORD`, `MAIL_PASSWORD`, `LDAP_PASS`, `OIDC_CLIENT_SECRET`,
+`STORAGE_S3_KEY`, `STORAGE_S3_SECRET` and the `*_APP_SECRET` of the social logins, they must not be set in `bookstack_environment`.
 
 The role requires the following variables and checks them before it changes anything:
 
@@ -22,10 +26,30 @@ The role requires the following variables and checks them before it changes anyt
 
 `APP_KEY` is generated with `php artisan key:generate --show` or as `base64:` followed by 32 random bytes in base64, e.g. `echo "base64:$(openssl rand -base64 32)"`.
 
+### Allowed variables
+
+The role only allows the environment variables in `app_bookstack__environment_allowed` and the secrets above,
+it stops before any change if unknown variables or secrets are set.
+This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
+The check uses the environment and the secrets of the container after merging `bookstack_container`,
+so variables set with `bookstack_container.environment` are checked as well.
+The allowed variables are `PUID`, `PGID`, `TZ` and `UMASK` of the linuxserver image and the keys of BookStack,
+generated from `.env.example.complete` and `app/Config/*.php` of BookStack v26.09.3 without the secrets and `TEST_DATABASE_URL`,
+and the file variables of the secrets (`FILE__<target>`). The role sets them from `bookstack_secrets`, they must not be set in `bookstack_environment`.
+New versions of BookStack may add keys, the list in `defaults/main.yml` is generated again.
+
+### Validation
+
+The role checks before any change that `bookstack_secrets` is a list of entries with `name`, `data` and `target` and unique names,
+that the required variables and secrets are set, that neither a secret nor its file variable is set in `bookstack_environment`
+and that only allowed variables and secrets are used.
+If `bookstack_container` is no dictionary, merging it with the default fails before anything changes.
+
 ### Changes and restarts
 
 A running container is restarted when a secret or the quadlet unit changed, e.g. after changing `bookstack_environment`.
 The first start of the container does not trigger an additional restart.
+Updates of the image are done by `container_update` with `bookstack_autoupdate_enabled: true` and `bookstack_autoupdate_schedule`.
 
 ### Migration from the single variables and the `.env` file
 
@@ -65,6 +89,12 @@ Set `MAIL_DRIVER`, `CACHE_DRIVER`, `SESSION_DRIVER`, `SESSION_SECURE_COOKIE` and
 Environment variables take precedence over `www/.env`, but values only set in the old file still apply.
 Remove `bookstack_home/www/.env` after the migration, the container creates a new one from the environment variables.
 The old file also contains the database password and the application key in plain text.
+
+Later changes of the role:
+
+- The secrets are mounted as files and read with `FILE__<target>`, before they were passed as environment variables, `bookstack_secrets` stays the same.
+- `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
+- The tags are `app` and `app_bookstack`.
 
 ### Multiple instances
 
@@ -121,7 +151,11 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | `molecule-bookstack-ipv6` | Container with IPv4 and IPv6 address |
 
 `prepare` sets up podman and the network `podman-molecule` with the role `container_podman`, pulls the images and starts a MariaDB container as database.
-`verify` checks the quadlet unit including the secrets, the podman secrets, the service, the container addresses and environment,
+`side_effect` runs the role with `bookstack_container` not a dictionary, a secret without name, without the secret of the application key,
+the mail password and the file variable of the application key in the environment, an unknown environment variable in `bookstack_environment` and in `bookstack_container.environment` and an unknown secret
+and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
+then it waits for the first start and sets `APP_DEFAULT_DARK_MODE` on `molecule-bookstack-ipv6`, the quadlet unit changes and BookStack has to restart.
+`verify` checks the quadlet unit with the mounted secrets, the podman secrets, the service, the container addresses and the environment with `FILE__APP_KEY` and `FILE__DB_PASSWORD` without the secrets,
 requests the login page and checks that `www/.env` was not generated by the role.
 The first start of BookStack runs the database migrations, so the login page may take a few minutes.
 

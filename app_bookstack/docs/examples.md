@@ -27,7 +27,7 @@ bookstack_environment:
   OIDC_ISSUER_DISCOVER: 'true'
   SESSION_SECURE_COOKIE: 'true'
 
-# Pass secrets as podman secrets
+# Pass secrets as podman secrets, the role mounts them as files and sets FILE__<target>
 bookstack_secrets:
   - name: 'bookstack_app_key'
     data: "{{ vault_bookstack_app_key }}"
