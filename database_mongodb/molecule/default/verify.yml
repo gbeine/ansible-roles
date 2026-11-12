@@ -1,0 +1,124 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_mongodb__test_case: "{{ database_mongodb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_mongodb__expect: "{{ database_mongodb__test_case.expect }}"
+    database_mongodb__test_home: "{{ database_mongodb__test_case.role_vars.mongodb_home }}"
+    # The passwords of the test case, they must not be part of the unit, the environment or mongod.conf
+    database_mongodb__test_plain: >-
+      {{ (database_mongodb__test_case.role_vars.mongodb_passwords | default({})).values() | list
+         + database_mongodb__test_case.role_vars.mongodb_secrets | map(attribute='data') | list }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_mongodb__test_quadlet_path }}"
+      register: 'database_mongodb__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_mongodb__expect.image) in database_mongodb__test_quadlet_lines
+          - ('IP=' + database_mongodb__expect.ip) in database_mongodb__test_quadlet_lines
+          - database_mongodb__expect.ip6 is none or ('IP6=' + database_mongodb__expect.ip6) in database_mongodb__test_quadlet_lines
+          - database_mongodb__expect.ip6 is not none or database_mongodb__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_mongodb__expect.quadlet | reject('in', database_mongodb__test_quadlet_lines) | list | length == 0
+          - database_mongodb__test_quadlet_lines | select('match', '(' ~ (database_mongodb__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+          - database_mongodb__test_quadlet_lines | select('search', 'MONGO_INITDB') | list | length == 0
+          - database_mongodb__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - database_mongodb__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - database_mongodb__test_plain | select('in', database_mongodb__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ database_mongodb__test_quadlet.content | b64decode }}"
+      vars:
+        database_mongodb__test_quadlet_lines: "{{ (database_mongodb__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the mongodb service'
+      ansible.builtin.command: 'systemctl is-active mongodb'
+      register: 'database_mongodb__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the mongodb container'
+      ansible.builtin.command: 'podman inspect mongodb'
+      register: 'database_mongodb__test_inspect'
+      changed_when: false
+
+    - name: 'Check the container of the initialization'
+      ansible.builtin.command: 'podman container exists mongodb-init'
+      register: 'database_mongodb__test_init_container'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service, the container addresses, the environment and the removed initialization'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__test_service.stdout == 'active'
+          - database_mongodb__test_net.IPAddress == database_mongodb__expect.ip
+          - database_mongodb__expect.ip6 is none or database_mongodb__test_net.GlobalIPv6Address == database_mongodb__expect.ip6
+          - database_mongodb__test_env | select('match', 'MONGO_INITDB') | list | length == 0
+          - database_mongodb__test_init_container.rc == 1
+        fail_msg: >-
+          service {{ database_mongodb__test_service.stdout }},
+          IPv4 {{ database_mongodb__test_net.IPAddress }}, IPv6 {{ database_mongodb__test_net.GlobalIPv6Address }},
+          environment {{ database_mongodb__test_env | reject('search', 'PASSWORD') | join(', ') }},
+          container of the initialization exists: {{ database_mongodb__test_init_container.rc == 0 }}
+      vars:
+        database_mongodb__test_container: "{{ (database_mongodb__test_inspect.stdout | from_json)[0] }}"
+        database_mongodb__test_net: "{{ database_mongodb__test_container.NetworkSettings.Networks[database_mongodb__test_case.role_vars.mongodb_network] }}"
+        database_mongodb__test_env: "{{ database_mongodb__test_container.Config.Env }}"
+
+    - name: 'Read mongod.conf'
+      ansible.builtin.slurp:
+        src: "{{ database_mongodb__test_home }}/etc/mongod.conf"
+      register: 'database_mongodb__test_config'
+
+    - name: 'Assert mongod.conf'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__expect.config | reject('in', database_mongodb__test_config_text) | list | length == 0
+          - database_mongodb__expect.config_absent | select('in', database_mongodb__test_config_text) | list | length == 0
+          - database_mongodb__test_plain | select('in', database_mongodb__test_config_text) | list | length == 0
+          - (database_mongodb__test_config_text | from_yaml).security.authorization == 'enabled'
+        fail_msg: "{{ database_mongodb__test_config_text.splitlines() }}"
+      vars:
+        database_mongodb__test_config_text: "{{ database_mongodb__test_config.content | b64decode }}"
+
+    # Like the role, the module connects from the VM to the address of the container
+    - name: 'Check root, the replica set, the server parameters and the accounts'
+      database_mongodb_test:
+        login_host: "{{ database_mongodb__expect.ip }}"
+        login_port: 27017
+        root:
+          name: "{{ database_mongodb__test_case.role_vars.mongodb_root_username | default('root') }}"
+          password: "{{ database_mongodb__test_root_password }}"
+        parameters: "{{ database_mongodb__expect.parameters.keys() | list }}"
+        accounts: "{{ database_mongodb__expect.accounts }}"
+      register: 'database_mongodb__test_result'
+
+    - name: 'Assert root, the replica set, the server parameters and the accounts'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__test_result.version.startswith(database_mongodb__expect.release ~ '.')
+          - database_mongodb__test_result.anonymous is match('denied')
+          - database_mongodb__test_result.replica_set == database_mongodb__expect.replica_set
+          - database_mongodb__expect.replica_set | length == 0 or database_mongodb__test_result.primary
+          - database_mongodb__test_result.parameters == database_mongodb__expect.parameters
+          - database_mongodb__test_expected_users | reject('in', database_mongodb__test_result.users) | list | length == 0
+          - database_mongodb__expect.accounts | length == 0 or database_mongodb__test_result.app_write == 'allowed'
+          - database_mongodb__expect.accounts | length == 0 or database_mongodb__test_result.reader_read == 'allowed'
+          - database_mongodb__expect.accounts | length == 0 or database_mongodb__test_result.reader_value == 42
+          - database_mongodb__expect.accounts | length == 0 or database_mongodb__test_result.reader_write is match('denied')
+          - database_mongodb__expect.accounts | length == 0 or database_mongodb__test_result.wrong_password is match('denied')
+        fail_msg: "{{ database_mongodb__test_result | to_json }}"
+      vars:
+        database_mongodb__test_expected_users: >-
+          {{ [ 'admin.' ~ (database_mongodb__test_case.role_vars.mongodb_root_username | default('root')) ]
+             + database_mongodb__expect.accounts | map(attribute='database') | zip(database_mongodb__expect.accounts | map(attribute='name')) | map('join', '.') | list }}

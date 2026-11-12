@@ -1,0 +1,192 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_mongodb__test_case: "{{ database_mongodb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_mongodb__test_vars: "{{ database_mongodb__test_case.role_vars }}"
+    database_mongodb__test_config: "{{ database_mongodb__test_vars.mongodb_config | default({}) }}"
+    database_mongodb__test_accounts: "{{ database_mongodb__test_vars.mongodb_accounts | default([]) }}"
+    database_mongodb__test_passwords: "{{ database_mongodb__test_vars.mongodb_passwords | default({}) }}"
+    database_mongodb__test_checked_files:
+      - "{{ database_mongodb__test_quadlet_path }}"
+      - "{{ database_mongodb__test_vars.mongodb_home }}/etc/mongod.conf"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_mongodb__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_mongodb__test_checked_files }}"
+      register: 'database_mongodb__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_mongodb with mongodb_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_container: [ 'environment' ]
+        database_mongodb__test_invalid:
+          message: 'mongodb_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_mongodb with an unknown release (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_release: '6.0'
+        database_mongodb__test_invalid:
+          message: 'an unknown release'
+          search: '^mongodb_release has to be one of 7.0, 8.0, 8.3, 9.0, got 6.0'
+
+    - name: 'Run database_mongodb with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_secrets: [ { name: 'mongodb_root_password', data: 'x' } ]
+        database_mongodb__test_invalid:
+          message: 'a secret without target'
+          search: '^mongodb_secrets entries need name, data and target$'
+
+    - name: 'Run database_mongodb without the root password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_secrets: []
+        database_mongodb__test_invalid:
+          message: 'without the root password'
+          search: '^MongoDB needs the secrets MONGO_INITDB_ROOT_PASSWORD, missing: MONGO_INITDB_ROOT_PASSWORD\.$'
+
+    - name: 'Run database_mongodb with the root password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_environment: { MONGO_INITDB_ROOT_PASSWORD: 'molecule' }
+        database_mongodb__test_invalid:
+          message: 'the root password in the environment'
+          search: '^Secrets and their file variables must not be set in mongodb_environment: MONGO_INITDB_ROOT_PASSWORD\.$'
+
+    - name: 'Run database_mongodb with a variable of the initialization in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_environment: { MONGO_INITDB_DATABASE: 'app' }
+        database_mongodb__test_invalid:
+          message: 'a variable of the initialization in the environment'
+          search: '^The initialization is managed by the role with mongodb_root_username and the secret MONGO_INITDB_ROOT_PASSWORD, not with MONGO_INITDB_DATABASE\.$'
+
+    - name: 'Run database_mongodb with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_config: { operationProfiling: { slowOpThreshold: 100 } }
+        database_mongodb__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in mongodb_config: operationProfiling\.slowOpThreshold\. Allowed are the options of MongoDB'
+
+    - name: 'Run database_mongodb with an unknown server parameter (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_config: { setParameter: { noSuchParameter: 1 } }
+        database_mongodb__test_invalid:
+          message: 'an unknown server parameter'
+          search: '^Unknown server parameters in mongodb_config\.setParameter: noSuchParameter\.'
+
+    - name: 'Run database_mongodb with an option set by the role (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_config: { net: { port: 27018 } }
+        database_mongodb__test_invalid:
+          message: 'an option set by the role'
+          search: '^Options set by the role must not be set in mongodb_config: net\.port\.$'
+
+    - name: 'Run database_mongodb with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_config:
+          systemLog:
+            path: |
+              /data/db/mongod.log
+              /data/db/other.log
+        database_mongodb__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: systemLog\.path\.$'
+
+    - name: 'Run database_mongodb with a replica set without keyfile (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_secrets: [ "{{ database_mongodb__test_root_secret }}" ]
+        mongodb_config: { replication: { replSetName: 'rs0' } }
+        database_mongodb__test_invalid:
+          message: 'a replica set without keyfile'
+          search: '^A replica set with authorization needs the secret MONGO_KEYFILE for replication\.replSetName\.$'
+
+    - name: 'Run database_mongodb with an account without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_accounts: "{{ database_mongodb__test_accounts + [ { 'name': 'worker', 'database': 'app' } ] }}"
+        database_mongodb__test_invalid:
+          message: 'an account without password'
+          search: '^Accounts without password in mongodb_passwords: worker\.$'
+
+    - name: 'Run database_mongodb with the password of an unknown account (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_passwords: "{{ database_mongodb__test_passwords | combine({ 'worker': 'molecule' }) }}"
+        database_mongodb__test_invalid:
+          message: 'the password of an unknown account'
+          search: '^Passwords of unknown accounts in mongodb_passwords: worker\.$'
+
+    - name: 'Run database_mongodb with an unknown environment variable in mongodb_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_container: { environment: { FOO: 'bar' } }
+        database_mongodb__test_invalid:
+          message: 'an unknown environment variable in mongodb_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_mongodb with the changed configuration'
+      when: database_mongodb__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongodb' ]
+          register: 'database_mongodb__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            mongodb_config: "{{ database_mongodb__test_config | combine(database_mongodb__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run database_mongodb with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'database_mongodb'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongodb' ]
+          register: 'database_mongodb__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed mongod.conf, the restart of the service and no second initialization'
+          ansible.builtin.assert:
+            that:
+              - database_mongodb__config_result is changed
+              - database_mongodb__quadlet_result is not changed
+              - database_mongodb__initialized.matched > 0
+              - database_mongodb__init_result is skipped
+              - database_mongodb__test_started_after.stdout | int > database_mongodb__test_started_before.stdout | int
+            fail_msg: >-
+              mongod.conf changed: {{ database_mongodb__config_result is changed }},
+              quadlet changed: {{ database_mongodb__quadlet_result is changed }},
+              initialized files: {{ database_mongodb__initialized.matched }},
+              initialization skipped: {{ database_mongodb__init_result is skipped }},
+              start before {{ database_mongodb__test_started_before.stdout }}, after {{ database_mongodb__test_started_after.stdout }}

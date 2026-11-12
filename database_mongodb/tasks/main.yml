@@ -1,54 +1,370 @@
 ---
 
 - name: 'Install MongoDB'
-  tags: [ 'database_mongodb'  ]
+  tags: [ 'database', 'database_mongodb' ]
   block:
 
-    - name: 'Create directories'
-      ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: "{{ database_mongodb__uid }}"
-        group: "{{ database_mongodb__gid }}"
-        mode: "{{ item.mode | default('0700') }}"
-        state: 'directory'
-      with_items:
-        - dest: "{{ database_mongodb__podman_etc_dir }}"
-        - dest: "{{ database_mongodb__podman_db_dir }}"
-        - dest: "{{ database_mongodb__podman_configdb_dir }}"
+    - name: 'Validate the release'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__release | string in database_mongodb__releases
+          - >-
+            database_mongodb__version | string == database_mongodb__release | string
+            or (database_mongodb__version | string).startswith(database_mongodb__release | string ~ '.')
+            or (database_mongodb__version | string).startswith(database_mongodb__release | string ~ '-')
+        fail_msg: >-
+          mongodb_release has to be one of {{ database_mongodb__releases | join(', ') }}, got {{ database_mongodb__release }},
+          and mongodb_version is the tag of the image and has to start with the release, got {{ database_mongodb__version }}.
+        quiet: true
 
-    - name: 'Create keyfile'
-      ansible.builtin.copy:
-        content: "{{ database_mongodb__keyfile }}"
-        owner: "{{ database_mongodb__uid }}"
-        group: "{{ database_mongodb__gid }}"
-        dest: "{{ database_mongodb__podman_etc_dir }}/mongo-keyfile"
-        mode: '400'
-      when: 'database_mongodb__keyfile | length > 0'
+    # Every run includes the options of its release, they replace the options of former runs on the host
+    - name: 'Include the allowed options and server parameters of the release'
+      ansible.builtin.include_vars:
+        file: "options-{{ database_mongodb__release }}.yml"
+
+    # A failing template in the variables (e.g. an unknown filter or mongodb_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_mongodb__container | length > 0
+          - database_mongodb__config is mapping
+        fail_msg: 'mongodb_config has to be a dictionary.'
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongodb__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_mongodb__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_mongodb__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('mongodb_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('mongodb_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of mongodb_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of mongodb_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongodb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongodb__secret_targets: "{{ database_mongodb__secrets | map(attribute='target') | list }}"
+        database_mongodb__secrets_missing: >-
+          {{ database_mongodb__secrets_required | reject('in', database_mongodb__secret_targets) | list }}
+        database_mongodb__secrets_in_environment: >-
+          {{ (database_mongodb__secret_targets + database_mongodb__secret_variables + database_mongodb__secret_files.values() | list)
+             | select('in', database_mongodb__environment.keys() | list) | unique | list }}
+        database_mongodb__environment_managed_set: >-
+          {{ database_mongodb__environment_managed | select('in', database_mongodb__environment.keys() | list) | list }}
+        database_mongodb__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_mongodb__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('MongoDB needs the secrets ' ~ (database_mongodb__secrets_required | join(', ')) ~ ', missing: ' ~ (database_mongodb__secrets_missing | join(', ')) ~ '.') -%}
+          {%- elif database_mongodb__root_password | string | length == 0 -%}
+          {%-   set _ = errors.append('The root password must not be empty.') -%}
+          {%- endif -%}
+          {%- if database_mongodb__root_username | string is not match(database_mongodb__account_name_pattern) -%}
+          {%-   set _ = errors.append('Invalid mongodb_root_username, allowed are letters, digits and _ . @ -.') -%}
+          {%- endif -%}
+          {%- if database_mongodb__environment_managed_set | length > 0 -%}
+          {%-   set _ = errors.append('The initialization is managed by the role with mongodb_root_username and the secret MONGO_INITDB_ROOT_PASSWORD, not with ' ~ (database_mongodb__environment_managed_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongodb__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in mongodb_environment: ' ~ (database_mongodb__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The paths of the options are the keys joined with dots, e.g. storage.wiredTiger.engineConfig.cacheSizeGB,
+    # an allowed path is an option even if its value is a dictionary (e.g. operationProfiling.filter)
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongodb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongodb__errors: >-
+          {%- macro walk(options, prefix, ns) -%}
+          {%-   for key, value in options.items() -%}
+          {%-     set path = prefix ~ (key | string) -%}
+          {%-     if path == 'setParameter' -%}
+          {%-       if value is not mapping -%}
+          {%-         set ns.sections = ns.sections + [ path ] -%}
+          {%-       else -%}
+          {%-         for name, parameter in value.items() -%}
+          {%-           if name not in database_mongodb__parameters_allowed -%}
+          {%-             set ns.parameters = ns.parameters + [ name ] -%}
+          {%-           elif parameter is mapping or (parameter is sequence and parameter is not string) -%}
+          {%-             set ns.invalid = ns.invalid + [ path ~ '.' ~ name ] -%}
+          {%-           elif parameter is string and (parameter ~ '.').splitlines() | length > 1 -%}
+          {%-             set ns.lines = ns.lines + [ path ~ '.' ~ name ] -%}
+          {%-           endif -%}
+          {%-         endfor -%}
+          {%-       endif -%}
+          {%-     elif path in database_mongodb__config_role_paths -%}
+          {%-       set ns.role = ns.role + [ path ] -%}
+          {%-     elif path in database_mongodb__config_passwords -%}
+          {%-       set ns.passwords = ns.passwords + [ path ] -%}
+          {%-     elif path in database_mongodb__config_allowed -%}
+          {%-       for item in (value if value is sequence and value is not string else [ value ]) if item is string -%}
+          {%-         if (item ~ '.').splitlines() | length > 1 -%}
+          {%-           set ns.lines = ns.lines + [ path ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     elif value is mapping -%}
+          {%-       if database_mongodb__config_allowed | select('match', (path ~ '.') | regex_escape) | list | length > 0 -%}
+          {%-         set _ = walk(value, path ~ '.', ns) -%}
+          {%-       else -%}
+          {%-         set ns.unknown = ns.unknown + [ path ] -%}
+          {%-       endif -%}
+          {%-     elif value is not none -%}
+          {%-       set ns.unknown = ns.unknown + [ path ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endmacro -%}
+          {%- set errors = [] -%}
+          {%- set ns = namespace(unknown=[], parameters=[], role=[], passwords=[], invalid=[], lines=[], sections=[]) -%}
+          {%- set _ = walk(database_mongodb__config, '', ns) -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in mongodb_config: ' ~ (ns.unknown | join(', ')) ~ '. Allowed are the options of MongoDB ' ~ database_mongodb__release ~ ' (database_mongodb__config_allowed).') -%}
+          {%- endif -%}
+          {%- if ns.sections | length > 0 -%}
+          {%-   set _ = errors.append('setParameter of mongodb_config has to be a dictionary.') -%}
+          {%- endif -%}
+          {%- if ns.parameters | length > 0 -%}
+          {%-   set _ = errors.append('Unknown server parameters in mongodb_config.setParameter: ' ~ (ns.parameters | join(', ')) ~ '. Allowed are the parameters of MongoDB ' ~ database_mongodb__release ~ ' set at startup (database_mongodb__parameters_allowed).') -%}
+          {%- endif -%}
+          {%- if ns.role | length > 0 -%}
+          {%-   set _ = errors.append('Options set by the role must not be set in mongodb_config: ' ~ (ns.role | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.passwords | length > 0 -%}
+          {%-   set _ = errors.append('Passwords must not be written to mongod.conf: ' ~ (ns.passwords | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.invalid | length > 0 -%}
+          {%-   set _ = errors.append('Server parameters have to be strings, numbers or booleans: ' ~ (ns.invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongodb__replica_set | length > 0 and database_mongodb__keyfile | length == 0 -%}
+          {%-   set _ = errors.append('A replica set with authorization needs the secret MONGO_KEYFILE for replication.replSetName.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the accounts'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongodb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongodb__errors: >-
+          {%- set errors = [] -%}
+          {%- set accounts = database_mongodb__accounts -%}
+          {%- if accounts is not sequence or accounts is string or accounts is mapping -%}
+          {%-   set _ = errors.append('mongodb_accounts has to be a list.') -%}
+          {%- elif accounts | reject('mapping') | list | length > 0 or accounts | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('mongodb_accounts entries need name.') -%}
+          {%- else -%}
+          {%-   set names = accounts | map(attribute='name') | map('string') | list -%}
+          {%-   set invalid = names | reject('match', database_mongodb__account_name_pattern) | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('Invalid names in mongodb_accounts: ' ~ (invalid | join(', ')) ~ ', allowed are letters, digits and _ . @ -.') -%}
+          {%-   endif -%}
+          {%-   set databases = accounts | map(attribute='database', default='admin') | map('string') | reject('match', database_mongodb__database_name_pattern) | list -%}
+          {%-   if databases | length > 0 -%}
+          {%-     set _ = errors.append('Invalid databases in mongodb_accounts: ' ~ (databases | join(', ')) ~ ', allowed are letters, digits, _ and -.') -%}
+          {%-   endif -%}
+          {%-   if names | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of mongodb_accounts have to be unique, mongodb_passwords has one password per name.') -%}
+          {%-   endif -%}
+          {%-   if database_mongodb__root_username | string in names -%}
+          {%-     set _ = errors.append('The account ' ~ database_mongodb__root_username ~ ' is created by the image on the initialization and must not be in mongodb_accounts.') -%}
+          {%-   endif -%}
+          {%-   set ns = namespace(roles=[]) -%}
+          {%-   for account in accounts if account.roles is defined -%}
+          {%-     if account.roles is not sequence or account.roles is string or account.roles is mapping
+                     or account.roles | reject('string') | reject('mapping') | list | length > 0
+                     or account.roles | select('mapping') | rejectattr('role', 'defined') | list | length > 0
+                     or account.roles | select('mapping') | rejectattr('db', 'defined') | list | length > 0 -%}
+          {%-       set ns.roles = ns.roles + [ account.name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.roles | length > 0 -%}
+          {%-     set _ = errors.append('roles of mongodb_accounts have to be a list of role names or dictionaries with role and db: ' ~ (ns.roles | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set passwords = database_mongodb__passwords -%}
+          {%-   if passwords is not mapping -%}
+          {%-     set _ = errors.append('mongodb_passwords has to be a dictionary.') -%}
+          {%-   else -%}
+          {%-     set missing = names | reject('in', passwords.keys() | list) | list -%}
+          {%-     if missing | length > 0 -%}
+          {%-       set _ = errors.append('Accounts without password in mongodb_passwords: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set unknown = passwords.keys() | reject('in', names) | list -%}
+          {%-     if unknown | length > 0 -%}
+          {%-       set _ = errors.append('Passwords of unknown accounts in mongodb_passwords: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set empty = passwords | dict2items | selectattr('value', 'in', ['', none]) | map(attribute='key') | list -%}
+          {%-     if empty | length > 0 -%}
+          {%-       set _ = errors.append('Empty passwords in mongodb_passwords: ' ~ (empty | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging mongodb_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongodb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongodb__environment_unknown: >-
+          {{ (database_mongodb__container.environment | default({})).keys()
+             | reject('in', database_mongodb__environment_allowed)
+             | reject('in', database_mongodb__environment_managed) | list }}
+        database_mongodb__secrets_unknown: >-
+          {{ database_mongodb__secrets | map(attribute='target') | reject('in', database_mongodb__secret_variables) | list }}
+        database_mongodb__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_mongodb__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_mongodb__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongodb__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_mongodb__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_mongodb__environment_allowed) and the secrets ' ~ (database_mongodb__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Install the packages for the management of the accounts'
+      ansible.builtin.apt:
+        pkg: "{{ database_mongodb__packages }}"
+        install_recommends: false
+        cache_valid_time: 3600
+
+    # The entrypoint of the image changes the owner of the files in /data/db and /data/configdb to mongodb
+    - name: 'Create the directories of MongoDB'
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "{{ item.mode }}"
+        state: 'directory'
+      loop:
+        - { path: "{{ database_mongodb__home }}", owner: 0, mode: '0755' }
+        - { path: "{{ database_mongodb__home }}/db", owner: "{{ database_mongodb__uid }}", mode: '0700' }
+        - { path: "{{ database_mongodb__home }}/configdb", owner: "{{ database_mongodb__uid }}", mode: '0700' }
+        - { path: "{{ database_mongodb__home }}/etc", owner: 0, mode: '0755' }
+      loop_control:
+        label: "{{ item.path }}"
+
+    # mongod.conf contains no passwords, mongod reads it as mongodb
+    - name: 'Generate mongod.conf'
+      ansible.builtin.template:
+        src: 'mongod.conf.j2'
+        dest: "{{ database_mongodb__home }}/etc/mongod.conf"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'database_mongodb__config_result'
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: "{{ item.key }}"
-        data: "{{ item.value }}"
-      with_dict:
-        mongodb_init_root_username: "{{ database_mongodb__init_root_username }}"
-        mongodb_init_root_password: "{{ database_mongodb__init_root_password }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_mongodb__secrets }}"
+      register: 'database_mongodb__secrets_result'
+
+    - name: 'Find the files of an initialized MongoDB'
+      ansible.builtin.find:
+        paths: "{{ database_mongodb__home }}/db"
+        patterns: "{{ database_mongodb__initialized_files }}"
+        file_type: 'any'
+      register: 'database_mongodb__initialized'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ database_mongodb__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[database_mongodb__container.name + ".service"] is defined and podman___update_mode | bool'
+    # The entrypoint only initializes an empty /data/db: it creates the root user with a temporary mongod bound to 127.0.0.1,
+    # stops it and starts mongod. The container of the initialization runs once without network and is removed afterwards.
+    - name: 'Initialize MongoDB'
+      when:
+        - not ansible_check_mode
+        - database_mongodb__initialized.matched == 0
+      block:
 
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ database_mongodb__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
+        - name: 'Run the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_mongodb__podman_init_name }}"
+            image: "{{ database_mongodb__container.image }}"
+            network: 'none'
+            command: "{{ database_mongodb__container.command }}"
+            env: "{{ database_mongodb__init_environment }}"
+            secrets: "{{ database_mongodb__podman_init_secrets }}"
+            volume: "{{ database_mongodb__container.volumes }}"
+            detach: true
+            state: 'started'
+          vars:
+            database_mongodb__init_environment: >-
+              {{ (database_mongodb__container.environment | default({}))
+                 | combine({ 'MONGO_INITDB_ROOT_USERNAME': database_mongodb__root_username | string })
+                 | combine(database_mongodb__environment_secrets_files) }}
+          register: 'database_mongodb__init_result'
+
+        - name: 'Wait for the end of the initialization'
+          ansible.builtin.command:
+            argv: [ 'podman', 'logs', "{{ database_mongodb__podman_init_name }}" ]
+          register: 'database_mongodb__init_log'
+          changed_when: false
+          failed_when: false
+          until: database_mongodb__init_message in (database_mongodb__init_log.stdout ~ database_mongodb__init_log.stderr)
+          retries: 60
+          delay: 2
+
+        - name: 'Assert the initialization'
+          ansible.builtin.assert:
+            that:
+              - database_mongodb__init_message in (database_mongodb__init_log.stdout ~ database_mongodb__init_log.stderr)
+            fail_msg: >-
+              The initialization of MongoDB failed, remove the content of {{ database_mongodb__home }}/db before the next run,
+              the initialization only runs on an empty directory.
+              {{ (database_mongodb__init_log.stdout_lines | default([]) + database_mongodb__init_log.stderr_lines | default([]))[-30:] }}
+            quiet: true
+
+      always:
+
+        - name: 'Remove the container of the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_mongodb__podman_init_name }}"
+            state: 'absent'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -59,14 +375,14 @@
         ip6: "{{ database_mongodb__container.ipv6 | default(omit) }}"
         network: "{{ database_mongodb__container.network }}"
         timezone: "{{ database_mongodb__container.timezone }}"
-        env: "{{ database_mongodb__container.environment | default(omit) }}"
-        etc_hosts: "{{ database_mongodb__container.hosts | default(omit) }}"
+        command: "{{ database_mongodb__container.command | default(omit) }}"
+        env: "{{ database_mongodb__container.environment if database_mongodb__container.environment | default({}) | length > 0 else omit }}"
+        etc_hosts: "{{ database_mongodb__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_mongodb__container.expose | default(omit) }}"
         label: "{{ database_mongodb__container.labels | default(omit) }}"
         publish: "{{ database_mongodb__container.publish | default(omit) }}"
-        expose: "{{ database_mongodb__container.expose | default(omit) }}"
         secrets: "{{ database_mongodb__container.secrets | default(omit) }}"
         volume: "{{ database_mongodb__container.volumes | default(omit) }}"
-        command: "{{ database_mongodb__container.command | default(omit) }}"
         quadlet_options: |
           [Install]
           WantedBy=default.target
@@ -74,49 +390,120 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if database_mongodb__container.requires is defined %}
+          Requires={{ database_mongodb__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'database_mongodb__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ database_mongodb__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if database_mongodb__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        database_mongodb__running: >-
+          {{ (ansible_facts.services[database_mongodb__container.name + '.service'].state | default('')) == 'running' }}
+        database_mongodb__restart: >-
+          {{ database_mongodb__running | bool
+             and (database_mongodb__secrets_result is changed
+                  or database_mongodb__quadlet_result is changed
+                  or database_mongodb__config_result is changed) }}
       when: 'not ansible_check_mode'
 
-    - name: 'Wait for MongoDB port to be opened'
-      ansible.builtin.wait_for:
-        host: "{{ database_mongodb__container.ip }}"
-        port: "{{ database_mongodb__port }}"
+    # ping needs no login, the check does not need the root password in the arguments
+    - name: 'Wait for MongoDB'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ database_mongodb__container.name }}", 'mongosh', '--quiet', '--norc', '--eval', 'db.adminCommand({ ping: 1 }).ok' ]
+      register: 'database_mongodb__ready'
+      until: database_mongodb__ready.rc == 0 and database_mongodb__ready.stdout | trim == '1'
+      retries: 60
+      delay: 2
+      changed_when: false
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of MongoDB'
+      when:
+        - not ansible_check_mode
+        - database_mongodb__ready.stdout | default('') | trim != '1'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ database_mongodb__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'database_mongodb__journal'
+      changed_when: false
+
+    - name: 'Assert that MongoDB answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - database_mongodb__ready.stdout | default('') | trim == '1'
+        fail_msg: "{{ database_mongodb__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Manage the replica set and the accounts'
+      when: 'not ansible_check_mode'
+      block:
+
+        # The module of the role only returns the names of the accounts that cannot log in
+        - name: 'Check the logins of root and the accounts'
+          database_mongodb_logins:
+            login_host: "{{ database_mongodb__ip }}"
+            login_port: "{{ database_mongodb__port }}"
+            accounts: >-
+              {%- set accounts = [ { 'name': database_mongodb__root_username | string, 'database': 'admin', 'password': database_mongodb__root_password } ] -%}
+              {%- for account in database_mongodb__accounts -%}
+              {%-   set _ = accounts.append({ 'name': account.name | string, 'database': account.database | default('admin'), 'password': database_mongodb__passwords[account.name] }) -%}
+              {%- endfor -%}
+              {{ accounts }}
+          register: 'database_mongodb__logins'
+
+        - name: 'Assert the login of root'
+          ansible.builtin.assert:
+            that:
+              - database_mongodb__root_username | string not in database_mongodb__logins.failed_logins
+            fail_msg: >-
+              The root password does not work, the image sets it only on the initialization,
+              the secret MONGO_INITDB_ROOT_PASSWORD has to stay the password of the initialization.
+            quiet: true
+
+        # community.mongodb.mongodb_replicaset initiates a replica set without login, it relies on the localhost exception,
+        # the module of the role initiates it as root
+        - name: 'Initiate the replica set and wait for its primary'
+          when: 'database_mongodb__replica_set | length > 0'
+          database_mongodb_replica_set:
+            login_host: "{{ database_mongodb__ip }}"
+            login_port: "{{ database_mongodb__port }}"
+            login_user: "{{ database_mongodb__root_username | string }}"
+            login_password: "{{ database_mongodb__root_password }}"
+            replica_set: "{{ database_mongodb__replica_set }}"
+            member: "{{ database_mongodb__ip }}:{{ database_mongodb__port }}"
+
+        # mongodb_user cannot compare passwords, the password is only set for new accounts and accounts that cannot log in
+        - name: 'Create the accounts with their roles'
+          no_log: true
+          community.mongodb.mongodb_user:
+            login_user: "{{ database_mongodb__root_username }}"
+            login_password: "{{ database_mongodb__root_password }}"
+            login_host: "{{ database_mongodb__ip }}"
+            login_port: "{{ database_mongodb__port }}"
+            database: "{{ item.database | default('admin') }}"
+            name: "{{ item.name }}"
+            password: "{{ database_mongodb__passwords[item.name] }}"
+            roles: "{{ item.roles | default([]) }}"
+            update_password: "{{ 'always' if item.name | string in database_mongodb__logins.failed_logins else 'on_create' }}"
+            strict_compatibility: false
+            state: 'present'
+          loop: "{{ database_mongodb__accounts }}"
 
     - name: 'Enable autoupdate on container'
-      when: 'database_mongodb__autoupdate_enabled'
-      include_role:
+      when: 'database_mongodb__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ database_mongodb__container.name }}"
         container_image: "{{ database_mongodb__container.image }}"
-
-    - name: 'Wait for user to press enter'
-      ansible.builtin.pause:
-        prompt: 'Please make sure to enable replication in MongoDB if you are using a replica set!'
-
-    - name: 'Install MongoDB packages'
-      ansible.builtin.apt:
-        update_cache: yes
-        install_recommends: no
-        pkg: "{{ database_mongodb__packages }}"
-
-    - name: 'Create databases and users'
-      community.mongodb.mongodb_user:
-        login_user: "{{ database_mongodb__init_root_username }}"
-        login_password: "{{ database_mongodb__init_root_password }}"
-        login_host: "{{ database_mongodb__ip }}"
-        database: "{{ item.database | default('admin') }}"
-        name: "{{ item.name }}"
-        password: "{{ item.password }}"
-        roles: "{{ item.roles | default({}) }}"
-        state: 'present'
-      with_items: "{{ database_mongodb__accounts }}"
+        container_schedule: "{{ database_mongodb__autoupdate_schedule }}"

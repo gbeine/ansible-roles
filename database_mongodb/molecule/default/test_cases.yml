@@ -1,0 +1,126 @@
+---
+# Network created by container_podman in prepare.yml
+database_mongodb__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_mongodb__test_quadlet_path: '/etc/containers/systemd/mongodb.container'
+
+# Test passwords only
+database_mongodb__test_root_password: 'molecule-root-password'
+database_mongodb__test_root_secret:
+  name: 'mongodb_root_password'
+  data: "{{ database_mongodb__test_root_password }}"
+  target: 'MONGO_INITDB_ROOT_PASSWORD'
+# A keyfile has 6 to 1024 base64 characters
+database_mongodb__test_keyfile_secret:
+  name: 'mongodb_keyfile'
+  data: 'bW9sZWN1bGUta2V5ZmlsZS1vZi10aGUtcmVwbGljYS1zZXQtb2YtdGhlLXRlc3Q='
+  target: 'MONGO_KEYFILE'
+
+database_mongodb__test_cases:
+
+  # Only the mandatory variables and the root password
+  - name: 'molecule-mongodb-default'
+    role_vars:
+      mongodb_home: '/opt/mongodb'
+      mongodb_ip: '10.89.0.90'
+      mongodb_network: 'podman-molecule'
+      mongodb_hostname: 'mongodb-default'
+      mongodb_timezone: 'Europe/Berlin'
+      mongodb_secrets:
+        - "{{ database_mongodb__test_root_secret }}"
+    expect:
+      image: 'docker.io/library/mongo:8.0'
+      release: '8.0'
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/mongodb/db:/data/db'
+        - 'Volume=/opt/mongodb/etc/mongod.conf:/etc/mongo/mongod.conf:ro'
+      quadlet_absent:
+        - 'Secret=mongodb_root_password'
+      config:
+        - 'authorization: "enabled"'
+        - 'dbPath: "/data/db"'
+        - 'bindIpAll: true'
+      config_absent:
+        - 'keyFile:'
+        - 'replication:'
+      replica_set: ''
+      parameters: {}
+      accounts: []
+
+  # Release 9.0, IPv6, labels, options and server parameters, a replica set with keyfile, accounts with roles
+  - name: 'molecule-mongodb'
+    role_vars:
+      mongodb_release: '9.0'
+      mongodb_home: '/opt/mongodb'
+      mongodb_ip: '10.89.0.91'
+      mongodb_ipv6: 'fd00:89::91'
+      mongodb_network: 'podman-molecule'
+      mongodb_hostname: 'mongodb-molecule'
+      mongodb_timezone: 'Europe/Berlin'
+      mongodb_labels:
+        traefik.enable: 'false'
+      mongodb_root_username: 'admin'
+      mongodb_secrets:
+        - "{{ database_mongodb__test_root_secret }}"
+        - "{{ database_mongodb__test_keyfile_secret }}"
+      mongodb_config:
+        operationProfiling:
+          slowOpThresholdMs: 200
+        storage:
+          wiredTiger:
+            engineConfig:
+              cacheSizeGB: 0.25
+        replication:
+          replSetName: 'rs0'
+        setParameter:
+          diagnosticDataCollectionEnabled: false
+      mongodb_accounts:
+        - name: 'app'
+          database: 'app'
+          roles: [ 'readWrite' ]
+        - name: 'reader'
+          database: 'admin'
+          roles:
+            - { role: 'read', db: 'app' }
+      mongodb_passwords:
+        app: 'molecule-app-password'
+        reader: 'molecule-reader-password'
+    # mongod.conf changes, MongoDB has to restart without a second initialization
+    side_effect:
+      config:
+        operationProfiling:
+          slowOpThresholdMs: 300
+    expect:
+      image: 'docker.io/library/mongo:9.0'
+      release: '9.0'
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/mongodb/db:/data/db'
+        - 'Label=traefik.enable=false'
+        - 'Secret=mongodb_keyfile,type=mount,target=/run/secrets/mongodb_keyfile,uid=999,gid=999,mode=0400'
+      quadlet_absent:
+        - 'Secret=mongodb_root_password'
+      config:
+        - 'authorization: "enabled"'
+        - 'keyFile: "/run/secrets/mongodb_keyfile"'
+        - 'replSetName: "rs0"'
+        - 'slowOpThresholdMs: 300'
+        - 'cacheSizeGB: 0.25'
+        - 'diagnosticDataCollectionEnabled: false'
+      config_absent: []
+      replica_set: 'rs0'
+      parameters:
+        diagnosticDataCollectionEnabled: false
+      accounts:
+        - { name: 'app', database: 'app', password: 'molecule-app-password' }
+        - { name: 'reader', database: 'admin', password: 'molecule-reader-password' }

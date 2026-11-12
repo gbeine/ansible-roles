@@ -11,72 +11,189 @@ database_mongodb__ipv6: "{{ mongodb_ipv6 }}"
 database_mongodb__network: "{{ mongodb_network | mandatory }}"
 database_mongodb__hostname: "{{ mongodb_hostname | mandatory }}"
 database_mongodb__timezone: "{{ mongodb_timezone | mandatory }}"
-database_mongodb__labels: "{{ mongodb_labels | default({}) }}"
-database_mongodb__publish: "{{ mongodb_publish | default([]) }}"
+database_mongodb__labels: "{{ mongodb_labels }}"
 
-database_mongodb__flavor: "{{ mongodb_flavor | default('mongo') }}"
-database_mongodb__version: "{{ mongodb_version | default('8.0') }}"
+# The release selects the major version and the allowed options, the version is the tag of the image
+database_mongodb__release: "{{ mongodb_release | default('8.0') }}"
+database_mongodb__version: "{{ mongodb_version | default(database_mongodb__release) }}"
 
-database_mongodb__init_root_username: "{{ mongodb_root_username | default('root') }}"
-database_mongodb__init_root_password: "{{ mongodb_root_password | mandatory }}"
-database_mongodb__keyfile: "{{ mongodb_keyfile | default('') }}"
-
-database_mongodb__accounts: "{{ mongodb_accounts | default([]) }}"
+# The root user created by the image on the initialization, the password is the secret MONGO_INITDB_ROOT_PASSWORD
+database_mongodb__root_username: "{{ mongodb_root_username | default('root') }}"
 
 database_mongodb__container: "{{ database_mongodb__podman_container_default | combine(mongodb_container | default({})) }}"
 
+# Variables of the image, the image only reads TZ besides the variables of the initialization set by the role
+database_mongodb__environment: "{{ database_mongodb__environment_default | combine(mongodb_environment | default({})) }}"
+
+# Secrets with name, data and target, the target MONGO_INITDB_ROOT_PASSWORD is mandatory, MONGO_KEYFILE is needed by a replica set
+database_mongodb__secrets: "{{ mongodb_secrets | default([]) }}"
+
+# The options of mongod.conf, merged recursively over the default, a dictionary is a section, null removes the option
+database_mongodb__config: "{{ mongodb_config | default({}) }}"
+
+# Accounts with name, database and roles, the passwords of the accounts by name
+database_mongodb__accounts: "{{ mongodb_accounts | default([]) }}"
+database_mongodb__passwords: "{{ mongodb_passwords | default({}) }}"
+
 database_mongodb__autoupdate_enabled: "{{ mongodb_autoupdate_enabled | default(false) }}"
+database_mongodb__autoupdate_schedule: "{{ mongodb_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-database_mongodb__uid: '999'
-database_mongodb__gid: "{{ database_mongodb__uid }}"
+# The supported releases, vars/options-<release>.yml contains the allowed options and server parameters of the release
+database_mongodb__releases: [ '7.0', '8.0', '8.3', '9.0' ]
+
+# The options set by the role, the image, the initialization and the role depend on them
+database_mongodb__config_role_default:
+  net:
+    port: "{{ database_mongodb__port }}"
+    bindIpAll: true
+  storage:
+    dbPath: '/data/db'
+  security:
+    authorization: 'enabled'
+  processManagement:
+    fork: false
+
+# The options set by the role, security.keyFile is the file of the secret MONGO_KEYFILE
+database_mongodb__config_role: >-
+  {{ database_mongodb__config_role_default
+     | combine({ 'security': { 'keyFile': database_mongodb__keyfile } } if database_mongodb__keyfile | length > 0 else {}, recursive=true) }}
+
+# The name of the replica set, the role initiates it with the address of the container as the only member
+database_mongodb__replica_set: >-
+  {{ ((database_mongodb__config.replication if database_mongodb__config.replication | default(none) is mapping else {}).replSetName
+      | default('', true)) | string }}
+
+# The paths of the options set by the role, they must not be set in mongodb_config
+database_mongodb__config_role_paths:
+  - 'net.port'
+  - 'net.bindIp'
+  - 'net.bindIpAll'
+  - 'storage.dbPath'
+  - 'security.authorization'
+  - 'security.keyFile'
+  - 'processManagement.fork'
+
+# Options carrying a password, they must not be written to mongod.conf
+database_mongodb__config_passwords:
+  - 'net.tls.certificateKeyFilePassword'
+  - 'net.tls.clusterPassword'
 
 database_mongodb__port: 27017
 
-database_mongodb__podman_name: 'mongodb'
-database_mongodb__podman_image: "{{ database_mongodb__podman_image_flavors[database_mongodb__flavor] }}"
-database_mongodb__podman_tag: "{{ database_mongodb__version }}"
+# The user and group mongodb of the image
+database_mongodb__uid: 999
+database_mongodb__gid: 999
 
-database_mongodb__podman_home: "{{ database_mongodb__home }}"
-database_mongodb__podman_etc_dir: "{{ database_mongodb__podman_home }}/etc"
-database_mongodb__podman_configdb_dir: "{{ database_mongodb__podman_home }}/configdb"
-database_mongodb__podman_db_dir: "{{ database_mongodb__podman_home }}/db"
-database_mongodb__podman_backup_dir: "{{ database_mongodb__podman_home }}/backup"
+database_mongodb__environment_default: {}
+
+database_mongodb__environment_allowed: [ 'TZ' ]
+
+# The variables of the initialization of the image, set by the role on the initialization only
+database_mongodb__environment_managed:
+  - 'MONGO_INITDB_ROOT_USERNAME'
+  - 'MONGO_INITDB_ROOT_USERNAME_FILE'
+  - 'MONGO_INITDB_DATABASE'
+
+# The entrypoint of the image reads MONGO_INITDB_ROOT_PASSWORD_FILE, it is only set in the container of the initialization
+database_mongodb__secret_files:
+  MONGO_INITDB_ROOT_PASSWORD: 'MONGO_INITDB_ROOT_PASSWORD_FILE'
+
+# The keyfile of the replica set is no variable of the image, it is mounted readable by mongodb only and set as security.keyFile
+database_mongodb__secret_keyfile: 'MONGO_KEYFILE'
+
+database_mongodb__secret_variables: "{{ database_mongodb__secret_files.keys() | list + [ database_mongodb__secret_keyfile ] }}"
+database_mongodb__secrets_required: [ 'MONGO_INITDB_ROOT_PASSWORD' ]
+database_mongodb__secrets_dir: '/run/secrets'
+
+# The data of a secret by its target, the role manages the accounts as root
+database_mongodb__secret_data: >-
+  {%- set data = {} -%}
+  {%- if database_mongodb__secrets is sequence and database_mongodb__secrets is not string and database_mongodb__secrets is not mapping -%}
+  {%-   for secret in database_mongodb__secrets if secret is mapping and secret.target is defined and secret.data is defined -%}
+  {%-     set _ = data.update({ secret.target: secret.data }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ data }}
+database_mongodb__root_password: "{{ database_mongodb__secret_data.MONGO_INITDB_ROOT_PASSWORD | default('') }}"
+
+# The file of the secret MONGO_KEYFILE in the container, empty without the secret
+database_mongodb__keyfile: >-
+  {%- set files = [] -%}
+  {%- if database_mongodb__secrets is sequence and database_mongodb__secrets is not string and database_mongodb__secrets is not mapping -%}
+  {%-   for secret in database_mongodb__secrets
+          if secret is mapping and secret.name is defined and secret.target | default('') == database_mongodb__secret_keyfile -%}
+  {%-     set _ = files.append(database_mongodb__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ files | first | default('') }}
+
+# The environment variables of the files of the secrets, only set in the container of the initialization
+database_mongodb__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if database_mongodb__secrets is sequence and database_mongodb__secrets is not string and database_mongodb__secrets is not mapping -%}
+  {%-   for secret in database_mongodb__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in database_mongodb__secret_files -%}
+  {%-     set _ = environment.update({ database_mongodb__secret_files[secret.target]: database_mongodb__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The podman secrets of mongodb_secrets by target, entries without name are left out, the validation of the secrets reports them,
+# the keyfile is readable by mongodb only, mongod refuses a keyfile readable by others
+database_mongodb__podman_secrets_by_target: >-
+  {%- set secrets = {} -%}
+  {%- if database_mongodb__secrets is sequence and database_mongodb__secrets is not string and database_mongodb__secrets is not mapping -%}
+  {%-   for secret in database_mongodb__secrets if secret is mapping and secret.name is defined -%}
+  {%-     set mount = secret.name ~ ',type=mount,target=' ~ database_mongodb__secrets_dir ~ '/' ~ secret.name -%}
+  {%-     if secret.target | default('') == database_mongodb__secret_keyfile -%}
+  {%-       set mount = mount ~ ',uid=' ~ database_mongodb__uid ~ ',gid=' ~ database_mongodb__gid ~ ',mode=0400' -%}
+  {%-     endif -%}
+  {%-     set _ = secrets.update({ secret.target | default(secret.name): mount }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ secrets }}
+
+# The container of MongoDB only gets the keyfile, the root password is only needed by the initialization
+database_mongodb__podman_secrets: >-
+  {{ database_mongodb__podman_secrets_by_target | dict2items | selectattr('key', 'eq', database_mongodb__secret_keyfile) | map(attribute='value') | list }}
+database_mongodb__podman_init_secrets: "{{ database_mongodb__podman_secrets_by_target.values() | list }}"
+
+# The names of the accounts and of their databases
+database_mongodb__account_name_pattern: '^[A-Za-z0-9_.@-]+$'
+database_mongodb__database_name_pattern: '^[A-Za-z0-9_-]+$'
+
+# The files in the directory of the databases that show an initialized MongoDB, the same as the entrypoint of the image checks
+database_mongodb__initialized_files: [ 'WiredTiger', 'journal', 'local.0', 'storage.bson' ]
+
+# The message of the entrypoint after the initialization
+database_mongodb__init_message: 'MongoDB init process complete'
+
+# The packages of the controlled host for community.mongodb and the check of the passwords
+database_mongodb__packages: [ 'python3-pymongo' ]
+
+database_mongodb__podman_name: 'mongodb'
+database_mongodb__podman_image: 'docker.io/library/mongo'
+database_mongodb__podman_init_name: "{{ database_mongodb__container.name }}-init"
+
+database_mongodb__config_file: '/etc/mongo/mongod.conf'
 
 database_mongodb__podman_container_default:
   name: "{{ database_mongodb__podman_name }}"
   hostname: "{{ database_mongodb__hostname }}"
-  image: "{{ database_mongodb__podman_image }}:{{ database_mongodb__podman_tag }}"
+  image: "{{ database_mongodb__podman_image }}:{{ database_mongodb__version }}"
   ip: "{{ database_mongodb__ip }}"
   ipv6: "{{ database_mongodb__ipv6 | default(omit) }}"
   network: "{{ database_mongodb__network }}"
   timezone: "{{ database_mongodb__timezone }}"
-  labels: "{{ database_mongodb__labels }}"
-  publish: "{{ database_mongodb__publish }}"
-  secrets:
-    - "mongodb_init_root_username,type=env,target=MONGO_INITDB_ROOT_USERNAME"
-    - "mongodb_init_root_password,type=env,target=MONGO_INITDB_ROOT_PASSWORD"
-  volumes: "{{
-    database_mongodb__podman_volumes_default
-    + database_mongodb__podman_volume_keyfile
-  }}"
-
-database_mongodb__podman_volumes_default:
-  - "/etc/localtime:/etc/localtime:ro"
-  - "/etc/timezone:/etc/timezone:ro"
-  - "{{ database_mongodb__podman_db_dir }}:/data/db"
-  - "{{ database_mongodb__podman_configdb_dir }}:/data/configdb"
-
-database_mongodb__podman_volume_keyfile: "{{
-  [ database_mongodb__podman_etc_dir + '/mongo-keyfile:/data/mongo-keyfile:ro' ] if database_mongodb__keyfile | length > 0 else []
-}}"
-
-database_mongodb__podman_image_flavors:
-  mongo: 'docker.io/mongo'
-  community: 'docker.io/mongodb/mongodb-community-server'
-
-database_mongodb__packages:
-  - 'python3-pymongo'
+  labels: "{{ database_mongodb__labels | default(omit) }}"
+  environment: "{{ database_mongodb__environment }}"
+  volumes:
+    - "{{ database_mongodb__home }}/db:/data/db"
+    - "{{ database_mongodb__home }}/configdb:/data/configdb"
+    - "{{ database_mongodb__home }}/etc/mongod.conf:{{ database_mongodb__config_file }}:ro"
+  command: [ 'mongod', '--config', "{{ database_mongodb__config_file }}" ]
+  secrets: "{{ database_mongodb__podman_secrets if database_mongodb__podman_secrets | length > 0 else omit }}"
