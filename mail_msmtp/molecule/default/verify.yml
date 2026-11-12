@@ -23,17 +23,24 @@
           - mail_msmtp__test_lines | select('match', 'Label=') | list | length == 0
           - ('IP=' + mail_msmtp__test_vars.msmtp_ip) in mail_msmtp__test_lines
           - ('IP6=' + mail_msmtp__test_vars.msmtp_ipv6) in mail_msmtp__test_lines
-          - "'Secret=msmtpd_smtp_password,type=env,target=SMTP_PASSWORD' in mail_msmtp__test_lines"
+          # The password is mounted as file, it is neither part of the quadlet unit nor of the environment
+          - "'Secret=msmtpd_smtp_user,type=mount,target=/run/secrets/msmtpd_smtp_user' in mail_msmtp__test_lines"
+          - "'Secret=msmtpd_smtp_password,type=mount,target=/run/secrets/msmtpd_smtp_password' in mail_msmtp__test_lines"
+          - mail_msmtp__test_lines | select('match', 'Environment=.*SMTP_USER_FILE=/run/secrets/msmtpd_smtp_user') | list | length == 1
+          - mail_msmtp__test_lines | select('match', 'Environment=.*SMTP_PASSWORD_FILE=/run/secrets/msmtpd_smtp_password') | list | length == 1
+          - mail_msmtp__test_lines | select('search', 'type=env') | list | length == 0
           - mail_msmtp__test_lines | select('match', 'Environment=.*SMTP_HOST=10\\.89\\.0\\.20') | list | length == 1
           - mail_msmtp__test_lines | select('match', 'Environment=.*SMTP_DOMAIN=msmtpd-molecule\\.example\\.test') | list | length == 1
           - mail_msmtp__test_lines | select('search', 'SMTP_PASSWORD=') | list | length == 0
+          - mail_msmtp__test_lines | select('search', 'molecule-smtp-password') | list | length == 0
         fail_msg: "{{ mail_msmtp__test_quadlet.content | b64decode }}"
       vars:
         mail_msmtp__test_lines: "{{ (mail_msmtp__test_quadlet.content | b64decode).splitlines() }}"
 
-    - name: 'Check the podman secret'
+    - name: 'Check the podman secrets'
       ansible.builtin.command:
-        argv: [ 'podman', 'secret', 'exists', 'msmtpd_smtp_password' ]
+        argv: [ 'podman', 'secret', 'exists', "{{ item }}" ]
+      loop: [ 'msmtpd_smtp_user', 'msmtpd_smtp_password' ]
       changed_when: false
 
     - name: 'Read the state of the msmtpd service'
@@ -56,6 +63,20 @@
         that:
           - mail_msmtp__test_service.stdout == 'active'
         fail_msg: "{{ mail_msmtp__test_service.stdout }}: {{ mail_msmtp__test_journal.stdout_lines | default([]) }}"
+
+    # The image writes the user and the password read from SMTP_USER_FILE and SMTP_PASSWORD_FILE to /etc/msmtprc
+    - name: 'Read the user and the password in the configuration of msmtp'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'msmtpd', 'grep', '-cx', '-e', 'user molecule', '-e', 'password molecule-smtp-password', '/etc/msmtprc' ]
+      register: 'mail_msmtp__test_msmtprc'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the user and the password were read from the secret files'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__test_msmtprc.stdout == '2'
+        fail_msg: "user and password lines in /etc/msmtprc: {{ mail_msmtp__test_msmtprc.stdout }} {{ mail_msmtp__test_msmtprc.stderr }}"
 
     - name: 'Wait for the SMTP port of msmtpd'
       ansible.builtin.wait_for:

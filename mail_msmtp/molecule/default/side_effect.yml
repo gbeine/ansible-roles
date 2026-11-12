@@ -6,7 +6,103 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    mail_msmtp__test_checked_files:
+      - '/etc/containers/systemd/msmtpd.container'
+
   tasks:
+
+    - name: 'Set the role variables of the test'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ mail_msmtp__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ mail_msmtp__test_checked_files }}"
+      register: 'mail_msmtp__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run mail_msmtp with msmtp_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_container: [ 'environment' ]
+        mail_msmtp__test_invalid:
+          message: 'msmtp_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run mail_msmtp with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_secrets:
+          - name: 'msmtpd_smtp_password'
+            data: 'molecule-smtp-password'
+        mail_msmtp__test_invalid:
+          message: 'a secret without target'
+          search: '^msmtp_secrets entries need name, data and target$'
+
+    - name: 'Run mail_msmtp without the secrets of the authentication (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_secrets: []
+        mail_msmtp__test_invalid:
+          message: 'no secrets of the authentication'
+          search: 'needs the secrets SMTP_USER, SMTP_PASSWORD,\s+missing: SMTP_USER, SMTP_PASSWORD\.'
+
+    - name: 'Run mail_msmtp with the user in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_environment: "{{ mail_msmtp__test_vars.msmtp_environment | combine({'SMTP_USER': 'molecule'}) }}"
+        mail_msmtp__test_invalid:
+          message: 'the user in the environment'
+          search: 'must not be set in msmtp_environment:\s+SMTP_USER\.'
+
+    - name: 'Run mail_msmtp with the password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_environment: "{{ mail_msmtp__test_vars.msmtp_environment | combine({'SMTP_PASSWORD': 'molecule'}) }}"
+        mail_msmtp__test_invalid:
+          message: 'the password in the environment'
+          search: 'must not be set in msmtp_environment:\s+SMTP_PASSWORD\.'
+
+    - name: 'Run mail_msmtp with the file variable of the password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_environment: "{{ mail_msmtp__test_vars.msmtp_environment | combine({'SMTP_PASSWORD_FILE': '/run/secrets/msmtpd_smtp_password'}) }}"
+        mail_msmtp__test_invalid:
+          message: 'the file variable of the password in the environment'
+          search: 'must not be set in msmtp_environment:\s+SMTP_PASSWORD_FILE\.'
+
+    - name: 'Run mail_msmtp with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_environment: "{{ mail_msmtp__test_vars.msmtp_environment | combine({'SMTP_FOO': 'bar'}) }}"
+        mail_msmtp__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: SMTP_FOO\.'
+
+    - name: 'Run mail_msmtp with an unknown environment variable in msmtp_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_container:
+          environment:
+            FOO: 'bar'
+        mail_msmtp__test_invalid:
+          message: 'an unknown environment variable in msmtp_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run mail_msmtp with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        msmtp_secrets: "{{ mail_msmtp__test_vars.msmtp_secrets + [{'name': 'msmtpd_molecule_token', 'data': 'x', 'target': 'SMTP_TOKEN'}] }}"
+        mail_msmtp__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: SMTP_TOKEN\.'
 
     - name: 'Read the start time of the service before the change'
       ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value msmtpd'
@@ -15,13 +111,7 @@
 
     - name: 'Set the role variables with changed environment'
       ansible.builtin.set_fact:
-        "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ mail_msmtp__test_vars
-           | combine({'msmtp_environment': mail_msmtp__test_vars.msmtp_environment | combine(mail_msmtp__test_side_effect_environment)})
-           | dict2items }}
-      loop_control:
-        label: "{{ item.key }}"
+        msmtp_environment: "{{ mail_msmtp__test_vars.msmtp_environment | combine(mail_msmtp__test_side_effect_environment) }}"
 
     - name: 'Run mail_msmtp with changed environment'
       ansible.builtin.include_role:

@@ -4,42 +4,99 @@
   tags: [ 'mail', 'mail_msmtp' ]
   block:
 
+    # A failing template in the variables (e.g. an unknown filter or msmtp_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - mail_msmtp__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_msmtp__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        mail_msmtp__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = mail_msmtp__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('msmtp_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('msmtp_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of msmtp_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - mail_msmtp__environment_missing | length == 0
-          - mail_msmtp__secrets | rejectattr('name', 'defined') | list | length == 0
-          - mail_msmtp__secrets | rejectattr('data', 'defined') | list | length == 0
-          - mail_msmtp__secrets | rejectattr('target', 'defined') | list | length == 0
-          - mail_msmtp__secrets_missing | length == 0
-          - mail_msmtp__secrets_in_environment | length == 0
-        fail_msg: >-
-          msmtpd needs the environment variables {{ mail_msmtp__environment_required_all | join(', ') }},
-          missing or empty: {{ mail_msmtp__environment_missing | join(', ') | default('none', true) }}.
-          msmtpd needs the secrets {{ mail_msmtp__secrets_required_all | join(', ') | default('none', true) }},
-          missing: {{ mail_msmtp__secrets_missing | join(', ') | default('none', true) }}.
-          Every secret needs name, data and target, secrets must not be set in msmtp_environment:
-          {{ mail_msmtp__secrets_in_environment | join(', ') | default('none', true) }}.
+          - mail_msmtp__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_msmtp__errors | join(' ') }}"
         quiet: true
       vars:
         mail_msmtp__auth: "{{ (mail_msmtp__environment.SMTP_AUTH | default('off', true) | string | lower) not in ['off', 'false'] }}"
-        mail_msmtp__environment_required_all: >-
-          {{ mail_msmtp__environment_required
-             + (mail_msmtp__environment_required_auth if mail_msmtp__auth | bool else []) }}
+        mail_msmtp__secret_targets: "{{ mail_msmtp__secrets | map(attribute='target') | list }}"
         mail_msmtp__secrets_required_all: >-
           {{ mail_msmtp__secrets_required_auth if mail_msmtp__auth | bool else [] }}
         mail_msmtp__environment_missing: >-
-          {{ mail_msmtp__environment_required_all
+          {{ mail_msmtp__environment_required
              | reject('in', mail_msmtp__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
              | list }}
         mail_msmtp__secrets_missing: >-
-          {{ mail_msmtp__secrets_required_all
-             | reject('in', mail_msmtp__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
-             | list }}
+          {{ mail_msmtp__secrets_required_all | reject('in', mail_msmtp__secret_targets) | list }}
         mail_msmtp__secrets_in_environment: >-
-          {{ (mail_msmtp__secrets | selectattr('target', 'defined') | map(attribute='target') | list
-              + mail_msmtp__secret_variables)
+          {{ (mail_msmtp__secret_targets + mail_msmtp__secret_variables + mail_msmtp__secret_files.values() | list)
              | select('in', mail_msmtp__environment.keys() | list) | unique | list }}
+        mail_msmtp__errors: >-
+          {%- set errors = [] -%}
+          {%- if mail_msmtp__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('msmtpd needs the environment variables ' ~ (mail_msmtp__environment_required | join(', ')) ~ ', missing or empty: ' ~ (mail_msmtp__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if mail_msmtp__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('msmtpd needs the secrets ' ~ (mail_msmtp__secrets_required_all | join(', ')) ~ ', missing: ' ~ (mail_msmtp__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if mail_msmtp__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in msmtp_environment: ' ~ (mail_msmtp__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging msmtp_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - mail_msmtp__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_msmtp__errors | join(' ') }}"
+        quiet: true
+      vars:
+        mail_msmtp__environment_unknown: >-
+          {{ (mail_msmtp__container.environment | default({})).keys()
+             | reject('in', mail_msmtp__environment_allowed) | list }}
+        mail_msmtp__secrets_unknown: >-
+          {{ mail_msmtp__secrets | map(attribute='target') | reject('in', mail_msmtp__secret_files.keys() | list) | list }}
+        mail_msmtp__errors: >-
+          {%- set errors = [] -%}
+          {%- if mail_msmtp__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (mail_msmtp__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if mail_msmtp__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (mail_msmtp__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (mail_msmtp__environment_allowed) and the secrets ' ~ (mail_msmtp__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create secrets'
       no_log: true
@@ -112,3 +169,4 @@
       vars:
         container_name: "{{ mail_msmtp__container.name }}"
         container_image: "{{ mail_msmtp__container.image }}"
+        container_schedule: "{{ mail_msmtp__autoupdate_schedule }}"
