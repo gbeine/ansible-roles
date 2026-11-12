@@ -13,22 +13,7 @@
           - app_grafana__container | length > 0
         quiet: true
 
-    # The secrets are mounted as files, they have no target in the environment
-    - name: 'Validate environment'
-      ansible.builtin.assert:
-        that:
-          - app_grafana__environment_missing | length == 0
-        fail_msg: >-
-          Grafana needs the environment variables {{ app_grafana__environment_required | join(', ') }},
-          missing or empty: {{ app_grafana__environment_missing | join(', ') | default('none', true) }}.
-        quiet: true
-      vars:
-        app_grafana__environment_missing: >-
-          {{ app_grafana__environment_required
-             | reject('in', app_grafana__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
-             | list }}
-
-    - name: 'Validate the role variables'
+    - name: 'Validate the secrets'
       ansible.builtin.assert:
         that:
           - app_grafana__invalid | length == 0
@@ -43,8 +28,37 @@
           {%-   set _ = errors.append('grafana_secrets has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
-                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('grafana_secrets entries need name and data') -%}
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('grafana_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of grafana_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_grafana__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_grafana__environment_missing: >-
+          {{ app_grafana__environment_required
+             | reject('in', app_grafana__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        app_grafana__secrets_in_environment: >-
+          {{ (app_grafana__secrets | map(attribute='target') | list
+              + app_grafana__secret_variables + app_grafana__secret_files.values() | list)
+             | select('in', app_grafana__environment.keys() | list) | unique | list }}
+        app_grafana__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_grafana__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('Grafana needs the environment variables ' ~ (app_grafana__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_grafana__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_grafana__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in grafana_environment: ' ~ (app_grafana__secrets_in_environment | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -53,26 +67,27 @@
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
-          - app_grafana__environment_unknown | length == 0
-          - app_grafana__secrets_unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ app_grafana__environment_unknown | join(', ') | default('none', true) }}.
-          Unknown secrets: {{ app_grafana__secrets_unknown | join(', ') | default('none', true) }}.
-          Allowed are the options of grafana.ini as GF_<SECTION>_<KEY> (app_grafana__environment_allowed)
-          and the secrets {{ app_grafana__secrets_allowed | join(', ') }}.
+          - app_grafana__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_grafana__errors | join(' ') }}"
         quiet: true
       vars:
-        # The secrets of the container are omit without secrets
-        app_grafana__container_secrets: >-
-          {{ app_grafana__container.secrets
-             if app_grafana__container.secrets is sequence and app_grafana__container.secrets is not string
-             else [] }}
         app_grafana__environment_unknown: >-
           {{ (app_grafana__container.environment | default({})).keys() | reject('in', app_grafana__environment_allowed) | list }}
         app_grafana__secrets_unknown: >-
-          {{ app_grafana__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1')
-             | map('regex_replace', '^' ~ (app_grafana__secrets_dir ~ '/') | regex_escape, '')
-             | reject('in', app_grafana__secrets_allowed) | list }}
+          {{ app_grafana__secrets | map(attribute='target') | reject('in', app_grafana__secret_files.keys() | list) | list }}
+        app_grafana__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_grafana__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_grafana__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_grafana__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_grafana__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the options of grafana.ini as GF_<SECTION>_<KEY> (app_grafana__environment_allowed) and the secrets in app_grafana__secret_files.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
