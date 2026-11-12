@@ -17,13 +17,17 @@ anubis_environment:
   SERVE_ROBOTS_TXT: 'true'
   WEBMASTER_EMAIL: 'webmaster@example.org'
 
-# Pass secrets as podman secrets
+# Pass secrets as podman secrets, the role mounts them as files and sets ED25519_PRIVATE_KEY_HEX_FILE
 anubis_secrets:
   - name: 'anubis_ed25519_private_key'
     data: "{{ vault_anubis_ed25519_private_key }}"
     target: 'ED25519_PRIVATE_KEY_HEX'
 
-# Use full anubis_config instead of default botPolicy.yaml
+# Networks that are never challenged by the default bot policy
+anubis_trusted_hosts:
+  - '192.168.99.0/24'
+
+# Replace keys of the default botPolicy.yaml, e.g. bots replaces all rules
 # See https://anubis.techaro.lol/docs/category/configuration for details
 anubis_config:
 # ...

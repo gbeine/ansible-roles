@@ -1,0 +1,139 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    webserver_anubis__test_case: "{{ webserver_anubis__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_anubis__test_checked_files:
+      - '/etc/containers/systemd/anubis.container'
+      - "{{ webserver_anubis__test_case.role_vars.anubis_home }}/botPolicies.yaml"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ webserver_anubis__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the quadlet unit and the bot policy before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ webserver_anubis__test_checked_files }}"
+      register: 'webserver_anubis__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run webserver_anubis with anubis_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_container: [ 'environment' ]
+        webserver_anubis__test_invalid:
+          message: 'anubis_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run webserver_anubis with a secret without data (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_secrets:
+          - name: 'anubis_molecule_ed25519'
+            target: 'ED25519_PRIVATE_KEY_HEX'
+        webserver_anubis__test_invalid:
+          message: 'a secret without data'
+          search: '^anubis_secrets entries need name, data and target$'
+
+    - name: 'Run webserver_anubis without TARGET (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_environment:
+          WEBMASTER_EMAIL: 'webmaster@example.org'
+        webserver_anubis__test_invalid:
+          message: 'no TARGET'
+          search: 'missing or empty: TARGET\.'
+
+    - name: 'Run webserver_anubis with the key in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_environment: "{{ webserver_anubis__test_case.role_vars.anubis_environment | combine({'ED25519_PRIVATE_KEY_HEX': '00'}) }}"
+        webserver_anubis__test_invalid:
+          message: 'the key in the environment'
+          search: 'must not be set in anubis_environment:\s+ED25519_PRIVATE_KEY_HEX\.'
+
+    - name: 'Run webserver_anubis with HS512_SECRET in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_environment: "{{ webserver_anubis__test_case.role_vars.anubis_environment | combine({'HS512_SECRET': 'molecule'}) }}"
+        webserver_anubis__test_invalid:
+          message: 'HS512_SECRET in the environment'
+          search: 'must not be set in anubis_environment:\s+HS512_SECRET\.'
+
+    - name: 'Run webserver_anubis with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_environment: "{{ webserver_anubis__test_case.role_vars.anubis_environment | combine({'DIFFICULTI': '5'}) }}"
+        webserver_anubis__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: DIFFICULTI\.'
+
+    - name: 'Run webserver_anubis with an unknown environment variable in anubis_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_container:
+          environment:
+            FOO: 'bar'
+        webserver_anubis__test_invalid:
+          message: 'an unknown environment variable in anubis_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run webserver_anubis with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        anubis_secrets:
+          - name: 'anubis_molecule_hs512'
+            data: 'molecule'
+            target: 'HS512_SECRET'
+        webserver_anubis__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: HS512_SECRET\.'
+
+    - name: 'Run webserver_anubis with the changed role variables'
+      when: webserver_anubis__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'anubis' ]
+          register: 'webserver_anubis__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ webserver_anubis__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run webserver_anubis with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'webserver_anubis'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'anubis' ]
+          register: 'webserver_anubis__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - webserver_anubis__quadlet_result is changed
+              - webserver_anubis__test_started_after.stdout | int > webserver_anubis__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ webserver_anubis__quadlet_result is changed }},
+              start before {{ webserver_anubis__test_started_before.stdout }}, after {{ webserver_anubis__test_started_after.stdout }}

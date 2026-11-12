@@ -13,24 +13,25 @@ webserver_anubis__hostname: "{{ anubis_hostname | mandatory }}"
 webserver_anubis__timezone: "{{ anubis_timezone | mandatory }}"
 webserver_anubis__labels: "{{ anubis_labels }}"
 
-webserver_anubis__config: "{{ anubis_config | default(webserver_anubis__config_default) }}"
+webserver_anubis__version: "{{ anubis_version | default('latest') }}"
 
+# Networks that are never challenged, e.g. internal networks or monitoring, used by the default bot policy
+webserver_anubis__trusted_hosts: "{{ anubis_trusted_hosts | default(['127.0.0.1/32', '::1/128']) }}"
+
+# The bot policy, every key replaces the key of the default completely
+webserver_anubis__config: "{{ webserver_anubis__config_default | combine(anubis_config | default({})) }}"
+
+webserver_anubis__container: "{{ webserver_anubis__podman_container_default | combine(anubis_container | default({})) }}"
 webserver_anubis__environment: "{{ webserver_anubis__environment_default | combine(anubis_environment | default({})) }}"
 webserver_anubis__secrets: "{{ anubis_secrets | default([]) }}"
 
-webserver_anubis__container: "{{ anubis_container | default(webserver_anubis__container_default) }}"
 
 webserver_anubis__autoupdate_enabled: "{{ anubis_autoupdate_enabled | default(false) }}"
+webserver_anubis__autoupdate_schedule: "{{ anubis_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
-
-webserver_anubis__name: 'anubis'
-webserver_anubis__image: 'ghcr.io/techarohq/anubis'
-webserver_anubis__tag: 'latest'
-
-webserver_anubis__podman_home: "{{ webserver_anubis__home }}"
 
 webserver_anubis__environment_default:
   BIND: ':8923'
@@ -43,20 +44,96 @@ webserver_anubis__environment_required:
   - 'POLICY_FNAME'
   - 'TARGET'
 
-webserver_anubis__container_default:
-  name: "{{ webserver_anubis__name }}"
+# Variables carrying secrets, they must be passed with anubis_secrets,
+# HS512_SECRET has no file variable and is not supported
+webserver_anubis__secret_variables:
+  - 'ED25519_PRIVATE_KEY_HEX'
+  - 'HS512_SECRET'
+
+# The secrets are mounted as files, the image reads the variable target from the file variable
+webserver_anubis__secret_files:
+  ED25519_PRIVATE_KEY_HEX: 'ED25519_PRIVATE_KEY_HEX_FILE'
+
+webserver_anubis__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+webserver_anubis__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if webserver_anubis__secrets is sequence and webserver_anubis__secrets is not string and webserver_anubis__secrets is not mapping -%}
+  {%-   for secret in webserver_anubis__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in webserver_anubis__secret_files -%}
+  {%-     set _ = environment.update({ webserver_anubis__secret_files[secret.target]: webserver_anubis__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The variables of Anubis v1.28.2 (docs/docs/admin/installation.mdx and the flags of cmd/anubis/main.go)
+# without the secrets, the variables of BotStopper, the command line modes and the deprecated THOTH_*
+webserver_anubis__environment_allowed:
+  - 'BASE_PREFIX'
+  - 'BIND'
+  - 'BIND_NETWORK'
+  - 'COOKIE_DOMAIN'
+  - 'COOKIE_DYNAMIC_DOMAIN'
+  - 'COOKIE_EXPIRATION_TIME'
+  - 'CUSTOM_REAL_IP_HEADER'
+  - 'COOKIE_PARTITIONED'
+  - 'COOKIE_PREFIX'
+  - 'COOKIE_HTTP_ONLY'
+  - 'COOKIE_SECURE'
+  - 'COOKIE_SAME_SITE'
+  - 'DIFFICULTY'
+  - 'DIFFICULTY_IN_JWT'
+  - 'DYNAMIC_COOKIE_SUFFIX'
+  - 'JWT_RESTRICTION_HEADER'
+  - 'METRICS_BIND'
+  - 'METRICS_BIND_NETWORK'
+  - 'OG_EXPIRY_TIME'
+  - 'OG_PASSTHROUGH'
+  - 'OG_CACHE_CONSIDER_HOST'
+  - 'POLICY_FNAME'
+  - 'PUBLIC_URL'
+  - 'REDIRECT_DOMAINS'
+  - 'SERVE_ROBOTS_TXT'
+  - 'SLOG_LEVEL'
+  - 'SOCKET_MODE'
+  - 'STRIP_BASE_PREFIX'
+  - 'TARGET'
+  - 'USE_REMOTE_ADDRESS'
+  - 'WEBMASTER_EMAIL'
+  - 'XFF_STRIP_PRIVATE'
+  - 'FORCED_LANGUAGE'
+  - 'TARGET_DISABLE_KEEPALIVE'
+  - 'TARGET_HOST'
+  - 'TARGET_INSECURE_SKIP_VERIFY'
+  - 'TARGET_SNI'
+  - 'PRESERVE_REFERER_QUERY_PARAM'
+  # The file variables of the secrets, set by the role
+  - 'ED25519_PRIVATE_KEY_HEX_FILE'
+
+webserver_anubis__podman_name: 'anubis'
+webserver_anubis__podman_image: 'ghcr.io/techarohq/anubis'
+webserver_anubis__podman_tag: "{{ webserver_anubis__version }}"
+
+webserver_anubis__podman_home: "{{ webserver_anubis__home }}"
+
+webserver_anubis__podman_container_default:
+  name: "{{ webserver_anubis__podman_name }}"
   hostname: "{{ webserver_anubis__hostname }}"
-  image: "{{ webserver_anubis__image }}:{{ webserver_anubis__tag }}"
+  image: "{{ webserver_anubis__podman_image }}:{{ webserver_anubis__podman_tag }}"
   ip: "{{ webserver_anubis__ip }}"
   ipv6: "{{ webserver_anubis__ipv6 | default(omit) }}"
   network: "{{ webserver_anubis__network }}"
   timezone: "{{ webserver_anubis__timezone }}"
-  environment: "{{ webserver_anubis__environment }}"
+  # Set with anubis_environment and anubis_secrets, merged over the default
+  environment: "{{ webserver_anubis__environment | combine(webserver_anubis__environment_secrets_files) }}"
   labels: "{{ webserver_anubis__labels | default(omit) }}"
   secrets: >-
-    {{ (webserver_anubis__secrets | map(attribute='name') | zip(webserver_anubis__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
-      if (webserver_anubis__secrets | default([]) | length > 0)
+    {{ (webserver_anubis__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ webserver_anubis__secrets_dir ~ '/\1') | list)
+      if (webserver_anubis__secrets is sequence and webserver_anubis__secrets is not string and webserver_anubis__secrets | length > 0)
       else omit }}
+  # anubis_container.volumes replaces the list completely
   volumes:
     - '/etc/localtime:/etc/localtime:ro'
     - '/etc/timezone:/etc/timezone:ro'
@@ -75,7 +152,7 @@ webserver_anubis__config_default:
     - import: (data)/crawlers/xai.yaml
 
     - name: trusted-internal-network
-      remote_addresses: "{{ trusted_hosts }}"
+      remote_addresses: "{{ webserver_anubis__trusted_hosts }}"
       action: ALLOW
 
     - name: known-scraper-ranges

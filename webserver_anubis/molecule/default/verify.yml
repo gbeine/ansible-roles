@@ -27,6 +27,8 @@
           - >-
             webserver_anubis__test_quadlet_lines | select('match', 'Secret=') | map('regex_replace', '^Secret=', '') | list | sort
             == webserver_anubis__expect.secrets | sort
+          - webserver_anubis__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+        fail_msg: "{{ webserver_anubis__test_quadlet.content | b64decode }}"
       vars:
         webserver_anubis__test_quadlet_lines: "{{ (webserver_anubis__test_quadlet.content | b64decode).splitlines() }}"
 
@@ -66,9 +68,10 @@
           - webserver_anubis__test_net.IPAddress == webserver_anubis__expect.ip
           - webserver_anubis__expect.ip6 is none or webserver_anubis__test_net.GlobalIPv6Address == webserver_anubis__expect.ip6
           - webserver_anubis__expect.env is subset(webserver_anubis__test_container.Config.Env)
+          - webserver_anubis__test_container.Config.Env | select('match', 'ED25519_PRIVATE_KEY_HEX=') | list | length == 0
         fail_msg: >-
           IPv4 {{ webserver_anubis__test_net.IPAddress }}, IPv6 {{ webserver_anubis__test_net.GlobalIPv6Address }},
-          environment {{ webserver_anubis__test_container.Config.Env | select('match', '(TARGET|WEBMASTER_EMAIL)=') | list }}
+          environment {{ webserver_anubis__test_container.Config.Env | select('match', '(TARGET|WEBMASTER_EMAIL|DIFFICULTY|ED25519_PRIVATE_KEY_HEX_FILE)=') | list }}
       vars:
         webserver_anubis__test_container: "{{ (webserver_anubis__test_inspect.stdout | from_json)[0] }}"
         webserver_anubis__test_net: "{{ webserver_anubis__test_container.NetworkSettings.Networks[webserver_anubis__test_case.role_vars.anubis_network] }}"
@@ -78,3 +81,26 @@
         argv: [ 'podman', 'secret', 'exists', "{{ item.split(',') | first }}" ]
       loop: "{{ webserver_anubis__expect.secrets }}"
       changed_when: false
+
+    # A browser gets the challenge of Anubis, the private key is read from the secret file at the start.
+    # Anubis expects the address of the client from the reverse proxy in X-Real-Ip, without it Anubis answers with 500
+    - name: 'Request Anubis as browser behind a reverse proxy'
+      ansible.builtin.uri:
+        url: "http://{{ webserver_anubis__expect.ip }}:8923/"
+        headers:
+          User-Agent: 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0'
+          X-Real-Ip: '203.0.113.10'
+        return_content: true
+        status_code: [ 200, 401 ]
+      register: 'webserver_anubis__test_challenge'
+      until: webserver_anubis__test_challenge.status | default(0) in [ 200, 401 ]
+      retries: 10
+      delay: 3
+
+    # The error page of Anubis contains the script anubis_challenge with null
+    - name: 'Assert Anubis answers with the challenge'
+      ansible.builtin.assert:
+        that:
+          - webserver_anubis__test_challenge.content is search('id="anubis_challenge"')
+          - webserver_anubis__test_challenge.content is not search('id="anubis_challenge" type="application/json">null')
+        fail_msg: "{{ webserver_anubis__test_challenge.status }}: {{ webserver_anubis__test_challenge.content | default('') | truncate(500) }}"
