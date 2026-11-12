@@ -106,7 +106,7 @@ The health check of the image is kept.
 
 ### Validation
 
-The role checks before any change that only allowed environment variables and secrets are set in the container, that every secret has `name`, `data` and `target`,
+The role checks before any change that only allowed environment variables and secrets are set in the container, that `evcc_secrets` is a list of entries with `name`, `data` and `target` and unique names,
 no secret target is set in `evcc_environment` and `evcc_home` is an absolute path.
 If `evcc_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
@@ -133,7 +133,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-evcc` | IPv6, labels, `EVCC_LOG` in `evcc_environment`, a secret with target `EVCC_MQTT_PASSWORD` and an own port published with `evcc_container.publish` |
 
 `prepare` creates the podman network and pulls the image.
-`side_effect` runs the role with `evcc_container` not a dictionary, an empty and a relative `evcc_home` and a secret target set in `evcc_environment`, an unknown environment variable in `evcc_environment` and in `evcc_container.environment` and an unknown secret and checks that it fails with the expected message
+`side_effect` runs the role with `evcc_container` not a dictionary, a secret without target, an empty and a relative `evcc_home` and a secret target set in `evcc_environment`, an unknown environment variable in `evcc_environment` and in `evcc_container.environment` and an unknown secret and checks that it fails with the expected message
 and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `evcc_home` on `molecule-evcc`, the quadlet unit changes and evcc has to restart.
 `verify` checks the quadlet unit, the service, the data directory, the secrets, the addresses and the environment of the container,
