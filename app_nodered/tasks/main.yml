@@ -1,32 +1,243 @@
 ---
 
-- name: 'Deploy Node-RED container'
-  tags: [ 'app_nodered' ]
+- name: 'Deploy Node-RED'
+  tags: [ 'app', 'app_nodered' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter, nodered_container or nodered_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_nodered__container | length > 0
+          - app_nodered__config | to_json | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nodered__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_nodered__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_nodered__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('nodered_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('nodered_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of nodered_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of nodered_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Node-RED reads settings.js as JavaScript, the role writes the options as JSON
+    - name: 'Validate the options of settings.js'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nodered__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nodered__options: "{{ (nodered_config | default({})).keys() | list }}"
+        app_nodered__managed_set: "{{ app_nodered__options | select('in', app_nodered__config_managed) | list }}"
+        app_nodered__unknown: "{{ app_nodered__options | reject('in', app_nodered__config_managed + app_nodered__config_allowed) | list }}"
+        app_nodered__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_nodered__config.items() -%}
+          {%-   if key in app_nodered__config_booleans and value is not none and value is not boolean -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value | to_json is search('(?<!\\\\)(\\\\\\\\)*\\\\[nr]') -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if app_nodered__managed_set | length > 0 -%}
+          {%-   set _ = errors.append('These options are set by the role, not with nodered_config: ' ~ (app_nodered__managed_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_nodered__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in nodered_config: ' ~ (app_nodered__unknown | join(', ')) ~ '. Allowed are the options of app_nodered__config_allowed.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The users of the editor are written to adminAuth with the hashes of their passwords
+    - name: 'Validate the users'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nodered__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nodered__errors: >-
+          {%- set errors = [] -%}
+          {%- set users = app_nodered__users -%}
+          {%- set passwords = app_nodered__passwords -%}
+          {%- if users is not sequence or users is string or users is mapping or users | reject('mapping') | list | length > 0 -%}
+          {%-   set _ = errors.append('nodered_users has to be a list of dictionaries with name and permissions.') -%}
+          {%- elif passwords is not mapping -%}
+          {%-   set _ = errors.append('nodered_passwords has to be a dictionary of the passwords by name.') -%}
+          {%- else -%}
+          {%-   set names = users | map(attribute='name', default='') | map('string') | list -%}
+          {%-   set ns = namespace(keys=[], invalid=[], permissions=[], missing=[], short=[]) -%}
+          {%-   for user in users -%}
+          {%-     set name = user.name | default('') | string -%}
+          {%-     set ns.keys = ns.keys + (user.keys() | reject('in', app_nodered__user_keys) | list) -%}
+          {%-     if name is not match(app_nodered__name_pattern) -%}
+          {%-       set ns.invalid = ns.invalid + [ name ] -%}
+          {%-     endif -%}
+          {%-     if (user.permissions | default('*', true) | string) not in app_nodered__user_permissions -%}
+          {%-       set ns.permissions = ns.permissions + [ name ] -%}
+          {%-     endif -%}
+          {%-     if passwords[name] is not defined or passwords[name] is none -%}
+          {%-       set ns.missing = ns.missing + [ name ] -%}
+          {%-     elif (passwords[name] | string | length) < app_nodered__password_length -%}
+          {%-       set ns.short = ns.short + [ name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.keys | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in nodered_users: ' ~ (ns.keys | unique | join(', ')) ~ ', allowed are ' ~ (app_nodered__user_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.invalid | length > 0 -%}
+          {%-     set _ = errors.append('Invalid names in nodered_users: ' ~ (ns.invalid | join(', ')) ~ ', allowed are letters, digits and . _ @ -.') -%}
+          {%-   endif -%}
+          {%-   if names | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of nodered_users have to be unique.') -%}
+          {%-   endif -%}
+          {%-   if ns.permissions | length > 0 -%}
+          {%-     set _ = errors.append('The permissions of these users have to be * or read: ' ~ (ns.permissions | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.missing | length > 0 -%}
+          {%-     set _ = errors.append('These users have no password in nodered_passwords: ' ~ (ns.missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.short | length > 0 -%}
+          {%-     set _ = errors.append('The passwords of these users need at least ' ~ app_nodered__password_length ~ ' characters: ' ~ (ns.short | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set unknown = passwords.keys() | map('string') | reject('in', names) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('nodered_passwords contains passwords of unknown users: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Node-RED reads the booleans of the environment as true and false
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nodered__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nodered__secrets_in_environment: >-
+          {{ app_nodered__secret_variables | select('in', app_nodered__environment.keys() | list) | list }}
+        app_nodered__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_nodered__environment.items() if value is not none -%}
+          {%-   if key in app_nodered__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if app_nodered__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in nodered_environment: ' ~ (app_nodered__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging nodered_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_nodered__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_nodered__environment_unknown: >-
+          {{ (app_nodered__container.environment | default({})).keys() | reject('in', app_nodered__environment_allowed) | list }}
+        app_nodered__secrets_unknown: >-
+          {{ app_nodered__secrets | map(attribute='target') | reject('in', app_nodered__secret_variables) | list }}
+        app_nodered__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_nodered__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_nodered__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_nodered__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_nodered__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (app_nodered__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_nodered__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Install the packages for the hashes of the passwords'
+      when: 'app_nodered__users | length > 0'
+      ansible.builtin.apt:
+        pkg: "{{ app_nodered__packages }}"
+        install_recommends: false
+        cache_valid_time: 3600
+
+    # Node-RED runs as the user node-red of the image
+    - name: 'Create the directory of Node-RED'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: "{{  app_nodered__uid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        path: "{{ app_nodered__home }}"
+        owner: "{{ app_nodered__uid }}"
+        group: "{{ app_nodered__gid }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_nodered__podman_home }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_nodered__secrets }}"
+      register: 'app_nodered__secrets_result'
+
+    # The passwords are an option with no_log, the module returns the hashes only
+    - name: 'Create the users of the editor'
+      when: 'app_nodered__users | length > 0'
+      app_nodered_users:
+        users: "{{ app_nodered__users }}"
+        passwords: "{{ app_nodered__passwords }}"
+      register: 'app_nodered__users_result'
+
+    - name: 'Create settings.js'
+      ansible.builtin.template:
+        src: 'settings.js.j2'
+        dest: "{{ app_nodered__settings_path }}"
+        owner: "{{ app_nodered__uid }}"
+        group: "{{ app_nodered__gid }}"
+        mode: '0600'
+      register: 'app_nodered__settings_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_nodered__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_nodered__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_nodered__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -37,6 +248,7 @@
         ip6: "{{ app_nodered__container.ipv6 | default(omit) }}"
         network: "{{ app_nodered__container.network }}"
         timezone: "{{ app_nodered__container.timezone }}"
+        command: "{{ app_nodered__container.command | default(omit) }}"
         env: "{{ app_nodered__container.environment | default(omit) }}"
         etc_hosts: "{{ app_nodered__container.etc_hosts | default(omit) }}"
         expose: "{{ app_nodered__container.expose | default(omit) }}"
@@ -49,11 +261,6 @@
           WantedBy=default.target
 
           [Service]
-          {% if app_nodered__container.exec_start_pre is defined %}
-          {% for command in app_nodered__container.exec_start_pre %}
-          ExecStartPre={{ command }}
-          {% endfor %}
-          {% endif %}
           RestartSec=5
           Restart=always
 
@@ -63,20 +270,57 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_nodered__quadlet_result'
 
+    # Node-RED reads settings.js and the secrets only on start
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_nodered__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_nodered__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_nodered__running: >-
+          {{ (ansible_facts.services[app_nodered__container.name + '.service'].state | default('')) == 'running' }}
+        app_nodered__restart: >-
+          {{ app_nodered__running | bool
+             and (app_nodered__secrets_result is changed or app_nodered__settings_result is changed or app_nodered__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
+    # Any answer of HTTP shows that Node-RED has started, the editor may be disabled or protected
+    - name: 'Wait for Node-RED'
+      ansible.builtin.uri:
+        url: "http://{{ app_nodered__ip }}:{{ app_nodered__port }}/"
+        status_code: [ -1 ]
+      register: 'app_nodered__ready'
+      until: app_nodered__ready.status | default(-1) > 0
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Node-RED'
+      when:
+        - not ansible_check_mode
+        - app_nodered__ready.status | default(-1) <= 0
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_nodered__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_nodered__journal'
+      changed_when: false
+
+    - name: 'Assert that Node-RED answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__journal is skipped
+        fail_msg: "{{ app_nodered__journal.stdout_lines | default([]) }}"
+        quiet: true
+
     - name: 'Enable autoupdate on container'
-      when: 'app_nodered__autoupdate_enabled'
-      include_role:
+      when: 'app_nodered__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_nodered__container.name }}"
         container_image: "{{ app_nodered__container.image }}"
+        container_schedule: "{{ app_nodered__autoupdate_schedule }}"

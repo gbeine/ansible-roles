@@ -1,0 +1,102 @@
+---
+# Network created by container_podman in prepare.yml
+app_nodered__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_nodered__test_image: 'docker.io/nodered/node-red:latest'
+app_nodered__test_quadlet_path: '/etc/containers/systemd/nodered.container'
+app_nodered__test_settings_path: '/opt/nodered/settings.js'
+
+app_nodered__test_cases:
+
+  # Only the mandatory variables, without users the editor is not protected
+  - name: 'molecule-nodered-default'
+    role_vars:
+      nodered_home: '/opt/nodered'
+      nodered_ip: '10.89.0.90'
+      nodered_network: 'podman-molecule'
+      nodered_hostname: 'nodered-default'
+      nodered_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/nodered:/data'
+      env:
+        - 'TZ=Europe/Berlin'
+      # Options of the settings of the admin API
+      settings:
+        flowFilePretty: true
+        markdownEditor: { mermaid: { enabled: true } }
+      settings_absent: []
+      settings_js:
+        - '"debugMaxLength": 1000'
+      users: ~
+
+  # IPv6, labels, options, the credential secret, an administrator and a user with read permissions
+  - name: 'molecule-nodered'
+    role_vars:
+      nodered_home: '/opt/nodered'
+      nodered_ip: '10.89.0.91'
+      nodered_ipv6: 'fd00:89::91'
+      nodered_network: 'podman-molecule'
+      nodered_hostname: 'nodered-molecule'
+      nodered_timezone: 'Europe/Berlin'
+      nodered_labels:
+        traefik.enable: 'false'
+      nodered_environment:
+        NODE_RED_ENABLE_TOURS: false
+      nodered_config:
+        flowFilePretty: false
+        debugMaxLength: 2000
+        logging:
+          console:
+            level: 'warn'
+        editorTheme:
+          multiplayer:
+            enabled: true
+          markdownEditor: ~
+      nodered_secrets:
+        - name: 'nodered_credential_secret'
+          data: 'molecule-credential-secret'
+          target: 'credentialSecret'
+      nodered_users:
+        - name: 'admin'
+        - name: 'viewer'
+          permissions: 'read'
+      nodered_passwords:
+        admin: 'molecule-admin-password'
+        viewer: 'molecule-viewer-password'
+    # The password of the administrator changes, settings.js changes and Node-RED has to restart
+    side_effect:
+      passwords:
+        admin: 'molecule-changed-password'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/nodered:/data'
+        - 'Label=traefik.enable=false'
+        - 'Secret=nodered_credential_secret,type=mount,target=/run/secrets/nodered_credential_secret'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'NODE_RED_ENABLE_TOURS=false'
+      # Options of the settings of the admin API, flowEncryptionType user shows the credential secret
+      settings:
+        flowEncryptionType: 'user'
+      # flowFilePretty is false, markdownEditor is removed with null
+      settings_absent: [ 'flowFilePretty', 'markdownEditor' ]
+      settings_js:
+        - '"debugMaxLength": 2000'
+        - '"level": "warn"'
+        - 'settings.credentialSecret = fs.readFileSync("/run/secrets/nodered_credential_secret", ''utf8'');'
+        - "type: 'credentials',"
+      users:
+        admin: { password: 'molecule-changed-password', former_password: 'molecule-admin-password' }
+        viewer: { password: 'molecule-viewer-password' }

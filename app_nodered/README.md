@@ -8,4 +8,4 @@ container_repository: https://github.com/node-red/node-red-docker
 documentation_link: https://nodered.org/docs/
 ---
 
-Installs and configures Node-RED as a podman quadlet.
+Installs and configures Node-RED as a podman quadlet, including its settings.js and the users of the editor.

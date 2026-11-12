@@ -1,0 +1,162 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_nodered__test_case: "{{ app_nodered__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nodered__test_vars: "{{ app_nodered__test_case.role_vars }}"
+    app_nodered__test_environment: "{{ app_nodered__test_vars.nodered_environment | default({}) }}"
+    app_nodered__test_secrets: "{{ app_nodered__test_vars.nodered_secrets | default([]) }}"
+    app_nodered__test_users: "{{ app_nodered__test_vars.nodered_users | default([]) }}"
+    app_nodered__test_passwords: "{{ app_nodered__test_vars.nodered_passwords | default({}) }}"
+    app_nodered__test_checked_files:
+      - "{{ app_nodered__test_quadlet_path }}"
+      - "{{ app_nodered__test_settings_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_nodered__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_nodered__test_checked_files }}"
+      register: 'app_nodered__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_nodered with nodered_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_container: [ 'environment' ]
+        app_nodered__test_invalid:
+          message: 'nodered_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_nodered with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_secrets: [ { name: 'nodered_credential_secret', data: 'x' } ]
+        app_nodered__test_invalid:
+          message: 'a secret without target'
+          search: '^nodered_secrets entries need name, data and target$'
+
+    - name: 'Run app_nodered with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_secrets: "{{ app_nodered__test_secrets + [ { 'name': 'nodered_unknown', 'data': 'molecule', 'target': 'NODE_RED_PASSWORD' } ] }}"
+        app_nodered__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: NODE_RED_PASSWORD\.'
+
+    - name: 'Run app_nodered with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_config: { uiPorts: 1881 }
+        app_nodered__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in nodered_config: uiPorts\.'
+
+    - name: 'Run app_nodered with adminAuth in nodered_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_config: { adminAuth: { type: 'credentials', users: [] } }
+        app_nodered__test_invalid:
+          message: 'adminAuth in nodered_config'
+          search: '^These options are set by the role, not with nodered_config: adminAuth\.$'
+
+    - name: 'Run app_nodered with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_config: { flowFilePretty: 'no' }
+        app_nodered__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These options are booleans, allowed are true and false: flowFilePretty\.$'
+
+    - name: 'Run app_nodered with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_config: { editorTheme: { page: { title: "Node-RED\nMolecule" } } }
+        app_nodered__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: editorTheme\.$'
+
+    - name: 'Run app_nodered with a user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_users: "{{ app_nodered__test_users + [ { 'name': 'molecule' } ] }}"
+        nodered_passwords: "{{ app_nodered__test_passwords }}"
+        app_nodered__test_invalid:
+          message: 'a user without password'
+          search: '^These users have no password in nodered_passwords: molecule\.$'
+
+    - name: 'Run app_nodered with a short password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_users: [ { name: 'molecule' } ]
+        nodered_passwords: { molecule: 'short' }
+        app_nodered__test_invalid:
+          message: 'a short password'
+          search: '^The passwords of these users need at least 8 characters: molecule\.$'
+
+    - name: 'Run app_nodered with invalid permissions (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_users: [ { name: 'molecule', permissions: 'write' } ]
+        nodered_passwords: { molecule: 'molecule-password' }
+        app_nodered__test_invalid:
+          message: 'invalid permissions'
+          search: '^The permissions of these users have to be \* or read: molecule\.$'
+
+    - name: 'Run app_nodered with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_environment: "{{ app_nodered__test_environment | combine({ 'PORT': '1881' }) }}"
+        app_nodered__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: PORT\.'
+
+    - name: 'Run app_nodered with the changed password of the administrator'
+      when: app_nodered__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nodered' ]
+          register: 'app_nodered__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed password of the administrator'
+          ansible.builtin.set_fact:
+            nodered_passwords: "{{ app_nodered__test_passwords | combine(app_nodered__test_case.side_effect.passwords) }}"
+
+        - name: 'Run app_nodered with the changed password of the administrator'
+          ansible.builtin.include_role:
+            name: 'app_nodered'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nodered' ]
+          register: 'app_nodered__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed settings.js and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_nodered__settings_result is changed
+              - app_nodered__quadlet_result is not changed
+              - app_nodered__test_started_after.stdout | int > app_nodered__test_started_before.stdout | int
+            fail_msg: >-
+              settings.js changed: {{ app_nodered__settings_result is changed }}, quadlet changed: {{ app_nodered__quadlet_result is changed }},
+              start before {{ app_nodered__test_started_before.stdout }}, after {{ app_nodered__test_started_after.stdout }}

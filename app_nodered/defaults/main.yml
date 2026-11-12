@@ -17,35 +17,220 @@ app_nodered__version: "{{ nodered_version | default('latest') }}"
 
 app_nodered__container: "{{ app_nodered__podman_container_default | combine(nodered_container | default({})) }}"
 
+# The variables of the image, the role sets TZ
+app_nodered__environment: "{{ app_nodered__environment_default | combine(nodered_environment | default({})) }}"
+
+# The options of settings.js, merged recursively over the default of the role
+app_nodered__config: "{{ app_nodered__config_default | combine(nodered_config | default({}), recursive=true) }}"
+
+# Secrets with name, data and target, the only target is credentialSecret
+app_nodered__secrets: "{{ nodered_secrets | default([]) }}"
+
+# The users of the editor with name and permissions, their passwords by name
+app_nodered__users: "{{ nodered_users | default([]) }}"
+app_nodered__passwords: "{{ nodered_passwords | default({}) }}"
+
 app_nodered__autoupdate_enabled: "{{ nodered_autoupdate_enabled | default(false) }}"
+app_nodered__autoupdate_schedule: "{{ nodered_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+# The user node-red of the image
 app_nodered__uid: 1000
 app_nodered__gid: 1000
 
+# The image starts Node-RED with --userDir /data, it reads /data/settings.js
 app_nodered__data_dir: '/data'
+app_nodered__settings_path: "{{ app_nodered__home }}/settings.js"
+
+app_nodered__port: "{{ app_nodered__config.uiPort | default(1880) }}"
+
+app_nodered__environment_default:
+  TZ: "{{ app_nodered__timezone }}"
+
+# The environment of the container, Node-RED reads booleans as true and false
+app_nodered__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in app_nodered__environment.items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+# Generated from process.env of Node-RED 5.0.9 and the Dockerfile and entrypoint.sh of node-red-docker v5.0.9,
+# PORT is left out, uiPort is set in settings.js, NODE_RED_DISABLE_TELEMETRY is left out, telemetry is set in settings.js
+app_nodered__environment_allowed:
+  - 'TZ'
+  - 'FLOWS'
+  - 'NODE_OPTIONS'
+  - 'NODE_ENV'
+  - 'NODE_RED_ENABLE_PROJECTS'
+  - 'NODE_RED_ENABLE_SAFE_MODE'
+  - 'NODE_RED_ENABLE_TOURS'
+  - 'NODE_RED_FUNCTION_TIME'
+  - 'NODE_TLS_REJECT_UNAUTHORIZED'
+
+# Node-RED reads these variables as true and false
+app_nodered__environment_booleans:
+  - 'NODE_RED_ENABLE_PROJECTS'
+  - 'NODE_RED_ENABLE_SAFE_MODE'
+  - 'NODE_RED_ENABLE_TOURS'
+
+# The active options of settings.js of Node-RED 5.0.9, uiPort without process.env.PORT
+app_nodered__config_default:
+  flowFile: 'flows.json'
+  flowFilePretty: true
+  uiPort: 1880
+  diagnostics:
+    enabled: true
+    ui: true
+  runtimeState:
+    enabled: false
+    ui: false
+  telemetry: {}
+  logging:
+    console:
+      level: 'info'
+      metrics: false
+      audit: false
+  exportGlobalContextKeys: false
+  externalModules: {}
+  editorTheme:
+    palette: {}
+    projects:
+      enabled: false
+      workflow:
+        mode: 'manual'
+    codeEditor:
+      lib: 'monaco'
+      options: {}
+    markdownEditor:
+      mermaid:
+        enabled: true
+    multiplayer:
+      enabled: false
+  functionExternalModules: true
+  globalFunctionTimeout: 0
+  functionTimeout: 0
+  functionGlobalContext: {}
+  debugMaxLength: 1000
+  mqttReconnectTime: 15000
+  serialReconnectTime: 15000
+
+# Generated from the options of the first level of settings.js of Node-RED 5.0.9, active and commented,
+# without the options set by the role (userDir, credentialSecret, adminAuth) and the options that need JavaScript
+# (https, httpsRefreshInterval, httpAdminMiddleware, httpNodeMiddleware, webSocketNodeVerifyClient)
+app_nodered__config_allowed:
+  - 'flowFile'
+  - 'flowFilePretty'
+  - 'nodesDir'
+  - 'requireHttps'
+  - 'httpNodeAuth'
+  - 'httpStaticAuth'
+  - 'uiPort'
+  - 'uiHost'
+  - 'apiMaxLength'
+  - 'httpServerOptions'
+  - 'httpAdminRoot'
+  - 'httpAdminCookieOptions'
+  - 'httpNodeRoot'
+  - 'httpNodeCors'
+  - 'httpStatic'
+  - 'httpStaticRoot'
+  - 'httpStaticCors'
+  - 'proxyOptions'
+  - 'lang'
+  - 'diagnostics'
+  - 'runtimeState'
+  - 'telemetry'
+  - 'logging'
+  - 'contextStorage'
+  - 'exportGlobalContextKeys'
+  - 'externalModules'
+  - 'disableEditor'
+  - 'editorTheme'
+  - 'fileWorkingDirectory'
+  - 'functionExternalModules'
+  - 'globalFunctionTimeout'
+  - 'functionTimeout'
+  - 'functionGlobalContext'
+  - 'nodeMessageBufferMaxLength'
+  - 'ui'
+  - 'debugUseColors'
+  - 'debugMaxLength'
+  - 'debugStatusLength'
+  - 'execMaxBufferSize'
+  - 'httpRequestTimeout'
+  - 'mqttReconnectTime'
+  - 'serialReconnectTime'
+  - 'socketReconnectTime'
+  - 'socketTimeout'
+  - 'tcpMsgQueueSize'
+  - 'inboundWebSocketTimeout'
+  - 'tlsConfigDisableLocalFiles'
+  - 'nodeDefaults'
+
+# The options set by the role
+app_nodered__config_managed: [ 'userDir', 'credentialSecret', 'adminAuth' ]
+
+# The booleans of the first level of settings.js
+app_nodered__config_booleans:
+  - 'flowFilePretty'
+  - 'requireHttps'
+  - 'exportGlobalContextKeys'
+  - 'disableEditor'
+  - 'functionExternalModules'
+  - 'debugUseColors'
+  - 'tlsConfigDisableLocalFiles'
+
+# Node-RED reads the secrets from settings.js, settings.js reads them from the files of the podman secrets
+app_nodered__secret_variables: [ 'credentialSecret' ]
+app_nodered__secrets_dir: '/run/secrets'
+
+# The files of the secrets by their target, secrets with an unknown target are left out, the validation reports them
+app_nodered__secret_paths: >-
+  {%- set paths = {} -%}
+  {%- if app_nodered__secrets is sequence and app_nodered__secrets is not string and app_nodered__secrets is not mapping -%}
+  {%-   for secret in app_nodered__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in app_nodered__secret_variables -%}
+  {%-     set _ = paths.update({ secret.target: app_nodered__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ paths }}
+
+app_nodered__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- if app_nodered__secrets is sequence and app_nodered__secrets is not string and app_nodered__secrets is not mapping -%}
+  {%-   for secret in app_nodered__secrets if secret is mapping and secret.name is defined -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ app_nodered__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ secrets }}
+
+# The users of adminAuth
+app_nodered__user_keys: [ 'name', 'permissions' ]
+app_nodered__user_permissions: [ '*', 'read' ]
+app_nodered__name_pattern: '^[A-Za-z0-9][A-Za-z0-9._@-]*$'
+app_nodered__password_length: 8
+
+# The packages of the controlled host for the hashes of the passwords
+app_nodered__packages: [ 'python3-bcrypt' ]
 
 app_nodered__podman_name: 'nodered'
 app_nodered__podman_image: 'docker.io/nodered/node-red'
-app_nodered__podman_tag: "{{ app_nodered__version }}"
-
-app_nodered__podman_home: "{{ app_nodered__home }}"
 
 app_nodered__podman_container_default:
   name: "{{ app_nodered__podman_name }}"
   hostname: "{{ app_nodered__hostname }}"
-  image: "{{ app_nodered__podman_image }}:{{ app_nodered__podman_tag }}"
+  image: "{{ app_nodered__podman_image }}:{{ app_nodered__version }}"
   ip: "{{ app_nodered__ip }}"
   ipv6: "{{ app_nodered__ipv6 | default(omit) }}"
   network: "{{ app_nodered__network }}"
   timezone: "{{ app_nodered__timezone }}"
-  environment:
-    TZ: "{{ app_nodered__timezone }}"
-  labels: "{{ app_nodered__labels }}"
+  labels: "{{ app_nodered__labels | default(omit) }}"
+  # Set with nodered_environment, merged over the default
+  environment: "{{ app_nodered__environment_container }}"
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ app_nodered__podman_home }}:{{ app_nodered__data_dir }}"
+    - "{{ app_nodered__home }}:{{ app_nodered__data_dir }}"
+  secrets: "{{ app_nodered__podman_secrets if app_nodered__podman_secrets | length > 0 else omit }}"

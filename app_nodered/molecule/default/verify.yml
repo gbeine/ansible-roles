@@ -1,0 +1,181 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_nodered__test_case: "{{ app_nodered__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nodered__expect: "{{ app_nodered__test_case.expect }}"
+    app_nodered__test_url: "http://{{ app_nodered__expect.ip }}:1880"
+    # The secrets and passwords of the test case, they must not be part of the unit, the environment or settings.js
+    app_nodered__test_plain: >-
+      {{ (app_nodered__test_case.role_vars.nodered_secrets | default([])) | map(attribute='data') | list
+         + (app_nodered__test_case.role_vars.nodered_passwords | default({})).values() | list
+         + (app_nodered__test_case.side_effect.passwords | default({})).values() | list }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_nodered__test_quadlet_path }}"
+      register: 'app_nodered__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_nodered__test_image) in app_nodered__test_quadlet_lines
+          - ('IP=' + app_nodered__expect.ip) in app_nodered__test_quadlet_lines
+          - app_nodered__expect.ip6 is none or ('IP6=' + app_nodered__expect.ip6) in app_nodered__test_quadlet_lines
+          - app_nodered__expect.ip6 is not none or app_nodered__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_nodered__expect.quadlet | reject('in', app_nodered__test_quadlet_lines) | list | length == 0
+          - app_nodered__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_nodered__test_quadlet_lines | select('match', 'ExecStartPre=') | list | length == 0
+          - app_nodered__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_nodered__test_plain | select('in', app_nodered__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_nodered__test_quadlet.content | b64decode }}"
+      vars:
+        app_nodered__test_quadlet_lines: "{{ (app_nodered__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of settings.js'
+      ansible.builtin.stat:
+        path: "{{ app_nodered__test_settings_path }}"
+      register: 'app_nodered__test_settings_stat'
+
+    - name: 'Read settings.js'
+      ansible.builtin.slurp:
+        src: "{{ app_nodered__test_settings_path }}"
+      register: 'app_nodered__test_settings_js'
+
+    - name: 'Assert settings.js'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__test_settings_stat.stat.mode == '0600'
+          - app_nodered__test_settings_stat.stat.uid == 1000
+          - app_nodered__expect.settings_js | reject('in', app_nodered__test_content) | list | length == 0
+          - (app_nodered__expect.users is none) == ('adminAuth' not in app_nodered__test_content)
+          - app_nodered__test_plain | select('in', app_nodered__test_content) | list | length == 0
+        fail_msg: "mode {{ app_nodered__test_settings_stat.stat.mode }}, uid {{ app_nodered__test_settings_stat.stat.uid }}, {{ app_nodered__test_content }}"
+      vars:
+        app_nodered__test_content: "{{ app_nodered__test_settings_js.content | b64decode }}"
+
+    - name: 'Read the state of the Node-RED service'
+      ansible.builtin.command: 'systemctl is-active nodered'
+      register: 'app_nodered__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the Node-RED container'
+      ansible.builtin.command: 'podman inspect nodered'
+      register: 'app_nodered__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__test_service.stdout == 'active'
+          - app_nodered__test_net.IPAddress == app_nodered__expect.ip
+          - app_nodered__expect.ip6 is none or app_nodered__test_net.GlobalIPv6Address == app_nodered__expect.ip6
+          - app_nodered__expect.env | reject('in', app_nodered__test_env) | list | length == 0
+          - app_nodered__test_plain | select('in', app_nodered__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_nodered__test_service.stdout }},
+          IPv4 {{ app_nodered__test_net.IPAddress }}, IPv6 {{ app_nodered__test_net.GlobalIPv6Address }},
+          environment {{ app_nodered__test_env | join(', ') }}
+      vars:
+        app_nodered__test_container: "{{ (app_nodered__test_inspect.stdout | from_json)[0] }}"
+        app_nodered__test_net: "{{ app_nodered__test_container.NetworkSettings.Networks[app_nodered__test_case.role_vars.nodered_network] }}"
+        app_nodered__test_env: "{{ app_nodered__test_container.Config.Env }}"
+
+    - name: 'Read the flows without login'
+      ansible.builtin.uri:
+        url: "{{ app_nodered__test_url }}/flows"
+        status_code: [ 200, 401 ]
+      register: 'app_nodered__test_flows'
+
+    - name: 'Log in to the admin API'
+      when: app_nodered__expect.users is not none
+      ansible.builtin.uri:
+        url: "{{ app_nodered__test_url }}/auth/token"
+        method: 'POST'
+        body_format: 'form-urlencoded'
+        body:
+          client_id: 'node-red-admin'
+          grant_type: 'password'
+          # The scope has to be covered by the permissions of the user
+          scope: "{{ item.scope }}"
+          username: "{{ item.name }}"
+          password: "{{ item.password }}"
+        status_code: [ 200, 401, 403 ]
+        return_content: true
+      loop:
+        - { name: 'admin', scope: '*', password: "{{ (app_nodered__expect.users | default({}, true)).admin.password | default('') }}" }
+        - { name: 'admin', scope: '*', password: "{{ (app_nodered__expect.users | default({}, true)).admin.former_password | default('') }}" }
+        - { name: 'viewer', scope: 'read', password: "{{ (app_nodered__expect.users | default({}, true)).viewer.password | default('') }}" }
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'app_nodered__test_login'
+      no_log: true
+
+    - name: 'Deploy the flows as the user with read permissions'
+      when: app_nodered__expect.users is not none
+      ansible.builtin.uri:
+        url: "{{ app_nodered__test_url }}/flows"
+        method: 'POST'
+        headers:
+          Authorization: "Bearer {{ app_nodered__test_login.results[2].json.access_token | default('') }}"
+        body_format: 'json'
+        body: []
+        status_code: [ 200, 204, 401, 403 ]
+      register: 'app_nodered__test_deploy'
+
+    - name: 'Read the settings of the admin API'
+      ansible.builtin.uri:
+        url: "{{ app_nodered__test_url }}/settings"
+        headers: >-
+          {{ {} if app_nodered__expect.users is none
+             else { 'Authorization': 'Bearer ' ~ (app_nodered__test_login.results[0].json.access_token | default('')) } }}
+        return_content: true
+      register: 'app_nodered__test_settings'
+
+    - name: 'Assert the login, the permissions and the settings'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__test_flows.status == (200 if app_nodered__expect.users is none else 401)
+          - app_nodered__expect.users is none or app_nodered__test_logins[0] == 200
+          - app_nodered__expect.users is none or app_nodered__test_logins[1] != 200
+          - app_nodered__expect.users is none or app_nodered__test_logins[2] == 200
+          - app_nodered__expect.users is none or app_nodered__test_deploy.status in [ 401, 403 ]
+          - app_nodered__test_settings_differ | length == 0
+          - app_nodered__expect.settings_absent | select('in', app_nodered__test_settings.json.keys() | list) | list | length == 0
+        fail_msg: >-
+          flows without login {{ app_nodered__test_flows.status }},
+          logins {{ app_nodered__test_logins }},
+          deployment of the reader {{ app_nodered__test_deploy.status | default('') }},
+          differing settings {{ app_nodered__test_settings_differ }},
+          settings {{ app_nodered__test_settings.json | to_json }}
+      vars:
+        app_nodered__test_logins: "{{ app_nodered__test_login.results | default([]) | map(attribute='status', default=0) | list }}"
+        app_nodered__test_settings_differ: >-
+          {%- set differ = [] -%}
+          {%- for key, value in app_nodered__expect.settings.items() if app_nodered__test_settings.json[key] is not defined or app_nodered__test_settings.json[key] != value -%}
+          {%-   set _ = differ.append(key) -%}
+          {%- endfor -%}
+          {{ differ }}
+
+    - name: 'Read the runtime configuration of Node-RED'
+      ansible.builtin.slurp:
+        src: '/opt/nodered/.config.runtime.json'
+      register: 'app_nodered__test_runtime'
+      failed_when: false
+
+    # Node-RED stores its own key only if no credentialSecret is set
+    - name: 'Assert that Node-RED did not create its own credential secret'
+      when: app_nodered__test_case.role_vars.nodered_secrets is defined
+      ansible.builtin.assert:
+        that:
+          - "'_credentialSecret' not in (app_nodered__test_runtime.content | default('') | b64decode)"
+        fail_msg: "{{ app_nodered__test_runtime.content | default('') | b64decode }}"
