@@ -1,0 +1,173 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_influxdb_explorer__test_case: "{{ database_influxdb_explorer__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_influxdb_explorer__test_vars: "{{ database_influxdb_explorer__test_case.role_vars }}"
+    database_influxdb_explorer__test_env: "{{ database_influxdb_explorer__test_vars.influxdb_explorer_environment | default({}) }}"
+    database_influxdb_explorer__test_secrets: "{{ database_influxdb_explorer__test_vars.influxdb_explorer_secrets }}"
+    database_influxdb_explorer__test_config: "{{ database_influxdb_explorer__test_vars.influxdb_explorer_config | default({}) }}"
+    database_influxdb_explorer__test_checked_files:
+      - "{{ database_influxdb_explorer__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_influxdb_explorer__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_influxdb_explorer__test_checked_files }}"
+      register: 'database_influxdb_explorer__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_influxdb_explorer with influxdb_explorer_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_container: [ 'environment' ]
+        database_influxdb_explorer__test_invalid:
+          message: 'influxdb_explorer_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_influxdb_explorer with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_secrets: [ { name: 'influxdb_explorer_session_secret_key', data: 'x' } ]
+        database_influxdb_explorer__test_invalid:
+          message: 'a secret without target'
+          search: '^influxdb_explorer_secrets entries need name, data and target$'
+
+    - name: 'Run database_influxdb_explorer with without the secret SESSION_SECRET_KEY (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_secrets: []
+        database_influxdb_explorer__test_invalid:
+          message: 'without the secret SESSION_SECRET_KEY'
+          search: '^InfluxDB 3 Explorer needs the secrets SESSION_SECRET_KEY, missing: SESSION_SECRET_KEY\.$'
+
+    - name: 'Run database_influxdb_explorer with SESSION_SECRET_KEY in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_environment: "{{ database_influxdb_explorer__test_env | combine({'SESSION_SECRET_KEY': 'molecule'}) }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'SESSION_SECRET_KEY in the environment'
+          search: '^Secrets and their file variables must not be set in influxdb_explorer_environment: SESSION_SECRET_KEY\.$'
+
+    - name: 'Run database_influxdb_explorer with influxdb_explorer_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_config: [ 'DEFAULT_SERVER_NAME' ]
+        database_influxdb_explorer__test_invalid:
+          message: 'influxdb_explorer_config not a dictionary'
+          # Depending on the version of Ansible combine fails before or the role reports it
+          search: '^influxdb_explorer_config has to be a dictionary\.$|failed to combine variables, expected dicts'
+
+    - name: 'Run database_influxdb_explorer with an unknown key in influxdb_explorer_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_config: "{{ database_influxdb_explorer__test_config | combine({'DEFAULT_SERVER': 'http://10.89.0.20:8181'}) }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'an unknown key in influxdb_explorer_config'
+          search: '^Unknown keys in influxdb_explorer_config: DEFAULT_SERVER, allowed are DEFAULT_INFLUX_SERVER, DEFAULT_INFLUX_DATABASE, DEFAULT_SERVER_NAME\.$'
+
+    - name: 'Run database_influxdb_explorer with the token in influxdb_explorer_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_config: "{{ database_influxdb_explorer__test_config | combine({'DEFAULT_API_TOKEN': 'apiv3_molecule'}) }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'the token in influxdb_explorer_config'
+          search: '^Secrets must not be set in influxdb_explorer_config, use influxdb_explorer_secrets: DEFAULT_API_TOKEN\.$'
+
+    - name: 'Run database_influxdb_explorer with a line break in a value of influxdb_explorer_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_config: "{{ database_influxdb_explorer__test_config | combine({'DEFAULT_SERVER_NAME': 'Molecule\nInfluxDB'}) }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'a line break in a value of influxdb_explorer_config'
+          search: '^The values of influxdb_explorer_config have to be strings without line breaks, null or false removes a key: DEFAULT_SERVER_NAME\.$'
+
+    - name: 'Run database_influxdb_explorer with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_environment: "{{ database_influxdb_explorer__test_env | combine({'PORT': '8888'}) }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: PORT\.'
+
+    - name: 'Run database_influxdb_explorer with an unknown environment variable in influxdb_explorer_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_container: { environment: { FOO: 'bar' } }
+        database_influxdb_explorer__test_invalid:
+          message: 'an unknown environment variable in influxdb_explorer_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_influxdb_explorer with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_secrets: "{{ database_influxdb_explorer__test_secrets + [{'name': 'influxdb_explorer_unknown', 'data': 'x', 'target': 'API_TOKEN'}] }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: API_TOKEN\.'
+
+    - name: 'Run database_influxdb_explorer with the changed configuration'
+      when: database_influxdb_explorer__test_case.side_effect | default(false)
+      block:
+
+        - name: 'Read the checksum of the quadlet unit before the change'
+          ansible.builtin.stat:
+            path: "{{ database_influxdb_explorer__test_quadlet_path }}"
+            checksum_algorithm: 'md5'
+          register: 'database_influxdb_explorer__test_quadlet_before'
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'influxdb-explorer' ]
+          register: 'database_influxdb_explorer__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            influxdb_explorer_config: "{{ database_influxdb_explorer__test_config | combine(database_influxdb_explorer__test_side_effect_config) }}"
+
+        - name: 'Run database_influxdb_explorer with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'database_influxdb_explorer'
+
+        - name: 'Read the checksum of the quadlet unit after the change'
+          ansible.builtin.stat:
+            path: "{{ database_influxdb_explorer__test_quadlet_path }}"
+            checksum_algorithm: 'md5'
+          register: 'database_influxdb_explorer__test_quadlet_after'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'influxdb-explorer' ]
+          register: 'database_influxdb_explorer__test_started_after'
+          changed_when: false
+
+        # Only the secret of config.json changes, the restart is caused by the changed secret
+        - name: 'Assert the changed secret of config.json, the unchanged quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb_explorer__config_result is changed
+              - database_influxdb_explorer__quadlet_result is not changed
+              - database_influxdb_explorer__test_quadlet_after.stat.checksum == database_influxdb_explorer__test_quadlet_before.stat.checksum
+              - database_influxdb_explorer__test_started_after.stdout | int > database_influxdb_explorer__test_started_before.stdout | int
+            fail_msg: >-
+              config.json changed: {{ database_influxdb_explorer__config_result is changed }},
+              quadlet changed: {{ database_influxdb_explorer__quadlet_result is changed }},
+              start before {{ database_influxdb_explorer__test_started_before.stdout }}, after {{ database_influxdb_explorer__test_started_after.stdout }}

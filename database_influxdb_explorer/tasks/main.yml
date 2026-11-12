@@ -1,56 +1,163 @@
 ---
 
 - name: 'Install InfluxDB 3 Explorer'
-  tags: [ 'database_influxdb_explorer'  ]
+  tags: [ 'database', 'database_influxdb_explorer' ]
   block:
 
-    - name: 'Create directories'
-      ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: "{{ item.owner | default('root') }}"
-        group: "{{ item.group | default('root') }}"
-        mode: "{{ item.mode | default('0700') }}"
-        state: 'directory'
-      with_items:
-        - dest: "{{ database_influxdb_explorer__podman_data_dir }}"
-          mode: '0750'
-          owner: '1500'
-          group: '1500'
-        - dest: "{{ database_influxdb_explorer__podman_config_dir }}"
-          mode: '0550'
+    # A failing template in the variables (e.g. an unknown filter or influxdb_explorer_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_influxdb_explorer__container | length > 0
+        quiet: true
 
-    - name: 'Generate config file'
-      no_log: true
-      ansible.builtin.template:
-        src: 'config.json.j2'
-        dest: "{{ database_influxdb_explorer__podman_config_dir }}/config.json"
-        owner: '1500'
-        group: '1500'
-        mode: '600'
-      when: 'not podman___update_mode | bool'
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_explorer__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb_explorer__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_influxdb_explorer__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_influxdb_explorer__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('influxdb_explorer_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('influxdb_explorer_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of influxdb_explorer_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_explorer__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb_explorer__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_influxdb_explorer__secret_targets: "{{ database_influxdb_explorer__secrets | map(attribute='target') | list }}"
+        database_influxdb_explorer__environment_set: >-
+          {{ database_influxdb_explorer__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        database_influxdb_explorer__environment_missing: >-
+          {{ database_influxdb_explorer__environment_required | reject('in', database_influxdb_explorer__environment_set) | list }}
+        database_influxdb_explorer__secrets_missing: >-
+          {{ database_influxdb_explorer__secrets_required | reject('in', database_influxdb_explorer__secret_targets) | list }}
+        database_influxdb_explorer__secrets_in_environment: >-
+          {{ (database_influxdb_explorer__secret_targets + database_influxdb_explorer__secret_variables + database_influxdb_explorer__secret_files.values() | list)
+             | select('in', database_influxdb_explorer__environment.keys() | list) | unique | list }}
+        database_influxdb_explorer__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_influxdb_explorer__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('InfluxDB 3 Explorer needs the environment variables ' ~ (database_influxdb_explorer__environment_required | join(', ')) ~ ', missing or empty: ' ~ (database_influxdb_explorer__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {#- combine with an empty default does not fail on every Ansible version, the role checks the configuration itself -#}
+          {%- if database_influxdb_explorer__config is not mapping -%}
+          {%-   set _ = errors.append('influxdb_explorer_config has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set config = database_influxdb_explorer__config -%}
+          {%-   set unknown = config.keys() | reject('in', database_influxdb_explorer__config_allowed) | reject('in', database_influxdb_explorer__secrets_config) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in influxdb_explorer_config: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (database_influxdb_explorer__config_allowed | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set secret_keys = config.keys() | select('in', database_influxdb_explorer__secrets_config) | list -%}
+          {%-   if secret_keys | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not be set in influxdb_explorer_config, use influxdb_explorer_secrets: ' ~ (secret_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set invalid = [] -%}
+          {%-   for key, value in config.items() if value is not none and value is not false
+                  and (value is not string or (value ~ '.').splitlines() | length > 1) -%}
+          {%-     set _ = invalid.append(key) -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The values of influxdb_explorer_config have to be strings without line breaks, null or false removes a key: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if database_influxdb_explorer__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('InfluxDB 3 Explorer needs the secrets ' ~ (database_influxdb_explorer__secrets_required | join(', ')) ~ ', missing: ' ~ (database_influxdb_explorer__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_influxdb_explorer__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in influxdb_explorer_environment: ' ~ (database_influxdb_explorer__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging influxdb_explorer_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_explorer__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_influxdb_explorer__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_influxdb_explorer__environment_unknown: >-
+          {{ (database_influxdb_explorer__container.environment | default({})).keys() | reject('in', database_influxdb_explorer__environment_allowed) | list }}
+        database_influxdb_explorer__secrets_unknown: >-
+          {{ database_influxdb_explorer__secrets | map(attribute='target')
+             | reject('in', database_influxdb_explorer__secret_variables) | list }}
+        database_influxdb_explorer__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_influxdb_explorer__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_influxdb_explorer__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_influxdb_explorer__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_influxdb_explorer__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_influxdb_explorer__environment_allowed) and the secrets ' ~ (database_influxdb_explorer__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directories'
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+        state: 'directory'
+      loop:
+        - path: "{{ database_influxdb_explorer__home }}"
+          owner: 'root'
+          group: 'root'
+          mode: '0750'
+        # The image runs as the user 1500 and stops if /db belongs to another user
+        - path: "{{ database_influxdb_explorer__data_dir }}"
+          owner: "{{ database_influxdb_explorer__data_owner }}"
+          group: "{{ database_influxdb_explorer__data_group }}"
+          mode: '0700'
+      loop_control:
+        label: "{{ item.path }}"
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'influxdb_explorer_session_secret'
-        data: "{{ database_influxdb_explorer__session_secret }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      # The secrets of config.json are part of the secret of config.json
+      loop: "{{ database_influxdb_explorer__secrets | rejectattr('target', 'in', database_influxdb_explorer__secrets_config) | list }}"
+      register: 'database_influxdb_explorer__secrets_result'
+
+    - name: 'Create the secret of config.json'
+      no_log: true
+      containers.podman.podman_secret:
+        state: "{{ 'present' if database_influxdb_explorer__config_json | length > 0 else 'absent' }}"
+        name: "{{ database_influxdb_explorer__config_secret }}"
+        data: "{{ database_influxdb_explorer__config_json if database_influxdb_explorer__config_json | length > 0 else omit }}"
+      register: 'database_influxdb_explorer__config_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ database_influxdb_explorer__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[database_influxdb_explorer__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ database_influxdb_explorer__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-      
     - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ database_influxdb_explorer__container.name }}"
@@ -62,12 +169,12 @@
         timezone: "{{ database_influxdb_explorer__container.timezone }}"
         env: "{{ database_influxdb_explorer__container.environment | default(omit) }}"
         etc_hosts: "{{ database_influxdb_explorer__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_influxdb_explorer__container.expose | default(omit) }}"
         label: "{{ database_influxdb_explorer__container.labels | default(omit) }}"
         publish: "{{ database_influxdb_explorer__container.publish | default(omit) }}"
-        expose: "{{ database_influxdb_explorer__container.expose | default(omit) }}"
         secrets: "{{ database_influxdb_explorer__container.secrets | default(omit) }}"
         volume: "{{ database_influxdb_explorer__container.volumes | default(omit) }}"
-        command: '--mode=admin'
+        command: "{{ database_influxdb_explorer__container.command | default(omit) }}"
         quadlet_options: |
           [Install]
           WantedBy=default.target
@@ -75,22 +182,36 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if database_influxdb_explorer__container.requires is defined %}
+          Requires={{ database_influxdb_explorer__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'database_influxdb_explorer__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ database_influxdb_explorer__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if database_influxdb_explorer__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        database_influxdb_explorer__running: >-
+          {{ (ansible_facts.services[database_influxdb_explorer__container.name + '.service'].state | default('')) == 'running' }}
+        database_influxdb_explorer__restart: >-
+          {{ database_influxdb_explorer__running | bool
+             and (database_influxdb_explorer__secrets_result is changed
+                  or database_influxdb_explorer__quadlet_result is changed
+                  or database_influxdb_explorer__config_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'database_influxdb_explorer__autoupdate_enabled'
-      include_role:
+      when: 'database_influxdb_explorer__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ database_influxdb_explorer__container.name }}"
         container_image: "{{ database_influxdb_explorer__container.image }}"
+        container_schedule: "{{ database_influxdb_explorer__autoupdate_schedule }}"

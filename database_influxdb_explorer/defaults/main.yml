@@ -11,33 +11,85 @@ database_influxdb_explorer__ipv6: "{{ influxdb_explorer_ipv6 }}"
 database_influxdb_explorer__network: "{{ influxdb_explorer_network | mandatory }}"
 database_influxdb_explorer__hostname: "{{ influxdb_explorer_hostname | mandatory }}"
 database_influxdb_explorer__timezone: "{{ influxdb_explorer_timezone | mandatory }}"
-database_influxdb_explorer__labels: "{{ influxdb_explorer_labels | default({}) }}"
+database_influxdb_explorer__labels: "{{ influxdb_explorer_labels }}"
 
 database_influxdb_explorer__version: "{{ influxdb_explorer_version | default('latest') }}"
 
 database_influxdb_explorer__container: "{{ database_influxdb_explorer__podman_container_default | combine(influxdb_explorer_container | default({})) }}"
+database_influxdb_explorer__environment: "{{ database_influxdb_explorer__environment_default | combine(influxdb_explorer_environment | default({})) }}"
+database_influxdb_explorer__secrets: "{{ influxdb_explorer_secrets | default([]) }}"
 
-database_influxdb_explorer__default_server: "{{ influxdb_explorer_default_server | mandatory }}"
-database_influxdb_explorer__default_database: "{{ influxdb_explorer_default_database | mandatory }}"
-database_influxdb_explorer__default_token: "{{ influxdb_explorer_default_token | mandatory }}"
-database_influxdb_explorer__default_name: "{{ influxdb_explorer_default_name | mandatory }}"
-
-database_influxdb_explorer__session_secret: "{{ influxdb_explorer_session_secret | mandatory }}"
+# The default connection of config.json, the token is a secret with the target DEFAULT_API_TOKEN
+database_influxdb_explorer__config: "{{ influxdb_explorer_config | default({}) }}"
 
 database_influxdb_explorer__autoupdate_enabled: "{{ influxdb_explorer_autoupdate_enabled | default(false) }}"
+database_influxdb_explorer__autoupdate_schedule: "{{ influxdb_explorer_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+# The keys of config.json, DEFAULT_API_TOKEN is set with a secret
+database_influxdb_explorer__config_allowed: [ 'DEFAULT_INFLUX_SERVER', 'DEFAULT_INFLUX_DATABASE', 'DEFAULT_SERVER_NAME' ]
+
+database_influxdb_explorer__environment_default:
+  TZ: "{{ database_influxdb_explorer__timezone }}"
+
+database_influxdb_explorer__environment_required: []
+
+# The targets of the secrets, they must not be set in influxdb_explorer_environment
+database_influxdb_explorer__secret_variables: "{{ database_influxdb_explorer__secret_files.keys() | list + database_influxdb_explorer__secrets_env + database_influxdb_explorer__secrets_config }}"
+
+# The image reads no secret from a file variable
+database_influxdb_explorer__secret_files: {}
+
+# The secrets passed in the environment, the image reads SESSION_SECRET_KEY only from the environment
+database_influxdb_explorer__secrets_env: [ 'SESSION_SECRET_KEY' ]
+
+# The secrets written to config.json, they are no podman secrets of their own
+database_influxdb_explorer__secrets_config: [ 'DEFAULT_API_TOKEN' ]
+
+database_influxdb_explorer__secrets_required: [ 'SESSION_SECRET_KEY' ]
+
+# From the documentation of InfluxDB 3 Explorer v1.11.2 (install/docker and the release notes),
+# the source of the image is not public, update with new versions of the image
+database_influxdb_explorer__environment_allowed:
+  - 'DATABASE_URL'
+  - 'SSL_CERT_PATH'
+  - 'SSL_KEY_PATH'
+  - 'NODE_EXTRA_CA_CERTS'
+  - 'CA_CERT_PATH'
+  - 'LOG_LEVEL'
+  - 'TZ'
+
+# config.json with the configuration without removed keys and the token of the secret, empty without both
+database_influxdb_explorer__config_json: >-
+  {%- set config = {} -%}
+  {%- if database_influxdb_explorer__config is mapping -%}
+  {%-   for key, value in database_influxdb_explorer__config.items() if value is not none and value is not false -%}
+  {%-     set _ = config.update({ key: value }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {%- if database_influxdb_explorer__secrets is sequence and database_influxdb_explorer__secrets is not string and database_influxdb_explorer__secrets is not mapping -%}
+  {%-   for secret in database_influxdb_explorer__secrets
+          if secret is mapping and secret.target is defined and secret.data is defined and secret.target in database_influxdb_explorer__secrets_config -%}
+  {%-     set _ = config.update({ secret.target: secret.data }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ (config | to_nice_json) if config | length > 0 else '' }}
+
+# The podman secret of config.json, mounted for the user of the image
+database_influxdb_explorer__config_secret: "{{ database_influxdb_explorer__podman_name }}-config"
+database_influxdb_explorer__config_target: '/app-root/config/config.json'
+
+# The data directory with the SQLite database, owned by the user of the image
+database_influxdb_explorer__data_dir: "{{ database_influxdb_explorer__home }}/db"
+database_influxdb_explorer__data_owner: 1500
+database_influxdb_explorer__data_group: 1500
+
 database_influxdb_explorer__podman_name: 'influxdb-explorer'
 database_influxdb_explorer__podman_image: 'docker.io/influxdata/influxdb3-ui'
 database_influxdb_explorer__podman_tag: "{{ database_influxdb_explorer__version }}"
-
-database_influxdb_explorer__podman_home: "{{ database_influxdb_explorer__home }}"
-database_influxdb_explorer__podman_data_dir: "{{ database_influxdb_explorer__podman_home }}/db"
-database_influxdb_explorer__podman_config_dir: "{{ database_influxdb_explorer__podman_home }}/config"
-
 
 database_influxdb_explorer__podman_container_default:
   name: "{{ database_influxdb_explorer__podman_name }}"
@@ -47,11 +99,26 @@ database_influxdb_explorer__podman_container_default:
   ipv6: "{{ database_influxdb_explorer__ipv6 | default(omit) }}"
   network: "{{ database_influxdb_explorer__network }}"
   timezone: "{{ database_influxdb_explorer__timezone }}"
-  labels: "{{ database_influxdb_explorer__labels }}"
-  secrets:
-    - "influxdb_explorer_session_secret,type=env,target=SESSION_SECRET_KEY"
+  # The query mode is read only, the admin mode manages databases and tokens
+  command: [ '--mode=admin' ]
+  environment: "{{ database_influxdb_explorer__environment }}"
+  labels: "{{ database_influxdb_explorer__labels | default(omit) }}"
   volumes:
-    - "/etc/localtime:/etc/localtime:ro"
-    - "/etc/timezone:/etc/timezone:ro"
-    - "{{ database_influxdb_explorer__podman_data_dir }}:/db"
-    - "{{ database_influxdb_explorer__podman_config_dir }}:/app-root/config:ro"
+    - "{{ database_influxdb_explorer__data_dir }}:/db"
+  secrets: "{{ database_influxdb_explorer__podman_secrets if database_influxdb_explorer__podman_secrets | length > 0 else omit }}"
+
+# The secrets of influxdb_explorer_secrets passed in the environment and the secret of config.json,
+# entries without name or target are left out, the validation of the secrets reports them
+database_influxdb_explorer__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- if database_influxdb_explorer__secrets is sequence and database_influxdb_explorer__secrets is not string and database_influxdb_explorer__secrets is not mapping -%}
+  {%-   for secret in database_influxdb_explorer__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in database_influxdb_explorer__secrets_env -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=env,target=' ~ secret.target) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {%- if database_influxdb_explorer__config_json | length > 0 -%}
+  {%-   set _ = secrets.append(database_influxdb_explorer__config_secret ~ ',type=mount,target=' ~ database_influxdb_explorer__config_target
+                               ~ ',uid=' ~ database_influxdb_explorer__data_owner ~ ',gid=' ~ database_influxdb_explorer__data_group ~ ',mode=0400') -%}
+  {%- endif -%}
+  {{ secrets }}

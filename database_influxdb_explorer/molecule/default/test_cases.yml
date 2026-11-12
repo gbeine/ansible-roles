@@ -1,0 +1,86 @@
+---
+# Network created by container_podman in prepare.yml
+database_influxdb_explorer__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_influxdb_explorer__test_image: 'docker.io/influxdata/influxdb3-ui:latest'
+database_influxdb_explorer__test_quadlet_path: '/etc/containers/systemd/influxdb-explorer.container'
+
+# A valid change of the side effect, only the secret of config.json changes and Explorer has to restart
+database_influxdb_explorer__test_side_effect_config:
+  DEFAULT_SERVER_NAME: 'Molecule InfluxDB, renamed'
+
+database_influxdb_explorer__test_cases:
+
+  # Only the mandatory variables and the session secret
+  - name: 'molecule-influxdb-explorer-default'
+    role_vars:
+      influxdb_explorer_home: '/opt/influxdb-explorer'
+      influxdb_explorer_ip: '10.89.0.60'
+      influxdb_explorer_network: 'podman-molecule'
+      influxdb_explorer_hostname: 'influxdb-explorer-default'
+      influxdb_explorer_timezone: 'Europe/Berlin'
+      influxdb_explorer_secrets:
+        - name: 'influxdb_explorer_session_secret_key'
+          data: 'molecule-session-secret-key'
+          target: 'SESSION_SECRET_KEY'
+    expect:
+      ip: '10.89.0.60'
+      ip6: ~
+      quadlet:
+        - 'Exec=--mode=admin'
+        - 'Volume=/opt/influxdb-explorer/db:/db'
+        - 'Secret=influxdb_explorer_session_secret_key,type=env,target=SESSION_SECRET_KEY'
+      env:
+        - 'TZ=Europe/Berlin'
+      config: ~
+
+  # IPv6, labels, the default connection in config.json with the token from a secret
+  - name: 'molecule-influxdb-explorer'
+    role_vars:
+      influxdb_explorer_home: '/opt/influxdb-explorer'
+      influxdb_explorer_ip: '10.89.0.61'
+      influxdb_explorer_ipv6: 'fd00:89::61'
+      influxdb_explorer_network: 'podman-molecule'
+      influxdb_explorer_hostname: 'influxdb-explorer-molecule'
+      influxdb_explorer_timezone: 'Europe/Berlin'
+      influxdb_explorer_labels:
+        traefik.enable: 'true'
+      influxdb_explorer_config:
+        DEFAULT_INFLUX_SERVER: 'http://10.89.0.20:8181'
+        DEFAULT_INFLUX_DATABASE: 'molecule'
+        DEFAULT_SERVER_NAME: 'Molecule InfluxDB'
+      influxdb_explorer_environment:
+        LOG_LEVEL: 'info'
+      influxdb_explorer_secrets:
+        - name: 'influxdb_explorer_session_secret_key'
+          data: 'molecule-session-secret-key'
+          target: 'SESSION_SECRET_KEY'
+        - name: 'influxdb_explorer_api_token'
+          data: 'apiv3_molecule-token'
+          target: 'DEFAULT_API_TOKEN'
+    side_effect: true
+    expect:
+      ip: '10.89.0.61'
+      ip6: 'fd00:89::61'
+      quadlet:
+        - 'Exec=--mode=admin'
+        - 'Volume=/opt/influxdb-explorer/db:/db'
+        - 'Secret=influxdb_explorer_session_secret_key,type=env,target=SESSION_SECRET_KEY'
+        - 'Secret=influxdb-explorer-config,type=mount,target=/app-root/config/config.json,uid=1500,gid=1500,mode=0400'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'LOG_LEVEL=info'
+      # After the change of the side effect
+      config:
+        DEFAULT_INFLUX_SERVER: 'http://10.89.0.20:8181'
+        DEFAULT_INFLUX_DATABASE: 'molecule'
+        DEFAULT_SERVER_NAME: 'Molecule InfluxDB, renamed'
+        DEFAULT_API_TOKEN: 'apiv3_molecule-token'

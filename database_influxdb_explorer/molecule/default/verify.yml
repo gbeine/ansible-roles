@@ -1,0 +1,109 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_influxdb_explorer__test_case: "{{ database_influxdb_explorer__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_influxdb_explorer__expect: "{{ database_influxdb_explorer__test_case.expect }}"
+    database_influxdb_explorer__test_home: "{{ database_influxdb_explorer__test_case.role_vars.influxdb_explorer_home }}"
+    database_influxdb_explorer__test_url: "http://{{ database_influxdb_explorer__expect.ip }}:8080"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_influxdb_explorer__test_quadlet_path }}"
+      register: 'database_influxdb_explorer__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_influxdb_explorer__test_image) in database_influxdb_explorer__test_quadlet_lines
+          - ('IP=' + database_influxdb_explorer__expect.ip) in database_influxdb_explorer__test_quadlet_lines
+          - database_influxdb_explorer__expect.ip6 is none or ('IP6=' + database_influxdb_explorer__expect.ip6) in database_influxdb_explorer__test_quadlet_lines
+          - database_influxdb_explorer__expect.ip6 is not none or database_influxdb_explorer__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_influxdb_explorer__expect.quadlet | reject('in', database_influxdb_explorer__test_quadlet_lines) | list | length == 0
+          # config.json is only mounted with a configuration or a token
+          - database_influxdb_explorer__expect.config is not none or database_influxdb_explorer__test_quadlet_lines | select('search', '/app-root/config') | list | length == 0
+        fail_msg: "{{ database_influxdb_explorer__test_quadlet.content | b64decode }}"
+      vars:
+        database_influxdb_explorer__test_quadlet_lines: "{{ (database_influxdb_explorer__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the influxdb-explorer service'
+      ansible.builtin.command: 'systemctl is-active influxdb-explorer'
+      register: 'database_influxdb_explorer__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the influxdb-explorer container'
+      ansible.builtin.command: 'podman inspect influxdb-explorer'
+      register: 'database_influxdb_explorer__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_explorer__test_service.stdout == 'active'
+          - database_influxdb_explorer__test_net.IPAddress == database_influxdb_explorer__expect.ip
+          - database_influxdb_explorer__expect.ip6 is none or database_influxdb_explorer__test_net.GlobalIPv6Address == database_influxdb_explorer__expect.ip6
+          - database_influxdb_explorer__expect.env | reject('in', database_influxdb_explorer__test_env) | list | length == 0
+        fail_msg: >-
+          service {{ database_influxdb_explorer__test_service.stdout }},
+          IPv4 {{ database_influxdb_explorer__test_net.IPAddress }}, IPv6 {{ database_influxdb_explorer__test_net.GlobalIPv6Address }},
+          environment {{ database_influxdb_explorer__test_env | reject('search', 'SECRET') | join(', ') }}
+      vars:
+        database_influxdb_explorer__test_container: "{{ (database_influxdb_explorer__test_inspect.stdout | from_json)[0] }}"
+        database_influxdb_explorer__test_net: "{{ database_influxdb_explorer__test_container.NetworkSettings.Networks[database_influxdb_explorer__test_case.role_vars.influxdb_explorer_network] }}"
+        database_influxdb_explorer__test_env: "{{ database_influxdb_explorer__test_container.Config.Env }}"
+
+    - name: 'Read config.json in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'influxdb-explorer', 'cat', '/app-root/config/config.json' ]
+      register: 'database_influxdb_explorer__test_config'
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 'Assert config.json'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_explorer__expect.config is none or database_influxdb_explorer__test_config.rc == 0
+          - database_influxdb_explorer__expect.config is none or (database_influxdb_explorer__test_config.stdout | from_json) == database_influxdb_explorer__expect.config
+        fail_msg: 'config.json differs from the expected configuration or is missing'
+      no_log: true
+
+    - name: 'Wait until Explorer answers'
+      ansible.builtin.uri:
+        url: "{{ database_influxdb_explorer__test_url }}/"
+        return_content: true
+      register: 'database_influxdb_explorer__test_page'
+      until: database_influxdb_explorer__test_page.status | default(0) == 200
+      retries: 30
+      delay: 5
+
+    # Explorer creates its SQLite database at the start
+    - name: 'Read the data directory and the database'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ database_influxdb_explorer__test_home }}/db"
+        - "{{ database_influxdb_explorer__test_home }}/db/sqlite.db"
+      register: 'database_influxdb_explorer__test_data'
+
+    - name: 'Assert the data directory and the web interface'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_explorer__test_data.results[0].stat.isdir | default(false)
+          - database_influxdb_explorer__test_data.results[0].stat.uid == 1500
+          - database_influxdb_explorer__test_data.results[0].stat.mode == '0700'
+          - database_influxdb_explorer__test_data.results[1].stat.exists
+          - database_influxdb_explorer__test_page.content is search('<html', ignorecase=true)
+        fail_msg: >-
+          data directory uid {{ database_influxdb_explorer__test_data.results[0].stat.uid | default('missing') }},
+          mode {{ database_influxdb_explorer__test_data.results[0].stat.mode | default('missing') }},
+          sqlite.db exists {{ database_influxdb_explorer__test_data.results[1].stat.exists }}
