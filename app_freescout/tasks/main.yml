@@ -13,22 +13,7 @@
           - app_freescout__container | length > 0
         quiet: true
 
-    # The secrets are mounted as files, the environment references them with <VARIABLE>_FILE
-    - name: 'Validate environment'
-      ansible.builtin.assert:
-        that:
-          - app_freescout__environment_missing | length == 0
-        fail_msg: >-
-          FreeScout needs the environment variables {{ app_freescout__environment_required | join(', ') }},
-          missing or empty: {{ app_freescout__environment_missing | join(', ') | default('none', true) }}.
-        quiet: true
-      vars:
-        app_freescout__environment_missing: >-
-          {{ app_freescout__environment_required
-             | reject('in', app_freescout__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
-             | list }}
-
-    - name: 'Validate the role variables'
+    - name: 'Validate the secrets'
       ansible.builtin.assert:
         that:
           - app_freescout__invalid | length == 0
@@ -43,21 +28,39 @@
           {%-   set _ = errors.append('freescout_secrets has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
-                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('freescout_secrets entries need name and data') -%}
-          {%- else -%}
-          {%-   set prefix = app_freescout__secrets_dir ~ '/' -%}
-          {%-   set referenced = app_freescout__environment | dict2items
-                                 | selectattr('key', 'match', '.*_FILE$')
-                                 | map(attribute='value') | map('string')
-                                 | select('match', prefix | regex_escape)
-                                 | map('regex_replace', '^' ~ prefix | regex_escape, '') | list -%}
-          {%-   set missing = referenced | reject('in', secrets | map(attribute='name') | list) | unique | list -%}
-          {%-   if missing | length > 0 -%}
-          {%-     set _ = errors.append('the environment references missing secrets in freescout_secrets: ' ~ missing | join(', ')) -%}
-          {%-   endif -%}
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('freescout_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of freescout_secrets have to be unique') -%}
           {%- endif -%}
           {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__environment_missing | length == 0
+          - app_freescout__secrets_missing | length == 0
+          - app_freescout__secrets_in_environment | length == 0
+        fail_msg: >-
+          FreeScout needs the environment variables {{ app_freescout__environment_required | join(', ') }},
+          missing or empty: {{ app_freescout__environment_missing | join(', ') | default('none', true) }}.
+          FreeScout needs the secrets {{ app_freescout__secrets_required | join(', ') }},
+          missing: {{ app_freescout__secrets_missing | join(', ') | default('none', true) }}.
+          Secrets and their file variables must not be set in freescout_environment:
+          {{ app_freescout__secrets_in_environment | join(', ') | default('none', true) }}.
+        quiet: true
+      vars:
+        app_freescout__secret_targets: "{{ app_freescout__secrets | map(attribute='target') | list }}"
+        app_freescout__environment_missing: >-
+          {{ app_freescout__environment_required
+             | reject('in', app_freescout__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        app_freescout__secrets_missing: >-
+          {{ app_freescout__secrets_required | reject('in', app_freescout__secret_targets) | list }}
+        app_freescout__secrets_in_environment: >-
+          {{ (app_freescout__secret_targets + app_freescout__secret_variables + app_freescout__secret_files.values() | list)
+             | select('in', app_freescout__environment.keys() | list) | unique | list }}
 
     # Checks the environment and the secrets of the container after merging freescout_container,
     # unknown variables would change the behavior unexpectedly
@@ -69,21 +72,14 @@
         fail_msg: >-
           Unknown environment variables: {{ app_freescout__environment_unknown | join(', ') | default('none', true) }}.
           Unknown secrets: {{ app_freescout__secrets_unknown | join(', ') | default('none', true) }}.
-          Allowed are the variables of the image and the keys of FreeScout as FREESCOUT_<KEY> (app_freescout__environment_allowed),
-          passwords only as <VARIABLE>_FILE, and the secrets {{ app_freescout__secrets_allowed | join(', ') }}.
+          Allowed are the variables of the image and the keys of FreeScout as FREESCOUT_<KEY> (app_freescout__environment_allowed)
+          and the secrets {{ app_freescout__secret_files.keys() | join(', ') }}.
         quiet: true
       vars:
-        # The secrets of the container are omit without secrets
-        app_freescout__container_secrets: >-
-          {{ app_freescout__container.secrets
-             if app_freescout__container.secrets is sequence and app_freescout__container.secrets is not string
-             else [] }}
         app_freescout__environment_unknown: >-
           {{ (app_freescout__container.environment | default({})).keys() | reject('in', app_freescout__environment_allowed) | list }}
         app_freescout__secrets_unknown: >-
-          {{ app_freescout__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1')
-             | map('regex_replace', '^' ~ (app_freescout__secrets_dir ~ '/') | regex_escape, '')
-             | reject('in', app_freescout__secrets_allowed) | list }}
+          {{ app_freescout__secrets | map(attribute='target') | reject('in', app_freescout__secret_files.keys() | list) | list }}
 
     - name: 'Create directories'
       ansible.builtin.file:

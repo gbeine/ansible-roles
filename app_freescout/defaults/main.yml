@@ -15,13 +15,13 @@ app_freescout__labels: "{{ freescout_labels }}"
 
 app_freescout__version: "{{ freescout_version | default('latest') }}"
 
-# Files below /run/secrets in the container, referenced with <VARIABLE>_FILE in the environment
-app_freescout__secrets: "{{ freescout_secrets | default([]) }}"
+app_freescout__container: "{{ app_freescout__podman_container_default | combine(freescout_container | default({})) }}"
 
 # The configuration of the image, FREESCOUT_<KEY> sets <KEY> in the .env file of FreeScout
 app_freescout__environment: "{{ app_freescout__environment_default | combine(freescout_environment | default({})) }}"
 
-app_freescout__container: "{{ app_freescout__podman_container_default | combine(freescout_container | default({})) }}"
+# Secrets with name, data and target, mounted below /run/secrets, the role sets the file variable of the target
+app_freescout__secrets: "{{ freescout_secrets | default([]) }}"
 
 app_freescout__autoupdate_enabled: "{{ freescout_autoupdate_enabled | default(false) }}"
 app_freescout__autoupdate_schedule: "{{ freescout_autoupdate_schedule }}"
@@ -30,11 +30,8 @@ app_freescout__autoupdate_schedule: "{{ freescout_autoupdate_schedule }}"
 # Defaults - do not change
 #
 
-# The passwords are read from the secrets freescout_admin_password and freescout_database_password
 app_freescout__environment_default:
   TIMEZONE: "{{ app_freescout__timezone }}"
-  ADMIN_PASS_FILE: '/run/secrets/freescout_admin_password'
-  DB_PASS_FILE: '/run/secrets/freescout_database_password'
 
 app_freescout__environment_required:
   - 'APP_URL'
@@ -43,8 +40,43 @@ app_freescout__environment_required:
   - 'DB_NAME'
   - 'DB_USER'
 
+# Options carrying secrets, they must be passed with freescout_secrets
+app_freescout__secret_variables: "{{ app_freescout__secret_files.keys() | list }}"
+
+# The secrets are mounted as files, the image reads the variable target from the file variable <target>_FILE
+app_freescout__secret_files:
+  ADMIN_PASS: 'ADMIN_PASS_FILE'
+  DB_PASS: 'DB_PASS_FILE'
+  APP_KEY: 'APP_KEY_FILE'
+  FREESCOUT_AWS_SECRET_ACCESS_KEY: 'FREESCOUT_AWS_SECRET_ACCESS_KEY_FILE'
+  FREESCOUT_IMAP_PASSWORD: 'FREESCOUT_IMAP_PASSWORD_FILE'
+  FREESCOUT_MAILGUN_SECRET: 'FREESCOUT_MAILGUN_SECRET_FILE'
+  FREESCOUT_MAIL_PASSWORD: 'FREESCOUT_MAIL_PASSWORD_FILE'
+  FREESCOUT_MEMCACHED_PASSWORD: 'FREESCOUT_MEMCACHED_PASSWORD_FILE'
+  FREESCOUT_PUSHER_APP_SECRET: 'FREESCOUT_PUSHER_APP_SECRET_FILE'
+  FREESCOUT_REDIS_PASSWORD: 'FREESCOUT_REDIS_PASSWORD_FILE'
+  FREESCOUT_SES_SECRET: 'FREESCOUT_SES_SECRET_FILE'
+  FREESCOUT_SPARKPOST_SECRET: 'FREESCOUT_SPARKPOST_SECRET_FILE'
+  FREESCOUT_SQS_SECRET: 'FREESCOUT_SQS_SECRET_FILE'
+  FREESCOUT_STRIPE_SECRET: 'FREESCOUT_STRIPE_SECRET_FILE'
+
+app_freescout__secrets_required:
+  - 'ADMIN_PASS'
+  - 'DB_PASS'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+app_freescout__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if app_freescout__secrets is sequence and app_freescout__secrets is not string and app_freescout__secrets is not mapping -%}
+  {%-   for secret in app_freescout__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in app_freescout__secret_files -%}
+  {%-     set _ = environment.update({ app_freescout__secret_files[secret.target]: app_freescout__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
 # The variables of the image and the keys of FreeScout as FREESCOUT_<KEY>.
-# Passwords are only allowed as <VARIABLE>_FILE referencing a secret.
+# Passwords are only allowed as secrets, the list contains their file variables <VARIABLE>_FILE, set by the role.
 # The keys of FreeScout are generated from config/*.php of FreeScout 1.8.250, update with new versions of the image,
 # except the keys the image writes from its own variables (APP_URL, APP_TIMEZONE, APP_KEY, DB_*) and DB_TEST_*
 app_freescout__environment_allowed:
@@ -54,16 +86,13 @@ app_freescout__environment_allowed:
   - 'ADMIN_EMAIL'
   - 'ADMIN_FIRST_NAME'
   - 'ADMIN_LAST_NAME'
-  - 'ADMIN_PASS_FILE'
   - 'DB_TYPE'
   - 'DB_HOST'
   - 'DB_PORT'
   - 'DB_NAME'
   - 'DB_USER'
-  - 'DB_PASS_FILE'
   - 'DB_SSL'
   - 'APP_URL'
-  - 'APP_KEY_FILE'
   - 'SCHEDULER_TYPE'
   - 'SCHEDULER_LOG_TYPE'
   - 'SCHEDULER_LOG_PATH'
@@ -131,7 +160,6 @@ app_freescout__environment_allowed:
   - 'FREESCOUT_AWS_BUCKET'
   - 'FREESCOUT_AWS_DEFAULT_REGION'
   - 'FREESCOUT_AWS_ENDPOINT'
-  - 'FREESCOUT_AWS_SECRET_ACCESS_KEY_FILE'
   - 'FREESCOUT_AWS_URL'
   - 'FREESCOUT_AWS_USE_PATH_STYLE_ENDPOINT'
   - 'FREESCOUT_BROADCAST_DRIVER'
@@ -153,37 +181,31 @@ app_freescout__environment_allowed:
   - 'FREESCOUT_IMAP_DEFAULT_ACCOUNT'
   - 'FREESCOUT_IMAP_ENCRYPTION'
   - 'FREESCOUT_IMAP_HOST'
-  - 'FREESCOUT_IMAP_PASSWORD_FILE'
   - 'FREESCOUT_IMAP_PORT'
   - 'FREESCOUT_IMAP_PROTOCOL'
   - 'FREESCOUT_IMAP_TIMEOUT'
   - 'FREESCOUT_IMAP_USERNAME'
   - 'FREESCOUT_IMAP_VALIDATE_CERT'
   - 'FREESCOUT_MAILGUN_DOMAIN'
-  - 'FREESCOUT_MAILGUN_SECRET_FILE'
   - 'FREESCOUT_MAIL_AUTH_MODE'
   - 'FREESCOUT_MAIL_DRIVER'
   - 'FREESCOUT_MAIL_ENCRYPTION'
   - 'FREESCOUT_MAIL_FROM_ADDRESS'
   - 'FREESCOUT_MAIL_FROM_NAME'
   - 'FREESCOUT_MAIL_HOST'
-  - 'FREESCOUT_MAIL_PASSWORD_FILE'
   - 'FREESCOUT_MAIL_PORT'
   - 'FREESCOUT_MAIL_SMTP_TIMEOUT'
   - 'FREESCOUT_MAIL_USERNAME'
   - 'FREESCOUT_MEMCACHED_HOST'
-  - 'FREESCOUT_MEMCACHED_PASSWORD_FILE'
   - 'FREESCOUT_MEMCACHED_PERSISTENT_ID'
   - 'FREESCOUT_MEMCACHED_PORT'
   - 'FREESCOUT_MEMCACHED_USERNAME'
   - 'FREESCOUT_PUSHER_APP_CLUSTER'
   - 'FREESCOUT_PUSHER_APP_ID'
   - 'FREESCOUT_PUSHER_APP_KEY'
-  - 'FREESCOUT_PUSHER_APP_SECRET_FILE'
   - 'FREESCOUT_QUEUE_DRIVER'
   - 'FREESCOUT_REDIS_CLIENT'
   - 'FREESCOUT_REDIS_HOST'
-  - 'FREESCOUT_REDIS_PASSWORD_FILE'
   - 'FREESCOUT_REDIS_PORT'
   - 'FREESCOUT_SELF_UPDATER_DOWNLOAD_PATH'
   - 'FREESCOUT_SELF_UPDATER_LOG_EVENTS'
@@ -200,23 +222,27 @@ app_freescout__environment_allowed:
   - 'FREESCOUT_SESSION_SAME_SITE'
   - 'FREESCOUT_SESSION_SECURE_COOKIE'
   - 'FREESCOUT_SES_KEY'
-  - 'FREESCOUT_SES_SECRET_FILE'
-  - 'FREESCOUT_SPARKPOST_SECRET_FILE'
   - 'FREESCOUT_SQS_KEY'
   - 'FREESCOUT_SQS_PREFIX'
   - 'FREESCOUT_SQS_QUEUE'
   - 'FREESCOUT_SQS_REGION'
-  - 'FREESCOUT_SQS_SECRET_FILE'
   - 'FREESCOUT_STRIPE_KEY'
-  - 'FREESCOUT_STRIPE_SECRET_FILE'
   - 'FREESCOUT_WAITING_SINCE_AS_FIRST_UNANSWERED_CUSTOMER_MESSAGE'
-
-app_freescout__secrets_allowed:
-  - 'freescout_admin_password'
-  - 'freescout_database_password'
-  - 'freescout_app_key'
-  - 'freescout_mail_password'
-  - 'freescout_imap_password'
+  # The file variables of the secrets, set by the role
+  - 'ADMIN_PASS_FILE'
+  - 'DB_PASS_FILE'
+  - 'APP_KEY_FILE'
+  - 'FREESCOUT_AWS_SECRET_ACCESS_KEY_FILE'
+  - 'FREESCOUT_IMAP_PASSWORD_FILE'
+  - 'FREESCOUT_MAILGUN_SECRET_FILE'
+  - 'FREESCOUT_MAIL_PASSWORD_FILE'
+  - 'FREESCOUT_MEMCACHED_PASSWORD_FILE'
+  - 'FREESCOUT_PUSHER_APP_SECRET_FILE'
+  - 'FREESCOUT_REDIS_PASSWORD_FILE'
+  - 'FREESCOUT_SES_SECRET_FILE'
+  - 'FREESCOUT_SPARKPOST_SECRET_FILE'
+  - 'FREESCOUT_SQS_SECRET_FILE'
+  - 'FREESCOUT_STRIPE_SECRET_FILE'
 
 app_freescout__secrets_dir: '/run/secrets'
 
@@ -237,13 +263,13 @@ app_freescout__podman_container_default:
   ipv6: "{{ app_freescout__ipv6 | default(omit) }}"
   network: "{{ app_freescout__network }}"
   timezone: "{{ app_freescout__timezone }}"
-  # Set with freescout_environment, merged over the default
-  environment: "{{ app_freescout__environment }}"
+  # Set with freescout_environment and freescout_secrets, merged over the default
+  environment: "{{ app_freescout__environment | combine(app_freescout__environment_secrets_files) }}"
   labels: "{{ app_freescout__labels | default(omit) }}"
   secrets: >-
-    {{ (app_freescout__secrets | map(attribute='name')
+    {{ (app_freescout__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
         | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ app_freescout__secrets_dir ~ '/\1') | list)
-      if (app_freescout__secrets | default([]) | length > 0)
+      if (app_freescout__secrets is sequence and app_freescout__secrets is not string and app_freescout__secrets | length > 0)
       else omit }}
   # freescout_container.volumes replaces the list completely
   volumes:
