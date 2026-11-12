@@ -1,57 +1,402 @@
 ---
 
 - name: 'Install MariaDB'
-  tags: [ 'database_mariadb'  ]
+  tags: [ 'database', 'database_mariadb' ]
   block:
 
-    - name: 'Include OS-specific variables (podman)'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}-podman.yml"
-        - "{{ ansible_facts['distribution'] }}-podman.yml"
-      when: 'database_mariadb__use_podman'
+    # A failing template in the variables (e.g. an unknown filter, mariadb_container or mariadb_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_mariadb__container | length > 0
+          - database_mariadb__config | length > 0
+        quiet: true
 
-    - name: 'Include OS-specific variables (native)'
-      ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}.yml"
-      when: 'not database_mariadb__use_podman'
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mariadb__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_mariadb__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_mariadb__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('mariadb_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('mariadb_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of mariadb_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
 
-    - name: 'Install MariaDB packages'
+    # The checks of the root password follow init-mariadb-initdb of the image,
+    # it sets no password with less than 4 characters and puts the password into SQL in single quotes without escaping
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mariadb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mariadb__secret_targets: "{{ database_mariadb__secrets | map(attribute='target') | list }}"
+        database_mariadb__secrets_missing: >-
+          {{ database_mariadb__secrets_required | reject('in', database_mariadb__secret_targets) | list }}
+        database_mariadb__secrets_in_environment: >-
+          {{ (database_mariadb__secret_targets + database_mariadb__secret_variables + database_mariadb__secret_files.values() | list)
+             | select('in', database_mariadb__environment.keys() | list) | unique | list }}
+        database_mariadb__environment_managed_set: >-
+          {{ database_mariadb__environment_managed | select('in', database_mariadb__environment.keys() | list) | list }}
+        database_mariadb__errors: >-
+          {%- set errors = [] -%}
+          {%- set bs = '\\' | first -%}
+          {%- if database_mariadb__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('MariaDB needs the secrets ' ~ (database_mariadb__secrets_required | join(', ')) ~ ', missing: ' ~ (database_mariadb__secrets_missing | join(', ')) ~ '.') -%}
+          {%- else -%}
+          {%-   set password = database_mariadb__root_password | string -%}
+          {%-   if password | length < 4 -%}
+          {%-     set _ = errors.append('The root password has to have at least 4 characters, the image sets no password otherwise.') -%}
+          {%-   endif -%}
+          {%-   if "'" in password or bs in password or (password ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('The root password must not contain single quotes, backslashes or line breaks, the image writes it into SQL without escaping.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if database_mariadb__environment_managed_set | length > 0 -%}
+          {%-   set _ = errors.append('Databases and accounts are managed with mariadb_databases, mariadb_accounts and mariadb_passwords, not with ' ~ (database_mariadb__environment_managed_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mariadb__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in mariadb_environment: ' ~ (database_mariadb__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # MariaDB treats - and _ in the names of options the same, the names are checked with underscores and without prefixes
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mariadb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mariadb__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = database_mariadb__config -%}
+          {%- set unknown_sections = config.keys() | reject('in', database_mariadb__config_sections) | list -%}
+          {%- if unknown_sections | length > 0 -%}
+          {%-   set _ = errors.append('Unknown sections in mariadb_config: ' ~ (unknown_sections | join(', ')) ~ ', allowed are ' ~ (database_mariadb__config_sections | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- for section in database_mariadb__config_sections if section in config -%}
+          {%-   set options = config[section] -%}
+          {%-   if options is not mapping -%}
+          {%-     set _ = errors.append('The section ' ~ section ~ ' of mariadb_config has to be a dictionary.') -%}
+          {%-   else -%}
+          {%-     set ns = namespace(unknown=[], role=[], passwords=[], invalid=[], lines=[], base='') -%}
+          {%-     set role_names = (database_mariadb__config_role[section] | default({})).keys() | map('replace', '-', '_') | list -%}
+          {%-     for option, value in options.items() -%}
+          {%-       set name = option | string | replace('-', '_') -%}
+          {%-       set ns.base = name[6:] if name.startswith('loose_') else name -%}
+          {%-       for prefix in database_mariadb__config_prefixes[1:] if ns.base.startswith(prefix) and ns.base[prefix | length:] in database_mariadb__config_allowed[section] -%}
+          {%-         set ns.base = ns.base[prefix | length:] -%}
+          {%-       endfor -%}
+          {%-       if ns.base in role_names -%}
+          {%-         set ns.role = ns.role + [ option ] -%}
+          {%-       elif ns.base in database_mariadb__config_passwords -%}
+          {%-         set ns.passwords = ns.passwords + [ option ] -%}
+          {%-       elif ns.base not in database_mariadb__config_allowed[section] -%}
+          {%-         set ns.unknown = ns.unknown + [ option ] -%}
+          {%-       endif -%}
+          {%-       for item in (value if value is sequence and value is not string else [ value ]) if item is not none and item is not boolean -%}
+          {%-         if item is not string and item is not number -%}
+          {%-           set ns.invalid = ns.invalid + [ option ] -%}
+          {%-         elif (item | string ~ '.').splitlines() | length > 1 -%}
+          {%-           set ns.lines = ns.lines + [ option ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endfor -%}
+          {%-     if ns.unknown | length > 0 -%}
+          {%-       set _ = errors.append('Unknown options in the section ' ~ section ~ ': ' ~ (ns.unknown | join(', ')) ~ '. Allowed are the options of MariaDB (database_mariadb__config_allowed.' ~ section ~ ').') -%}
+          {%-     endif -%}
+          {%-     if ns.role | length > 0 -%}
+          {%-       set _ = errors.append('Options set by the role must not be set in the section ' ~ section ~ ': ' ~ (ns.role | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     if ns.passwords | length > 0 -%}
+          {%-       set _ = errors.append('Passwords must not be written to custom.cnf, section ' ~ section ~ ': ' ~ (ns.passwords | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     if ns.invalid | length > 0 -%}
+          {%-       set _ = errors.append('Values have to be strings, numbers, booleans or lists of them, section ' ~ section ~ ': ' ~ (ns.invalid | unique | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     if ns.lines | length > 0 -%}
+          {%-       set _ = errors.append('Values must not contain line breaks, section ' ~ section ~ ': ' ~ (ns.lines | unique | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ errors }}
+
+    - name: 'Validate the databases and accounts'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mariadb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mariadb__errors: >-
+          {%- set errors = [] -%}
+          {%- set lists = { 'mariadb_databases': database_mariadb__databases, 'mariadb_accounts': database_mariadb__accounts } -%}
+          {%- for variable, entries in lists.items() -%}
+          {%-   if entries is not sequence or entries is string or entries is mapping -%}
+          {%-     set _ = errors.append(variable ~ ' has to be a list.') -%}
+          {%-   elif entries | reject('mapping') | list | length > 0 or entries | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-     set _ = errors.append(variable ~ ' entries need name.') -%}
+          {%-   else -%}
+          {%-     set invalid = entries | map(attribute='name') | map('string') | reject('match', database_mariadb__object_name_pattern) | list -%}
+          {%-     if invalid | length > 0 -%}
+          {%-       set _ = errors.append('Invalid names in ' ~ variable ~ ': ' ~ (invalid | join(', ')) ~ ', allowed are letters, digits and _ . $ -.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if errors | length == 0 -%}
+          {%-   set names = database_mariadb__databases | map(attribute='name') | map('string') | list -%}
+          {%-   if names | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of mariadb_databases have to be unique.') -%}
+          {%-   endif -%}
+          {%-   set accounts = database_mariadb__accounts | map(attribute='name') | map('string') | list -%}
+          {%-   set keys = [] -%}
+          {%-   for account in database_mariadb__accounts -%}
+          {%-     set _ = keys.append((account.name | string) ~ '@' ~ (account.host | default('localhost'))) -%}
+          {%-   endfor -%}
+          {%-   if keys | unique | list | length != keys | length -%}
+          {%-     set _ = errors.append('The accounts of mariadb_accounts have to be unique by name and host.') -%}
+          {%-   endif -%}
+          {%-   if 'root' in accounts -%}
+          {%-     set _ = errors.append('The account root is created by the image with the secret MYSQL_ROOT_PASSWORD and must not be in mariadb_accounts.') -%}
+          {%-   endif -%}
+          {%-   set privileges = database_mariadb__accounts | selectattr('privileges', 'defined') | rejectattr('privileges', 'string') | rejectattr('privileges', 'mapping') | map(attribute='name') | list -%}
+          {%-   if privileges | length > 0 -%}
+          {%-     set _ = errors.append('privileges of mariadb_accounts have to be a string like app.*:ALL or a dictionary: ' ~ (privileges | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set passwords = database_mariadb__passwords -%}
+          {%-   if passwords is not mapping -%}
+          {%-     set _ = errors.append('mariadb_passwords has to be a dictionary.') -%}
+          {%-   else -%}
+          {%-     set missing = accounts | reject('in', passwords.keys() | list) | unique | list -%}
+          {%-     if missing | length > 0 -%}
+          {%-       set _ = errors.append('Accounts without password in mariadb_passwords: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set unknown = passwords.keys() | reject('in', accounts) | list -%}
+          {%-     if unknown | length > 0 -%}
+          {%-       set _ = errors.append('Passwords of unknown accounts in mariadb_passwords: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set empty = passwords | dict2items | selectattr('value', 'in', ['', none]) | map(attribute='key') | list -%}
+          {%-     if empty | length > 0 -%}
+          {%-       set _ = errors.append('Empty passwords in mariadb_passwords: ' ~ (empty | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging mariadb_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mariadb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mariadb__environment_unknown: >-
+          {{ (database_mariadb__container.environment | default({})).keys()
+             | reject('in', database_mariadb__environment_allowed)
+             | reject('in', database_mariadb__environment_managed) | list }}
+        database_mariadb__secrets_unknown: >-
+          {{ database_mariadb__secrets | map(attribute='target') | reject('in', database_mariadb__secret_variables) | list }}
+        database_mariadb__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_mariadb__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_mariadb__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mariadb__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_mariadb__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_mariadb__environment_allowed) and the secrets ' ~ (database_mariadb__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Install the packages for the management of databases and accounts'
       ansible.builtin.apt:
-        update_cache: 'yes'
-        install_recommends: 'no'
         pkg: "{{ database_mariadb__packages }}"
-      register: 'database_mariadb_packages_installation_result'
+        install_recommends: false
+        cache_valid_time: 3600
 
-    - name: 'Generate root login configuration'
-      no_log: true
+    # The image changes the owner of /config to PUID and PGID on every start
+    - name: 'Create the directory of MariaDB'
+      ansible.builtin.file:
+        path: "{{ database_mariadb__home }}"
+        owner: "{{ database_mariadb__uid }}"
+        group: "{{ database_mariadb__gid }}"
+        mode: '0700'
+        state: 'directory'
+
+    - name: 'Generate custom.cnf'
       ansible.builtin.template:
-        src: 'my.cnf.j2'
-        dest: '/root/.my.cnf'
-        owner: 'root'
-        group: 'root'
-        mode: '600'
+        src: 'custom.cnf.j2'
+        dest: "{{ database_mariadb__home }}/custom.cnf"
+        owner: "{{ database_mariadb__uid }}"
+        group: "{{ database_mariadb__gid }}"
+        mode: '0640'
+      register: 'database_mariadb__config_result'
 
-    - name: 'Install MariaDB using package management'
-      ansible.builtin.include_tasks:
-        file: 'apt.yml'
-      when: 'not database_mariadb__use_podman'
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_mariadb__secrets }}"
+      register: 'database_mariadb__secrets_result'
 
-    - name: 'Install MariaDB using podman'
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
-      when: 'database_mariadb__use_podman'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
-    - name: 'Initialize MariaDB'
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_mariadb__container.name }}"
+        hostname: "{{ database_mariadb__container.hostname }}"
+        image: "{{ database_mariadb__container.image }}"
+        ip: "{{ database_mariadb__container.ip }}"
+        ip6: "{{ database_mariadb__container.ipv6 | default(omit) }}"
+        network: "{{ database_mariadb__container.network }}"
+        timezone: "{{ database_mariadb__container.timezone }}"
+        command: "{{ database_mariadb__container.command | default(omit) }}"
+        env: "{{ database_mariadb__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_mariadb__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_mariadb__container.expose | default(omit) }}"
+        label: "{{ database_mariadb__container.labels | default(omit) }}"
+        publish: "{{ database_mariadb__container.publish | default(omit) }}"
+        secrets: "{{ database_mariadb__container.secrets | default(omit) }}"
+        volume: "{{ database_mariadb__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if database_mariadb__container.requires is defined %}
+          Requires={{ database_mariadb__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'database_mariadb__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_mariadb__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if database_mariadb__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        database_mariadb__running: >-
+          {{ (ansible_facts.services[database_mariadb__container.name + '.service'].state | default('')) == 'running' }}
+        database_mariadb__restart: >-
+          {{ database_mariadb__running | bool
+             and (database_mariadb__secrets_result is changed
+                  or database_mariadb__quadlet_result is changed
+                  or database_mariadb__config_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    # On the first start the image initializes the databases and restarts MariaDB
+    - name: 'Wait for MariaDB'
+      ansible.mariadb.mariadb_info:
+        login_user: 'root'
+        login_password: "{{ database_mariadb__root_password }}"
+        login_host: "{{ database_mariadb__ip }}"
+        login_port: "{{ database_mariadb__port }}"
+        filter: [ 'version' ]
+      register: 'database_mariadb__ready'
+      until: database_mariadb__ready.version is defined
+      retries: 60
+      delay: 2
+      failed_when: false
+      no_log: true
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of MariaDB'
+      when:
+        - not ansible_check_mode
+        - database_mariadb__ready.version is not defined
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ database_mariadb__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'database_mariadb__journal'
+      changed_when: false
+
+    - name: 'Assert that MariaDB answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__ready.version is defined
+        fail_msg: "{{ database_mariadb__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Manage the databases and accounts'
+      when: 'not ansible_check_mode'
       block:
-        - name: 'Initialize MariaDB accounts'
-          ansible.builtin.include_tasks:
-            file: 'accounts.yml'
-        - name: 'Initialize MariaDB databases'
-          ansible.builtin.include_tasks:
-            file: 'databases.yml'
-      when: 'not ansible_check_mode and not podman___update_mode | bool'
+
+        - name: 'Remove the anonymous accounts'
+          ansible.mariadb.mariadb_user:
+            login_user: 'root'
+            login_password: "{{ database_mariadb__root_password }}"
+            login_host: "{{ database_mariadb__ip }}"
+            login_port: "{{ database_mariadb__port }}"
+            name: ''
+            host_all: true
+            state: 'absent'
+
+        - name: 'Create the databases'
+          ansible.mariadb.mariadb_db:
+            login_user: 'root'
+            login_password: "{{ database_mariadb__root_password }}"
+            login_host: "{{ database_mariadb__ip }}"
+            login_port: "{{ database_mariadb__port }}"
+            name: "{{ item.name }}"
+            encoding: "{{ item.encoding | default(omit) }}"
+            collation: "{{ item.collation | default(omit) }}"
+            state: 'present'
+          loop: "{{ database_mariadb__databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: 'Create the accounts with their privileges'
+          no_log: true
+          ansible.mariadb.mariadb_user:
+            login_user: 'root'
+            login_password: "{{ database_mariadb__root_password }}"
+            login_host: "{{ database_mariadb__ip }}"
+            login_port: "{{ database_mariadb__port }}"
+            name: "{{ item.name }}"
+            host: "{{ item.host | default('localhost') }}"
+            password: "{{ database_mariadb__passwords[item.name] }}"
+            priv: "{{ item.privileges | default(omit) }}"
+            state: 'present'
+          loop: "{{ database_mariadb__accounts }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_mariadb__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_mariadb__container.name }}"
+        container_image: "{{ database_mariadb__container.image }}"
+        container_schedule: "{{ database_mariadb__autoupdate_schedule }}"

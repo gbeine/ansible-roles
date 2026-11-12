@@ -1,0 +1,125 @@
+---
+# Network created by container_podman in prepare.yml
+database_mariadb__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_mariadb__test_image: 'lscr.io/linuxserver/mariadb:latest'
+database_mariadb__test_quadlet_path: '/etc/containers/systemd/mariadb.container'
+
+# Test passwords only
+database_mariadb__test_root_password: 'molecule-root-password'
+database_mariadb__test_secrets:
+  - name: 'mariadb_root_password'
+    data: "{{ database_mariadb__test_root_password }}"
+    target: 'MYSQL_ROOT_PASSWORD'
+
+database_mariadb__test_cases:
+
+  # Only the mandatory variables and the root password
+  - name: 'molecule-mariadb-default'
+    role_vars:
+      mariadb_home: '/opt/mariadb'
+      mariadb_ip: '10.89.0.90'
+      mariadb_network: 'podman-molecule'
+      mariadb_hostname: 'mariadb-default'
+      mariadb_timezone: 'Europe/Berlin'
+      mariadb_uid: 1000
+      mariadb_gid: 1000
+      mariadb_secrets: "{{ database_mariadb__test_secrets }}"
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/mariadb:/config'
+        - 'Secret=mariadb_root_password,type=mount,target=/run/secrets/mariadb_root_password'
+      env:
+        - 'PUID=1000'
+        - 'PGID=1000'
+        - 'TZ=Europe/Berlin'
+        - 'FILE__MYSQL_ROOT_PASSWORD=/run/secrets/mariadb_root_password'
+      config:
+        - '[mysqld]'
+        - 'datadir = /config/databases'
+        - 'max_connections = 100'
+        - 'skip-external-locking'
+        - 'query_cache_type = DEMAND'
+      config_absent: []
+      variables:
+        max_connections: '100'
+      databases: []
+      accounts: []
+
+  # IPv6, labels, options of several sections, databases and accounts with privileges
+  - name: 'molecule-mariadb'
+    role_vars:
+      mariadb_home: '/opt/mariadb'
+      mariadb_ip: '10.89.0.91'
+      mariadb_ipv6: 'fd00:89::91'
+      mariadb_network: 'podman-molecule'
+      mariadb_hostname: 'mariadb-molecule'
+      mariadb_timezone: 'Europe/Berlin'
+      mariadb_uid: 1000
+      mariadb_gid: 1000
+      mariadb_labels:
+        traefik.enable: 'false'
+      mariadb_secrets: "{{ database_mariadb__test_secrets }}"
+      mariadb_config:
+        mysqld:
+          max_connections: 150
+          query_cache_type: false
+          skip-name-resolve: true
+          loose-innodb_io_capacity_max: 800
+        mysqldump:
+          max_allowed_packet: '64M'
+      mariadb_databases:
+        - name: 'app'
+        - name: 'other'
+          encoding: 'utf8mb4'
+          collation: 'utf8mb4_unicode_ci'
+      mariadb_accounts:
+        - name: 'app'
+          host: '%'
+          privileges: 'app.*:ALL'
+        - name: 'reader'
+          host: '%'
+          privileges: 'app.*:SELECT'
+        - name: '_backup_'
+          privileges: '*.*:SELECT,LOCK TABLES,SHOW VIEW,EVENT,TRIGGER'
+      mariadb_passwords:
+        app: 'molecule-app-password'
+        reader: 'molecule-reader-password'
+        _backup_: 'molecule-backup-password'
+    # custom.cnf changes, MariaDB has to restart
+    side_effect:
+      config:
+        mysqld:
+          max_connections: 200
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/mariadb:/config'
+        - 'Label=traefik.enable=false'
+      env:
+        - 'FILE__MYSQL_ROOT_PASSWORD=/run/secrets/mariadb_root_password'
+      config:
+        - 'max_connections = 200'
+        - 'skip-name-resolve'
+        - 'loose-innodb_io_capacity_max = 800'
+        - 'max_allowed_packet = 64M'
+      config_absent:
+        - 'query_cache_type = DEMAND'
+      variables:
+        max_connections: '200'
+        skip_name_resolve: 'on'
+        innodb_io_capacity_max: '800'
+      databases: [ 'app', 'other' ]
+      accounts:
+        - { name: 'app', password: 'molecule-app-password' }
+        - { name: 'reader', password: 'molecule-reader-password' }

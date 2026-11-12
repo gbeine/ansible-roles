@@ -1,0 +1,171 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_mariadb__test_case: "{{ database_mariadb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_mariadb__expect: "{{ database_mariadb__test_case.expect }}"
+    database_mariadb__test_home: "{{ database_mariadb__test_case.role_vars.mariadb_home }}"
+    # The passwords of the test case, they must not be part of the unit, the environment or custom.cnf
+    database_mariadb__test_plain: >-
+      {{ (database_mariadb__test_case.role_vars.mariadb_passwords | default({})).values() | list + [ database_mariadb__test_root_password ] }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_mariadb__test_quadlet_path }}"
+      register: 'database_mariadb__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_mariadb__test_image) in database_mariadb__test_quadlet_lines
+          - ('IP=' + database_mariadb__expect.ip) in database_mariadb__test_quadlet_lines
+          - database_mariadb__expect.ip6 is none or ('IP6=' + database_mariadb__expect.ip6) in database_mariadb__test_quadlet_lines
+          - database_mariadb__expect.ip6 is not none or database_mariadb__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_mariadb__expect.quadlet | reject('in', database_mariadb__test_quadlet_lines) | list | length == 0
+          - database_mariadb__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - database_mariadb__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - database_mariadb__test_plain | select('in', database_mariadb__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ database_mariadb__test_quadlet.content | b64decode }}"
+      vars:
+        database_mariadb__test_quadlet_lines: "{{ (database_mariadb__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the mariadb service'
+      ansible.builtin.command: 'systemctl is-active mariadb'
+      register: 'database_mariadb__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the mariadb container'
+      ansible.builtin.command: 'podman inspect mariadb'
+      register: 'database_mariadb__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__test_service.stdout == 'active'
+          - database_mariadb__test_net.IPAddress == database_mariadb__expect.ip
+          - database_mariadb__expect.ip6 is none or database_mariadb__test_net.GlobalIPv6Address == database_mariadb__expect.ip6
+          - database_mariadb__expect.env | reject('in', database_mariadb__test_env) | list | length == 0
+          - database_mariadb__test_env | select('match', 'MYSQL_ROOT_PASSWORD=') | list | length == 0
+        fail_msg: >-
+          service {{ database_mariadb__test_service.stdout }},
+          IPv4 {{ database_mariadb__test_net.IPAddress }}, IPv6 {{ database_mariadb__test_net.GlobalIPv6Address }},
+          environment {{ database_mariadb__test_env | reject('search', 'PASSWORD=') | join(', ') }}
+      vars:
+        database_mariadb__test_container: "{{ (database_mariadb__test_inspect.stdout | from_json)[0] }}"
+        database_mariadb__test_net: "{{ database_mariadb__test_container.NetworkSettings.Networks[database_mariadb__test_case.role_vars.mariadb_network] }}"
+        database_mariadb__test_env: "{{ database_mariadb__test_container.Config.Env }}"
+
+    - name: 'Read custom.cnf'
+      ansible.builtin.slurp:
+        src: "{{ database_mariadb__test_home }}/custom.cnf"
+      register: 'database_mariadb__test_config'
+
+    - name: 'Read the owner of custom.cnf'
+      ansible.builtin.stat:
+        path: "{{ database_mariadb__test_home }}/custom.cnf"
+      register: 'database_mariadb__test_config_stat'
+
+    - name: 'Assert custom.cnf'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__expect.config | reject('in', database_mariadb__test_config_lines) | list | length == 0
+          - database_mariadb__expect.config_absent | select('in', database_mariadb__test_config_lines) | list | length == 0
+          - database_mariadb__test_plain | select('in', database_mariadb__test_config.content | b64decode) | list | length == 0
+          - database_mariadb__test_config_stat.stat.uid == 1000
+          - database_mariadb__test_config_stat.stat.mode == '0640'
+        fail_msg: "{{ database_mariadb__test_config_lines }}"
+      vars:
+        database_mariadb__test_config_lines: "{{ (database_mariadb__test_config.content | b64decode).splitlines() }}"
+
+    # Like the role, the queries connect from the VM to the address of the container with ansible.mariadb
+    - name: 'Read the variables, the databases and the accounts as root'
+      ansible.mariadb.mariadb_query:
+        login_user: 'root'
+        login_password: "{{ database_mariadb__test_root_password }}"
+        login_host: "{{ database_mariadb__expect.ip }}"
+        query:
+          - "SELECT LOWER(VARIABLE_NAME) AS name, LOWER(VARIABLE_VALUE) AS value FROM information_schema.GLOBAL_VARIABLES
+             WHERE VARIABLE_NAME IN ('MAX_CONNECTIONS', 'SKIP_NAME_RESOLVE', 'INNODB_IO_CAPACITY_MAX')"
+          - 'SHOW DATABASES'
+          - "SELECT CONCAT(User, '@', Host) AS account FROM mysql.user"
+      register: 'database_mariadb__test_root'
+
+    - name: 'Assert the variables, the databases and the accounts'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__test_mismatch | length == 0
+          - database_mariadb__expect.databases | reject('in', database_mariadb__test_databases) | list | length == 0
+          - "'_backup_@localhost' in database_mariadb__test_accounts or database_mariadb__expect.accounts | length == 0"
+          # The anonymous accounts are removed
+          - database_mariadb__test_accounts | select('match', '^@') | list | length == 0
+        fail_msg: >-
+          variables {{ database_mariadb__test_found }}, databases {{ database_mariadb__test_databases }},
+          accounts {{ database_mariadb__test_accounts }}
+      vars:
+        database_mariadb__test_found: "{{ database_mariadb__test_root.query_result[0] | items2dict(key_name='name', value_name='value') }}"
+        database_mariadb__test_databases: "{{ database_mariadb__test_root.query_result[1] | map(attribute='Database') | list }}"
+        database_mariadb__test_accounts: "{{ database_mariadb__test_root.query_result[2] | map(attribute='account') | list }}"
+        database_mariadb__test_mismatch: >-
+          {%- set differences = [] -%}
+          {%- for name, value in database_mariadb__expect.variables.items() if (database_mariadb__test_found[name] | default('') | string) != value -%}
+          {%-   set _ = differences.append(name) -%}
+          {%- endfor -%}
+          {{ differences }}
+
+    - name: 'Write and read as the accounts'
+      when: database_mariadb__expect.accounts | length > 0
+      ansible.mariadb.mariadb_query:
+        login_user: "{{ item.user }}"
+        login_password: "{{ item.password }}"
+        login_host: "{{ database_mariadb__expect.ip }}"
+        query: "{{ item.query }}"
+      loop:
+        - user: 'app'
+          password: 'molecule-app-password'
+          query: [ 'CREATE TABLE IF NOT EXISTS app.molecule (id INT)', 'INSERT INTO app.molecule VALUES (42)' ]
+          allowed: true
+        - user: 'reader'
+          password: 'molecule-reader-password'
+          query: 'SELECT id FROM app.molecule LIMIT 1'
+          allowed: true
+        - user: 'reader'
+          password: 'molecule-reader-password'
+          query: 'INSERT INTO app.molecule VALUES (43)'
+          allowed: false
+        - user: 'reader'
+          password: 'wrong-password'
+          query: 'SELECT 1'
+          allowed: false
+      loop_control:
+        label: "{{ item.user }}: {{ item.query }}"
+      register: 'database_mariadb__test_access'
+      # The denied queries are checked below
+      failed_when: false
+
+    - name: 'Assert the privileges of the accounts'
+      when: database_mariadb__expect.accounts | length > 0
+      ansible.builtin.assert:
+        that:
+          - (item.query_result is defined) == item.item.allowed
+        fail_msg: "{{ item.item.user }}: {{ item.item.query }}: {{ item.msg | default('allowed') }}"
+        quiet: true
+      loop: "{{ database_mariadb__test_access.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.user }}: {{ item.item.query }}"
+
+    - name: 'Assert the read value'
+      when: database_mariadb__expect.accounts | length > 0
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__test_access.results[1].query_result[0][0].id == 42
+        fail_msg: "reader read {{ database_mariadb__test_access.results[1].query_result | default('nothing') }}"

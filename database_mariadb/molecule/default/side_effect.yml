@@ -1,0 +1,195 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_mariadb__test_case: "{{ database_mariadb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_mariadb__test_vars: "{{ database_mariadb__test_case.role_vars }}"
+    database_mariadb__test_config: "{{ database_mariadb__test_vars.mariadb_config | default({}) }}"
+    database_mariadb__test_accounts: "{{ database_mariadb__test_vars.mariadb_accounts | default([]) }}"
+    database_mariadb__test_passwords: "{{ database_mariadb__test_vars.mariadb_passwords | default({}) }}"
+    database_mariadb__test_checked_files:
+      - "{{ database_mariadb__test_quadlet_path }}"
+      - "{{ database_mariadb__test_vars.mariadb_home }}/custom.cnf"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_mariadb__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_mariadb__test_checked_files }}"
+      register: 'database_mariadb__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_mariadb with mariadb_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_container: [ 'environment' ]
+        database_mariadb__test_invalid:
+          message: 'mariadb_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_mariadb with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_secrets: [ { name: 'mariadb_root_password', data: 'x' } ]
+        database_mariadb__test_invalid:
+          message: 'a secret without target'
+          search: '^mariadb_secrets entries need name, data and target$'
+
+    - name: 'Run database_mariadb without the root password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_secrets: []
+        database_mariadb__test_invalid:
+          message: 'without the root password'
+          search: '^MariaDB needs the secrets MYSQL_ROOT_PASSWORD, missing: MYSQL_ROOT_PASSWORD\.$'
+
+    - name: 'Run database_mariadb with a short root password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_secrets: [ { name: 'mariadb_root_password', data: 'abc', target: 'MYSQL_ROOT_PASSWORD' } ]
+        database_mariadb__test_invalid:
+          message: 'a short root password'
+          search: '^The root password has to have at least 4 characters, the image sets no password otherwise\.$'
+
+    - name: 'Run database_mariadb with a single quote in the root password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_secrets: [ { name: 'mariadb_root_password', data: "molecule'password", target: 'MYSQL_ROOT_PASSWORD' } ]
+        database_mariadb__test_invalid:
+          message: 'a single quote in the root password'
+          search: '^The root password must not contain single quotes, backslashes or line breaks, the image writes it into SQL without escaping\.$'
+
+    - name: 'Run database_mariadb with the root password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_environment: { MYSQL_ROOT_PASSWORD: 'molecule' }
+        database_mariadb__test_invalid:
+          message: 'the root password in the environment'
+          search: '^Secrets and their file variables must not be set in mariadb_environment: MYSQL_ROOT_PASSWORD\.$'
+
+    - name: 'Run database_mariadb with a user of the image (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_environment: { MYSQL_USER: 'app', MYSQL_DATABASE: 'app' }
+        database_mariadb__test_invalid:
+          message: 'a user of the image'
+          search: '^Databases and accounts are managed with mariadb_databases, mariadb_accounts and mariadb_passwords, not with MYSQL_DATABASE, MYSQL_USER\.$'
+
+    - name: 'Run database_mariadb with an unknown section (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_config: "{{ database_mariadb__test_config | combine({ 'galera': { 'wsrep_on': 'ON' } }) }}"
+        database_mariadb__test_invalid:
+          message: 'an unknown section'
+          search: '^Unknown sections in mariadb_config: galera, allowed are client, mysql, mysqldump, mysqld_safe, mysqld\.$'
+
+    - name: 'Run database_mariadb with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_config: { mysqld: { max_connection: 100 } }
+        database_mariadb__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in the section mysqld: max_connection\. Allowed are the options of MariaDB'
+
+    - name: 'Run database_mariadb with an option set by the role (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_config: { mysqld: { loose-datadir: '/var/lib/mysql' } }
+        database_mariadb__test_invalid:
+          message: 'an option set by the role'
+          search: '^Options set by the role must not be set in the section mysqld: loose-datadir\.$'
+
+    - name: 'Run database_mariadb with a password in custom.cnf (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_config: { client: { password: 'molecule' } }
+        database_mariadb__test_invalid:
+          message: 'a password in custom.cnf'
+          search: '^Passwords must not be written to custom.cnf, section client: password\.$'
+
+    - name: 'Run database_mariadb with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_config:
+          mysqld:
+            init_connect: |
+              SET NAMES utf8mb4
+              SET time_zone = '+00:00'
+        database_mariadb__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks, section mysqld: init_connect\.$'
+
+    - name: 'Run database_mariadb with an account without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_accounts: "{{ database_mariadb__test_accounts + [ { 'name': 'worker', 'host': '%' } ] }}"
+        database_mariadb__test_invalid:
+          message: 'an account without password'
+          search: '^Accounts without password in mariadb_passwords: worker\.$'
+
+    - name: 'Run database_mariadb with the password of an unknown account (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_passwords: "{{ database_mariadb__test_passwords | combine({ 'worker': 'molecule' }) }}"
+        database_mariadb__test_invalid:
+          message: 'the password of an unknown account'
+          search: '^Passwords of unknown accounts in mariadb_passwords: worker\.$'
+
+    - name: 'Run database_mariadb with an unknown environment variable in mariadb_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_container: { environment: { FOO: 'bar' } }
+        database_mariadb__test_invalid:
+          message: 'an unknown environment variable in mariadb_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_mariadb with the changed configuration'
+      when: database_mariadb__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mariadb' ]
+          register: 'database_mariadb__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            mariadb_config: "{{ database_mariadb__test_config | combine(database_mariadb__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run database_mariadb with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'database_mariadb'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mariadb' ]
+          register: 'database_mariadb__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed custom.cnf and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_mariadb__config_result is changed
+              - database_mariadb__quadlet_result is not changed
+              - database_mariadb__test_started_after.stdout | int > database_mariadb__test_started_before.stdout | int
+            fail_msg: >-
+              custom.cnf changed: {{ database_mariadb__config_result is changed }},
+              quadlet changed: {{ database_mariadb__quadlet_result is changed }},
+              start before {{ database_mariadb__test_started_before.stdout }}, after {{ database_mariadb__test_started_after.stdout }}
