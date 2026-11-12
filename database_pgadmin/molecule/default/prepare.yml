@@ -1,0 +1,52 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ database_pgadmin__test_network }}"
+    podman_default_network: "{{ database_pgadmin__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify logs in with curl, it keeps the cookies of the session in a file
+    - name: 'Install curl'
+      ansible.builtin.apt:
+        name: 'curl'
+        state: 'present'
+        update_cache: true
+
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ database_pgadmin__test_image }}"
+        - "{{ database_pgadmin__test_database.image }}"
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ database_pgadmin__test_database.name }}"
+        image: "{{ database_pgadmin__test_database.image }}"
+        network: "{{ database_pgadmin__test_network.name }}"
+        ip: "{{ database_pgadmin__test_database.ip }}"
+        env:
+          POSTGRES_USER: "{{ database_pgadmin__test_database.user }}"
+          POSTGRES_PASSWORD: "{{ database_pgadmin__test_database.password }}"
+        state: 'started'
+
+    - name: 'Wait for the database'
+      ansible.builtin.wait_for:
+        host: "{{ database_pgadmin__test_database.ip }}"
+        port: 5432
+        timeout: 120

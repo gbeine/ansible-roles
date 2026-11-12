@@ -1,0 +1,162 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_pgadmin__test_case: "{{ database_pgadmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_pgadmin__test_vars: "{{ database_pgadmin__test_case.role_vars }}"
+    database_pgadmin__test_env: "{{ database_pgadmin__test_vars.pgadmin_environment }}"
+    database_pgadmin__test_secrets: "{{ database_pgadmin__test_vars.pgadmin_secrets }}"
+    # servers.json only exists with pgadmin_servers
+    database_pgadmin__test_checked_files: >-
+      {{ [ database_pgadmin__test_quadlet_path ]
+         + ([ database_pgadmin__test_vars.pgadmin_home ~ '/servers.json' ] if database_pgadmin__test_vars.pgadmin_servers is defined else []) }}
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_pgadmin__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_pgadmin__test_checked_files }}"
+      register: 'database_pgadmin__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_pgadmin with pgadmin_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_container: [ 'environment' ]
+        database_pgadmin__test_invalid:
+          message: 'pgadmin_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_pgadmin with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_secrets: [ { name: 'pgadmin_default_password', data: 'x' } ]
+        database_pgadmin__test_invalid:
+          message: 'a secret without target'
+          search: '^pgadmin_secrets entries need name, data and target$'
+
+    - name: 'Run database_pgadmin with without PGADMIN_DEFAULT_EMAIL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_environment: {}
+        database_pgadmin__test_invalid:
+          message: 'without PGADMIN_DEFAULT_EMAIL'
+          search: '^pgAdmin needs the environment variables PGADMIN_DEFAULT_EMAIL, missing or empty: PGADMIN_DEFAULT_EMAIL\.$'
+
+    - name: 'Run database_pgadmin with without the secret PGADMIN_DEFAULT_PASSWORD (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_secrets: []
+        database_pgadmin__test_invalid:
+          message: 'without the secret PGADMIN_DEFAULT_PASSWORD'
+          search: '^pgAdmin needs the secrets PGADMIN_DEFAULT_PASSWORD, missing: PGADMIN_DEFAULT_PASSWORD\.$'
+
+    - name: 'Run database_pgadmin with PGADMIN_DEFAULT_PASSWORD_FILE in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_environment: "{{ database_pgadmin__test_env | combine({'PGADMIN_DEFAULT_PASSWORD_FILE': '/run/secrets/pgadmin_default_password'}) }}"
+        database_pgadmin__test_invalid:
+          message: 'PGADMIN_DEFAULT_PASSWORD_FILE in the environment'
+          search: '^Secrets and their file variables must not be set in pgadmin_environment: PGADMIN_DEFAULT_PASSWORD_FILE\.$'
+
+    - name: 'Run database_pgadmin with the password of the mail server in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_environment: "{{ database_pgadmin__test_env | combine({'PGADMIN_CONFIG_MAIL_PASSWORD': \"'molecule'\"}) }}"
+        database_pgadmin__test_invalid:
+          message: 'the password of the mail server in the environment'
+          search: '^Secrets and their file variables must not be set in pgadmin_environment: PGADMIN_CONFIG_MAIL_PASSWORD\.$'
+
+    - name: 'Run database_pgadmin with pgadmin_servers without Servers (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_servers: { '1': { Name: 'Molecule' } }
+        database_pgadmin__test_invalid:
+          message: 'pgadmin_servers without Servers'
+          search: '^pgadmin_servers has to be a dictionary with Servers, the content of servers.json\.$'
+
+    - name: 'Run database_pgadmin with an unknown setting of pgAdmin (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_environment: "{{ database_pgadmin__test_env | combine({'PGADMIN_CONFIG_FOO': 'True'}) }}"
+        database_pgadmin__test_invalid:
+          message: 'an unknown setting of pgAdmin'
+          search: '^Unknown environment variables: PGADMIN_CONFIG_FOO\.'
+
+    - name: 'Run database_pgadmin with an unknown environment variable in pgadmin_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_container: "{{ {'environment': database_pgadmin__test_env | combine({'FOO': 'bar'})} }}"
+        database_pgadmin__test_invalid:
+          message: 'an unknown environment variable in pgadmin_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_pgadmin with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pgadmin_secrets: "{{ database_pgadmin__test_secrets + [{'name': 'pgadmin_unknown', 'data': 'x', 'target': 'PGADMIN_CONFIG_SMTP_PASSWORD'}] }}"
+        database_pgadmin__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: PGADMIN_CONFIG_SMTP_PASSWORD\.'
+
+    - name: 'Run database_pgadmin with the changed environment'
+      when: database_pgadmin__test_case.side_effect | default(false)
+      block:
+
+        # The first start creates the database of pgAdmin and loads servers.json afterwards,
+        # a restart in between leaves pgAdmin without the servers, gunicorn serves the login page after both
+        - name: 'Wait until the first start of pgAdmin has finished'
+          ansible.builtin.uri:
+            url: "http://{{ database_pgadmin__test_vars.pgadmin_ip }}/login"
+            return_content: true
+          register: 'database_pgadmin__test_login_page'
+          until:
+            - database_pgadmin__test_login_page.status | default(0) == 200
+            - database_pgadmin__test_login_page.content | default('') is search('"csrfToken"')
+          retries: 60
+          delay: 5
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'pgadmin' ]
+          register: 'database_pgadmin__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            pgadmin_environment: "{{ database_pgadmin__test_env | combine(database_pgadmin__test_side_effect_environment) }}"
+
+        - name: 'Run database_pgadmin with the changed environment'
+          ansible.builtin.include_role:
+            name: 'database_pgadmin'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'pgadmin' ]
+          register: 'database_pgadmin__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_pgadmin__quadlet_result is changed
+              - database_pgadmin__test_started_after.stdout | int > database_pgadmin__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ database_pgadmin__quadlet_result is changed }},
+              start before {{ database_pgadmin__test_started_before.stdout }}, after {{ database_pgadmin__test_started_after.stdout }}

@@ -11,26 +11,267 @@ database_pgadmin__ipv6: "{{ pgadmin_ipv6 }}"
 database_pgadmin__network: "{{ pgadmin_network | mandatory }}"
 database_pgadmin__hostname: "{{ pgadmin_hostname | mandatory }}"
 database_pgadmin__timezone: "{{ pgadmin_timezone | mandatory }}"
-database_pgadmin__labels: "{{ pgadmin_labels | default({}) }}"
+database_pgadmin__labels: "{{ pgadmin_labels }}"
 
-database_pgadmin__user: "{{ pgadmin_user | mandatory }}"
-database_pgadmin__pass: "{{ pgadmin_pass | mandatory }}"
+database_pgadmin__version: "{{ pgadmin_version | default('latest') }}"
 
 database_pgadmin__container: "{{ database_pgadmin__podman_container_default | combine(pgadmin_container | default({})) }}"
 
-database_pgadmin__server: "{{ pgadmin_server | default('') }}"
+# The configuration of the image, the settings of pgAdmin are set with PGADMIN_CONFIG_<SETTING> as Python literals
+database_pgadmin__environment: "{{ database_pgadmin__environment_default | combine(pgadmin_environment | default({})) }}"
+
+# Secrets with name, data and target, the passwords of the settings of pgAdmin without file variable are passed in the environment,
+# the others are mounted below /run/secrets and the role sets the file variable of the target
+database_pgadmin__secrets: "{{ pgadmin_secrets | default([]) }}"
+
+# The content of servers.json, loaded by pgAdmin at the first start
+database_pgadmin__servers: "{{ pgadmin_servers | default({}) }}"
 
 database_pgadmin__autoupdate_enabled: "{{ pgadmin_autoupdate_enabled | default(false) }}"
+database_pgadmin__autoupdate_schedule: "{{ pgadmin_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+database_pgadmin__environment_default:
+  TZ: "{{ database_pgadmin__timezone }}"
+
+database_pgadmin__environment_required: [ 'PGADMIN_DEFAULT_EMAIL' ]
+
+# The targets of the secrets, they must not be set in pgadmin_environment
+database_pgadmin__secret_variables: "{{ database_pgadmin__secret_files.keys() | list + database_pgadmin__secrets_env }}"
+
+# The secrets mounted as files, the image reads the variable target from the file variable
+# (file_env in pkg/docker/entrypoint.sh of pgAdmin 9.19)
+database_pgadmin__secret_files:
+  PGADMIN_DEFAULT_PASSWORD: 'PGADMIN_DEFAULT_PASSWORD_FILE'
+  PGADMIN_CONFIG_CONFIG_DATABASE_URI: 'PGADMIN_CONFIG_CONFIG_DATABASE_URI_FILE'
+
+# The secrets passed in the environment, the image has no file variable for these settings of pgAdmin
+database_pgadmin__secrets_env:
+  - 'PGADMIN_CONFIG_MAIL_PASSWORD'
+  - 'PGADMIN_CONFIG_LDAP_BIND_PASSWORD'
+  - 'PGADMIN_CONFIG_WEBSERVER_SHARED_SECRET'
+
+database_pgadmin__secrets_required: [ 'PGADMIN_DEFAULT_PASSWORD' ]
+
+database_pgadmin__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+database_pgadmin__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if database_pgadmin__secrets is sequence and database_pgadmin__secrets is not string and database_pgadmin__secrets is not mapping -%}
+  {%-   for secret in database_pgadmin__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in database_pgadmin__secret_files -%}
+  {%-     set _ = environment.update({ database_pgadmin__secret_files[secret.target]: database_pgadmin__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The variables of pkg/docker/entrypoint.sh of pgAdmin 9.19 and the settings of web/config.py, update with new versions of the image
+database_pgadmin__environment_allowed:
+  - 'PGADMIN_DEFAULT_EMAIL'
+  - 'PGADMIN_DISABLE_POSTFIX'
+  - 'PGADMIN_ENABLE_TLS'
+  - 'PGADMIN_ENABLE_SOCK'
+  - 'PGADMIN_LISTEN_ADDRESS'
+  - 'PGADMIN_LISTEN_PORT'
+  - 'PGADMIN_SERVER_JSON_FILE'
+  - 'PGADMIN_PREFERENCES_JSON_FILE'
+  - 'PGADMIN_REPLACE_SERVERS_ON_STARTUP'
+  - 'PGADMIN_CUSTOM_CONFIG_DISTRO_FILE'
+  - 'PGPASS_FILE'
+  - 'PUID'
+  - 'PGID'
+  - 'GUNICORN_ACCESS_LOGFILE'
+  - 'GUNICORN_LIMIT_REQUEST_FIELDS'
+  - 'GUNICORN_LIMIT_REQUEST_FIELD_SIZE'
+  - 'GUNICORN_LIMIT_REQUEST_LINE'
+  - 'GUNICORN_THREADS'
+  - 'TZ'
+  # The file variables of the secrets, set by the role
+  - 'PGADMIN_DEFAULT_PASSWORD_FILE'
+  - 'PGADMIN_CONFIG_CONFIG_DATABASE_URI_FILE'
+  # The settings of pgAdmin, written to config_distro.py, generated from the settings of web/config.py of pgAdmin 9.19
+  # without the settings carrying secrets
+  - 'PGADMIN_CONFIG_ALLOWED_HOSTS'
+  - 'PGADMIN_CONFIG_ALLOWED_LLM_API_URLS'
+  - 'PGADMIN_CONFIG_ALLOW_SAVE_PASSWORD'
+  - 'PGADMIN_CONFIG_ALLOW_SAVE_TUNNEL_PASSWORD'
+  - 'PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS'
+  - 'PGADMIN_CONFIG_ANTHROPIC_API_KEY_FILE'
+  - 'PGADMIN_CONFIG_ANTHROPIC_API_MODEL'
+  - 'PGADMIN_CONFIG_ANTHROPIC_API_URL'
+  - 'PGADMIN_CONFIG_APP_VERSION_EXTN'
+  - 'PGADMIN_CONFIG_APP_VERSION_PARAM'
+  - 'PGADMIN_CONFIG_AUTHENTICATION_SOURCES'
+  - 'PGADMIN_CONFIG_AUTO_DISCOVER_SERVERS'
+  - 'PGADMIN_CONFIG_AZURE_CREDENTIAL_CACHE_DIR'
+  - 'PGADMIN_CONFIG_CA_FILE'
+  - 'PGADMIN_CONFIG_CHECK_EMAIL_DELIVERABILITY'
+  - 'PGADMIN_CONFIG_CHECK_SESSION_FILES_INTERVAL'
+  - 'PGADMIN_CONFIG_CHECK_SUPPORTED_BROWSER'
+  - 'PGADMIN_CONFIG_COMPRESS_LEVEL'
+  - 'PGADMIN_CONFIG_COMPRESS_MIMETYPES'
+  - 'PGADMIN_CONFIG_COMPRESS_MIN_SIZE'
+  - 'PGADMIN_CONFIG_CONFIG_DATABASE_CONNECTION_MAX_OVERFLOW'
+  - 'PGADMIN_CONFIG_CONFIG_DATABASE_CONNECTION_POOL_SIZE'
+  - 'PGADMIN_CONFIG_CONSOLE_LOG_FORMAT'
+  - 'PGADMIN_CONFIG_CONSOLE_LOG_FORMAT_JSON'
+  - 'PGADMIN_CONFIG_CONSOLE_LOG_LEVEL'
+  - 'PGADMIN_CONFIG_CONTENT_SECURITY_POLICY'
+  - 'PGADMIN_CONFIG_COOKIE_DEFAULT_DOMAIN'
+  - 'PGADMIN_CONFIG_COOKIE_DEFAULT_PATH'
+  - 'PGADMIN_CONFIG_CROSS_ORIGIN_OPENER_POLICY'
+  - 'PGADMIN_CONFIG_DATA_DIR'
+  - 'PGADMIN_CONFIG_DATA_RESULT_ROWS_PER_PAGE'
+  - 'PGADMIN_CONFIG_DEBUG'
+  - 'PGADMIN_CONFIG_DEFAULT_BINARY_PATHS'
+  - 'PGADMIN_CONFIG_DEFAULT_GEOMETRY_VIEWER_PROVIDER'
+  - 'PGADMIN_CONFIG_DEFAULT_LLM_PROVIDER'
+  - 'PGADMIN_CONFIG_DEFAULT_SERVER'
+  - 'PGADMIN_CONFIG_DEFAULT_SERVER_PORT'
+  - 'PGADMIN_CONFIG_DESKTOP_USER'
+  - 'PGADMIN_CONFIG_DOCKER_API_MODEL'
+  - 'PGADMIN_CONFIG_DOCKER_API_URL'
+  - 'PGADMIN_CONFIG_ENABLE_BINARY_PATH_BROWSING'
+  - 'PGADMIN_CONFIG_ENABLE_PSQL'
+  - 'PGADMIN_CONFIG_ENABLE_SERVER_PASS_EXEC_CMD'
+  - 'PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION'
+  - 'PGADMIN_CONFIG_FILE_LOG_FORMAT'
+  - 'PGADMIN_CONFIG_FILE_LOG_FORMAT_JSON'
+  - 'PGADMIN_CONFIG_FILE_LOG_LEVEL'
+  - 'PGADMIN_CONFIG_FIXED_BINARY_PATHS'
+  - 'PGADMIN_CONFIG_GLOBALLY_DELIVERABLE'
+  - 'PGADMIN_CONFIG_HELP_PATH'
+  - 'PGADMIN_CONFIG_JSON_LOGGER'
+  - 'PGADMIN_CONFIG_KERBEROS_CCACHE_DIR'
+  - 'PGADMIN_CONFIG_KRB_APP_HOST_NAME'
+  - 'PGADMIN_CONFIG_KRB_AUTO_CREATE_USER'
+  - 'PGADMIN_CONFIG_KRB_KTNAME'
+  - 'PGADMIN_CONFIG_LANGUAGES'
+  - 'PGADMIN_CONFIG_LDAP_ANONYMOUS_BIND'
+  - 'PGADMIN_CONFIG_LDAP_AUTO_CREATE_USER'
+  - 'PGADMIN_CONFIG_LDAP_BASE_DN'
+  - 'PGADMIN_CONFIG_LDAP_BIND_FORMAT'
+  - 'PGADMIN_CONFIG_LDAP_BIND_USER'
+  - 'PGADMIN_CONFIG_LDAP_CA_CERT_FILE'
+  - 'PGADMIN_CONFIG_LDAP_CERT_FILE'
+  - 'PGADMIN_CONFIG_LDAP_CERT_VALIDATE'
+  - 'PGADMIN_CONFIG_LDAP_CONNECTION_TIMEOUT'
+  - 'PGADMIN_CONFIG_LDAP_DN_CASE_SENSITIVE'
+  - 'PGADMIN_CONFIG_LDAP_IGNORE_MALFORMED_SCHEMA'
+  - 'PGADMIN_CONFIG_LDAP_KEY_FILE'
+  - 'PGADMIN_CONFIG_LDAP_SEARCH_BASE_DN'
+  - 'PGADMIN_CONFIG_LDAP_SEARCH_FILTER'
+  - 'PGADMIN_CONFIG_LDAP_SEARCH_SCOPE'
+  - 'PGADMIN_CONFIG_LDAP_SERVER_URI'
+  - 'PGADMIN_CONFIG_LDAP_USERNAME_ATTRIBUTE'
+  - 'PGADMIN_CONFIG_LDAP_USE_STARTTLS'
+  - 'PGADMIN_CONFIG_LLM_ENABLED'
+  - 'PGADMIN_CONFIG_LOGIN_ATTEMPT_FIELDS'
+  - 'PGADMIN_CONFIG_LOGIN_BANNER'
+  - 'PGADMIN_CONFIG_LOG_AUTHENTICATED_USER'
+  - 'PGADMIN_CONFIG_LOG_FILE'
+  - 'PGADMIN_CONFIG_LOG_ROTATION_AGE'
+  - 'PGADMIN_CONFIG_LOG_ROTATION_MAX_LOG_FILES'
+  - 'PGADMIN_CONFIG_LOG_ROTATION_SIZE'
+  - 'PGADMIN_CONFIG_MAIL_DEBUG'
+  - 'PGADMIN_CONFIG_MAIL_PORT'
+  - 'PGADMIN_CONFIG_MAIL_SERVER'
+  - 'PGADMIN_CONFIG_MAIL_USERNAME'
+  - 'PGADMIN_CONFIG_MAIL_USE_SSL'
+  - 'PGADMIN_CONFIG_MAIL_USE_TLS'
+  - 'PGADMIN_CONFIG_MASTER_PASSWORD_HOOK'
+  - 'PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED'
+  - 'PGADMIN_CONFIG_MAX_LLM_TOOL_ITERATIONS'
+  - 'PGADMIN_CONFIG_MAX_LOGIN_ATTEMPTS'
+  - 'PGADMIN_CONFIG_MAX_QUERY_HIST_STORED'
+  - 'PGADMIN_CONFIG_MAX_SERVER_TAGS_ALLOWED'
+  - 'PGADMIN_CONFIG_MAX_SESSION_IDLE_TIME'
+  - 'PGADMIN_CONFIG_MFA_EMAIL_CODE_MAX_ATTEMPTS'
+  - 'PGADMIN_CONFIG_MFA_EMAIL_SUBJECT'
+  - 'PGADMIN_CONFIG_MFA_ENABLED'
+  - 'PGADMIN_CONFIG_MFA_FORCE_REGISTRATION'
+  - 'PGADMIN_CONFIG_MFA_SUPPORTED_METHODS'
+  - 'PGADMIN_CONFIG_MODULE_BLACKLIST'
+  - 'PGADMIN_CONFIG_NODE_BLACKLIST'
+  - 'PGADMIN_CONFIG_OAUTH2_AUTO_CREATE_USER'
+  - 'PGADMIN_CONFIG_OAUTH2_AUTO_LOGIN'
+  - 'PGADMIN_CONFIG_OAUTH2_CONFIG'
+  - 'PGADMIN_CONFIG_OLLAMA_API_MODEL'
+  - 'PGADMIN_CONFIG_OLLAMA_API_URL'
+  - 'PGADMIN_CONFIG_ON_DEMAND_LOG_COUNT'
+  - 'PGADMIN_CONFIG_OPENAI_API_KEY_FILE'
+  - 'PGADMIN_CONFIG_OPENAI_API_MODEL'
+  - 'PGADMIN_CONFIG_OPENAI_API_URL'
+  - 'PGADMIN_CONFIG_OVERRIDE_USER_INACTIVITY_TIMEOUT'
+  - 'PGADMIN_CONFIG_PASSWORD_LENGTH_MIN'
+  - 'PGADMIN_CONFIG_PG_DEFAULT_DRIVER'
+  - 'PGADMIN_CONFIG_PROXY_X_FOR_COUNT'
+  - 'PGADMIN_CONFIG_PROXY_X_HOST_COUNT'
+  - 'PGADMIN_CONFIG_PROXY_X_PORT_COUNT'
+  - 'PGADMIN_CONFIG_PROXY_X_PREFIX_COUNT'
+  - 'PGADMIN_CONFIG_PROXY_X_PROTO_COUNT'
+  - 'PGADMIN_CONFIG_SECURITY_EMAIL_SENDER'
+  - 'PGADMIN_CONFIG_SECURITY_EMAIL_SUBJECT_PASSWORD_CHANGE_NOTICE'
+  - 'PGADMIN_CONFIG_SECURITY_EMAIL_SUBJECT_PASSWORD_NOTICE'
+  - 'PGADMIN_CONFIG_SECURITY_EMAIL_SUBJECT_PASSWORD_RESET'
+  - 'PGADMIN_CONFIG_SECURITY_EMAIL_VALIDATOR_ARGS'
+  - 'PGADMIN_CONFIG_SECURITY_PASSWORD_HASH'
+  - 'PGADMIN_CONFIG_SEND_FILE_MAX_AGE_DEFAULT'
+  - 'PGADMIN_CONFIG_SERVER_HEARTBEAT_TIMEOUT'
+  - 'PGADMIN_CONFIG_SERVER_MODE'
+  - 'PGADMIN_CONFIG_SERVER_MODE_ALLOWED_SERVICES'
+  - 'PGADMIN_CONFIG_SERVER_PASSEXEC_COMMANDS'
+  - 'PGADMIN_CONFIG_SERVER_PASSEXEC_ENV_PASSTHROUGH'
+  - 'PGADMIN_CONFIG_SESSION_COOKIE_DOMAIN'
+  - 'PGADMIN_CONFIG_SESSION_COOKIE_HTTPONLY'
+  - 'PGADMIN_CONFIG_SESSION_COOKIE_NAME'
+  - 'PGADMIN_CONFIG_SESSION_COOKIE_SAMESITE'
+  - 'PGADMIN_CONFIG_SESSION_COOKIE_SECURE'
+  - 'PGADMIN_CONFIG_SESSION_DB_PATH'
+  - 'PGADMIN_CONFIG_SESSION_DIGEST_METHOD'
+  - 'PGADMIN_CONFIG_SESSION_EXPIRATION_TIME'
+  - 'PGADMIN_CONFIG_SESSION_SKIP_PATHS'
+  - 'PGADMIN_CONFIG_SHARED_STORAGE'
+  - 'PGADMIN_CONFIG_SHOW_GRAVATAR_IMAGE'
+  - 'PGADMIN_CONFIG_SQLALCHEMY_TRACK_MODIFICATIONS'
+  - 'PGADMIN_CONFIG_SQLITE_PATH'
+  - 'PGADMIN_CONFIG_SQLITE_TIMEOUT'
+  - 'PGADMIN_CONFIG_STARFLEET_API_URL'
+  - 'PGADMIN_CONFIG_STORAGE_DIR'
+  - 'PGADMIN_CONFIG_STRICT_TRANSPORT_SECURITY'
+  - 'PGADMIN_CONFIG_STRICT_TRANSPORT_SECURITY_ENABLED'
+  - 'PGADMIN_CONFIG_SUPPORT_SSH_TUNNEL'
+  - 'PGADMIN_CONFIG_TEST_SQLITE_PATH'
+  - 'PGADMIN_CONFIG_THREADED_MODE'
+  - 'PGADMIN_CONFIG_UPGRADE_CHECK_ENABLED'
+  - 'PGADMIN_CONFIG_UPGRADE_CHECK_KEY'
+  - 'PGADMIN_CONFIG_UPGRADE_CHECK_URL'
+  - 'PGADMIN_CONFIG_USER_INACTIVITY_TIMEOUT'
+  - 'PGADMIN_CONFIG_USE_OS_SECRET_STORAGE'
+  - 'PGADMIN_CONFIG_WEBSERVER_AUTO_CREATE_USER'
+  - 'PGADMIN_CONFIG_WEBSERVER_REMOTE_USER'
+  - 'PGADMIN_CONFIG_WEBSERVER_REMOTE_USER_FROM_HEADER'
+  - 'PGADMIN_CONFIG_WEBSERVER_SHARED_SECRET_HEADER'
+  - 'PGADMIN_CONFIG_WEBSERVER_TRUSTED_PROXIES'
+  - 'PGADMIN_CONFIG_WEB_SERVER'
+  - 'PGADMIN_CONFIG_WTF_CSRF_HEADERS'
+  - 'PGADMIN_CONFIG_X_CONTENT_TYPE_OPTIONS'
+  - 'PGADMIN_CONFIG_X_FRAME_OPTIONS'
+  - 'PGADMIN_CONFIG_X_XSS_PROTECTION'
+
+# The data directory of pgAdmin, owned by the user of the image
+database_pgadmin__data_dir: "{{ database_pgadmin__home }}/data"
+database_pgadmin__data_owner: 5050
+database_pgadmin__data_group: 0
+database_pgadmin__servers_file: "{{ database_pgadmin__home }}/servers.json"
+
 database_pgadmin__podman_name: 'pgadmin'
 database_pgadmin__podman_image: 'docker.io/dpage/pgadmin4'
-database_pgadmin__podman_tag: "{{ pgadmin_version | default('latest') }}"
-
-database_pgadmin__podman_home: "{{ database_pgadmin__home }}"
+database_pgadmin__podman_tag: "{{ database_pgadmin__version }}"
 
 database_pgadmin__podman_container_default:
   name: "{{ database_pgadmin__podman_name }}"
@@ -40,13 +281,26 @@ database_pgadmin__podman_container_default:
   ipv6: "{{ database_pgadmin__ipv6 | default(omit) }}"
   network: "{{ database_pgadmin__network }}"
   timezone: "{{ database_pgadmin__timezone }}"
-  environment:
-    PGADMIN_DEFAULT_EMAIL: "{{ database_pgadmin__user }}"
-  labels: "{{ database_pgadmin__labels }}"
-  secrets:
-    - "pgadmin_password,type=env,target=PGADMIN_DEFAULT_PASSWORD"
-  volumes: "{{ [
-    '/etc/localtime:/etc/localtime:ro',
-    '/etc/timezone:/etc/timezone:ro'
-    ] + ( [ database_pgadmin__podman_home + '/servers.json:/pgadmin4/servers.json:ro'] if database_pgadmin__server | length > 0 else [])
-    }}"
+  # Set with pgadmin_environment and pgadmin_secrets, merged over the default
+  environment: "{{ database_pgadmin__environment | combine(database_pgadmin__environment_secrets_files) }}"
+  labels: "{{ database_pgadmin__labels | default(omit) }}"
+  volumes: >-
+    {{ [ database_pgadmin__data_dir ~ ':/var/lib/pgadmin' ]
+       + ([ database_pgadmin__servers_file ~ ':/pgadmin4/servers.json:ro' ] if database_pgadmin__servers | length > 0 else []) }}
+  # The secrets of database_pgadmin__secrets_env are passed in the environment, the others are mounted
+  secrets: >-
+    {{ database_pgadmin__podman_secrets
+       if (database_pgadmin__secrets is sequence and database_pgadmin__secrets is not string and database_pgadmin__secrets | length > 0)
+       else omit }}
+
+# The podman secrets of pgadmin_secrets, entries without name or target are left out, the validation of the secrets reports them
+database_pgadmin__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- for secret in database_pgadmin__secrets if secret is mapping and secret.name is defined and secret.target is defined -%}
+  {%-   if secret.target in database_pgadmin__secrets_env -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=env,target=' ~ secret.target) -%}
+  {%-   else -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ database_pgadmin__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ secrets }}

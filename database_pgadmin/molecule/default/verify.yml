@@ -1,0 +1,198 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_pgadmin__test_case: "{{ database_pgadmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_pgadmin__expect: "{{ database_pgadmin__test_case.expect }}"
+    database_pgadmin__test_home: "{{ database_pgadmin__test_case.role_vars.pgadmin_home }}"
+    database_pgadmin__test_url: "http://{{ database_pgadmin__expect.ip }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_pgadmin__test_quadlet_path }}"
+      register: 'database_pgadmin__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_pgadmin__test_image) in database_pgadmin__test_quadlet_lines
+          - ('IP=' + database_pgadmin__expect.ip) in database_pgadmin__test_quadlet_lines
+          - database_pgadmin__expect.ip6 is none or ('IP6=' + database_pgadmin__expect.ip6) in database_pgadmin__test_quadlet_lines
+          - database_pgadmin__expect.ip6 is not none or database_pgadmin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_pgadmin__expect.quadlet | reject('in', database_pgadmin__test_quadlet_lines) | list | length == 0
+          # Only the passwords of the settings without file variable are passed in the environment
+          - database_pgadmin__test_quadlet_lines | select('search', 'type=env') | reject('search', 'target=PGADMIN_CONFIG_(MAIL_PASSWORD|LDAP_BIND_PASSWORD|WEBSERVER_SHARED_SECRET)$') | list | length == 0
+        fail_msg: "{{ database_pgadmin__test_quadlet.content | b64decode }}"
+      vars:
+        database_pgadmin__test_quadlet_lines: "{{ (database_pgadmin__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the pgadmin service'
+      ansible.builtin.command: 'systemctl is-active pgadmin'
+      register: 'database_pgadmin__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the pgadmin container'
+      ansible.builtin.command: 'podman inspect pgadmin'
+      register: 'database_pgadmin__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_pgadmin__test_service.stdout == 'active'
+          - database_pgadmin__test_net.IPAddress == database_pgadmin__expect.ip
+          - database_pgadmin__expect.ip6 is none or database_pgadmin__test_net.GlobalIPv6Address == database_pgadmin__expect.ip6
+          - database_pgadmin__expect.env | reject('in', database_pgadmin__test_env) | list | length == 0
+          - database_pgadmin__test_env | select('match', 'PGADMIN_DEFAULT_PASSWORD=') | list | length == 0
+        fail_msg: >-
+          service {{ database_pgadmin__test_service.stdout }},
+          IPv4 {{ database_pgadmin__test_net.IPAddress }}, IPv6 {{ database_pgadmin__test_net.GlobalIPv6Address }},
+          environment {{ database_pgadmin__test_env | reject('search', 'PASSWORD=|SECRET=') | join(', ') }}
+      vars:
+        database_pgadmin__test_container: "{{ (database_pgadmin__test_inspect.stdout | from_json)[0] }}"
+        database_pgadmin__test_net: "{{ database_pgadmin__test_container.NetworkSettings.Networks[database_pgadmin__test_case.role_vars.pgadmin_network] }}"
+        database_pgadmin__test_env: "{{ database_pgadmin__test_container.Config.Env }}"
+
+    - name: 'Read the files of the secrets in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'pgadmin', 'cat', "{{ item.path }}" ]
+      loop: "{{ database_pgadmin__expect.secret_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: 'database_pgadmin__test_secret_files'
+      changed_when: false
+      no_log: true
+
+    # The entrypoint writes the settings of PGADMIN_CONFIG_* to config_distro.py at the start of the container
+    - name: 'Read config_distro.py in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'pgadmin', 'cat', '/pgadmin4/config_distro.py' ]
+      register: 'database_pgadmin__test_config_distro'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert the files of the secrets and the settings of pgAdmin'
+      ansible.builtin.assert:
+        that:
+          - database_pgadmin__test_secret_files.results | map(attribute='stdout') | list
+            == database_pgadmin__expect.secret_files | map(attribute='content') | list
+          - database_pgadmin__expect.config_distro | reject('in', database_pgadmin__test_config_distro.stdout_lines) | list | length == 0
+        fail_msg: 'The files of the secrets or the settings in config_distro.py differ from the expected values'
+      no_log: true
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ database_pgadmin__test_home }}/data"
+      register: 'database_pgadmin__test_data_dir'
+
+    - name: 'Wait until pgAdmin shows the login page'
+      ansible.builtin.uri:
+        url: "{{ database_pgadmin__test_url }}/login"
+        return_content: true
+      register: 'database_pgadmin__test_login_page'
+      until:
+        - database_pgadmin__test_login_page.status | default(0) == 200
+        - database_pgadmin__test_login_page.content | default('') is search('"csrfToken"')
+      retries: 60
+      delay: 5
+
+    # The first start creates the database of pgAdmin in the data directory
+    - name: 'Read the database of pgAdmin'
+      ansible.builtin.stat:
+        path: "{{ database_pgadmin__test_home }}/data/pgadmin4.db"
+      register: 'database_pgadmin__test_database_file'
+
+    - name: 'Assert the data directory'
+      ansible.builtin.assert:
+        that:
+          - database_pgadmin__test_data_dir.stat.isdir | default(false)
+          - database_pgadmin__test_data_dir.stat.uid == 5050
+          - database_pgadmin__test_data_dir.stat.mode == '0700'
+          - database_pgadmin__test_database_file.stat.exists
+        fail_msg: >-
+          data directory uid {{ database_pgadmin__test_data_dir.stat.uid | default('missing') }},
+          mode {{ database_pgadmin__test_data_dir.stat.mode | default('missing') }},
+          pgadmin4.db exists {{ database_pgadmin__test_database_file.stat.exists }}
+
+    # curl keeps all cookies of the session in a file
+    - name: 'Create the cookie file'
+      ansible.builtin.tempfile:
+        suffix: '.cookies'
+      register: 'database_pgadmin__test_cookie_file'
+
+    - name: 'Log in as admin'
+      block:
+
+        - name: 'Read the login page'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error', '--fail',
+                    '--cookie', "{{ database_pgadmin__test_cookie_file.path }}", '--cookie-jar', "{{ database_pgadmin__test_cookie_file.path }}",
+                    "{{ database_pgadmin__test_url }}/login" ]
+          register: 'database_pgadmin__test_login_form'
+          changed_when: false
+
+        - name: 'Log in as admin'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ database_pgadmin__test_cookie_file.path }}", '--cookie-jar', "{{ database_pgadmin__test_cookie_file.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code} %{redirect_url}',
+                    '--data-urlencode', "csrf_token={{ database_pgadmin__test_login_form.stdout | regex_search('\"csrfToken\": *\"([^\"]+)\"', '\\1') | first }}",
+                    '--data-urlencode', "email={{ database_pgadmin__expect.login.email }}",
+                    '--data-urlencode', "password={{ database_pgadmin__expect.login.password }}",
+                    "{{ database_pgadmin__test_url }}/authenticate/login" ]
+          register: 'database_pgadmin__test_login'
+          changed_when: false
+
+        - name: 'Read the browser'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ database_pgadmin__test_cookie_file.path }}", '--cookie-jar', "{{ database_pgadmin__test_cookie_file.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code} %{redirect_url}',
+                    "{{ database_pgadmin__test_url }}/browser/" ]
+          register: 'database_pgadmin__test_browser'
+          changed_when: false
+
+      always:
+
+        - name: 'Remove the cookie file'
+          ansible.builtin.file:
+            path: "{{ database_pgadmin__test_cookie_file.path }}"
+            state: 'absent'
+
+    - name: 'Export the servers of the admin'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '--user', '5050', '--workdir', '/pgadmin4', 'pgadmin',
+                '/venv/bin/python3', '/pgadmin4/setup.py', 'dump-servers', '/tmp/molecule-servers.json', '--user', "{{ database_pgadmin__expect.login.email }}" ]
+      register: 'database_pgadmin__test_dump'
+      changed_when: false
+
+    - name: 'Read the exported servers'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'pgadmin', 'cat', '/tmp/molecule-servers.json' ]
+      register: 'database_pgadmin__test_servers'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the login and the servers'
+      ansible.builtin.assert:
+        that:
+          # A failed login redirects back to the login page
+          - database_pgadmin__test_login.stdout is match('302 ')
+          - database_pgadmin__test_login.stdout is not search('/login')
+          - database_pgadmin__test_browser.stdout is match('200')
+          - database_pgadmin__expect.servers | reject('in', database_pgadmin__test_server_names) | list | length == 0
+        fail_msg: >-
+          login {{ database_pgadmin__test_login.stdout }}, browser {{ database_pgadmin__test_browser.stdout }},
+          servers {{ database_pgadmin__test_server_names | join(', ') }}, export {{ database_pgadmin__test_dump.stdout_lines | join(' ') }}
+      vars:
+        database_pgadmin__test_server_names: >-
+          {{ ((database_pgadmin__test_servers.stdout | default('{}', true) | from_json).Servers | default({})).values() | map(attribute='Name') | list }}

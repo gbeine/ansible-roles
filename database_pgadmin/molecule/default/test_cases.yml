@@ -1,0 +1,122 @@
+---
+# Network created by container_podman in prepare.yml
+database_pgadmin__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_pgadmin__test_image: 'docker.io/dpage/pgadmin4:latest'
+database_pgadmin__test_quadlet_path: '/etc/containers/systemd/pgadmin.container'
+
+# Database started by prepare.yml, test credentials only
+database_pgadmin__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  user: 'molecule'
+  password: 'molecule-database-password'
+
+# A valid change of the side effect, the quadlet unit changes and pgAdmin has to restart
+database_pgadmin__test_side_effect_environment:
+  PGADMIN_CONFIG_LOGIN_BANNER: "'Molecule login, changed'"
+
+database_pgadmin__test_cases:
+
+  # Only the mandatory variables, the email and the password of the admin
+  - name: 'molecule-pgadmin-default'
+    role_vars:
+      pgadmin_home: '/opt/pgadmin'
+      pgadmin_ip: '10.89.0.60'
+      pgadmin_network: 'podman-molecule'
+      pgadmin_hostname: 'pgadmin-default'
+      pgadmin_timezone: 'Europe/Berlin'
+      pgadmin_environment:
+        PGADMIN_DEFAULT_EMAIL: 'molecule@molecule.dev'
+      pgadmin_secrets:
+        - name: 'pgadmin_default_password'
+          data: 'molecule-admin-password'
+          target: 'PGADMIN_DEFAULT_PASSWORD'
+    expect:
+      ip: '10.89.0.60'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/pgadmin/data:/var/lib/pgadmin'
+        - 'Secret=pgadmin_default_password,type=mount,target=/run/secrets/pgadmin_default_password'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'PGADMIN_DEFAULT_EMAIL=molecule@molecule.dev'
+        - 'PGADMIN_DEFAULT_PASSWORD_FILE=/run/secrets/pgadmin_default_password'
+      secret_files:
+        - path: '/run/secrets/pgadmin_default_password'
+          content: 'molecule-admin-password'
+      config_distro: []
+      login:
+        email: 'molecule@molecule.dev'
+        password: 'molecule-admin-password'
+      servers: []
+
+  # IPv6, labels, a server in servers.json, a setting of pgAdmin and the password of the mail server in the environment
+  - name: 'molecule-pgadmin'
+    role_vars:
+      pgadmin_home: '/opt/pgadmin'
+      pgadmin_ip: '10.89.0.61'
+      pgadmin_ipv6: 'fd00:89::61'
+      pgadmin_network: 'podman-molecule'
+      pgadmin_hostname: 'pgadmin-molecule'
+      pgadmin_timezone: 'Europe/Berlin'
+      pgadmin_labels:
+        traefik.enable: 'true'
+      pgadmin_environment:
+        PGADMIN_DEFAULT_EMAIL: 'molecule@molecule.dev'
+        PGADMIN_CONFIG_LOGIN_BANNER: "'Molecule login'"
+        PGADMIN_CONFIG_MAIL_SERVER: "'mail.molecule.dev'"
+      pgadmin_secrets:
+        - name: 'pgadmin_default_password'
+          data: 'molecule-admin-password'
+          target: 'PGADMIN_DEFAULT_PASSWORD'
+        - name: 'pgadmin_mail_password'
+          data: "'molecule-mail-password'"
+          target: 'PGADMIN_CONFIG_MAIL_PASSWORD'
+      pgadmin_servers:
+        Servers:
+          '1':
+            Name: 'Molecule PostgreSQL'
+            Group: 'Servers'
+            Host: '10.89.0.20'
+            Port: 5432
+            MaintenanceDB: 'postgres'
+            Username: 'molecule'
+            SSLMode: 'prefer'
+    side_effect: true
+    expect:
+      ip: '10.89.0.61'
+      ip6: 'fd00:89::61'
+      quadlet:
+        - 'Volume=/opt/pgadmin/data:/var/lib/pgadmin'
+        - 'Volume=/opt/pgadmin/servers.json:/pgadmin4/servers.json:ro'
+        - 'Secret=pgadmin_default_password,type=mount,target=/run/secrets/pgadmin_default_password'
+        - 'Secret=pgadmin_mail_password,type=env,target=PGADMIN_CONFIG_MAIL_PASSWORD'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'PGADMIN_DEFAULT_EMAIL=molecule@molecule.dev'
+        - "PGADMIN_CONFIG_LOGIN_BANNER='Molecule login, changed'"
+        - "PGADMIN_CONFIG_MAIL_SERVER='mail.molecule.dev'"
+        - 'PGADMIN_DEFAULT_PASSWORD_FILE=/run/secrets/pgadmin_default_password'
+      secret_files:
+        - path: '/run/secrets/pgadmin_default_password'
+          content: 'molecule-admin-password'
+      # The entrypoint writes the settings to config_distro.py, the password of the mail server from the secret in the environment
+      config_distro:
+        - "LOGIN_BANNER = 'Molecule login, changed'"
+        - "MAIL_SERVER = 'mail.molecule.dev'"
+        - "MAIL_PASSWORD = 'molecule-mail-password'"
+      login:
+        email: 'molecule@molecule.dev'
+        password: 'molecule-admin-password'
+      servers:
+        - 'Molecule PostgreSQL'
