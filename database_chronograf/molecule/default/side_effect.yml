@@ -1,0 +1,155 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_chronograf__test_case: "{{ database_chronograf__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_chronograf__test_vars: "{{ database_chronograf__test_case.role_vars }}"
+    database_chronograf__test_env: "{{ database_chronograf__test_vars.chronograf_environment | default({}) }}"
+    database_chronograf__test_secrets: "{{ database_chronograf__test_vars.chronograf_secrets | default([]) }}"
+    database_chronograf__test_checked_files:
+      - "{{ database_chronograf__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_chronograf__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_chronograf__test_checked_files }}"
+      register: 'database_chronograf__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_chronograf with chronograf_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_container: [ 'environment' ]
+        database_chronograf__test_invalid:
+          message: 'chronograf_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_chronograf with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_secrets: [ { name: 'chronograf_influxdb_password', data: 'x' } ]
+        database_chronograf__test_invalid:
+          message: 'a secret without target'
+          search: '^chronograf_secrets entries need name, data and target$'
+
+    - name: 'Run database_chronograf with the password of InfluxDB in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_environment: "{{ database_chronograf__test_env | combine({'INFLUXDB_PASSWORD': 'molecule'}) }}"
+        database_chronograf__test_invalid:
+          message: 'the password of InfluxDB in the environment'
+          search: '^Secrets must not be set in chronograf_environment: INFLUXDB_PASSWORD\.$'
+
+    - name: 'Run database_chronograf with TOKEN_SECRET without an OAuth 2.0 provider (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_secrets: "{{ database_chronograf__test_secrets + [{'name': 'chronograf_token_secret', 'data': 'x', 'target': 'TOKEN_SECRET'}] }}"
+        database_chronograf__test_invalid:
+          message: 'TOKEN_SECRET without an OAuth 2.0 provider'
+          search: '^TOKEN_SECRET needs an OAuth 2.0 provider, Chronograf does not start with it alone\.$'
+
+    - name: 'Run database_chronograf with an incomplete OAuth 2.0 provider (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_environment: "{{ database_chronograf__test_env | combine({'GH_CLIENT_ID': 'molecule'}) }}"
+        database_chronograf__test_invalid:
+          message: 'an incomplete OAuth 2.0 provider'
+          search: '^The OAuth 2.0 provider GitHub needs GH_CLIENT_ID, GH_CLIENT_SECRET, TOKEN_SECRET, missing: GH_CLIENT_SECRET, TOKEN_SECRET\.$'
+
+    - name: 'Run database_chronograf with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_environment: "{{ database_chronograf__test_env | combine({'INFLUXDB_HOST': '10.89.0.20'}) }}"
+        database_chronograf__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: INFLUXDB_HOST\.'
+
+    - name: 'Run database_chronograf with an unknown environment variable in chronograf_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_container: { environment: { FOO: 'bar' } }
+        database_chronograf__test_invalid:
+          message: 'an unknown environment variable in chronograf_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_chronograf with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_secrets: "{{ database_chronograf__test_secrets + [{'name': 'chronograf_unknown', 'data': 'x', 'target': 'INFLUXDB_SECRET'}] }}"
+        database_chronograf__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: INFLUXDB_SECRET\.'
+
+    - name: 'Run database_chronograf with the changed environment'
+      when: database_chronograf__test_case.side_effect | default(false)
+      block:
+
+        # The change is only a restart if Chronograf runs
+        - name: 'Wait until Chronograf answers'
+          ansible.builtin.uri:
+            url: "http://{{ database_chronograf__test_vars.chronograf_ip }}:8888/chronograf/v1/sources"
+            return_content: true
+          register: 'database_chronograf__test_ready'
+          until: database_chronograf__test_ready.status | default(0) == 200
+          retries: 30
+          delay: 5
+          failed_when: false
+
+        - name: 'Read the log of Chronograf'
+          when: database_chronograf__test_ready.status | default(0) != 200
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', 'chronograf', '-n', '50', '--no-pager' ]
+          register: 'database_chronograf__test_journal'
+          changed_when: false
+
+        - name: 'Assert that Chronograf runs'
+          ansible.builtin.assert:
+            that:
+              - database_chronograf__test_ready.status | default(0) == 200
+            fail_msg: "{{ database_chronograf__test_journal.stdout_lines | default([]) }}"
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'chronograf' ]
+          register: 'database_chronograf__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            chronograf_environment: "{{ database_chronograf__test_env | combine(database_chronograf__test_side_effect_environment) }}"
+
+        - name: 'Run database_chronograf with the changed environment'
+          ansible.builtin.include_role:
+            name: 'database_chronograf'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'chronograf' ]
+          register: 'database_chronograf__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_chronograf__quadlet_result is changed
+              - database_chronograf__test_started_after.stdout | int > database_chronograf__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ database_chronograf__quadlet_result is changed }},
+              start before {{ database_chronograf__test_started_before.stdout }}, after {{ database_chronograf__test_started_after.stdout }}

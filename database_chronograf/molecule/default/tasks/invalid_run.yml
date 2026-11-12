@@ -1,0 +1,40 @@
+---
+# Runs database_chronograf with the invalid role variables passed as include parameters,
+# the role has to fail before the quadlet unit changes.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run database_chronograf with invalid variables (expect ERROR): {{ database_chronograf__test_invalid.message }}"
+  block:
+
+    - name: 'Run database_chronograf, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'database_chronograf'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ database_chronograf__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksum of the quadlet unit after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_chronograf__test_checked_files }}"
+      register: 'database_chronograf__test_md5_after'
+
+    - name: 'Assert the run failed before the quadlet unit changed'
+      ansible.builtin.assert:
+        that:
+          - database_chronograf__test_failure is search(database_chronograf__test_invalid.search, multiline=true)
+          - database_chronograf__test_before | select('equalto', '') | list | length == 0
+          - database_chronograf__test_after == database_chronograf__test_before
+        fail_msg: >-
+          Failure: {{ database_chronograf__test_failure }}
+          Checksums before: {{ database_chronograf__test_before | join(', ') }},
+          after: {{ database_chronograf__test_after | join(', ') }}.
+      vars:
+        # Double quotes, so \n is a line break for the anchors of the searches
+        database_chronograf__test_failure: "{{ [ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ] | join('\n') }}"
+        database_chronograf__test_before: "{{ database_chronograf__test_md5_before.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+        database_chronograf__test_after: "{{ database_chronograf__test_md5_after.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"

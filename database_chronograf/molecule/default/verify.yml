@@ -1,0 +1,131 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_chronograf__test_case: "{{ database_chronograf__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_chronograf__expect: "{{ database_chronograf__test_case.expect }}"
+    database_chronograf__test_home: "{{ database_chronograf__test_case.role_vars.chronograf_home }}"
+    database_chronograf__test_url: "http://{{ database_chronograf__expect.ip }}:8888"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_chronograf__test_quadlet_path }}"
+      register: 'database_chronograf__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_chronograf__test_image) in database_chronograf__test_quadlet_lines
+          - ('IP=' + database_chronograf__expect.ip) in database_chronograf__test_quadlet_lines
+          - database_chronograf__expect.ip6 is none or ('IP6=' + database_chronograf__expect.ip6) in database_chronograf__test_quadlet_lines
+          - database_chronograf__expect.ip6 is not none or database_chronograf__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_chronograf__expect.quadlet | reject('in', database_chronograf__test_quadlet_lines) | list | length == 0
+          # The passwords are never part of the quadlet unit
+          - database_chronograf__test_quadlet_lines | select('search', 'molecule-influxdb-password') | list | length == 0
+        fail_msg: "{{ database_chronograf__test_quadlet.content | b64decode }}"
+      vars:
+        database_chronograf__test_quadlet_lines: "{{ (database_chronograf__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the chronograf service'
+      ansible.builtin.command: 'systemctl is-active chronograf'
+      register: 'database_chronograf__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the chronograf container'
+      ansible.builtin.command: 'podman inspect chronograf'
+      register: 'database_chronograf__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_chronograf__test_service.stdout == 'active'
+          - database_chronograf__test_net.IPAddress == database_chronograf__expect.ip
+          - database_chronograf__expect.ip6 is none or database_chronograf__test_net.GlobalIPv6Address == database_chronograf__expect.ip6
+          - database_chronograf__expect.env | reject('in', database_chronograf__test_env) | list | length == 0
+        fail_msg: >-
+          service {{ database_chronograf__test_service.stdout }},
+          IPv4 {{ database_chronograf__test_net.IPAddress }}, IPv6 {{ database_chronograf__test_net.GlobalIPv6Address }},
+          environment {{ database_chronograf__test_env | reject('search', 'PASSWORD|SECRET|TOKEN') | join(', ') }}
+      vars:
+        database_chronograf__test_container: "{{ (database_chronograf__test_inspect.stdout | from_json)[0] }}"
+        database_chronograf__test_net: "{{ database_chronograf__test_container.NetworkSettings.Networks[database_chronograf__test_case.role_vars.chronograf_network] }}"
+        database_chronograf__test_env: "{{ database_chronograf__test_container.Config.Env }}"
+
+    - name: 'Wait until Chronograf answers'
+      ansible.builtin.uri:
+        url: "http://{{ database_chronograf__expect.ip }}:8888/chronograf/v1/sources"
+        return_content: true
+      register: 'database_chronograf__test_sources'
+      until: database_chronograf__test_sources.status | default(0) == 200
+      retries: 30
+      delay: 5
+      failed_when: false
+
+    - name: 'Read the log of Chronograf'
+      when: database_chronograf__test_sources.status | default(0) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'chronograf', '-n', '50', '--no-pager' ]
+      register: 'database_chronograf__test_journal'
+      changed_when: false
+
+    - name: 'Assert that Chronograf runs'
+      ansible.builtin.assert:
+        that:
+          - database_chronograf__test_sources.status | default(0) == 200
+        fail_msg: "{{ database_chronograf__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the user chronograf of the image'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'chronograf', 'id', '-u', 'chronograf' ]
+      register: 'database_chronograf__test_uid'
+      changed_when: false
+
+    - name: 'Read the data directory and the database'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ database_chronograf__test_home }}/data"
+        - "{{ database_chronograf__test_home }}/data/chronograf-v1.db"
+      register: 'database_chronograf__test_data'
+
+    - name: 'Assert the data directory'
+      ansible.builtin.assert:
+        that:
+          - database_chronograf__test_data.results[0].stat.isdir | default(false)
+          - database_chronograf__test_data.results[0].stat.uid == database_chronograf__test_uid.stdout | int
+          - database_chronograf__test_data.results[0].stat.mode == '0700'
+          - database_chronograf__test_data.results[1].stat.exists
+        fail_msg: >-
+          uid of chronograf {{ database_chronograf__test_uid.stdout }},
+          data directory uid {{ database_chronograf__test_data.results[0].stat.uid | default('missing') }},
+          mode {{ database_chronograf__test_data.results[0].stat.mode | default('missing') }},
+          chronograf-v1.db exists {{ database_chronograf__test_data.results[1].stat.exists }}
+
+    - name: 'Assert the sources'
+      ansible.builtin.assert:
+        that:
+          - database_chronograf__expect.source is not none or database_chronograf__test_source_list | length == 0
+          - database_chronograf__expect.source is none or database_chronograf__test_source_list | selectattr('url', 'eq', database_chronograf__expect.source) | list | length == 1
+        fail_msg: "sources {{ database_chronograf__test_source_list | map(attribute='url') | join(', ') }}"
+      vars:
+        database_chronograf__test_source_list: "{{ database_chronograf__test_sources.json.sources | default([]) }}"
+
+    # The health check connects to InfluxDB with the user and the password of the secret
+    - name: 'Read the health of the source'
+      when: database_chronograf__expect.source is not none
+      ansible.builtin.uri:
+        url: "{{ database_chronograf__test_url }}{{ database_chronograf__test_source.links.health }}"
+        status_code: [ 204 ]
+      vars:
+        database_chronograf__test_source: >-
+          {{ database_chronograf__test_sources.json.sources | selectattr('url', 'eq', database_chronograf__expect.source) | first }}

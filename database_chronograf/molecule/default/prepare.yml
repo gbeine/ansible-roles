@@ -1,0 +1,45 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ database_chronograf__test_network }}"
+    podman_default_network: "{{ database_chronograf__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ database_chronograf__test_image }}"
+        - "{{ database_chronograf__test_influxdb.image }}"
+
+    - name: 'Start InfluxDB with authentication'
+      containers.podman.podman_container:
+        name: "{{ database_chronograf__test_influxdb.name }}"
+        image: "{{ database_chronograf__test_influxdb.image }}"
+        network: "{{ database_chronograf__test_network.name }}"
+        ip: "{{ database_chronograf__test_influxdb.ip }}"
+        env:
+          INFLUXDB_HTTP_AUTH_ENABLED: 'true'
+          INFLUXDB_ADMIN_USER: "{{ database_chronograf__test_influxdb.user }}"
+          INFLUXDB_ADMIN_PASSWORD: "{{ database_chronograf__test_influxdb.password }}"
+        state: 'started'
+
+    - name: 'Wait for InfluxDB'
+      ansible.builtin.wait_for:
+        host: "{{ database_chronograf__test_influxdb.ip }}"
+        port: 8086
+        timeout: 120
