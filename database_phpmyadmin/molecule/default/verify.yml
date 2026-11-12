@@ -1,0 +1,165 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_phpmyadmin__test_case: "{{ database_phpmyadmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_phpmyadmin__expect: "{{ database_phpmyadmin__test_case.expect }}"
+    database_phpmyadmin__test_url: "http://{{ database_phpmyadmin__expect.ip }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_phpmyadmin__test_quadlet_path }}"
+      register: 'database_phpmyadmin__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_phpmyadmin__test_image) in database_phpmyadmin__test_quadlet_lines
+          - ('IP=' + database_phpmyadmin__expect.ip) in database_phpmyadmin__test_quadlet_lines
+          - database_phpmyadmin__expect.ip6 is none or ('IP6=' + database_phpmyadmin__expect.ip6) in database_phpmyadmin__test_quadlet_lines
+          - database_phpmyadmin__expect.ip6 is not none or database_phpmyadmin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_phpmyadmin__expect.quadlet | reject('in', database_phpmyadmin__test_quadlet_lines) | list | length == 0
+          # The passwords are mounted as files, they are never part of the environment
+          - database_phpmyadmin__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+        fail_msg: "{{ database_phpmyadmin__test_quadlet.content | b64decode }}"
+      vars:
+        database_phpmyadmin__test_quadlet_lines: "{{ (database_phpmyadmin__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the phpmyadmin service'
+      ansible.builtin.command: 'systemctl is-active phpmyadmin'
+      register: 'database_phpmyadmin__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the phpmyadmin container'
+      ansible.builtin.command: 'podman inspect phpmyadmin'
+      register: 'database_phpmyadmin__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_phpmyadmin__test_service.stdout == 'active'
+          - database_phpmyadmin__test_net.IPAddress == database_phpmyadmin__expect.ip
+          - database_phpmyadmin__expect.ip6 is none or database_phpmyadmin__test_net.GlobalIPv6Address == database_phpmyadmin__expect.ip6
+          - database_phpmyadmin__expect.env | reject('in', database_phpmyadmin__test_env) | list | length == 0
+          - database_phpmyadmin__test_env | select('match', '(PMA_PASSWORD|PMA_CONTROLPASS)=') | list | length == 0
+        fail_msg: >-
+          service {{ database_phpmyadmin__test_service.stdout }},
+          IPv4 {{ database_phpmyadmin__test_net.IPAddress }}, IPv6 {{ database_phpmyadmin__test_net.GlobalIPv6Address }},
+          environment {{ database_phpmyadmin__test_env | reject('search', 'PASS=') | join(', ') }}
+      vars:
+        database_phpmyadmin__test_container: "{{ (database_phpmyadmin__test_inspect.stdout | from_json)[0] }}"
+        database_phpmyadmin__test_net: "{{ database_phpmyadmin__test_container.NetworkSettings.Networks[database_phpmyadmin__test_case.role_vars.phpmyadmin_network] }}"
+        database_phpmyadmin__test_env: "{{ database_phpmyadmin__test_container.Config.Env }}"
+
+    - name: 'Read the files of the secrets in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'phpmyadmin', 'cat', "{{ item.path }}" ]
+      loop: "{{ database_phpmyadmin__expect.secret_files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: 'database_phpmyadmin__test_secret_files'
+      changed_when: false
+      no_log: true
+
+    # The entrypoint reads the file variables and exports the targets for the web server, process 1
+    - name: 'Read the environment of the web server'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'phpmyadmin', 'cat', '/proc/1/environ' ]
+      register: 'database_phpmyadmin__test_process_env'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert the files of the secrets and the environment of the web server'
+      ansible.builtin.assert:
+        that:
+          - database_phpmyadmin__test_secret_files.results | map(attribute='stdout') | list
+            == database_phpmyadmin__expect.secret_files | default([]) | map(attribute='content') | list
+          - database_phpmyadmin__expect.process_env | default([]) | reject('in', database_phpmyadmin__test_process_env_lines) | list | length == 0
+        fail_msg: 'The files of the secrets or the environment of the web server differ from the expected values'
+      vars:
+        database_phpmyadmin__test_process_env_lines: "{{ database_phpmyadmin__test_process_env.stdout.split('\u0000') }}"
+      no_log: true
+
+    - name: 'Wait until phpMyAdmin shows the login form'
+      ansible.builtin.uri:
+        url: "{{ database_phpmyadmin__test_url }}/"
+        return_content: true
+      register: 'database_phpmyadmin__test_login_page'
+      until:
+        - database_phpmyadmin__test_login_page.status | default(0) == 200
+        - database_phpmyadmin__test_login_page.content | default('') is search('name="token" value="')
+      retries: 30
+      delay: 5
+
+    # The uri module only returns the last cookie of a redirect, curl keeps all cookies of the session in a file
+    - name: 'Create the cookie file'
+      ansible.builtin.tempfile:
+        suffix: '.cookies'
+      register: 'database_phpmyadmin__test_cookie_file'
+
+    - name: 'Log in and read the list of the databases'
+      block:
+
+        - name: 'Read the login form'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error', '--fail',
+                    '--cookie', "{{ database_phpmyadmin__test_cookie_file.path }}", '--cookie-jar', "{{ database_phpmyadmin__test_cookie_file.path }}",
+                    "{{ database_phpmyadmin__test_url }}/" ]
+          register: 'database_phpmyadmin__test_login_form'
+          changed_when: false
+
+        - name: 'Log in as the database user'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ database_phpmyadmin__test_cookie_file.path }}", '--cookie-jar', "{{ database_phpmyadmin__test_cookie_file.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code} %{redirect_url}',
+                    '--data-urlencode', 'route=/',
+                    '--data-urlencode', "token={{ database_phpmyadmin__test_login_form.stdout | regex_search('name=\"token\" value=\"([^\"]+)\"', '\\1') | first }}",
+                    '--data-urlencode', 'server=1',
+                    '--data-urlencode', "pma_username={{ database_phpmyadmin__test_database.user }}",
+                    '--data-urlencode', "pma_password={{ database_phpmyadmin__test_database.password }}",
+                    "{{ database_phpmyadmin__test_url }}/index.php?route=/" ]
+          register: 'database_phpmyadmin__test_login'
+          changed_when: false
+
+        - name: 'Read the list of the databases'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error', '--fail',
+                    '--cookie', "{{ database_phpmyadmin__test_cookie_file.path }}", '--cookie-jar', "{{ database_phpmyadmin__test_cookie_file.path }}",
+                    "{{ database_phpmyadmin__test_url }}/index.php?route=/server/databases" ]
+          register: 'database_phpmyadmin__test_databases'
+          changed_when: false
+
+        - name: 'Read the names of the cookies'
+          ansible.builtin.command:
+            argv: [ 'awk', '!/^# / && NF >= 7 { print $6 }', "{{ database_phpmyadmin__test_cookie_file.path }}" ]
+          register: 'database_phpmyadmin__test_cookies'
+          changed_when: false
+
+      always:
+
+        - name: 'Remove the cookie file'
+          ansible.builtin.file:
+            path: "{{ database_phpmyadmin__test_cookie_file.path }}"
+            state: 'absent'
+
+    - name: 'Assert the login and the database of the test'
+      ansible.builtin.assert:
+        that:
+          # Without a session phpMyAdmin shows the login form again
+          - database_phpmyadmin__test_databases.stdout is not search('name="pma_username"')
+          - database_phpmyadmin__test_databases.stdout is search('db=' ~ database_phpmyadmin__test_database.database)
+        fail_msg: >-
+          login status and redirect {{ database_phpmyadmin__test_login.stdout }},
+          cookies {{ database_phpmyadmin__test_cookies.stdout_lines | join(', ') }},
+          login form shown {{ database_phpmyadmin__test_databases.stdout is search('name="pma_username"') }}

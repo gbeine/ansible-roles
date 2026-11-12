@@ -10,26 +10,113 @@ database_phpmyadmin__ipv6: "{{ phpmyadmin_ipv6 }}"
 database_phpmyadmin__network: "{{ phpmyadmin_network | mandatory }}"
 database_phpmyadmin__hostname: "{{ phpmyadmin_hostname | mandatory }}"
 database_phpmyadmin__timezone: "{{ phpmyadmin_timezone | mandatory }}"
-database_phpmyadmin__labels: "{{ phpmyadmin_labels | default({}) }}"
+database_phpmyadmin__labels: "{{ phpmyadmin_labels }}"
 
-database_phpmyadmin__db: "{{ phpmyadmin_db | default('phpmyadmin') }}"
-database_phpmyadmin__db_user: "{{ phpmyadmin_db_user | default('phpmyadmin') }}"
-database_phpmyadmin__db_pass: "{{ phpmyadmin_db_pass | mandatory }}"
-database_phpmyadmin__db_host: "{{ phpmyadmin_db_host | mandatory }}"
-database_phpmyadmin__db_port: "{{ phpmyadmin_db_port | default(3306) }}"
-database_phpmyadmin__base_url: "{{ phpmyadmin_base_url | mandatory }}"
+database_phpmyadmin__version: "{{ phpmyadmin_version | default('latest') }}"
 
 database_phpmyadmin__container: "{{ database_phpmyadmin__podman_container_default | combine(phpmyadmin_container | default({})) }}"
 
+# The configuration of the image, see the documentation of the image
+database_phpmyadmin__environment: "{{ database_phpmyadmin__environment_default | combine(phpmyadmin_environment | default({})) }}"
+
+# Secrets with name, data and target, mounted below /run/secrets, the role sets the file variable of the target
+database_phpmyadmin__secrets: "{{ phpmyadmin_secrets | default([]) }}"
+
 database_phpmyadmin__autoupdate_enabled: "{{ phpmyadmin_autoupdate_enabled | default(false) }}"
+database_phpmyadmin__autoupdate_schedule: "{{ phpmyadmin_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+database_phpmyadmin__environment_default:
+  TZ: "{{ database_phpmyadmin__timezone }}"
+
+database_phpmyadmin__environment_required: []
+
+# phpMyAdmin needs a server: one of these variables has to be set
+database_phpmyadmin__environment_server: [ 'PMA_HOST', 'PMA_HOSTS', 'PMA_SOCKET', 'PMA_SOCKETS', 'PMA_ARBITRARY' ]
+
+# The targets of the secrets, they must not be set in phpmyadmin_environment
+database_phpmyadmin__secret_variables: "{{ database_phpmyadmin__secret_files.keys() | list }}"
+
+# The secrets are mounted as files, the image reads the variable target from the file variable <target>_FILE
+# (get_docker_secret in docker-entrypoint.sh of phpmyadmin/docker for phpMyAdmin 5.2.3)
+database_phpmyadmin__secret_files:
+  PMA_PASSWORD: 'PMA_PASSWORD_FILE'
+  PMA_CONTROLPASS: 'PMA_CONTROLPASS_FILE'
+
+database_phpmyadmin__secrets_required: []
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+database_phpmyadmin__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if database_phpmyadmin__secrets is sequence and database_phpmyadmin__secrets is not string and database_phpmyadmin__secrets is not mapping -%}
+  {%-   for secret in database_phpmyadmin__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in database_phpmyadmin__secret_files -%}
+  {%-     set _ = environment.update({ database_phpmyadmin__secret_files[secret.target]: database_phpmyadmin__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The variables of the image and the file variables of the secrets, set by the role.
+# Generated from config.inc.php, docker-entrypoint.sh and apache/Dockerfile of phpmyadmin/docker for phpMyAdmin 5.2.3,
+# update with new versions of the image
+database_phpmyadmin__environment_allowed:
+  - 'PMA_ARBITRARY'
+  - 'PMA_HOST'
+  - 'PMA_HOSTS'
+  - 'PMA_VERBOSE'
+  - 'PMA_VERBOSES'
+  - 'PMA_PORT'
+  - 'PMA_PORTS'
+  - 'PMA_SOCKET'
+  - 'PMA_SOCKETS'
+  - 'PMA_USER'
+  - 'PMA_ABSOLUTE_URI'
+  - 'PMA_CONTROLHOST'
+  - 'PMA_CONTROLPORT'
+  - 'PMA_PMADB'
+  - 'PMA_CONTROLUSER'
+  - 'PMA_QUERYHISTORYDB'
+  - 'PMA_QUERYHISTORYMAX'
+  - 'MAX_EXECUTION_TIME'
+  - 'MEMORY_LIMIT'
+  - 'UPLOAD_LIMIT'
+  - 'PMA_UPLOADDIR'
+  - 'PMA_SAVEDIR'
+  - 'PMA_SSL'
+  - 'PMA_SSLS'
+  - 'PMA_SSL_DIR'
+  - 'PMA_SSL_VERIFY'
+  - 'PMA_SSL_VERIFIES'
+  - 'PMA_SSL_CA'
+  - 'PMA_SSL_CAS'
+  - 'PMA_SSL_CA_BASE64'
+  - 'PMA_SSL_CAS_BASE64'
+  - 'PMA_SSL_KEY'
+  - 'PMA_SSL_KEYS'
+  - 'PMA_SSL_KEY_BASE64'
+  - 'PMA_SSL_KEYS_BASE64'
+  - 'PMA_SSL_CERT'
+  - 'PMA_SSL_CERTS'
+  - 'PMA_SSL_CERT_BASE64'
+  - 'PMA_SSL_CERTS_BASE64'
+  - 'PMA_CONFIG_BASE64'
+  - 'PMA_USER_CONFIG_BASE64'
+  - 'HIDE_PHP_VERSION'
+  - 'APACHE_PORT'
+  - 'SESSION_SAVE_PATH'
+  - 'TZ'
+  # The file variables of the secrets, set by the role
+  - 'PMA_PASSWORD_FILE'
+  - 'PMA_CONTROLPASS_FILE'
+
+database_phpmyadmin__secrets_dir: '/run/secrets'
+
 database_phpmyadmin__podman_name: 'phpmyadmin'
-database_phpmyadmin__podman_image: 'docker.io/phpmyadmin'
-database_phpmyadmin__podman_tag: 'latest'
+database_phpmyadmin__podman_image: 'docker.io/library/phpmyadmin'
+database_phpmyadmin__podman_tag: "{{ database_phpmyadmin__version }}"
 
 database_phpmyadmin__podman_container_default:
   name: "{{ database_phpmyadmin__podman_name }}"
@@ -39,12 +126,12 @@ database_phpmyadmin__podman_container_default:
   ipv6: "{{ database_phpmyadmin__ipv6 | default(omit) }}"
   network: "{{ database_phpmyadmin__network }}"
   timezone: "{{ database_phpmyadmin__timezone }}"
-  environment:
-    PMA_PMADB: "{{ database_phpmyadmin__db }}"
-    PMA_CONTROLUSER: "{{ database_phpmyadmin__db_user }}"
-    PMA_HOST: "{{ database_phpmyadmin__db_host }}"
-    PMA_PORT: "{{ database_phpmyadmin__db_port }}"
-    PMA_ABSOLUTE_URI: "{{ database_phpmyadmin__base_url }}"
-  labels: "{{ database_phpmyadmin__labels }}"
-  secrets:
-    - "pma_controluser_password,type=env,target=PMA_CONTROLPASS"
+  # Set with phpmyadmin_environment and phpmyadmin_secrets, merged over the default
+  environment: "{{ database_phpmyadmin__environment | combine(database_phpmyadmin__environment_secrets_files) }}"
+  labels: "{{ database_phpmyadmin__labels | default(omit) }}"
+  # Entries without name are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (database_phpmyadmin__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ database_phpmyadmin__secrets_dir ~ '/\1') | list)
+      if (database_phpmyadmin__secrets is sequence and database_phpmyadmin__secrets is not string and database_phpmyadmin__secrets | length > 0)
+      else omit }}

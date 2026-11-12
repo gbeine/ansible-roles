@@ -1,0 +1,89 @@
+---
+# Network created by container_podman in prepare.yml
+database_phpmyadmin__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_phpmyadmin__test_image: 'docker.io/library/phpmyadmin:latest'
+database_phpmyadmin__test_quadlet_path: '/etc/containers/systemd/phpmyadmin.container'
+
+# Database started by prepare.yml, test credentials only
+database_phpmyadmin__test_database:
+  name: 'molecule-mariadb'
+  image: 'docker.io/library/mariadb:11'
+  ip: '10.89.0.20'
+  database: 'phpmyadmin'
+  user: 'molecule'
+  password: 'molecule-database-password'
+
+# A valid change of the side effect, the quadlet unit changes and phpMyAdmin has to restart
+database_phpmyadmin__test_side_effect_environment:
+  MEMORY_LIMIT: '256M'
+
+database_phpmyadmin__test_cases:
+
+  # Only the mandatory variables and the server
+  - name: 'molecule-phpmyadmin-default'
+    role_vars:
+      phpmyadmin_ip: '10.89.0.60'
+      phpmyadmin_network: 'podman-molecule'
+      phpmyadmin_hostname: 'phpmyadmin-default'
+      phpmyadmin_timezone: 'Europe/Berlin'
+      phpmyadmin_environment:
+        PMA_HOST: '10.89.0.20'
+    expect:
+      ip: '10.89.0.60'
+      ip6: ~
+      quadlet: []
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'PMA_HOST=10.89.0.20'
+
+  # IPv6, labels, the configuration storage with the control user and its password from a secret,
+  # the role sets PMA_CONTROLPASS_FILE
+  - name: 'molecule-phpmyadmin'
+    role_vars:
+      phpmyadmin_ip: '10.89.0.61'
+      phpmyadmin_ipv6: 'fd00:89::61'
+      phpmyadmin_network: 'podman-molecule'
+      phpmyadmin_hostname: 'phpmyadmin-molecule'
+      phpmyadmin_timezone: 'Europe/Berlin'
+      phpmyadmin_labels:
+        traefik.enable: 'true'
+      phpmyadmin_environment:
+        PMA_HOST: '10.89.0.20'
+        PMA_PORT: '3306'
+        PMA_ABSOLUTE_URI: 'http://10.89.0.61/'
+        PMA_PMADB: 'phpmyadmin'
+        PMA_CONTROLUSER: 'molecule'
+      phpmyadmin_secrets:
+        - name: 'phpmyadmin_controlpass'
+          data: 'molecule-database-password'
+          target: 'PMA_CONTROLPASS'
+    side_effect: true
+    expect:
+      ip: '10.89.0.61'
+      ip6: 'fd00:89::61'
+      quadlet:
+        - 'Secret=phpmyadmin_controlpass,type=mount,target=/run/secrets/phpmyadmin_controlpass'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'PMA_HOST=10.89.0.20'
+        - 'PMA_PORT=3306'
+        - 'PMA_ABSOLUTE_URI=http://10.89.0.61/'
+        - 'PMA_PMADB=phpmyadmin'
+        - 'PMA_CONTROLUSER=molecule'
+        - 'PMA_CONTROLPASS_FILE=/run/secrets/phpmyadmin_controlpass'
+        - 'MEMORY_LIMIT=256M'
+      secret_files:
+        - path: '/run/secrets/phpmyadmin_controlpass'
+          content: 'molecule-database-password'
+      # The image reads the password from PMA_CONTROLPASS_FILE and exports it for the web server
+      process_env:
+        - 'PMA_CONTROLPASS=molecule-database-password'
