@@ -1,0 +1,190 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_phpredisadmin__test_case: "{{ database_phpredisadmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_phpredisadmin__test_vars: "{{ database_phpredisadmin__test_case.role_vars }}"
+    database_phpredisadmin__test_env: "{{ database_phpredisadmin__test_vars.phpredisadmin_environment }}"
+    database_phpredisadmin__test_secrets: "{{ database_phpredisadmin__test_vars.phpredisadmin_secrets | default([]) }}"
+    database_phpredisadmin__test_checked_files:
+      - "{{ database_phpredisadmin__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_phpredisadmin__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_phpredisadmin__test_checked_files }}"
+      register: 'database_phpredisadmin__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_phpredisadmin with phpredisadmin_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_container: [ 'environment' ]
+        database_phpredisadmin__test_invalid:
+          message: 'phpredisadmin_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_phpredisadmin with phpredisadmin_keys not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_keys: [ 1 ]
+        database_phpredisadmin__test_invalid:
+          message: 'phpredisadmin_keys not a dictionary'
+          search: '^phpredisadmin_keys has to be a dictionary$'
+
+    - name: 'Run database_phpredisadmin with an unknown family in phpredisadmin_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_keys: { redis: [ 1 ], server: [ 1 ] }
+        database_phpredisadmin__test_invalid:
+          message: 'an unknown family in phpredisadmin_keys'
+          search: '^unknown entries in phpredisadmin_keys: server, allowed are redis$'
+
+    - name: 'Run database_phpredisadmin with a gap in the keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_keys: { redis: [ 1, 3 ] }
+        database_phpredisadmin__test_invalid:
+          message: 'a gap in the keys'
+          search: '^phpredisadmin_keys.redis has to start with 1 without gaps'
+
+    - name: 'Run database_phpredisadmin with a duplicate key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_keys: { redis: [ 1, 1 ] }
+        database_phpredisadmin__test_invalid:
+          message: 'a duplicate key'
+          search: '^phpredisadmin_keys.redis contains duplicate keys$'
+
+    - name: 'Run database_phpredisadmin with a key without REDIS_<n>_HOST (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_keys: { redis: [ 1, 2, 3 ] }
+        database_phpredisadmin__test_invalid:
+          message: 'a key without REDIS_<n>_HOST'
+          search: 'phpRedisAdmin needs REDIS_<n>_HOST for every key of phpredisadmin_keys.redis, missing or empty: (REDIS_2_HOST, )?REDIS_3_HOST\.'
+
+    - name: 'Run database_phpredisadmin with REDIS_3_HOST without a key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_environment: "{{ database_phpredisadmin__test_env | combine({'REDIS_3_HOST': '10.89.0.20'}) }}"
+        database_phpredisadmin__test_invalid:
+          message: 'REDIS_3_HOST without a key'
+          search: '^Unknown environment variables: REDIS_3_HOST\.'
+
+    - name: 'Run database_phpredisadmin with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_secrets: [ { name: 'phpredisadmin_admin_pass', data: 'x' } ]
+        database_phpredisadmin__test_invalid:
+          message: 'a secret without target'
+          search: '^phpredisadmin_secrets entries need name, data and target$'
+
+    - name: 'Run database_phpredisadmin with ADMIN_USER without the secret ADMIN_PASS (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_environment: "{{ database_phpredisadmin__test_env | combine({'ADMIN_USER': 'molecule'}) }}"
+        phpredisadmin_secrets: []
+        database_phpredisadmin__test_invalid:
+          message: 'ADMIN_USER without the secret ADMIN_PASS'
+          search: 'ADMIN_USER and the secret ADMIN_PASS have to be set together\.'
+
+    - name: 'Run database_phpredisadmin with neither authentication nor ALLOW_NO_AUTH (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_environment: { REDIS_1_HOST: '10.89.0.20' }
+        phpredisadmin_keys: { redis: [ 1 ] }
+        phpredisadmin_secrets: []
+        database_phpredisadmin__test_invalid:
+          message: 'neither authentication nor ALLOW_NO_AUTH'
+          search: "phpRedisAdmin needs ADMIN_USER and the secret ADMIN_PASS, or ALLOW_NO_AUTH 'true'\\."
+
+    - name: 'Run database_phpredisadmin with ALLOW_NO_AUTH not ''true'' or ''false'' (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_environment: "{{ database_phpredisadmin__test_env | combine({'ALLOW_NO_AUTH': 'yes'}) }}"
+        database_phpredisadmin__test_invalid:
+          message: 'ALLOW_NO_AUTH not ''true'' or ''false'''
+          search: "ALLOW_NO_AUTH has to be 'true' or 'false'\\."
+
+    - name: 'Run database_phpredisadmin with ADMIN_PASS in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_environment: "{{ database_phpredisadmin__test_env | combine({'ADMIN_PASS': 'molecule'}) }}"
+        database_phpredisadmin__test_invalid:
+          message: 'ADMIN_PASS in the environment'
+          search: 'Secrets and their file variables must not be set in phpredisadmin_environment: ADMIN_PASS\.'
+
+    - name: 'Run database_phpredisadmin with REDIS_1_AUTH_FILE in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_environment: "{{ database_phpredisadmin__test_env | combine({'REDIS_1_AUTH_FILE': '/run/secrets/redis'}) }}"
+        database_phpredisadmin__test_invalid:
+          message: 'REDIS_1_AUTH_FILE in the environment'
+          search: 'Secrets and their file variables must not be set in phpredisadmin_environment: REDIS_1_AUTH_FILE\.'
+
+    - name: 'Run database_phpredisadmin with an unknown environment variable in phpredisadmin_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_container: "{{ {'environment': database_phpredisadmin__test_env | combine({'FOO': 'bar'})} }}"
+        database_phpredisadmin__test_invalid:
+          message: 'an unknown environment variable in phpredisadmin_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_phpredisadmin with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpredisadmin_secrets: "{{ database_phpredisadmin__test_secrets + [{'name': 'phpredisadmin_unknown', 'data': 'x', 'target': 'REDIS_3_AUTH'}] }}"
+        database_phpredisadmin__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: REDIS_3_AUTH\.'
+
+    - name: 'Run database_phpredisadmin with the changed environment'
+      when: database_phpredisadmin__test_case.side_effect | default(false)
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpredisadmin' ]
+          register: 'database_phpredisadmin__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            phpredisadmin_environment: "{{ database_phpredisadmin__test_env | combine(database_phpredisadmin__test_side_effect_environment) }}"
+
+        - name: 'Run database_phpredisadmin with the changed environment'
+          ansible.builtin.include_role:
+            name: 'database_phpredisadmin'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpredisadmin' ]
+          register: 'database_phpredisadmin__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_phpredisadmin__quadlet_result is changed
+              - database_phpredisadmin__test_started_after.stdout | int > database_phpredisadmin__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ database_phpredisadmin__quadlet_result is changed }},
+              start before {{ database_phpredisadmin__test_started_before.stdout }}, after {{ database_phpredisadmin__test_started_after.stdout }}

@@ -1,0 +1,101 @@
+---
+# Network created by container_podman in prepare.yml
+database_phpredisadmin__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_phpredisadmin__test_image: 'docker.io/erikdubbelboer/phpredisadmin:latest'
+database_phpredisadmin__test_quadlet_path: '/etc/containers/systemd/phpredisadmin.container'
+
+# Redis servers started by prepare.yml, the second one with a password, test credentials only
+database_phpredisadmin__test_redis_image: 'docker.io/library/redis:7'
+database_phpredisadmin__test_redis:
+  - name: 'molecule-redis'
+    ip: '10.89.0.20'
+    password: ~
+  - name: 'molecule-redis-auth'
+    ip: '10.89.0.21'
+    password: 'molecule-redis-password'
+
+# A valid change of the side effect, the quadlet unit changes and phpRedisAdmin has to restart
+database_phpredisadmin__test_side_effect_environment:
+  REDIS_2_NAME: 'Redis with password, renamed'
+
+database_phpredisadmin__test_cases:
+
+  # Only the mandatory variables, one server without password and without authentication
+  - name: 'molecule-phpredisadmin-default'
+    role_vars:
+      phpredisadmin_ip: '10.89.0.60'
+      phpredisadmin_network: 'podman-molecule'
+      phpredisadmin_hostname: 'phpredisadmin-default'
+      phpredisadmin_timezone: 'Europe/Berlin'
+      phpredisadmin_keys:
+        redis: [ 1 ]
+      phpredisadmin_environment:
+        REDIS_1_HOST: '10.89.0.20'
+        ALLOW_NO_AUTH: 'true'
+    expect:
+      ip: '10.89.0.60'
+      ip6: ~
+      quadlet: []
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'REDIS_1_HOST=10.89.0.20'
+        - 'ALLOW_NO_AUTH=true'
+      servers: 1
+      login: ~
+
+  # IPv6, labels, two servers, the password of the second one from a secret mounted as file,
+  # the admin password from a secret in the environment
+  - name: 'molecule-phpredisadmin'
+    role_vars:
+      phpredisadmin_ip: '10.89.0.61'
+      phpredisadmin_ipv6: 'fd00:89::61'
+      phpredisadmin_network: 'podman-molecule'
+      phpredisadmin_hostname: 'phpredisadmin-molecule'
+      phpredisadmin_timezone: 'Europe/Berlin'
+      phpredisadmin_labels:
+        traefik.enable: 'true'
+      phpredisadmin_keys:
+        redis: [ 1, 2 ]
+      phpredisadmin_environment:
+        ADMIN_USER: 'molecule'
+        REDIS_1_HOST: '10.89.0.20'
+        REDIS_1_NAME: 'Redis'
+        REDIS_2_HOST: '10.89.0.21'
+        REDIS_2_NAME: 'Redis with password'
+      phpredisadmin_secrets:
+        - name: 'phpredisadmin_admin_pass'
+          data: 'molecule-admin-password'
+          target: 'ADMIN_PASS'
+        - name: 'phpredisadmin_redis_2_auth'
+          data: 'molecule-redis-password'
+          target: 'REDIS_2_AUTH'
+    side_effect: true
+    expect:
+      ip: '10.89.0.61'
+      ip6: 'fd00:89::61'
+      quadlet:
+        - 'Secret=phpredisadmin_admin_pass,type=env,target=ADMIN_PASS'
+        - 'Secret=phpredisadmin_redis_2_auth,type=mount,target=/run/secrets/phpredisadmin_redis_2_auth'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'ADMIN_USER=molecule'
+        - 'REDIS_1_HOST=10.89.0.20'
+        - 'REDIS_2_HOST=10.89.0.21'
+        - 'REDIS_2_NAME=Redis with password, renamed'
+        - 'REDIS_2_AUTH_FILE=/run/secrets/phpredisadmin_redis_2_auth'
+      secret_files:
+        - path: '/run/secrets/phpredisadmin_redis_2_auth'
+          content: 'molecule-redis-password'
+      servers: 2
+      login:
+        user: 'molecule'
+        password: 'molecule-admin-password'

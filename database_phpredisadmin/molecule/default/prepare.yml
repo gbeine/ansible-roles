@@ -1,0 +1,63 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ database_phpredisadmin__test_network }}"
+    podman_default_network: "{{ database_phpredisadmin__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify reads the overview of phpRedisAdmin with curl, it supports the digest authentication of phpRedisAdmin
+    - name: 'Install curl'
+      ansible.builtin.apt:
+        name: 'curl'
+        state: 'present'
+        update_cache: true
+
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '0644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ database_phpredisadmin__test_image }}"
+        - "{{ database_phpredisadmin__test_redis_image }}"
+
+    - name: 'Start the Redis servers'
+      containers.podman.podman_container:
+        name: "{{ item.name }}"
+        image: "{{ database_phpredisadmin__test_redis_image }}"
+        network: "{{ database_phpredisadmin__test_network.name }}"
+        ip: "{{ item.ip }}"
+        command: "{{ [ 'redis-server', '--requirepass', item.password ] if item.password else omit }}"
+        state: 'started'
+      loop: "{{ database_phpredisadmin__test_redis }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 'Wait for the Redis servers'
+      ansible.builtin.wait_for:
+        host: "{{ item.ip }}"
+        port: 6379
+        timeout: 120
+      loop: "{{ database_phpredisadmin__test_redis }}"
+      loop_control:
+        label: "{{ item.name }}"

@@ -1,32 +1,171 @@
 ---
 
-- name: 'Deploy phpRedisAdmin container'
-  tags: [ 'database_phpredisadmin' ]
+- name: 'Install phpRedisAdmin'
+  tags: [ 'database', 'database_phpredisadmin' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or phpredisadmin_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_phpredisadmin__container | length > 0
+        quiet: true
+
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - database_phpredisadmin__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpredisadmin__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_phpredisadmin__invalid: >-
+          {%- set errors = [] -%}
+          {%- set keys = database_phpredisadmin__keys -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('phpredisadmin_keys has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set unknown = keys.keys() | reject('in', database_phpredisadmin__keys_families) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('unknown entries in phpredisadmin_keys: ' ~ unknown | join(', ')
+                                        ~ ', allowed are ' ~ database_phpredisadmin__keys_families | join(', ')) -%}
+          {%-   endif -%}
+          {%-   for family in database_phpredisadmin__keys_families if family in keys -%}
+          {%-     set values = keys[family] -%}
+          {%-     if values is not sequence or values is string or values is mapping -%}
+          {%-       set _ = errors.append('phpredisadmin_keys.' ~ family ~ ' has to be a list') -%}
+          {%-     elif values | reject('integer') | list | length > 0 or values | select('integer') | select('lt', 1) | list | length > 0 -%}
+          {%-       set _ = errors.append('phpredisadmin_keys.' ~ family ~ ' contains invalid keys, allowed are numbers from 1: '
+                                          ~ (values | reject('integer') | map('string') | list
+                                             + values | select('integer') | select('lt', 1) | map('string') | list) | join(', ')) -%}
+          {%-     elif values | unique | list | length != values | length -%}
+          {%-       set _ = errors.append('phpredisadmin_keys.' ~ family ~ ' contains duplicate keys') -%}
+          {%-     elif values | sort | list != range(1, values | length + 1) | list -%}
+          {%-       set _ = errors.append('phpredisadmin_keys.' ~ family ~ ' has to start with 1 without gaps, phpRedisAdmin stops at the first missing server') -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_phpredisadmin__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpredisadmin__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_phpredisadmin__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_phpredisadmin__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('phpredisadmin_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('phpredisadmin_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of phpredisadmin_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_phpredisadmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpredisadmin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_phpredisadmin__secret_targets: "{{ database_phpredisadmin__secrets | map(attribute='target') | list }}"
+        database_phpredisadmin__environment_set: >-
+          {{ database_phpredisadmin__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        database_phpredisadmin__environment_missing: >-
+          {{ database_phpredisadmin__environment_required | reject('in', database_phpredisadmin__environment_set) | list }}
+        database_phpredisadmin__secrets_missing: >-
+          {{ database_phpredisadmin__secrets_required | reject('in', database_phpredisadmin__secret_targets) | list }}
+        database_phpredisadmin__secrets_in_environment: >-
+          {{ (database_phpredisadmin__secret_targets + database_phpredisadmin__secret_variables + database_phpredisadmin__secret_files.values() | list)
+             | select('in', database_phpredisadmin__environment.keys() | list) | unique | list }}
+        database_phpredisadmin__servers_missing: >-
+          {%- set missing = [] -%}
+          {%- for key in database_phpredisadmin__keys_valid.redis if ('REDIS_' ~ key ~ '_HOST') not in database_phpredisadmin__environment_set -%}
+          {%-   set _ = missing.append('REDIS_' ~ key ~ '_HOST') -%}
+          {%- endfor -%}
+          {{ missing }}
+        database_phpredisadmin__admin_user_set: "{{ 'ADMIN_USER' in database_phpredisadmin__environment_set }}"
+        database_phpredisadmin__admin_pass_set: "{{ 'ADMIN_PASS' in database_phpredisadmin__secret_targets }}"
+        database_phpredisadmin__allow_no_auth: "{{ database_phpredisadmin__environment.ALLOW_NO_AUTH | default('') }}"
+        database_phpredisadmin__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_phpredisadmin__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('phpRedisAdmin needs the environment variables ' ~ (database_phpredisadmin__environment_required | join(', ')) ~ ', missing or empty: ' ~ (database_phpredisadmin__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__keys_valid.redis | length == 0 -%}
+          {%-   set _ = errors.append('phpRedisAdmin needs a server, set phpredisadmin_keys.redis and REDIS_<n>_HOST in phpredisadmin_environment.') -%}
+          {%- elif database_phpredisadmin__servers_missing | length > 0 -%}
+          {%-   set _ = errors.append('phpRedisAdmin needs REDIS_<n>_HOST for every key of phpredisadmin_keys.redis, missing or empty: ' ~ (database_phpredisadmin__servers_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__admin_user_set | bool != database_phpredisadmin__admin_pass_set | bool -%}
+          {%-   set _ = errors.append('ADMIN_USER and the secret ADMIN_PASS have to be set together.') -%}
+          {%- elif not database_phpredisadmin__admin_user_set | bool and database_phpredisadmin__allow_no_auth != 'true' -%}
+          {%-   set _ = errors.append("phpRedisAdmin needs ADMIN_USER and the secret ADMIN_PASS, or ALLOW_NO_AUTH 'true'.") -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__allow_no_auth not in ['', 'true', 'false'] -%}
+          {%-   set _ = errors.append("ALLOW_NO_AUTH has to be 'true' or 'false'.") -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('phpRedisAdmin needs the secrets ' ~ (database_phpredisadmin__secrets_required | join(', ')) ~ ', missing: ' ~ (database_phpredisadmin__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in phpredisadmin_environment: ' ~ (database_phpredisadmin__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging phpredisadmin_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_phpredisadmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpredisadmin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_phpredisadmin__environment_unknown: >-
+          {{ (database_phpredisadmin__container.environment | default({})).keys() | reject('in', database_phpredisadmin__environment_allowed) | list }}
+        database_phpredisadmin__secrets_unknown: >-
+          {{ database_phpredisadmin__secrets | map(attribute='target')
+             | reject('in', database_phpredisadmin__secret_files.keys() | list + database_phpredisadmin__secrets_env) | list }}
+        database_phpredisadmin__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_phpredisadmin__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_phpredisadmin__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_phpredisadmin__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_phpredisadmin__environment_allowed) and the secrets ' ~ ((database_phpredisadmin__secret_files.keys() | list + database_phpredisadmin__secrets_env) | join(', ')) ~ ', options with keys in their names need the keys in phpredisadmin_keys.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'pra_admin_password'
-        data: "{{ database_phpredisadmin__admin_password }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_phpredisadmin__secrets }}"
+      register: 'database_phpredisadmin__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ database_phpredisadmin__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[database_phpredisadmin__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ database_phpredisadmin__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Install phpredisadmin container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ database_phpredisadmin__container.name }}"
         hostname: "{{ database_phpredisadmin__container.hostname }}"
@@ -37,13 +176,12 @@
         timezone: "{{ database_phpredisadmin__container.timezone }}"
         env: "{{ database_phpredisadmin__container.environment | default(omit) }}"
         etc_hosts: "{{ database_phpredisadmin__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_phpredisadmin__container.expose | default(omit) }}"
         label: "{{ database_phpredisadmin__container.labels | default(omit) }}"
         publish: "{{ database_phpredisadmin__container.publish | default(omit) }}"
-        expose: "{{ database_phpredisadmin__container.expose | default(omit) }}"
         secrets: "{{ database_phpredisadmin__container.secrets | default(omit) }}"
         volume: "{{ database_phpredisadmin__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
@@ -57,20 +195,28 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'database_phpredisadmin__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd_service:
         name: "{{ database_phpredisadmin__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if database_phpredisadmin__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        database_phpredisadmin__running: >-
+          {{ (ansible_facts.services[database_phpredisadmin__container.name + '.service'].state | default('')) == 'running' }}
+        database_phpredisadmin__restart: >-
+          {{ database_phpredisadmin__running | bool
+             and (database_phpredisadmin__secrets_result is changed
+                  or database_phpredisadmin__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
     - name: 'Enable autoupdate on container'
-      when: 'database_phpredisadmin__autoupdate_enabled'
-      include_role:
+      when: 'database_phpredisadmin__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ database_phpredisadmin__container.name }}"
         container_image: "{{ database_phpredisadmin__container.image }}"
+        container_schedule: "{{ database_phpredisadmin__autoupdate_schedule }}"
