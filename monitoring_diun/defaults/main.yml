@@ -15,19 +15,18 @@ monitoring_diun__labels: "{{ diun_labels }}"
 
 monitoring_diun__version: "{{ diun_version | default('latest') }}"
 
-monitoring_diun__publish: "{{ diun_publish | default([]) }}"
-monitoring_diun__volumes: "{{ diun_volumes | default([]) }}"
-
 # Watch the containers of the host with the docker provider through the podman socket
 monitoring_diun__provider_podman: "{{ diun_provider_podman | default(true) }}"
 
+monitoring_diun__container: "{{ monitoring_diun__podman_container_default | combine(diun_container | default({})) }}"
 monitoring_diun__environment: >-
   {{ monitoring_diun__environment_default
      | combine(monitoring_diun__provider_podman_environment if monitoring_diun__provider_podman | bool else {})
      | combine(diun_environment | default({})) }}
 monitoring_diun__secrets: "{{ diun_secrets | default([]) }}"
 
-monitoring_diun__container: "{{ monitoring_diun__podman_container_default | combine(diun_container | default({})) }}"
+# Keys that diun composes into the names of options, e.g. regopts: [ 'GHCR' ] allows DIUN_REGOPTS_GHCR_NAME
+monitoring_diun__keys: "{{ diun_keys | default({}) }}"
 
 monitoring_diun__autoupdate_enabled: "{{ diun_autoupdate_enabled | default(false) }}"
 monitoring_diun__autoupdate_schedule: "{{ diun_autoupdate_schedule }}"
@@ -58,8 +57,324 @@ monitoring_diun__provider_podman_environment:
 
 monitoring_diun__podman_socket: '/run/podman/podman.sock'
 
-# Variables carrying secrets match this pattern, they must be passed with diun_secrets
-monitoring_diun__secret_pattern: '(?i)(PASSWORD|TOKEN|SECRET|WEBHOOKURL)'
+# Options carrying secrets, they must be passed with diun_secrets
+monitoring_diun__secret_variables: "{{ monitoring_diun__secret_variables_options + monitoring_diun__secret_variables_keys }}"
+
+monitoring_diun__secret_variables_options:
+  - 'DIUN_METRICS_TOKEN'
+  - 'DIUN_NOTIF_AMQP_PASSWORD'
+  - 'DIUN_NOTIF_APPRISE_TOKEN'
+  - 'DIUN_NOTIF_DISCORD_WEBHOOKURL'
+  - 'DIUN_NOTIF_ELASTICSEARCH_PASSWORD'
+  - 'DIUN_NOTIF_GOTIFY_TOKEN'
+  - 'DIUN_NOTIF_MAIL_PASSWORD'
+  - 'DIUN_NOTIF_MATRIX_PASSWORD'
+  - 'DIUN_NOTIF_MQTT_PASSWORD'
+  - 'DIUN_NOTIF_NTFY_TOKEN'
+  - 'DIUN_NOTIF_PUSHOVER_TOKEN'
+  - 'DIUN_NOTIF_ROCKETCHAT_TOKEN'
+  - 'DIUN_NOTIF_SLACK_WEBHOOKURL'
+  - 'DIUN_NOTIF_TEAMS_WEBHOOKURL'
+  - 'DIUN_NOTIF_TELEGRAM_TOKEN'
+
+# The secrets are mounted as files, diun reads the option target from the file variable
+monitoring_diun__secret_files: "{{ monitoring_diun__secret_files_options | combine(monitoring_diun__secret_files_keys) }}"
+
+# Generated from the *File options of internal/model of diun v4.33.1
+monitoring_diun__secret_files_options:
+  DIUN_METRICS_TOKEN: 'DIUN_METRICS_TOKENFILE'
+  DIUN_NOTIF_AMQP_PASSWORD: 'DIUN_NOTIF_AMQP_PASSWORDFILE'
+  DIUN_NOTIF_AMQP_USERNAME: 'DIUN_NOTIF_AMQP_USERNAMEFILE'
+  DIUN_NOTIF_APPRISE_TOKEN: 'DIUN_NOTIF_APPRISE_TOKENFILE'
+  DIUN_NOTIF_DISCORD_WEBHOOKURL: 'DIUN_NOTIF_DISCORD_WEBHOOKURLFILE'
+  DIUN_NOTIF_ELASTICSEARCH_PASSWORD: 'DIUN_NOTIF_ELASTICSEARCH_PASSWORDFILE'
+  DIUN_NOTIF_ELASTICSEARCH_USERNAME: 'DIUN_NOTIF_ELASTICSEARCH_USERNAMEFILE'
+  DIUN_NOTIF_GOTIFY_TOKEN: 'DIUN_NOTIF_GOTIFY_TOKENFILE'
+  DIUN_NOTIF_MAIL_PASSWORD: 'DIUN_NOTIF_MAIL_PASSWORDFILE'
+  DIUN_NOTIF_MAIL_USERNAME: 'DIUN_NOTIF_MAIL_USERNAMEFILE'
+  DIUN_NOTIF_MATRIX_PASSWORD: 'DIUN_NOTIF_MATRIX_PASSWORDFILE'
+  DIUN_NOTIF_MATRIX_USER: 'DIUN_NOTIF_MATRIX_USERFILE'
+  DIUN_NOTIF_MQTT_PASSWORD: 'DIUN_NOTIF_MQTT_PASSWORDFILE'
+  DIUN_NOTIF_MQTT_USERNAME: 'DIUN_NOTIF_MQTT_USERNAMEFILE'
+  DIUN_NOTIF_NTFY_TOKEN: 'DIUN_NOTIF_NTFY_TOKENFILE'
+  DIUN_NOTIF_PUSHOVER_RECIPIENT: 'DIUN_NOTIF_PUSHOVER_RECIPIENTFILE'
+  DIUN_NOTIF_PUSHOVER_TOKEN: 'DIUN_NOTIF_PUSHOVER_TOKENFILE'
+  DIUN_NOTIF_ROCKETCHAT_TOKEN: 'DIUN_NOTIF_ROCKETCHAT_TOKENFILE'
+  DIUN_NOTIF_SLACK_WEBHOOKURL: 'DIUN_NOTIF_SLACK_WEBHOOKURLFILE'
+  DIUN_NOTIF_TEAMS_WEBHOOKURL: 'DIUN_NOTIF_TEAMS_WEBHOOKURLFILE'
+  DIUN_NOTIF_TELEGRAM_CHATIDS: 'DIUN_NOTIF_TELEGRAM_CHATIDSFILE'
+  DIUN_NOTIF_TELEGRAM_TOKEN: 'DIUN_NOTIF_TELEGRAM_TOKENFILE'
+  DIUN_WATCH_HEALTHCHECKS_UUID: 'DIUN_WATCH_HEALTHCHECKS_UUIDFILE'
+
+monitoring_diun__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+monitoring_diun__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if monitoring_diun__secrets is sequence and monitoring_diun__secrets is not string and monitoring_diun__secrets is not mapping -%}
+  {%-   for secret in monitoring_diun__secrets if secret is mapping and secret.name is defined and secret.target is defined -%}
+  {%-     if secret.target in monitoring_diun__secret_files -%}
+  {%-       set _ = environment.update({ monitoring_diun__secret_files[secret.target]: monitoring_diun__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-     endif -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+monitoring_diun__environment_allowed: "{{ monitoring_diun__environment_allowed_options + monitoring_diun__environment_allowed_keys }}"
+
+# The options of diun v4.33.1 (docs/config, docs/notif, docs/providers and docs/usage/command-line.md) as environment variables,
+# without the options carrying secrets (passwords, tokens, webhook URLs), update with new versions of diun
+monitoring_diun__environment_allowed_options:
+  - 'TZ'
+  - 'CONFIG'
+  - 'PROFILER_PATH'
+  - 'PROFILER'
+  - 'LOG_LEVEL'
+  - 'LOG_JSON'
+  - 'LOG_CALLER'
+  - 'LOG_NOCOLOR'
+  - 'GRPC_AUTHORITY'
+  - 'DIUN_DB'
+  - 'DIUN_DB_PATH'
+  - 'DIUN_DEFAULTS_EXCLUDETAGS'
+  - 'DIUN_DEFAULTS_INCLUDETAGS'
+  - 'DIUN_DEFAULTS_MAXTAGS'
+  - 'DIUN_DEFAULTS_NOTIFYON'
+  - 'DIUN_DEFAULTS_SORTTAGS'
+  - 'DIUN_DEFAULTS_WATCHREPO'
+  - 'DIUN_METRICS_ADDR'
+  - 'DIUN_METRICS_ENABLED'
+  - 'DIUN_METRICS_PATH'
+  - 'DIUN_NOTIF_AMQP_EXCHANGE'
+  - 'DIUN_NOTIF_AMQP_HOST'
+  - 'DIUN_NOTIF_AMQP_PORT'
+  - 'DIUN_NOTIF_AMQP_QUEUE'
+  - 'DIUN_NOTIF_AMQP_USERNAME'
+  - 'DIUN_NOTIF_APPRISE_ENDPOINT'
+  - 'DIUN_NOTIF_APPRISE_PROXY'
+  - 'DIUN_NOTIF_APPRISE_TAGS'
+  - 'DIUN_NOTIF_APPRISE_TEMPLATEBODY'
+  - 'DIUN_NOTIF_APPRISE_TEMPLATETITLE'
+  - 'DIUN_NOTIF_APPRISE_TIMEOUT'
+  - 'DIUN_NOTIF_APPRISE_TLSCACERTFILES'
+  - 'DIUN_NOTIF_APPRISE_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_APPRISE_URLS'
+  - 'DIUN_NOTIF_DISCORD_MENTIONS'
+  - 'DIUN_NOTIF_DISCORD_PROXY'
+  - 'DIUN_NOTIF_DISCORD_RENDEREMBEDS'
+  - 'DIUN_NOTIF_DISCORD_RENDERFIELDS'
+  - 'DIUN_NOTIF_DISCORD_TEMPLATEBODY'
+  - 'DIUN_NOTIF_DISCORD_TIMEOUT'
+  - 'DIUN_NOTIF_ELASTICSEARCH_ADDRESS'
+  - 'DIUN_NOTIF_ELASTICSEARCH_CLIENT'
+  - 'DIUN_NOTIF_ELASTICSEARCH_INDEX'
+  - 'DIUN_NOTIF_ELASTICSEARCH_PROXY'
+  - 'DIUN_NOTIF_ELASTICSEARCH_TIMEOUT'
+  - 'DIUN_NOTIF_ELASTICSEARCH_TLSCACERTFILES'
+  - 'DIUN_NOTIF_ELASTICSEARCH_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_ELASTICSEARCH_USERNAME'
+  - 'DIUN_NOTIF_GOTIFY_ENDPOINT'
+  - 'DIUN_NOTIF_GOTIFY_PRIORITY'
+  - 'DIUN_NOTIF_GOTIFY_PROXY'
+  - 'DIUN_NOTIF_GOTIFY_TEMPLATEBODY'
+  - 'DIUN_NOTIF_GOTIFY_TEMPLATETITLE'
+  - 'DIUN_NOTIF_GOTIFY_TIMEOUT'
+  - 'DIUN_NOTIF_GOTIFY_TLSCACERTFILES'
+  - 'DIUN_NOTIF_GOTIFY_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_MAIL_FROM'
+  - 'DIUN_NOTIF_MAIL_HOST'
+  - 'DIUN_NOTIF_MAIL_INSECURESKIPVERIFY'
+  - 'DIUN_NOTIF_MAIL_LOCALNAME'
+  - 'DIUN_NOTIF_MAIL_PORT'
+  - 'DIUN_NOTIF_MAIL_SSL'
+  - 'DIUN_NOTIF_MAIL_TEMPLATEBODY'
+  - 'DIUN_NOTIF_MAIL_TEMPLATETITLE'
+  - 'DIUN_NOTIF_MAIL_TO'
+  - 'DIUN_NOTIF_MAIL_USERNAME'
+  - 'DIUN_NOTIF_MATRIX_HOMESERVERURL'
+  - 'DIUN_NOTIF_MATRIX_MSGTYPE'
+  - 'DIUN_NOTIF_MATRIX_ROOMID'
+  - 'DIUN_NOTIF_MATRIX_TEMPLATEBODY'
+  - 'DIUN_NOTIF_MATRIX_USER'
+  - 'DIUN_NOTIF_MQTT_CLIENT'
+  - 'DIUN_NOTIF_MQTT_HOST'
+  - 'DIUN_NOTIF_MQTT_PORT'
+  - 'DIUN_NOTIF_MQTT_QOS'
+  - 'DIUN_NOTIF_MQTT_SCHEME'
+  - 'DIUN_NOTIF_MQTT_TOPIC'
+  - 'DIUN_NOTIF_MQTT_USERNAME'
+  - 'DIUN_NOTIF_NTFY_CLICK'
+  - 'DIUN_NOTIF_NTFY_ENDPOINT'
+  - 'DIUN_NOTIF_NTFY_ICON'
+  - 'DIUN_NOTIF_NTFY_PRIORITY'
+  - 'DIUN_NOTIF_NTFY_PROXY'
+  - 'DIUN_NOTIF_NTFY_TAGS'
+  - 'DIUN_NOTIF_NTFY_TEMPLATEBODY'
+  - 'DIUN_NOTIF_NTFY_TEMPLATETITLE'
+  - 'DIUN_NOTIF_NTFY_TIMEOUT'
+  - 'DIUN_NOTIF_NTFY_TLSCACERTFILES'
+  - 'DIUN_NOTIF_NTFY_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_NTFY_TOPIC'
+  - 'DIUN_NOTIF_PUSHOVER_PRIORITY'
+  - 'DIUN_NOTIF_PUSHOVER_PROXY'
+  - 'DIUN_NOTIF_PUSHOVER_RECIPIENT'
+  - 'DIUN_NOTIF_PUSHOVER_SOUND'
+  - 'DIUN_NOTIF_PUSHOVER_TEMPLATEBODY'
+  - 'DIUN_NOTIF_PUSHOVER_TEMPLATETITLE'
+  - 'DIUN_NOTIF_PUSHOVER_TIMEOUT'
+  - 'DIUN_NOTIF_ROCKETCHAT_CHANNEL'
+  - 'DIUN_NOTIF_ROCKETCHAT_ENDPOINT'
+  - 'DIUN_NOTIF_ROCKETCHAT_PROXY'
+  - 'DIUN_NOTIF_ROCKETCHAT_RENDERATTACHMENT'
+  - 'DIUN_NOTIF_ROCKETCHAT_TEMPLATEBODY'
+  - 'DIUN_NOTIF_ROCKETCHAT_TEMPLATETITLE'
+  - 'DIUN_NOTIF_ROCKETCHAT_TIMEOUT'
+  - 'DIUN_NOTIF_ROCKETCHAT_TLSCACERTFILES'
+  - 'DIUN_NOTIF_ROCKETCHAT_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_ROCKETCHAT_USERID'
+  - 'DIUN_NOTIF_SCRIPT_ARGS'
+  - 'DIUN_NOTIF_SCRIPT_CMD'
+  - 'DIUN_NOTIF_SCRIPT_DIR'
+  - 'DIUN_NOTIF_SIGNALREST_ENDPOINT'
+  - 'DIUN_NOTIF_SIGNALREST_NUMBER'
+  - 'DIUN_NOTIF_SIGNALREST_PROXY'
+  - 'DIUN_NOTIF_SIGNALREST_TEXTMODE'
+  - 'DIUN_NOTIF_SIGNALREST_TIMEOUT'
+  - 'DIUN_NOTIF_SIGNALREST_TLSCACERTFILES'
+  - 'DIUN_NOTIF_SIGNALREST_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_SLACK_PROXY'
+  - 'DIUN_NOTIF_SLACK_RENDERFIELDS'
+  - 'DIUN_NOTIF_SLACK_TEMPLATEBODY'
+  - 'DIUN_NOTIF_TEAMS_CARDTYPE'
+  - 'DIUN_NOTIF_TEAMS_PROXY'
+  - 'DIUN_NOTIF_TEAMS_RENDERFACTS'
+  - 'DIUN_NOTIF_TEAMS_TEMPLATEBODY'
+  - 'DIUN_NOTIF_TEAMS_TIMEOUT'
+  - 'DIUN_NOTIF_TEAMS_TLSCACERTFILES'
+  - 'DIUN_NOTIF_TEAMS_TLSSKIPVERIFY'
+  - 'DIUN_NOTIF_TELEGRAM_APIURL'
+  - 'DIUN_NOTIF_TELEGRAM_CHATIDS'
+  - 'DIUN_NOTIF_TELEGRAM_DISABLENOTIFICATION'
+  - 'DIUN_NOTIF_TELEGRAM_PROXY'
+  - 'DIUN_NOTIF_TELEGRAM_TEMPLATEBODY'
+  - 'DIUN_NOTIF_WEBHOOK_ENDPOINT'
+  - 'DIUN_NOTIF_WEBHOOK_METHOD'
+  - 'DIUN_NOTIF_WEBHOOK_PROXY'
+  - 'DIUN_NOTIF_WEBHOOK_TIMEOUT'
+  - 'DIUN_NOTIF_WEBHOOK_TLSCACERTFILES'
+  - 'DIUN_NOTIF_WEBHOOK_TLSSKIPVERIFY'
+  - 'DIUN_PROVIDERS_CONTAINERD'
+  - 'DIUN_PROVIDERS_CONTAINERD_ENDPOINT'
+  - 'DIUN_PROVIDERS_CONTAINERD_NAMESPACES'
+  - 'DIUN_PROVIDERS_CONTAINERD_WATCHBYDEFAULT'
+  - 'DIUN_PROVIDERS_CONTAINERD_WATCHSTOPPED'
+  - 'DIUN_PROVIDERS_DOCKER'
+  - 'DIUN_PROVIDERS_DOCKERFILE_PATTERNS'
+  - 'DIUN_PROVIDERS_DOCKER_APIVERSION'
+  - 'DIUN_PROVIDERS_DOCKER_ENDPOINT'
+  - 'DIUN_PROVIDERS_DOCKER_TLSCERTSPATH'
+  - 'DIUN_PROVIDERS_DOCKER_TLSVERIFY'
+  - 'DIUN_PROVIDERS_DOCKER_WATCHBYDEFAULT'
+  - 'DIUN_PROVIDERS_DOCKER_WATCHSTOPPED'
+  - 'DIUN_PROVIDERS_FILE_DIRECTORY'
+  - 'DIUN_PROVIDERS_FILE_FILENAME'
+  - 'DIUN_PROVIDERS_KUBERNETES'
+  - 'DIUN_PROVIDERS_KUBERNETES_CERTAUTHFILEPATH'
+  - 'DIUN_PROVIDERS_KUBERNETES_ENDPOINT'
+  - 'DIUN_PROVIDERS_KUBERNETES_NAMESPACES'
+  - 'DIUN_PROVIDERS_KUBERNETES_TLSINSECURE'
+  - 'DIUN_PROVIDERS_KUBERNETES_TOKENFILE'
+  - 'DIUN_PROVIDERS_KUBERNETES_WATCHBYDEFAULT'
+  - 'DIUN_PROVIDERS_NOMAD'
+  - 'DIUN_PROVIDERS_NOMAD_ENDPOINT'
+  - 'DIUN_PROVIDERS_NOMAD_NAMESPACE'
+  - 'DIUN_PROVIDERS_NOMAD_NAMESPACES'
+  - 'DIUN_PROVIDERS_NOMAD_REGION'
+  - 'DIUN_PROVIDERS_NOMAD_SECRETID'
+  - 'DIUN_PROVIDERS_NOMAD_TLSINSECURE'
+  - 'DIUN_PROVIDERS_NOMAD_WATCHBYDEFAULT'
+  - 'DIUN_PROVIDERS_SWARM'
+  - 'DIUN_PROVIDERS_SWARM_APIVERSION'
+  - 'DIUN_PROVIDERS_SWARM_ENDPOINT'
+  - 'DIUN_PROVIDERS_SWARM_TLSCERTSPATH'
+  - 'DIUN_PROVIDERS_SWARM_TLSVERIFY'
+  - 'DIUN_PROVIDERS_SWARM_WATCHBYDEFAULT'
+  - 'DIUN_WATCH_COMPAREDIGEST'
+  - 'DIUN_WATCH_FIRSTCHECKNOTIF'
+  - 'DIUN_WATCH_HEALTHCHECKS_BASEURL'
+  - 'DIUN_WATCH_HEALTHCHECKS_UUID'
+  - 'DIUN_WATCH_JITTER'
+  - 'DIUN_WATCH_RUNONSTARTUP'
+  - 'DIUN_WATCH_SCHEDULE'
+  - 'DIUN_WATCH_WORKERS'
+  # The file variables of the secrets, set by the role
+  - 'DIUN_METRICS_TOKENFILE'
+  - 'DIUN_NOTIF_AMQP_PASSWORDFILE'
+  - 'DIUN_NOTIF_AMQP_USERNAMEFILE'
+  - 'DIUN_NOTIF_APPRISE_TOKENFILE'
+  - 'DIUN_NOTIF_DISCORD_WEBHOOKURLFILE'
+  - 'DIUN_NOTIF_ELASTICSEARCH_PASSWORDFILE'
+  - 'DIUN_NOTIF_ELASTICSEARCH_USERNAMEFILE'
+  - 'DIUN_NOTIF_GOTIFY_TOKENFILE'
+  - 'DIUN_NOTIF_MAIL_PASSWORDFILE'
+  - 'DIUN_NOTIF_MAIL_USERNAMEFILE'
+  - 'DIUN_NOTIF_MATRIX_PASSWORDFILE'
+  - 'DIUN_NOTIF_MATRIX_USERFILE'
+  - 'DIUN_NOTIF_MQTT_PASSWORDFILE'
+  - 'DIUN_NOTIF_MQTT_USERNAMEFILE'
+  - 'DIUN_NOTIF_NTFY_TOKENFILE'
+  - 'DIUN_NOTIF_PUSHOVER_RECIPIENTFILE'
+  - 'DIUN_NOTIF_PUSHOVER_TOKENFILE'
+  - 'DIUN_NOTIF_ROCKETCHAT_TOKENFILE'
+  - 'DIUN_NOTIF_SLACK_WEBHOOKURLFILE'
+  - 'DIUN_NOTIF_TEAMS_WEBHOOKURLFILE'
+  - 'DIUN_NOTIF_TELEGRAM_CHATIDSFILE'
+  - 'DIUN_NOTIF_TELEGRAM_TOKENFILE'
+  - 'DIUN_WATCH_HEALTHCHECKS_UUIDFILE'
+
+# The keys of diun_keys, entries of the wrong type are left out, the validation reports them
+monitoring_diun__keys_valid: >-
+  {%- set keys = {} -%}
+  {%- for family in monitoring_diun__keys_families -%}
+  {%-   set values = monitoring_diun__keys[family] | default([]) if monitoring_diun__keys is mapping else [] -%}
+  {%-   set _ = keys.update({ family: (values | select('string') | list) if values is sequence and values is not string and values is not mapping else [] }) -%}
+  {%- endfor -%}
+  {{ keys }}
+
+monitoring_diun__keys_families: [ 'regopts', 'notif_webhook_headers', 'notif_signalrest_recipients', 'notif_signalrest_headers', 'defaults_metadata' ]
+
+# The options of the keys, the passwords of the registries are secrets
+monitoring_diun__environment_allowed_keys: >-
+  {%- set names = [] -%}
+  {%- for key in monitoring_diun__keys_valid.regopts -%}
+  {%-   for option in [ 'NAME', 'SELECTOR', 'USERNAME', 'TIMEOUT', 'INSECURETLS', 'USERNAMEFILE', 'PASSWORDFILE' ] -%}
+  {%-     set _ = names.append('DIUN_REGOPTS_' ~ key ~ '_' ~ option) -%}
+  {%-   endfor -%}
+  {%- endfor -%}
+  {%- for key in monitoring_diun__keys_valid.notif_webhook_headers -%}
+  {%-   set _ = names.append('DIUN_NOTIF_WEBHOOK_HEADERS_' ~ key) -%}
+  {%- endfor -%}
+  {%- for key in monitoring_diun__keys_valid.notif_signalrest_recipients -%}
+  {%-   set _ = names.append('DIUN_NOTIF_SIGNALREST_RECIPIENTS_' ~ key) -%}
+  {%- endfor -%}
+  {%- for key in monitoring_diun__keys_valid.notif_signalrest_headers -%}
+  {%-   set _ = names.append('DIUN_NOTIF_SIGNALREST_HEADERS_' ~ key) -%}
+  {%- endfor -%}
+  {%- for key in monitoring_diun__keys_valid.defaults_metadata -%}
+  {%-   set _ = names.append('DIUN_DEFAULTS_METADATA_' ~ key) -%}
+  {%- endfor -%}
+  {{ names }}
+
+monitoring_diun__secret_variables_keys: >-
+  {{ monitoring_diun__keys_valid.regopts | map('regex_replace', '^(.*)$', 'DIUN_REGOPTS_\1_PASSWORD') | list }}
+
+monitoring_diun__secret_files_keys: >-
+  {%- set files = {} -%}
+  {%- for key in monitoring_diun__keys_valid.regopts -%}
+  {%-   set _ = files.update({ 'DIUN_REGOPTS_' ~ key ~ '_USERNAME': 'DIUN_REGOPTS_' ~ key ~ '_USERNAMEFILE',
+                               'DIUN_REGOPTS_' ~ key ~ '_PASSWORD': 'DIUN_REGOPTS_' ~ key ~ '_PASSWORDFILE' }) -%}
+  {%- endfor -%}
+  {{ files }}
 
 monitoring_diun__podman_name: 'diun'
 monitoring_diun__podman_image: 'docker.io/crazymax/diun'
@@ -77,15 +392,15 @@ monitoring_diun__podman_container_default:
   ipv6: "{{ monitoring_diun__ipv6 | default(omit) }}"
   network: "{{ monitoring_diun__network }}"
   timezone: "{{ monitoring_diun__timezone }}"
-  environment: "{{ monitoring_diun__environment }}"
+  # Set with diun_environment and diun_secrets, merged over the default
+  environment: "{{ monitoring_diun__environment | combine(monitoring_diun__environment_secrets_files) }}"
   labels: "{{ monitoring_diun__labels | default(omit) }}"
-  publish: "{{ monitoring_diun__publish }}"
   secrets: >-
-    {{ (monitoring_diun__secrets | map(attribute='name') | zip(monitoring_diun__secrets | map(attribute='target'))
-        | map('join', ',type=env,target=') | list)
-      if (monitoring_diun__secrets | default([]) | length > 0)
+    {{ (monitoring_diun__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ monitoring_diun__secrets_dir ~ '/\1') | list)
+      if (monitoring_diun__secrets is sequence and monitoring_diun__secrets is not string and monitoring_diun__secrets | length > 0)
       else omit }}
+  # diun_container.volumes replaces the list completely
   volumes: >-
     {{ [monitoring_diun__podman_data_dir + ':/data']
-       + ([monitoring_diun__podman_socket + ':/var/run/docker.sock:ro'] if monitoring_diun__provider_podman | bool else [])
-       + monitoring_diun__volumes }}
+       + ([monitoring_diun__podman_socket + ':/var/run/docker.sock:ro'] if monitoring_diun__provider_podman | bool else []) }}

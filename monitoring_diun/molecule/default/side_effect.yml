@@ -6,7 +6,121 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    monitoring_diun__test_checked_files:
+      - '/etc/containers/systemd/diun.container'
+
   tasks:
+
+    - name: 'Set the role variables of the test'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_diun__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_diun__test_checked_files }}"
+      register: 'monitoring_diun__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_diun with diun_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_container: [ 'environment' ]
+        monitoring_diun__test_invalid:
+          message: 'diun_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_diun with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_secrets:
+          - name: 'diun_mail_password'
+            data: 'molecule-diun-secret'
+        monitoring_diun__test_invalid:
+          message: 'a secret without target'
+          search: '^diun_secrets entries need name, data and target$'
+
+    - name: 'Run monitoring_diun with the password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_environment: "{{ monitoring_diun__test_vars.diun_environment | combine({'DIUN_NOTIF_MAIL_PASSWORD': 'molecule'}) }}"
+        monitoring_diun__test_invalid:
+          message: 'the password in the environment'
+          search: 'must not be set in diun_environment:\s+DIUN_NOTIF_MAIL_PASSWORD\.'
+
+    - name: 'Run monitoring_diun with the file variable of the password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_environment: "{{ monitoring_diun__test_vars.diun_environment | combine({'DIUN_NOTIF_MAIL_PASSWORDFILE': '/run/secrets/diun_mail_password'}) }}"
+        monitoring_diun__test_invalid:
+          message: 'the file variable of the password in the environment'
+          search: 'must not be set in diun_environment:\s+DIUN_NOTIF_MAIL_PASSWORDFILE\.'
+
+    - name: 'Run monitoring_diun with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_environment: "{{ monitoring_diun__test_vars.diun_environment | combine({'DIUN_NOTIF_MAIL_SERVER': 'mail.example.test'}) }}"
+        monitoring_diun__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: DIUN_NOTIF_MAIL_SERVER\.'
+
+    - name: 'Run monitoring_diun with an unknown environment variable in diun_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_container:
+          environment:
+            FOO: 'bar'
+        monitoring_diun__test_invalid:
+          message: 'an unknown environment variable in diun_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run monitoring_diun with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_secrets: "{{ monitoring_diun__test_vars.diun_secrets + [{'name': 'diun_molecule_nomad', 'data': 'x', 'target': 'DIUN_PROVIDERS_NOMAD_SECRETID'}] }}"
+        monitoring_diun__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: DIUN_PROVIDERS_NOMAD_SECRETID\.'
+
+    - name: 'Run monitoring_diun with a registry option without its key in diun_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_environment: "{{ monitoring_diun__test_vars.diun_environment | combine({'DIUN_REGOPTS_OTHER_NAME': 'registry.example.test'}) }}"
+        monitoring_diun__test_invalid:
+          message: 'a registry option without its key'
+          search: 'Unknown environment variables: DIUN_REGOPTS_OTHER_NAME\.'
+
+    - name: 'Run monitoring_diun with the registry password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_environment: "{{ monitoring_diun__test_vars.diun_environment | combine({'DIUN_REGOPTS_MOLECULE_PASSWORD': 'molecule'}) }}"
+        monitoring_diun__test_invalid:
+          message: 'the registry password in the environment'
+          search: 'must not be set in diun_environment:\s+DIUN_REGOPTS_MOLECULE_PASSWORD\.'
+
+    - name: 'Run monitoring_diun with an invalid key in diun_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_keys:
+          regopts: [ 'MOLECULE_REGISTRY' ]
+        monitoring_diun__test_invalid:
+          message: 'an invalid key in diun_keys'
+          search: '^diun_keys.regopts contains invalid keys, allowed are uppercase letters and digits: MOLECULE_REGISTRY$'
+
+    - name: 'Run monitoring_diun with an unknown entry in diun_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_keys:
+          regopt: [ 'MOLECULE' ]
+        monitoring_diun__test_invalid:
+          message: 'an unknown entry in diun_keys'
+          search: '^unknown entries in diun_keys: regopt,'
 
     - name: 'Read the main PID of Diun before the change'
       ansible.builtin.command: 'systemctl show --property=MainPID --value diun'
@@ -15,13 +129,7 @@
 
     - name: 'Set the role variables with a changed environment'
       ansible.builtin.set_fact:
-        "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ monitoring_diun__test_vars
-           | combine({'diun_environment': {'DIUN_WATCH_WORKERS': monitoring_diun__test_side_effect_workers}}, recursive=true)
-           | dict2items }}
-      loop_control:
-        label: "{{ item.key }}"
+        diun_environment: "{{ monitoring_diun__test_vars.diun_environment | combine({'DIUN_WATCH_WORKERS': monitoring_diun__test_side_effect_workers}) }}"
 
     - name: 'Run monitoring_diun with changed environment'
       ansible.builtin.include_role:

@@ -1,26 +1,120 @@
 ---
 
 - name: 'Install Diun'
-  tags: [ 'monitoring_diun' ]
+  tags: [ 'monitoring', 'monitoring_diun' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or diun_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_diun__container | length > 0
+        quiet: true
+
+    # The keys become part of the names of environment variables, the keys of regopts without '_'
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_diun__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_diun__invalid: >-
+          {%- set errors = [] -%}
+          {%- set keys = monitoring_diun__keys -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('diun_keys has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set unknown = keys.keys() | reject('in', monitoring_diun__keys_families) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('unknown entries in diun_keys: ' ~ unknown | join(', ')
+                                        ~ ', allowed are ' ~ monitoring_diun__keys_families | join(', ')) -%}
+          {%-   endif -%}
+          {%-   for family in monitoring_diun__keys_families if family in keys -%}
+          {%-     set values = keys[family] -%}
+          {%-     set pattern = '^[A-Z0-9]+$' if family == 'regopts' else '^[A-Z0-9_]+$' -%}
+          {%-     if values is not sequence or values is string or values is mapping -%}
+          {%-       set _ = errors.append('diun_keys.' ~ family ~ ' has to be a list') -%}
+          {%-     elif values | reject('string') | list | length > 0 or values | reject('match', pattern) | list | length > 0 -%}
+          {%-       set _ = errors.append('diun_keys.' ~ family ~ ' contains invalid keys, allowed are '
+                                          ~ ('uppercase letters and digits' if family == 'regopts' else 'uppercase letters, digits and _')
+                                          ~ ': ' ~ (values | select('string') | reject('match', pattern) | list
+                                                    + values | reject('string') | map('string') | list) | join(', ')) -%}
+          {%-     elif values | unique | list | length != values | length -%}
+          {%-       set _ = errors.append('diun_keys.' ~ family ~ ' contains duplicate keys') -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_diun__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_diun__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_diun__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('diun_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('diun_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of diun_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - monitoring_diun__secrets | rejectattr('name', 'defined') | list | length == 0
-          - monitoring_diun__secrets | rejectattr('data', 'defined') | list | length == 0
-          - monitoring_diun__secrets | rejectattr('target', 'defined') | list | length == 0
           - monitoring_diun__secrets_in_environment | length == 0
         fail_msg: >-
-          Every secret needs name, data and target. Secrets must be passed with diun_secrets, not in diun_environment:
+          Secrets and their file variables must not be set in diun_environment:
           {{ monitoring_diun__secrets_in_environment | join(', ') | default('none', true) }}.
         quiet: true
       vars:
         monitoring_diun__secrets_in_environment: >-
-          {{ (monitoring_diun__environment.keys() | select('search', monitoring_diun__secret_pattern) | list
-              + monitoring_diun__secrets | selectattr('target', 'defined') | map(attribute='target')
-                | select('in', monitoring_diun__environment.keys() | list) | list)
-             | unique | list }}
+          {{ (monitoring_diun__secrets | map(attribute='target') | list
+              + monitoring_diun__secret_variables + monitoring_diun__secret_files.values() | list)
+             | select('in', monitoring_diun__environment.keys() | list) | unique | list }}
+
+    # Checks the environment and the secrets of the container after merging diun_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_diun__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_diun__environment_unknown: >-
+          {{ (monitoring_diun__container.environment | default({})).keys()
+             | reject('in', monitoring_diun__environment_allowed) | list }}
+        monitoring_diun__secrets_unknown: >-
+          {{ monitoring_diun__secrets | map(attribute='target')
+             | reject('in', monitoring_diun__secret_files.keys() | list) | list }}
+        monitoring_diun__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_diun__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_diun__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_diun__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (monitoring_diun__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the options of diun in monitoring_diun__environment_allowed and the targets in monitoring_diun__secret_files, options with keys in their names need the keys in diun_keys.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
