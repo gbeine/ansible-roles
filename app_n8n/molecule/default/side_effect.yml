@@ -1,0 +1,165 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_n8n__test_case: "{{ app_n8n__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_n8n__test_vars: "{{ app_n8n__test_case.role_vars }}"
+    app_n8n__test_environment: "{{ app_n8n__test_vars.n8n_environment | default({}) }}"
+    app_n8n__test_secrets: "{{ app_n8n__test_vars.n8n_secrets | default([]) }}"
+    app_n8n__test_checked_files:
+      - "{{ app_n8n__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_n8n__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_n8n__test_checked_files }}"
+      register: 'app_n8n__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_n8n with n8n_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_container: [ 'environment' ]
+        app_n8n__test_invalid:
+          message: 'n8n_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_n8n with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_secrets: [ { name: 'n8n_db_password', data: 'x' } ]
+        app_n8n__test_invalid:
+          message: 'a secret without target'
+          search: '^n8n_secrets entries need name, data and target$'
+
+    - name: 'Run app_n8n with the database password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'DB_POSTGRESDB_PASSWORD': 'molecule' }) }}"
+        app_n8n__test_invalid:
+          message: 'the database password in the environment'
+          search: 'Secrets and their file variables must not be set in n8n_environment: DB_POSTGRESDB_PASSWORD\.$'
+
+    - name: 'Run app_n8n with PostgreSQL without the database password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'DB_TYPE': 'postgresdb', 'DB_POSTGRESDB_HOST': '10.89.0.20', 'DB_POSTGRESDB_DATABASE': 'n8n', 'DB_POSTGRESDB_USER': 'n8n' }) }}"
+        n8n_secrets: "{{ app_n8n__test_secrets | rejectattr('target', 'eq', 'DB_POSTGRESDB_PASSWORD') | list }}"
+        app_n8n__test_invalid:
+          message: 'PostgreSQL without the database password'
+          search: '^DB_TYPE postgresdb needs DB_POSTGRESDB_HOST, DB_POSTGRESDB_DATABASE, DB_POSTGRESDB_USER and the secret DB_POSTGRESDB_PASSWORD, missing: DB_POSTGRESDB_PASSWORD\.$'
+
+    - name: 'Run app_n8n with an invalid database type (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'DB_TYPE': 'mysqldb' }) }}"
+        app_n8n__test_invalid:
+          message: 'an invalid database type'
+          search: '^DB_TYPE has to be one of sqlite, postgresdb, got mysqldb\.$'
+
+    - name: 'Run app_n8n with a variable of the owner in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'N8N_INSTANCE_OWNER_EMAIL': 'owner@example.org' }) }}"
+        app_n8n__test_invalid:
+          message: 'a variable of the owner in the environment'
+          search: '^The owner is set with n8n_owner, not with N8N_INSTANCE_OWNER_EMAIL\.$'
+
+    - name: 'Run app_n8n with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'N8N_DIAGNOSTICS_ENABLED': 'no' }) }}"
+        app_n8n__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: N8N_DIAGNOSTICS_ENABLED\.$'
+
+    - name: 'Run app_n8n with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'N8N_HOST': 'n8n\nexample.org' }) }}"
+        app_n8n__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: N8N_HOST\.$'
+
+    - name: 'Run app_n8n with an owner without email (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_owner: { first_name: 'Molecule', password: 'Molecule-Owner-1' }
+        app_n8n__test_invalid:
+          message: 'an owner without email'
+          search: '^n8n_owner needs a valid email\.$'
+
+    - name: 'Run app_n8n with a weak password of the owner (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_owner: { email: 'owner@example.org', password: 'molecule' }
+        app_n8n__test_invalid:
+          message: 'a weak password of the owner'
+          search: '^The password of n8n_owner needs 8 to 64 characters with at least one digit and one uppercase letter'
+
+    - name: 'Run app_n8n with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_environment: "{{ app_n8n__test_environment | combine({ 'N8N_HOSTNAME': 'n8n.example.org' }) }}"
+        app_n8n__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: N8N_HOSTNAME\.'
+
+    - name: 'Run app_n8n with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        n8n_secrets: "{{ app_n8n__test_secrets + [ { 'name': 'n8n_unknown', 'data': 'molecule', 'target': 'N8N_UNKNOWN_SECRET' } ] }}"
+        app_n8n__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: N8N_UNKNOWN_SECRET\.'
+
+    - name: 'Run app_n8n with the changed password of the owner'
+      when: app_n8n__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'n8n' ]
+          register: 'app_n8n__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed password of the owner'
+          ansible.builtin.set_fact:
+            n8n_owner: "{{ app_n8n__test_owner | combine(app_n8n__test_case.side_effect.owner) }}"
+
+        - name: 'Run app_n8n with the changed password of the owner'
+          ansible.builtin.include_role:
+            name: 'app_n8n'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'n8n' ]
+          register: 'app_n8n__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed secret of the owner and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_n8n__owner_result is changed
+              - app_n8n__quadlet_result is not changed
+              - app_n8n__test_started_after.stdout | int > app_n8n__test_started_before.stdout | int
+            fail_msg: >-
+              owner secret changed: {{ app_n8n__owner_result is changed }}, quadlet changed: {{ app_n8n__quadlet_result is changed }},
+              start before {{ app_n8n__test_started_before.stdout }}, after {{ app_n8n__test_started_after.stdout }}

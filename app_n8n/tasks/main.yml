@@ -1,33 +1,202 @@
 ---
 
-- name: 'Deploy n8n container'
-  tags: [ 'app_n8n' ]
+- name: 'Deploy n8n'
+  tags: [ 'app', 'app_n8n' ]
   block:
 
-    - name: 'Create n8n directories'
+    # A failing template in the variables (e.g. an unknown filter or n8n_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_n8n__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_n8n__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_n8n__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_n8n__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('n8n_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('n8n_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of n8n_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # With DB_TYPE postgresdb n8n needs the host, the database, the user and the password of PostgreSQL
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_n8n__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_n8n__set: "{{ app_n8n__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_n8n__secret_targets: "{{ app_n8n__secrets | map(attribute='target') | list }}"
+        app_n8n__database_missing: >-
+          {{ (app_n8n__environment_postgres | reject('in', app_n8n__set) | list)
+             + ([] if 'DB_POSTGRESDB_PASSWORD' in app_n8n__secret_targets else [ 'DB_POSTGRESDB_PASSWORD' ]) }}
+        app_n8n__managed_set: "{{ app_n8n__environment_managed | select('in', app_n8n__environment.keys() | list) | list }}"
+        app_n8n__secrets_in_environment: >-
+          {{ (app_n8n__secret_targets + app_n8n__secret_variables + app_n8n__secret_files.values() | list)
+             | select('in', app_n8n__environment.keys() | list) | unique | list }}
+        app_n8n__errors: >-
+          {%- set errors = [] -%}
+          {%- set database = app_n8n__environment.DB_TYPE | default('sqlite', true) | string -%}
+          {%- if database not in app_n8n__database_types -%}
+          {%-   set _ = errors.append('DB_TYPE has to be one of ' ~ (app_n8n__database_types | join(', ')) ~ ', got ' ~ database ~ '.') -%}
+          {%- elif database == 'postgresdb' and app_n8n__database_missing | length > 0 -%}
+          {%-   set _ = errors.append('DB_TYPE postgresdb needs ' ~ (app_n8n__environment_postgres | join(', ')) ~ ' and the secret DB_POSTGRESDB_PASSWORD, missing: ' ~ (app_n8n__database_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_n8n__managed_set | length > 0 -%}
+          {%-   set _ = errors.append('The owner is set with n8n_owner, not with ' ~ (app_n8n__managed_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_n8n__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in n8n_environment: ' ~ (app_n8n__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # n8n creates or updates the owner from these values on every start
+    - name: 'Validate the owner'
+      when: 'app_n8n__owner | length > 0 or app_n8n__owner is not mapping'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_n8n__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_n8n__errors: >-
+          {%- set errors = [] -%}
+          {%- set owner = app_n8n__owner -%}
+          {%- if owner is not mapping -%}
+          {%-   set _ = errors.append('n8n_owner has to be a dictionary with email, first_name, last_name and password.') -%}
+          {%- else -%}
+          {%-   set unknown = owner.keys() | reject('in', [ 'email', 'first_name', 'last_name', 'password' ]) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in n8n_owner: ' ~ (unknown | join(', ')) ~ ', allowed are email, first_name, last_name and password.') -%}
+          {%-   endif -%}
+          {%-   if (owner.email | default('') | string) is not match(app_n8n__owner_email_pattern) -%}
+          {%-     set _ = errors.append('n8n_owner needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if (owner.password | default('') | string) is not match(app_n8n__owner_password_pattern) -%}
+          {%-     set _ = errors.append('The password of n8n_owner needs 8 to 64 characters with at least one digit and one uppercase letter, like n8n requires.') -%}
+          {%-   endif -%}
+          {%-   for key in [ 'email', 'first_name', 'last_name' ] if owner[key] is defined and (owner[key] | string ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('n8n_owner.' ~ key ~ ' must not contain line breaks.') -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # n8n reads the booleans of @Env only as true and false
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_n8n__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_n8n__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_n8n__environment.items() if value is not none -%}
+          {%-   if key in app_n8n__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging n8n_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_n8n__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_n8n__environment_unknown: >-
+          {{ (app_n8n__container.environment | default({})).keys() | reject('in', app_n8n__environment_allowed) | list }}
+        app_n8n__secrets_unknown: >-
+          {{ app_n8n__secrets | map(attribute='target') | reject('in', app_n8n__secret_variables) | list }}
+        app_n8n__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_n8n__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_n8n__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_n8n__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_n8n__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of n8n (app_n8n__environment_allowed) and the secrets ' ~ (app_n8n__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Install the packages for the hash of the password of the owner'
+      when: 'app_n8n__owner | length > 0'
+      ansible.builtin.apt:
+        pkg: "{{ app_n8n__packages }}"
+        install_recommends: false
+        cache_valid_time: 3600
+
+    # n8n runs as the user node of the image
+    - name: 'Create the directories of n8n'
       ansible.builtin.file:
-        dest: "{{ item }}"
-        state: 'directory'
+        path: "{{ item }}"
         owner: "{{ app_n8n__uid }}"
-      with_items:
-        - "{{ app_n8n__data_dir }}"
+        group: "{{ app_n8n__gid }}"
+        mode: '0700'
+        state: 'directory'
+      loop:
+        - "{{ app_n8n__home }}"
+        - "{{ app_n8n__home }}/data"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_n8n__secrets }}"
+      register: 'app_n8n__secrets_result'
+
+    # The password is an option with no_log, the hash is passed to podman on stdin
+    - name: 'Create the secret of the password of the owner'
+      when: 'app_n8n__owner | length > 0'
+      app_n8n_owner_secret:
+        name: "{{ app_n8n__owner_secret }}"
+        email: "{{ app_n8n__owner.email }}"
+        password: "{{ app_n8n__owner.password | string }}"
+      register: 'app_n8n__owner_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_n8n__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_n8n__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull n8n image'
-      containers.podman.podman_image:
-        name: "{{ app_n8n__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Create podman container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_n8n__container.name }}"
         hostname: "{{ app_n8n__container.hostname }}"
@@ -35,13 +204,14 @@
         ip: "{{ app_n8n__container.ip }}"
         ip6: "{{ app_n8n__container.ipv6 | default(omit) }}"
         network: "{{ app_n8n__container.network }}"
+        timezone: "{{ app_n8n__container.timezone }}"
+        command: "{{ app_n8n__container.command | default(omit) }}"
         env: "{{ app_n8n__container.environment | default(omit) }}"
-        etc_hosts: "{{ app_n8n__hosts | default(omit) }}"
+        etc_hosts: "{{ app_n8n__container.etc_hosts | default(omit) }}"
         expose: "{{ app_n8n__container.expose | default(omit) }}"
         label: "{{ app_n8n__container.labels | default(omit) }}"
         publish: "{{ app_n8n__container.publish | default(omit) }}"
         secrets: "{{ app_n8n__container.secrets | default(omit) }}"
-        timezone: "{{ app_n8n__container.timezone }}"
         volume: "{{ app_n8n__container.volumes | default(omit) }}"
         quadlet_options: |
           [Install]
@@ -50,17 +220,56 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if app_n8n__container.requires is defined %}
+          Requires={{ app_n8n__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_n8n__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_n8n__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_n8n__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_n8n__running: >-
+          {{ (ansible_facts.services[app_n8n__container.name + '.service'].state | default('')) == 'running' }}
+        app_n8n__restart: >-
+          {{ app_n8n__running | bool
+             and (app_n8n__secrets_result is changed or app_n8n__owner_result is changed or app_n8n__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
+
+    # n8n migrates the database and applies the owner on every start
+    - name: 'Wait for n8n'
+      ansible.builtin.uri:
+        url: "http://{{ app_n8n__ip }}:{{ app_n8n__port }}/healthz"
+      register: 'app_n8n__ready'
+      until: app_n8n__ready.status | default(-1) == 200
+      retries: 90
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of n8n'
+      when:
+        - not ansible_check_mode
+        - app_n8n__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_n8n__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_n8n__journal'
+      changed_when: false
+
+    - name: 'Assert that n8n answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__journal is skipped
+        fail_msg: "{{ app_n8n__journal.stdout_lines | default([]) }}"
+        quiet: true
 
     - name: 'Enable autoupdate on container'
       when: 'app_n8n__autoupdate_enabled | bool'

@@ -1,0 +1,124 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_n8n__test_case: "{{ app_n8n__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_n8n__expect: "{{ app_n8n__test_case.expect }}"
+    app_n8n__test_url: "http://{{ app_n8n__expect.ip }}:5678"
+    # The secrets of the test case, they must not be part of the unit or the environment
+    app_n8n__test_plain: >-
+      {{ (app_n8n__test_case.role_vars.n8n_secrets | default([])) | map(attribute='data') | list
+         + ([ app_n8n__test_owner.password, app_n8n__expect.owner.password ] if app_n8n__expect.owner is not none else []) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_n8n__test_quadlet_path }}"
+      register: 'app_n8n__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_n8n__test_image) in app_n8n__test_quadlet_lines
+          - ('IP=' + app_n8n__expect.ip) in app_n8n__test_quadlet_lines
+          - app_n8n__expect.ip6 is none or ('IP6=' + app_n8n__expect.ip6) in app_n8n__test_quadlet_lines
+          - app_n8n__expect.ip6 is not none or app_n8n__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_n8n__expect.quadlet | reject('in', app_n8n__test_quadlet_lines) | list | length == 0
+          - app_n8n__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_n8n__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_n8n__test_plain | select('in', app_n8n__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_n8n__test_quadlet.content | b64decode }}"
+      vars:
+        app_n8n__test_quadlet_lines: "{{ (app_n8n__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the n8n service'
+      ansible.builtin.command: 'systemctl is-active n8n'
+      register: 'app_n8n__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the n8n container'
+      ansible.builtin.command: 'podman inspect n8n'
+      register: 'app_n8n__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__test_service.stdout == 'active'
+          - app_n8n__test_net.IPAddress == app_n8n__expect.ip
+          - app_n8n__expect.ip6 is none or app_n8n__test_net.GlobalIPv6Address == app_n8n__expect.ip6
+          - app_n8n__expect.env | reject('in', app_n8n__test_env) | list | length == 0
+          - app_n8n__test_plain | select('in', app_n8n__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_n8n__test_service.stdout }},
+          IPv4 {{ app_n8n__test_net.IPAddress }}, IPv6 {{ app_n8n__test_net.GlobalIPv6Address }},
+          environment {{ app_n8n__test_env | join(', ') }}
+      vars:
+        app_n8n__test_container: "{{ (app_n8n__test_inspect.stdout | from_json)[0] }}"
+        app_n8n__test_net: "{{ app_n8n__test_container.NetworkSettings.Networks[app_n8n__test_case.role_vars.n8n_network] }}"
+        app_n8n__test_env: "{{ app_n8n__test_container.Config.Env }}"
+
+    - name: 'Read the health of n8n'
+      ansible.builtin.uri:
+        url: "{{ app_n8n__test_url }}/healthz"
+        return_content: true
+      register: 'app_n8n__test_health'
+
+    - name: 'Read the settings of n8n'
+      ansible.builtin.uri:
+        url: "{{ app_n8n__test_url }}/rest/settings"
+        return_content: true
+      register: 'app_n8n__test_settings'
+
+    - name: 'Log in as the owner'
+      when: app_n8n__expect.owner is not none
+      ansible.builtin.uri:
+        url: "{{ app_n8n__test_url }}/rest/login"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          emailOrLdapLoginId: "{{ app_n8n__expect.owner.email }}"
+          password: "{{ item.password }}"
+        status_code: [ 200, 401 ]
+      loop:
+        - { password: "{{ app_n8n__expect.owner.password | default('') }}", allowed: true }
+        - { password: "{{ app_n8n__expect.owner.former_password | default('') }}", allowed: false }
+      loop_control:
+        label: "{{ 'password' if item.allowed else 'former password' }}"
+      register: 'app_n8n__test_login'
+      no_log: true
+
+    - name: 'Assert the health, the setup of the owner and the login'
+      ansible.builtin.assert:
+        that:
+          - app_n8n__test_health.json.status == 'ok'
+          - app_n8n__test_settings.json.data.userManagement.showSetupOnFirstLoad == (app_n8n__expect.owner is none)
+          - app_n8n__expect.owner is none or app_n8n__test_login.results | map(attribute='status') | list == [ 200, 401 ]
+        fail_msg: >-
+          health {{ app_n8n__test_health.json | default({}) | to_json }},
+          setup on first load {{ app_n8n__test_settings.json.data.userManagement.showSetupOnFirstLoad | default('') }},
+          logins {{ app_n8n__test_login.results | default([]) | map(attribute='status', default='') | list }}
+
+    - name: 'Read the tables of n8n in PostgreSQL'
+      when: app_n8n__expect.postgres
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ app_n8n__test_database.name }}", 'psql', '-U', "{{ app_n8n__test_database.user }}",
+                '-d', "{{ app_n8n__test_database.database }}", '-tAc', "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'" ]
+      register: 'app_n8n__test_tables'
+      changed_when: false
+
+    - name: 'Assert the tables of n8n in PostgreSQL'
+      when: app_n8n__expect.postgres
+      ansible.builtin.assert:
+        that:
+          - "'user' in app_n8n__test_tables.stdout_lines"
+          - "'workflow_entity' in app_n8n__test_tables.stdout_lines"
+        fail_msg: "{{ app_n8n__test_tables.stdout_lines }}"

@@ -1,0 +1,48 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_n8n__test_network }}"
+    podman_default_network: "{{ app_n8n__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_n8n__test_case: "{{ app_n8n__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_n8n__test_postgres: "{{ (app_n8n__test_case.role_vars.n8n_environment | default({})).DB_TYPE | default('') == 'postgresdb' }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ app_n8n__test_image }}"
+
+    - name: 'Start PostgreSQL for n8n'
+      when: 'app_n8n__test_postgres | bool'
+      block:
+
+        - name: 'Start the database'
+          containers.podman.podman_container:
+            name: "{{ app_n8n__test_database.name }}"
+            image: "{{ app_n8n__test_database.image }}"
+            network: "{{ app_n8n__test_network.name }}"
+            ip: "{{ app_n8n__test_database.ip }}"
+            env:
+              POSTGRES_DB: "{{ app_n8n__test_database.database }}"
+              POSTGRES_USER: "{{ app_n8n__test_database.user }}"
+              POSTGRES_PASSWORD: "{{ app_n8n__test_database.password }}"
+            state: 'started'
+
+        - name: 'Wait for the database'
+          ansible.builtin.wait_for:
+            host: "{{ app_n8n__test_database.ip }}"
+            port: 5432
+            timeout: 120

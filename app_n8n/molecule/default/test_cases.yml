@@ -1,0 +1,99 @@
+---
+# Network created by container_podman in prepare.yml
+app_n8n__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_n8n__test_image: 'docker.io/n8nio/n8n:latest'
+app_n8n__test_quadlet_path: '/etc/containers/systemd/n8n.container'
+
+# Database started by prepare.yml on molecule-n8n, test credentials only
+app_n8n__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  database: 'n8n'
+  user: 'n8n'
+  password: 'molecule-db-password'
+
+app_n8n__test_owner:
+  email: 'owner@example.org'
+  first_name: 'Molecule'
+  last_name: 'Owner'
+  password: 'Molecule-Owner-1'
+
+app_n8n__test_cases:
+
+  # Only the mandatory variables, sqlite, the owner is set up in the browser
+  - name: 'molecule-n8n-default'
+    role_vars:
+      n8n_home: '/opt/n8n'
+      n8n_ip: '10.89.0.90'
+      n8n_network: 'podman-molecule'
+      n8n_hostname: 'n8n-default'
+      n8n_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/n8n/data:/home/node/.n8n'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'GENERIC_TIMEZONE=Europe/Berlin'
+        - 'N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true'
+      owner: ~
+      postgres: false
+
+  # IPv6, labels, PostgreSQL, the encryption key and the owner
+  - name: 'molecule-n8n'
+    role_vars:
+      n8n_home: '/opt/n8n'
+      n8n_ip: '10.89.0.91'
+      n8n_ipv6: 'fd00:89::91'
+      n8n_network: 'podman-molecule'
+      n8n_hostname: 'n8n-molecule'
+      n8n_timezone: 'Europe/Berlin'
+      n8n_labels:
+        traefik.enable: 'false'
+      n8n_environment:
+        N8N_HOST: 'n8n.example.org'
+        N8N_DIAGNOSTICS_ENABLED: false
+        DB_TYPE: 'postgresdb'
+        DB_POSTGRESDB_HOST: '10.89.0.20'
+        DB_POSTGRESDB_DATABASE: 'n8n'
+        DB_POSTGRESDB_USER: 'n8n'
+      n8n_secrets:
+        - name: 'n8n_db_password'
+          data: 'molecule-db-password'
+          target: 'DB_POSTGRESDB_PASSWORD'
+        - name: 'n8n_encryption_key'
+          data: 'molecule-encryption-key'
+          target: 'N8N_ENCRYPTION_KEY'
+      n8n_owner: "{{ app_n8n__test_owner }}"
+    # The password of the owner changes, the secret changes and n8n has to restart
+    side_effect:
+      owner:
+        password: 'Molecule-Changed-2'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/n8n/data:/home/node/.n8n'
+        - 'Label=traefik.enable=false'
+        - 'Secret=n8n_db_password,type=mount,target=/run/secrets/n8n_db_password'
+        - 'Secret=n8n_owner_password_hash,type=mount,target=/run/secrets/n8n_owner_password_hash'
+      env:
+        - 'N8N_DIAGNOSTICS_ENABLED=false'
+        - 'DB_TYPE=postgresdb'
+        - 'DB_POSTGRESDB_PASSWORD_FILE=/run/secrets/n8n_db_password'
+        - 'N8N_ENCRYPTION_KEY_FILE=/run/secrets/n8n_encryption_key'
+        - 'N8N_INSTANCE_OWNER_MANAGED_BY_ENV=true'
+        - 'N8N_INSTANCE_OWNER_EMAIL=owner@example.org'
+        - 'N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE=/run/secrets/n8n_owner_password_hash'
+      owner: { email: 'owner@example.org', password: 'Molecule-Changed-2', former_password: 'Molecule-Owner-1' }
+      postgres: true

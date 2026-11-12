@@ -7,4 +7,4 @@ container_link: https://hub.docker.com/r/n8nio/n8n
 documentation_link: https://docs.n8n.io/
 ---
 
-Installs and configures n8n as a podman quadlet.
+Installs and configures n8n as a podman quadlet, including its owner.
