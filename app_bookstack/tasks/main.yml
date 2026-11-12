@@ -39,16 +39,9 @@
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - app_bookstack__environment_missing | length == 0
-          - app_bookstack__secrets_missing | length == 0
-          - app_bookstack__secrets_in_environment | length == 0
-        fail_msg: >-
-          BookStack needs the environment variables {{ app_bookstack__environment_required | join(', ') }},
-          missing or empty: {{ app_bookstack__environment_missing | join(', ') | default('none', true) }}.
-          BookStack needs the secrets {{ app_bookstack__secrets_required | join(', ') }},
-          missing: {{ app_bookstack__secrets_missing | join(', ') | default('none', true) }}.
-          Secrets and their file variables must not be set in bookstack_environment:
-          {{ app_bookstack__secrets_in_environment | join(', ') | default('none', true) }}.
+          - app_bookstack__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_bookstack__errors | join(' ') }}"
         quiet: true
       vars:
         app_bookstack__environment_missing: >-
@@ -63,19 +56,27 @@
           {{ (app_bookstack__secrets | map(attribute='target') | list
               + app_bookstack__secret_variables + app_bookstack__secret_files.values() | list)
              | select('in', app_bookstack__environment.keys() | list) | unique | list }}
+        app_bookstack__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_bookstack__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('BookStack needs the environment variables ' ~ (app_bookstack__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_bookstack__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_bookstack__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('BookStack needs the secrets ' ~ (app_bookstack__secrets_required | join(', ')) ~ ', missing: ' ~ (app_bookstack__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_bookstack__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in bookstack_environment: ' ~ (app_bookstack__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     # Checks the environment and the secrets of the container after merging bookstack_container,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
-          - app_bookstack__environment_unknown | length == 0
-          - app_bookstack__secrets_unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ app_bookstack__environment_unknown | join(', ') | default('none', true) }}.
-          Unknown secrets: {{ app_bookstack__secrets_unknown | join(', ') | default('none', true) }}.
-          Allowed are the variables of the image (app_bookstack__environment_allowed)
-          and the secrets {{ app_bookstack__secret_files.keys() | join(', ') }}.
+          - app_bookstack__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_bookstack__errors | join(' ') }}"
         quiet: true
       vars:
         app_bookstack__environment_unknown: >-
@@ -83,6 +84,18 @@
              | reject('in', app_bookstack__environment_allowed) | list }}
         app_bookstack__secrets_unknown: >-
           {{ app_bookstack__secrets | map(attribute='target') | reject('in', app_bookstack__secret_files.keys() | list) | list }}
+        app_bookstack__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_bookstack__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_bookstack__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_bookstack__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_bookstack__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (app_bookstack__environment_allowed) and the secrets ' ~ (app_bookstack__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
