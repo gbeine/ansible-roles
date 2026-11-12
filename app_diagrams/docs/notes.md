@@ -96,7 +96,7 @@ The merge is not recursive, `publish` and `volumes` replace the values of the de
 ### Validation
 
 The role checks before any change that only allowed environment variables and secrets are set in the container, that `DRAWIO_BASE_URL` is set and not empty,
-every secret has `name`, `data` and `target` and no secret target is set in `diagrams_environment`.
+`diagrams_secrets` is a list of entries with `name`, `data` and `target` and unique names and no secret target is set in `diagrams_environment`.
 If `diagrams_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
@@ -129,7 +129,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-diagrams` | IPv6, labels, `diagrams_container.etc_hosts` and a base URL with a path setting the context |
 
 `prepare` creates the podman network and pulls the image.
-`side_effect` runs the role with `diagrams_container` not a dictionary, an empty `DRAWIO_BASE_URL` and a secret with target `TZ` set in the environment, an unknown environment variable in `diagrams_environment` and in `diagrams_container.environment` and an unknown secret and checks that it fails with the expected message
+`side_effect` runs the role with `diagrams_container` not a dictionary, a secret without target, an empty `DRAWIO_BASE_URL` and a secret with target `TZ` set in the environment, an unknown environment variable in `diagrams_environment` and in `diagrams_container.environment` and an unknown secret and checks that it fails with the expected message
 and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `DRAWIO_BASE_URL` on `molecule-diagrams`, the quadlet unit changes and draw.io has to restart.
 `verify` checks the quadlet unit, the service, the addresses and the environment of the container,

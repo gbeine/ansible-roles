@@ -13,6 +13,29 @@
           - app_diagrams__container | length > 0
         quiet: true
 
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_diagrams__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_diagrams__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_diagrams__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_diagrams__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('diagrams_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('diagrams_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of diagrams_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
@@ -34,9 +57,6 @@
              | select('in', app_diagrams__environment.keys() | list) | list }}
         app_diagrams__errors: >-
           {%- set errors = [] -%}
-          {%- if app_diagrams__secrets | rejectattr('name', 'defined') | list | length > 0 or app_diagrams__secrets | rejectattr('data', 'defined') | list | length > 0 or app_diagrams__secrets | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('diagrams_secrets entries need name, data and target.') -%}
-          {%- endif -%}
           {%- if app_diagrams__environment_missing | length > 0 -%}
           {%-   set _ = errors.append('draw.io needs the environment variables ' ~ (app_diagrams__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_diagrams__environment_missing | join(', ')) ~ '.') -%}
           {%- endif -%}
