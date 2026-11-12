@@ -1,0 +1,133 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_influxdb_core__test_case: "{{ database_influxdb_core__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_influxdb_core__expect: "{{ database_influxdb_core__test_case.expect }}"
+    database_influxdb_core__test_home: "{{ database_influxdb_core__test_case.role_vars.influxdb_core_home }}"
+    database_influxdb_core__test_url: "http://{{ database_influxdb_core__expect.ip }}:8181"
+    database_influxdb_core__test_headers:
+      Authorization: "Bearer {{ database_influxdb_core__expect.token }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_influxdb_core__test_quadlet_path }}"
+      register: 'database_influxdb_core__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_influxdb_core__test_image) in database_influxdb_core__test_quadlet_lines
+          - ('IP=' + database_influxdb_core__expect.ip) in database_influxdb_core__test_quadlet_lines
+          - database_influxdb_core__expect.ip6 is none or ('IP6=' + database_influxdb_core__expect.ip6) in database_influxdb_core__test_quadlet_lines
+          - database_influxdb_core__expect.ip6 is not none or database_influxdb_core__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_influxdb_core__expect.quadlet | reject('in', database_influxdb_core__test_quadlet_lines) | list | length == 0
+          # The token is never part of the quadlet unit
+          - database_influxdb_core__test_quadlet_lines | select('search', 'apiv3_') | list | length == 0
+        fail_msg: "{{ database_influxdb_core__test_quadlet.content | b64decode }}"
+      vars:
+        database_influxdb_core__test_quadlet_lines: "{{ (database_influxdb_core__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the influxdb-core service'
+      ansible.builtin.command: 'systemctl is-active influxdb-core'
+      register: 'database_influxdb_core__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the influxdb-core container'
+      ansible.builtin.command: 'podman inspect influxdb-core'
+      register: 'database_influxdb_core__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_core__test_service.stdout == 'active'
+          - database_influxdb_core__test_net.IPAddress == database_influxdb_core__expect.ip
+          - database_influxdb_core__expect.ip6 is none or database_influxdb_core__test_net.GlobalIPv6Address == database_influxdb_core__expect.ip6
+          - database_influxdb_core__expect.env | reject('in', database_influxdb_core__test_env) | list | length == 0
+        fail_msg: >-
+          service {{ database_influxdb_core__test_service.stdout }},
+          IPv4 {{ database_influxdb_core__test_net.IPAddress }}, IPv6 {{ database_influxdb_core__test_net.GlobalIPv6Address }},
+          environment {{ database_influxdb_core__test_env | reject('search', 'SECRET|TOKEN=') | join(', ') }}
+      vars:
+        database_influxdb_core__test_container: "{{ (database_influxdb_core__test_inspect.stdout | from_json)[0] }}"
+        database_influxdb_core__test_net: "{{ database_influxdb_core__test_container.NetworkSettings.Networks[database_influxdb_core__test_case.role_vars.influxdb_core_network] }}"
+        database_influxdb_core__test_env: "{{ database_influxdb_core__test_container.Config.Env }}"
+
+    - name: 'Read the directories'
+      ansible.builtin.stat:
+        path: "{{ database_influxdb_core__test_home }}/{{ item }}"
+      loop: [ 'data', 'plugins' ]
+      register: 'database_influxdb_core__test_dirs'
+
+    - name: 'Assert the directories'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_core__test_dirs.results | map(attribute='stat') | selectattr('isdir', 'defined') | selectattr('isdir') | list | length == 2
+          - database_influxdb_core__test_dirs.results | map(attribute='stat') | map(attribute='uid', default=-1) | reject('eq', 1500) | list | length == 0
+          - database_influxdb_core__test_dirs.results | map(attribute='stat') | map(attribute='mode', default='') | reject('eq', '0700') | list | length == 0
+        fail_msg: >-
+          uids {{ database_influxdb_core__test_dirs.results | map(attribute='stat') | map(attribute='uid', default='missing') | join(', ') }},
+          modes {{ database_influxdb_core__test_dirs.results | map(attribute='stat') | map(attribute='mode', default='missing') | join(', ') }}
+
+    # Without a token InfluxDB answers 401, with the token of the secret 200
+    - name: 'Wait until InfluxDB answers'
+      ansible.builtin.uri:
+        url: "{{ database_influxdb_core__test_url }}/health"
+        headers: "{{ database_influxdb_core__test_headers if database_influxdb_core__expect.token else {} }}"
+        status_code: [ 200, 401 ]
+      register: 'database_influxdb_core__test_health'
+      until: database_influxdb_core__test_health.status | default(0) in [ 200, 401 ]
+      retries: 30
+      delay: 5
+      failed_when: false
+      no_log: true
+
+    - name: 'Read the log of InfluxDB'
+      when: database_influxdb_core__test_health.status | default(0) not in [ 200, 401 ]
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'influxdb-core', '-n', '50', '--no-pager' ]
+      register: 'database_influxdb_core__test_journal'
+      changed_when: false
+
+    - name: 'Assert the health of InfluxDB'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb_core__test_health.status | default(0) == (200 if database_influxdb_core__expect.token else 401)
+        fail_msg: "status {{ database_influxdb_core__test_health.status | default('none') }}, log {{ database_influxdb_core__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Write and read a point with the admin token'
+      when: database_influxdb_core__expect.token is not none
+      block:
+
+        - name: 'Write a point'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb_core__test_url }}/api/v3/write_lp?db=molecule"
+            method: 'POST'
+            headers: "{{ database_influxdb_core__test_headers }}"
+            body: 'molecule,host=verify value=42i'
+            status_code: [ 200, 204 ]
+          no_log: true
+
+        - name: 'Read the point'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb_core__test_url }}/api/v3/query_sql?db=molecule&format=json&q={{ 'SELECT value FROM molecule' | urlencode }}"
+            headers: "{{ database_influxdb_core__test_headers }}"
+            return_content: true
+          register: 'database_influxdb_core__test_query'
+          no_log: true
+
+        - name: 'Assert the point'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb_core__test_query.json | map(attribute='value') | list == [ 42 ]
+            fail_msg: "query {{ database_influxdb_core__test_query.content | default('') }}"

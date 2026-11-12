@@ -11,33 +11,177 @@ database_influxdb_core__ipv6: "{{ influxdb_core_ipv6 }}"
 database_influxdb_core__network: "{{ influxdb_core_network | mandatory }}"
 database_influxdb_core__hostname: "{{ influxdb_core_hostname | mandatory }}"
 database_influxdb_core__timezone: "{{ influxdb_core_timezone | mandatory }}"
-database_influxdb_core__labels: "{{ influxdb_core_labels | default({}) }}"
-database_influxdb_core__publish: "{{ influxdb_core_publish | default([]) }}"
+database_influxdb_core__labels: "{{ influxdb_core_labels }}"
 
 database_influxdb_core__version: "{{ influxdb_core_version | default('3-core') }}"
 
 database_influxdb_core__container: "{{ database_influxdb_core__podman_container_default | combine(influxdb_core_container | default({})) }}"
 
+# The configuration of influxdb3 serve, every option is set with its environment variable
+database_influxdb_core__environment: "{{ database_influxdb_core__environment_default | combine(influxdb_core_environment | default({})) }}"
+
+# Secrets with name, data and target, INFLUXDB3_ADMIN_TOKEN is mounted as file,
+# the credentials of the object stores are passed in the environment
+database_influxdb_core__secrets: "{{ influxdb_core_secrets | default([]) }}"
+
 database_influxdb_core__autoupdate_enabled: "{{ influxdb_core_autoupdate_enabled | default(false) }}"
+database_influxdb_core__autoupdate_schedule: "{{ influxdb_core_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-database_influxdb_core__uid: 1500
-database_influxdb_core__gid: "{{ database_influxdb_core__uid }}"
+# The options of the former command of the role
+database_influxdb_core__environment_default:
+  TZ: "{{ database_influxdb_core__timezone }}"
+  INFLUXDB3_NODE_ID: 'node0'
+  INFLUXDB3_OBJECT_STORE: 'file'
+  INFLUXDB3_DATA_DIR: '/var/lib/influxdb3/data'
+  INFLUXDB3_PLUGIN_DIR: '/var/lib/influxdb3/plugins'
+
+database_influxdb_core__environment_required: [ 'INFLUXDB3_NODE_ID', 'INFLUXDB3_OBJECT_STORE' ]
+
+# The targets of the secrets, they must not be set in influxdb_core_environment
+database_influxdb_core__secret_variables: "{{ database_influxdb_core__secret_files.keys() | list + database_influxdb_core__secrets_env }}"
+
+# The secrets mounted as files, INFLUXDB3_ADMIN_TOKEN_FILE is the JSON file of the offline admin token
+database_influxdb_core__secret_files:
+  INFLUXDB3_ADMIN_TOKEN: 'INFLUXDB3_ADMIN_TOKEN_FILE'
+
+# The secrets passed in the environment, influxdb3 reads the credentials of the object stores only from the environment
+database_influxdb_core__secrets_env:
+  - 'AWS_SECRET_ACCESS_KEY'
+  - 'AWS_SESSION_TOKEN'
+  - 'AZURE_STORAGE_ACCESS_KEY'
+
+database_influxdb_core__secrets_required: []
+
+database_influxdb_core__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+database_influxdb_core__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if database_influxdb_core__secrets is sequence and database_influxdb_core__secrets is not string and database_influxdb_core__secrets is not mapping -%}
+  {%-   for secret in database_influxdb_core__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in database_influxdb_core__secret_files -%}
+  {%-     set _ = environment.update({ database_influxdb_core__secret_files[secret.target]: database_influxdb_core__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# Generated from influxdb3 serve of InfluxDB 3 Core v3.12.2 (influxdb3/src/commands/serve.rs, influxdb3_clap_blocks, core/trogging, core/trace_exporters)
+# and entrypoint.sh of the image, without the secrets and the internal INFLUXDB3_SERVE_INVOCATION_METHOD and VIRTUAL_ENV,
+# update with new versions of the image
+database_influxdb_core__environment_allowed:
+  - 'AWS_ACCESS_KEY_ID'
+  - 'AWS_ALLOW_HTTP'
+  - 'AWS_CREDENTIALS_FILE'
+  - 'AWS_DEFAULT_REGION'
+  - 'AWS_ENDPOINT'
+  - 'AWS_SKIP_SIGNATURE'
+  - 'AZURE_ALLOW_HTTP'
+  - 'AZURE_ENDPOINT'
+  - 'AZURE_STORAGE_ACCOUNT'
+  - 'GOOGLE_SERVICE_ACCOUNT'
+  - 'INFLUXDB3_ADMIN_TOKEN_FILE'
+  - 'INFLUXDB3_ADMIN_TOKEN_RECOVERY_HTTP_BIND_ADDR'
+  - 'INFLUXDB3_ADMIN_TOKEN_RECOVERY_TCP_LISTENER_FILE_PATH'
+  - 'INFLUXDB3_ASYNC_TRIGGER_CONCURRENCY_LIMIT'
+  - 'INFLUXDB3_BUCKET'
+  - 'INFLUXDB3_CHECKPOINT_INTERVAL'
+  - 'INFLUXDB3_DATAFUSION_CONFIG'
+  - 'INFLUXDB3_DATAFUSION_MAX_PARQUET_FANOUT'
+  - 'INFLUXDB3_DATAFUSION_USE_CACHED_PARQUET_LOADER'
+  - 'INFLUXDB3_DATA_DIR'
+  - 'INFLUXDB3_DELETE_GRACE_PERIOD'
+  - 'INFLUXDB3_DISABLE_AUTHZ'
+  - 'INFLUXDB3_DISABLE_FILE_CACHE'
+  - 'INFLUXDB3_DISABLE_LOG_FILTER_NOISE_REDUCTION'
+  - 'INFLUXDB3_DISABLE_PACKAGE_MANAGEMENT'
+  - 'INFLUXDB3_DISABLE_TELEMETRY_UPLOAD'
+  - 'INFLUXDB3_DISTINCT_CACHE_EVICTION_INTERVAL'
+  - 'INFLUXDB3_EXEC_MEM_POOL_BYTES'
+  - 'INFLUXDB3_EXEC_MEM_POOL_SIZE'
+  - 'INFLUXDB3_FILE_CACHE_RECENCY'
+  - 'INFLUXDB3_FILE_CACHE_SIZE'
+  - 'INFLUXDB3_FORCE_SNAPSHOT_MAX_AGE'
+  - 'INFLUXDB3_FORCE_SNAPSHOT_MEM_SIZE'
+  - 'INFLUXDB3_FORCE_SNAPSHOT_MEM_THRESHOLD'
+  - 'INFLUXDB3_GEN1_DURATION'
+  - 'INFLUXDB3_GEN1_LOOKBACK_DURATION'
+  - 'INFLUXDB3_HARD_DELETE_DEFAULT_DURATION'
+  - 'INFLUXDB3_HTTP_BIND_ADDR'
+  - 'INFLUXDB3_LAST_CACHE_EVICTION_INTERVAL'
+  - 'INFLUXDB3_MAX_CONCURRENT_QUERIES'
+  - 'INFLUXDB3_MAX_HTTP_REQUEST_SIZE'
+  - 'INFLUXDB3_NODE_ID'
+  - 'INFLUXDB3_NODE_ID_FROM_ENV'
+  - 'INFLUXDB3_NUM_DATAFUSION_THREADS'
+  - 'INFLUXDB3_NUM_IO_THREADS'
+  - 'INFLUXDB3_OBJECT_STORE'
+  - 'INFLUXDB3_OBJECT_STORE_CONNECTION_LIMIT'
+  - 'INFLUXDB3_OBJECT_STORE_HTTP2_MAX_FRAME_SIZE'
+  - 'INFLUXDB3_OBJECT_STORE_HTTP2_ONLY'
+  - 'INFLUXDB3_OBJECT_STORE_MAX_RETRIES'
+  - 'INFLUXDB3_OBJECT_STORE_REQUEST_TIMEOUT'
+  - 'INFLUXDB3_OBJECT_STORE_RETRY_TIMEOUT'
+  - 'INFLUXDB3_OBJECT_STORE_TLS_ALLOW_INSECURE'
+  - 'INFLUXDB3_OBJECT_STORE_TLS_CA'
+  - 'INFLUXDB3_OPERATOR_SOCKET_PATH'
+  - 'INFLUXDB3_PACKAGE_MANAGER'
+  - 'INFLUXDB3_PARQUET_MEM_CACHE_PRUNE_INTERVAL'
+  - 'INFLUXDB3_PARQUET_MEM_CACHE_PRUNE_PERCENTAGE'
+  - 'INFLUXDB3_PARQUET_MEM_CACHE_SIZE'
+  - 'INFLUXDB3_PLUGIN_DIR'
+  - 'INFLUXDB3_PLUGIN_REPO'
+  - 'INFLUXDB3_QUERY_FILE_LIMIT'
+  - 'INFLUXDB3_QUERY_LOG_MAX_ENTRIES'
+  - 'INFLUXDB3_RESTRICT_PLUGIN_TRIGGERS_TO'
+  - 'INFLUXDB3_RETENTION_CHECK_INTERVAL'
+  - 'INFLUXDB3_SHUTDOWN_TIMEOUT'
+  - 'INFLUXDB3_SNAPSHOTTED_WAL_FILES_TO_KEEP'
+  - 'INFLUXDB3_SNAPSHOT_CONCURRENCY_LIMIT'
+  - 'INFLUXDB3_TABLE_INDEX_CACHE_CONCURRENCY_LIMIT'
+  - 'INFLUXDB3_TABLE_INDEX_CACHE_MAX_ENTRIES'
+  - 'INFLUXDB3_TCP_LISTENER_FILE_PATH'
+  - 'INFLUXDB3_TELEMETRY_ENDPOINT'
+  - 'INFLUXDB3_TLS_CERT'
+  - 'INFLUXDB3_TLS_KEY'
+  - 'INFLUXDB3_TLS_MINIMUM_VERSION'
+  - 'INFLUXDB3_TOKIO_CONSOLE_CLIENT_BUFFER_CAPACITY'
+  - 'INFLUXDB3_TOKIO_CONSOLE_ENABLED'
+  - 'INFLUXDB3_TOKIO_CONSOLE_EVENT_BUFFER_CAPACITY'
+  - 'INFLUXDB3_UNSET_VARS'
+  - 'INFLUXDB3_WAL_FILES_PER_SNAPSHOT'
+  - 'INFLUXDB3_WAL_FLUSH_INTERVAL'
+  - 'INFLUXDB3_WAL_MAX_BUFFERED_WRITES'
+  - 'INFLUXDB3_WAL_REPLAY_CONCURRENCY_LIMIT'
+  - 'INFLUXDB3_WAL_REPLAY_FAIL_ON_ERROR'
+  - 'INFLUXDB3_WITHOUT_AUTH'
+  - 'LOG_DESTINATION'
+  - 'LOG_FILTER'
+  - 'LOG_FORMAT'
+  - 'TRACES_EXPORTER'
+  - 'TRACES_EXPORTER_JAEGER_AGENT_HOST'
+  - 'TRACES_EXPORTER_JAEGER_AGENT_PORT'
+  - 'TRACES_EXPORTER_JAEGER_DEBUG_NAME'
+  - 'TRACES_EXPORTER_JAEGER_SERVICE_NAME'
+  - 'TRACES_EXPORTER_JAEGER_TAGS'
+  - 'TRACES_EXPORTER_JAEGER_TRACE_CONTEXT_HEADER_NAME'
+  - 'TRACES_JAEGER_MAX_MSGS_PER_SECOND'
+  - 'TZ'
+
+# The data and the plugins, owned by the user influxdb3 of the image
+database_influxdb_core__data_dir: "{{ database_influxdb_core__home }}/data"
+database_influxdb_core__plugins_dir: "{{ database_influxdb_core__home }}/plugins"
+database_influxdb_core__data_owner: 1500
+database_influxdb_core__data_group: 1500
 
 database_influxdb_core__port: 8181
 
 database_influxdb_core__podman_name: 'influxdb-core'
 database_influxdb_core__podman_image: 'docker.io/influxdb'
 database_influxdb_core__podman_tag: "{{ database_influxdb_core__version }}"
-
-database_influxdb_core__podman_home: "{{ database_influxdb_core__home }}"
-database_influxdb_core__podman_data_dir: "{{ database_influxdb_core__podman_home }}/data"
-database_influxdb_core__podman_plugins_dir: "{{ database_influxdb_core__podman_home }}/plugins"
-database_influxdb_core__podman_backup_dir: "{{ database_influxdb_core__podman_home }}/backup"
-
 
 database_influxdb_core__podman_container_default:
   name: "{{ database_influxdb_core__podman_name }}"
@@ -47,17 +191,28 @@ database_influxdb_core__podman_container_default:
   ipv6: "{{ database_influxdb_core__ipv6 | default(omit) }}"
   network: "{{ database_influxdb_core__network }}"
   timezone: "{{ database_influxdb_core__timezone }}"
-  labels: "{{ database_influxdb_core__labels }}"
-  publish: "{{ database_influxdb_core__publish }}"
+  # Set with influxdb_core_environment and influxdb_core_secrets, merged over the default
+  environment: "{{ database_influxdb_core__environment | combine(database_influxdb_core__environment_secrets_files) }}"
+  labels: "{{ database_influxdb_core__labels | default(omit) }}"
+  # influxdb_core_container.volumes replaces the list completely
   volumes:
-    - "/etc/localtime:/etc/localtime:ro"
-    - "/etc/timezone:/etc/timezone:ro"
-    - "{{ database_influxdb_core__podman_data_dir }}:/var/lib/influxdb3/data"
-    - "{{ database_influxdb_core__podman_plugins_dir }}:/var/lib/influxdb3/plugins"
-  command:
-    - 'influxdb3'
-    - 'serve'
-    - '--node-id=node0'
-    - '--object-store=file'
-    - '--data-dir=/var/lib/influxdb3/data'
-    - '--plugin-dir=/var/lib/influxdb3/plugins'
+    - "{{ database_influxdb_core__data_dir }}:/var/lib/influxdb3/data"
+    - "{{ database_influxdb_core__plugins_dir }}:/var/lib/influxdb3/plugins"
+  # The secrets of database_influxdb_core__secrets_env are passed in the environment, the others are mounted for the user of the image
+  secrets: >-
+    {{ database_influxdb_core__podman_secrets
+       if (database_influxdb_core__secrets is sequence and database_influxdb_core__secrets is not string and database_influxdb_core__secrets | length > 0)
+       else omit }}
+
+# The podman secrets of influxdb_core_secrets, entries without name or target are left out, the validation of the secrets reports them
+database_influxdb_core__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- for secret in database_influxdb_core__secrets if secret is mapping and secret.name is defined and secret.target is defined -%}
+  {%-   if secret.target in database_influxdb_core__secrets_env -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=env,target=' ~ secret.target) -%}
+  {%-   else -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ database_influxdb_core__secrets_dir ~ '/' ~ secret.name
+                                 ~ ',uid=' ~ database_influxdb_core__data_owner ~ ',gid=' ~ database_influxdb_core__data_group ~ ',mode=0400') -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ secrets }}
