@@ -16,19 +16,9 @@
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - app_collabora__environment_missing | length == 0
-          - app_collabora__secrets | rejectattr('name', 'defined') | list | length == 0
-          - app_collabora__secrets | rejectattr('data', 'defined') | list | length == 0
-          - app_collabora__secrets | rejectattr('target', 'defined') | list | length == 0
-          - app_collabora__secrets_missing | length == 0
-          - app_collabora__secrets_in_environment | length == 0
-        fail_msg: >-
-          Collabora needs the environment variables {{ app_collabora__environment_required | join(', ') }},
-          missing or empty: {{ app_collabora__environment_missing | join(', ') | default('none', true) }}.
-          Collabora needs the secrets {{ app_collabora__secrets_required | join(', ') }},
-          missing: {{ app_collabora__secrets_missing | join(', ') | default('none', true) }}.
-          Every secret needs name, data and target, secret targets must not be set in collabora_environment:
-          {{ app_collabora__secrets_in_environment | join(', ') | default('none', true) }}.
+          - app_collabora__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_collabora__errors | join(' ') }}"
         quiet: true
       vars:
         app_collabora__environment_missing: >-
@@ -42,19 +32,30 @@
         app_collabora__secrets_in_environment: >-
           {{ app_collabora__secrets | selectattr('target', 'defined') | map(attribute='target')
              | select('in', app_collabora__environment.keys() | list) | list }}
+        app_collabora__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_collabora__secrets | rejectattr('name', 'defined') | list | length > 0 or app_collabora__secrets | rejectattr('data', 'defined') | list | length > 0 or app_collabora__secrets | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('collabora_secrets entries need name, data and target.') -%}
+          {%- endif -%}
+          {%- if app_collabora__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('Collabora needs the environment variables ' ~ (app_collabora__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_collabora__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_collabora__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Collabora needs the secrets ' ~ (app_collabora__secrets_required | join(', ')) ~ ', missing: ' ~ (app_collabora__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_collabora__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secret targets must not be set in collabora_environment: ' ~ (app_collabora__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     # Checks the environment and the secrets of the container after merging collabora_container,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
-          - app_collabora__environment_unknown | length == 0
-          - app_collabora__secrets_unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ app_collabora__environment_unknown | join(', ') | default('none', true) }}.
-          Unknown secrets: {{ app_collabora__secrets_unknown | join(', ') | default('none', true) }}.
-          Allowed are the environment variables {{ app_collabora__environment_allowed | join(', ') }}
-          and the secrets {{ app_collabora__secrets_allowed | join(', ') }}.
+          - app_collabora__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_collabora__errors | join(' ') }}"
         quiet: true
       vars:
         # The secrets of the container are omit without secrets
@@ -67,6 +68,18 @@
         app_collabora__secrets_unknown: >-
           {{ app_collabora__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
              | reject('in', app_collabora__secrets_allowed) | list }}
+        app_collabora__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_collabora__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_collabora__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_collabora__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_collabora__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_collabora__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_collabora__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create secrets'
       no_log: true
