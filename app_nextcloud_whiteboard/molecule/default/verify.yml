@@ -1,0 +1,104 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_nextcloud_whiteboard__test_case: "{{ app_nextcloud_whiteboard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nextcloud_whiteboard__expect: "{{ app_nextcloud_whiteboard__test_case.expect }}"
+    app_nextcloud_whiteboard__test_url: "http://{{ app_nextcloud_whiteboard__expect.ip }}:3002"
+    # The secrets of the test case, they must not be part of the quadlet unit
+    app_nextcloud_whiteboard__test_plain: >-
+      {{ (app_nextcloud_whiteboard__test_case.role_vars.whiteboard_secrets | default([])
+          + app_nextcloud_whiteboard__test_case.side_effect.secrets | default([])) | map(attribute='data') | unique | list }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_nextcloud_whiteboard__test_quadlet_path }}"
+      register: 'app_nextcloud_whiteboard__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_nextcloud_whiteboard__test_image) in app_nextcloud_whiteboard__test_quadlet_lines
+          - ('IP=' + app_nextcloud_whiteboard__expect.ip) in app_nextcloud_whiteboard__test_quadlet_lines
+          - app_nextcloud_whiteboard__expect.ip6 is none or ('IP6=' + app_nextcloud_whiteboard__expect.ip6) in app_nextcloud_whiteboard__test_quadlet_lines
+          - app_nextcloud_whiteboard__expect.ip6 is not none or app_nextcloud_whiteboard__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_nextcloud_whiteboard__expect.quadlet | reject('in', app_nextcloud_whiteboard__test_quadlet_lines) | list | length == 0
+          - app_nextcloud_whiteboard__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_nextcloud_whiteboard__test_plain | select('in', app_nextcloud_whiteboard__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_nextcloud_whiteboard__test_quadlet.content | b64decode }}"
+      vars:
+        app_nextcloud_whiteboard__test_quadlet_lines: "{{ (app_nextcloud_whiteboard__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the whiteboard service'
+      ansible.builtin.command: 'systemctl is-active whiteboard'
+      register: 'app_nextcloud_whiteboard__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the whiteboard container'
+      ansible.builtin.command: 'podman inspect whiteboard'
+      register: 'app_nextcloud_whiteboard__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud_whiteboard__test_service.stdout == 'active'
+          - app_nextcloud_whiteboard__test_net.IPAddress == app_nextcloud_whiteboard__expect.ip
+          - app_nextcloud_whiteboard__expect.ip6 is none or app_nextcloud_whiteboard__test_net.GlobalIPv6Address == app_nextcloud_whiteboard__expect.ip6
+          - app_nextcloud_whiteboard__expect.env | reject('in', app_nextcloud_whiteboard__test_env) | list | length == 0
+        fail_msg: >-
+          service {{ app_nextcloud_whiteboard__test_service.stdout }},
+          IPv4 {{ app_nextcloud_whiteboard__test_net.IPAddress }}, IPv6 {{ app_nextcloud_whiteboard__test_net.GlobalIPv6Address }},
+          environment {{ app_nextcloud_whiteboard__test_env | join(', ') }}
+      vars:
+        app_nextcloud_whiteboard__test_container: "{{ (app_nextcloud_whiteboard__test_inspect.stdout | from_json)[0] }}"
+        app_nextcloud_whiteboard__test_net: "{{ app_nextcloud_whiteboard__test_container.NetworkSettings.Networks[app_nextcloud_whiteboard__test_case.role_vars.whiteboard_network] }}"
+        app_nextcloud_whiteboard__test_env: "{{ app_nextcloud_whiteboard__test_container.Config.Env }}"
+
+    - name: 'Read the home page of the server'
+      ansible.builtin.uri:
+        url: "{{ app_nextcloud_whiteboard__test_url }}/"
+        return_content: true
+      register: 'app_nextcloud_whiteboard__test_home'
+
+    # The server only allows the origin of NEXTCLOUD_URL
+    - name: 'Read the status with the origin of Nextcloud'
+      ansible.builtin.uri:
+        url: "{{ app_nextcloud_whiteboard__test_url }}/status"
+        headers:
+          Origin: "{{ app_nextcloud_whiteboard__expect.origin }}"
+        return_content: true
+      register: 'app_nextcloud_whiteboard__test_status'
+
+    - name: 'Read the metrics with the token and the former token'
+      when: app_nextcloud_whiteboard__expect.metrics is not none
+      ansible.builtin.uri:
+        url: "{{ app_nextcloud_whiteboard__test_url }}/metrics"
+        headers:
+          Authorization: "Bearer {{ item }}"
+        status_code: [ 200, 403 ]
+      loop:
+        - "{{ (app_nextcloud_whiteboard__expect.metrics | default({}, true)).token | default('') }}"
+        - "{{ (app_nextcloud_whiteboard__expect.metrics | default({}, true)).former_token | default('') }}"
+      register: 'app_nextcloud_whiteboard__test_metrics'
+      no_log: true
+
+    - name: 'Assert the server, the origin of Nextcloud and the metrics'
+      ansible.builtin.assert:
+        that:
+          - "'Nextcloud Whiteboard Collaboration Server' in app_nextcloud_whiteboard__test_home.content"
+          - app_nextcloud_whiteboard__test_status.access_control_allow_origin | default('') == app_nextcloud_whiteboard__expect.origin
+          - app_nextcloud_whiteboard__expect.metrics is none or app_nextcloud_whiteboard__test_metrics.results | map(attribute='status') | list == [ 200, 403 ]
+        fail_msg: >-
+          home {{ app_nextcloud_whiteboard__test_home.content | default('') }},
+          allowed origin {{ app_nextcloud_whiteboard__test_status.access_control_allow_origin | default('') }},
+          metrics {{ app_nextcloud_whiteboard__test_metrics.results | default([]) | map(attribute='status', default='') | list }}

@@ -16,10 +16,14 @@ app_nextcloud_whiteboard__version: "{{ whiteboard_version | default('stable') }}
 
 app_nextcloud_whiteboard__container: "{{ app_nextcloud_whiteboard__podman_container_default | combine(whiteboard_container | default({})) }}"
 
-app_nextcloud_whiteboard__nextcloud_url: "{{ whiteboard_nextcloud_url | mandatory }}"
-app_nextcloud_whiteboard__secret: "{{ whiteboard_secret | mandatory }}"
+# The configuration of the server, NEXTCLOUD_URL is mandatory, the role sets TZ
+app_nextcloud_whiteboard__environment: "{{ app_nextcloud_whiteboard__environment_default | combine(whiteboard_environment | default({})) }}"
+
+# Secrets with name, data and target, JWT_SECRET_KEY is mandatory
+app_nextcloud_whiteboard__secrets: "{{ whiteboard_secrets | default([]) }}"
 
 app_nextcloud_whiteboard__autoupdate_enabled: "{{ whiteboard_autoupdate_enabled | default(false) }}"
+app_nextcloud_whiteboard__autoupdate_schedule: "{{ whiteboard_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
@@ -27,21 +31,82 @@ app_nextcloud_whiteboard__autoupdate_enabled: "{{ whiteboard_autoupdate_enabled 
 
 app_nextcloud_whiteboard__podman_name: 'whiteboard'
 app_nextcloud_whiteboard__podman_image: 'ghcr.io/nextcloud-releases/whiteboard'
-app_nextcloud_whiteboard__podman_tag: "{{ app_nextcloud_whiteboard__version }}"
+
+app_nextcloud_whiteboard__port: "{{ app_nextcloud_whiteboard__container.environment.PORT | default(3002) }}"
+
+app_nextcloud_whiteboard__environment_default:
+  TZ: "{{ app_nextcloud_whiteboard__timezone }}"
+
+# NEXTCLOUD_URL is the URL of Nextcloud, the server allows its origin and checks the tokens of Nextcloud with JWT_SECRET_KEY
+app_nextcloud_whiteboard__environment_required: [ 'NEXTCLOUD_URL' ]
+app_nextcloud_whiteboard__secrets_required: [ 'JWT_SECRET_KEY' ]
+
+# The server only reads true as true (GeneralUtility.parseBooleanFromEnv), the role writes booleans in lower case
+app_nextcloud_whiteboard__environment_booleans:
+  - 'TLS'
+  - 'COMPRESSION_ENABLED'
+  - 'NEXTCLOUD_UPLOAD_ENABLED'
+  - 'CLEANUP_LOCAL_RECORDINGS'
+
+app_nextcloud_whiteboard__environment_values:
+  STORAGE_STRATEGY: [ 'lru', 'redis' ]
+
+# The environment of the container
+app_nextcloud_whiteboard__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in app_nextcloud_whiteboard__environment.items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+# Generated from process.env of websocket_server of whiteboard v2.1.2 and its Dockerfile without the secrets,
+# HOSTNAME and USERNAME are only fallbacks of the server and not allowed
+app_nextcloud_whiteboard__environment_allowed:
+  - 'TZ'
+  - 'NEXTCLOUD_URL'
+  - 'PORT'
+  - 'HOST'
+  - 'TLS'
+  - 'TLS_KEY'
+  - 'TLS_CERT'
+  - 'STORAGE_STRATEGY'
+  - 'FORCE_CLOSE_TIMEOUT'
+  - 'MAX_UPLOAD_FILE_SIZE'
+  - 'CACHED_TOKEN_TTL'
+  - 'SESSION_TTL'
+  - 'COMPRESSION_ENABLED'
+  - 'NEXTCLOUD_UPLOAD_ENABLED'
+  - 'CLEANUP_LOCAL_RECORDINGS'
+  - 'RECORDINGS_DIR'
+  - 'RECORDING_DISCONNECT_GRACE_MS'
+  - 'CHROME_EXECUTABLE_PATH'
+  - 'WEBSOCKET_NODE_ID'
+  - 'NODE_ENV'
+
+# Targets of the secrets in whiteboard_secrets, the server reads them only from the environment,
+# REDIS_URL may contain the password of Redis
+app_nextcloud_whiteboard__secrets_allowed:
+  - 'JWT_SECRET_KEY'
+  - 'METRICS_TOKEN'
+  - 'REDIS_URL'
+
+app_nextcloud_whiteboard__secret_variables: "{{ app_nextcloud_whiteboard__secrets_allowed }}"
 
 app_nextcloud_whiteboard__podman_container_default:
   name: "{{ app_nextcloud_whiteboard__podman_name }}"
   hostname: "{{ app_nextcloud_whiteboard__hostname }}"
-  image: "{{ app_nextcloud_whiteboard__podman_image }}:{{ app_nextcloud_whiteboard__podman_tag }}"
+  image: "{{ app_nextcloud_whiteboard__podman_image }}:{{ app_nextcloud_whiteboard__version }}"
   ip: "{{ app_nextcloud_whiteboard__ip }}"
   ipv6: "{{ app_nextcloud_whiteboard__ipv6 | default(omit) }}"
   network: "{{ app_nextcloud_whiteboard__network }}"
   timezone: "{{ app_nextcloud_whiteboard__timezone }}"
-  environment:
-    NEXTCLOUD_URL: "{{ app_nextcloud_whiteboard__nextcloud_url }}"
-  labels: "{{ app_nextcloud_whiteboard__labels }}"
-  secrets:
-    - "whiteboard_jwt_secret,type=env,target=JWT_SECRET_KEY"
-  volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
+  # Set with whiteboard_environment, merged over the default
+  environment: "{{ app_nextcloud_whiteboard__environment_container }}"
+  labels: "{{ app_nextcloud_whiteboard__labels | default(omit) }}"
+  # Entries without name or target are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (app_nextcloud_whiteboard__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='name')
+        | zip(app_nextcloud_whiteboard__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='target'))
+        | map('join', ',type=env,target=') | list)
+      if (app_nextcloud_whiteboard__secrets is sequence and app_nextcloud_whiteboard__secrets is not string and app_nextcloud_whiteboard__secrets | length > 0)
+      else omit }}

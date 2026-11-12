@@ -1,0 +1,156 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_nextcloud_whiteboard__test_case: "{{ app_nextcloud_whiteboard__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_nextcloud_whiteboard__test_vars: "{{ app_nextcloud_whiteboard__test_case.role_vars }}"
+    app_nextcloud_whiteboard__test_environment: "{{ app_nextcloud_whiteboard__test_vars.whiteboard_environment | default({}) }}"
+    app_nextcloud_whiteboard__test_secrets: "{{ app_nextcloud_whiteboard__test_vars.whiteboard_secrets | default([]) }}"
+    app_nextcloud_whiteboard__test_checked_files:
+      - "{{ app_nextcloud_whiteboard__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_nextcloud_whiteboard__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_nextcloud_whiteboard__test_checked_files }}"
+      register: 'app_nextcloud_whiteboard__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_nextcloud_whiteboard with whiteboard_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_container: [ 'environment' ]
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'whiteboard_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_nextcloud_whiteboard with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_secrets: [ { name: 'whiteboard_jwt_secret', data: 'x' } ]
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'a secret without target'
+          search: '^whiteboard_secrets entries need name, data and target$'
+
+    - name: 'Run app_nextcloud_whiteboard without the JWT secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_secrets: "{{ app_nextcloud_whiteboard__test_secrets | rejectattr('target', 'eq', 'JWT_SECRET_KEY') | list }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'no JWT secret'
+          search: '^Nextcloud Whiteboard needs the secrets JWT_SECRET_KEY, missing: JWT_SECRET_KEY\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_secrets: "{{ app_nextcloud_whiteboard__test_secrets + [ { 'name': 'whiteboard_unknown', 'data': 'molecule', 'target': 'REDIS_PASSWORD' } ] }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: REDIS_PASSWORD\.'
+
+    - name: 'Run app_nextcloud_whiteboard with the JWT secret in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'JWT_SECRET_KEY': 'molecule' }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'the JWT secret in the environment'
+          search: '^Secrets must not be set in whiteboard_environment: JWT_SECRET_KEY\.$'
+
+    - name: 'Run app_nextcloud_whiteboard without NEXTCLOUD_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'NEXTCLOUD_URL': '' }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'no NEXTCLOUD_URL'
+          search: '^Nextcloud Whiteboard needs the environment variables NEXTCLOUD_URL, missing or empty: NEXTCLOUD_URL\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with an invalid NEXTCLOUD_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'NEXTCLOUD_URL': 'cloud.example.org' }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'an invalid NEXTCLOUD_URL'
+          search: '^NEXTCLOUD_URL has to be the URL of Nextcloud starting with http:// or https://\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with an invalid storage strategy (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'STORAGE_STRATEGY': 'memory' }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'an invalid storage strategy'
+          search: '^Invalid values: STORAGE_STRATEGY \(lru, redis\)\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'TLS': 'yes' }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: TLS\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'WEBSOCKET_NODE_ID': \"node\nmolecule\" }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: WEBSOCKET_NODE_ID\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'HOSTNAME': 'whiteboard' }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: HOSTNAME\.'
+
+    - name: 'Run app_nextcloud_whiteboard with the changed metrics token'
+      when: app_nextcloud_whiteboard__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'whiteboard' ]
+          register: 'app_nextcloud_whiteboard__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed secrets'
+          ansible.builtin.set_fact:
+            whiteboard_secrets: "{{ app_nextcloud_whiteboard__test_case.side_effect.secrets }}"
+
+        - name: 'Run app_nextcloud_whiteboard with the changed secrets'
+          ansible.builtin.include_role:
+            name: 'app_nextcloud_whiteboard'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'whiteboard' ]
+          register: 'app_nextcloud_whiteboard__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed secret and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_nextcloud_whiteboard__secrets_result is changed
+              - app_nextcloud_whiteboard__quadlet_result is not changed
+              - app_nextcloud_whiteboard__test_started_after.stdout | int > app_nextcloud_whiteboard__test_started_before.stdout | int
+            fail_msg: >-
+              secrets changed: {{ app_nextcloud_whiteboard__secrets_result is changed }}, quadlet changed: {{ app_nextcloud_whiteboard__quadlet_result is changed }},
+              start before {{ app_nextcloud_whiteboard__test_started_before.stdout }}, after {{ app_nextcloud_whiteboard__test_started_after.stdout }}
