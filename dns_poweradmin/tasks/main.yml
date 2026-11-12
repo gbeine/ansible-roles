@@ -1,25 +1,47 @@
 ---
 
 - name: 'Install Poweradmin'
-  tags: [ 'dns_poweradmin' ]
+  tags: [ 'dns', 'dns_poweradmin' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or poweradmin_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - dns_poweradmin__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ dns_poweradmin__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        dns_poweradmin__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = dns_poweradmin__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('poweradmin_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('poweradmin_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of poweradmin_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
-          - dns_poweradmin__environment_missing | length == 0
-          - dns_poweradmin__secrets | rejectattr('name', 'defined') | list | length == 0
-          - dns_poweradmin__secrets | rejectattr('data', 'defined') | list | length == 0
-          - dns_poweradmin__secrets | rejectattr('target', 'defined') | list | length == 0
-          - dns_poweradmin__secrets_missing | length == 0
-          - dns_poweradmin__secrets_in_environment | length == 0
-        fail_msg: >-
-          Poweradmin needs the environment variables {{ dns_poweradmin__environment_required_all | join(', ') }},
-          missing or empty: {{ dns_poweradmin__environment_missing | join(', ') | default('none', true) }}.
-          Poweradmin needs the secrets {{ dns_poweradmin__secrets_required_all | join(', ') | default('none', true) }},
-          missing: {{ dns_poweradmin__secrets_missing | join(', ') | default('none', true) }}.
-          Every secret needs name, data and target, secrets must not be set in poweradmin_environment:
-          {{ dns_poweradmin__secrets_in_environment | join(', ') | default('none', true) }}.
+          - dns_poweradmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ dns_poweradmin__errors | join(' ') }}"
         quiet: true
       vars:
         dns_poweradmin__db_server: "{{ dns_poweradmin__environment.DB_TYPE | default('') in ['mysql', 'pgsql'] }}"
@@ -34,12 +56,52 @@
              | list }}
         dns_poweradmin__secrets_missing: >-
           {{ dns_poweradmin__secrets_required_all
-             | reject('in', dns_poweradmin__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
+             | reject('in', dns_poweradmin__secrets | map(attribute='target') | list)
              | list }}
         dns_poweradmin__secrets_in_environment: >-
-          {{ (dns_poweradmin__secrets | selectattr('target', 'defined') | map(attribute='target') | list
-              + dns_poweradmin__secret_variables)
+          {{ (dns_poweradmin__secrets | map(attribute='target') | list
+              + dns_poweradmin__secret_variables + dns_poweradmin__secret_files.values() | list)
              | select('in', dns_poweradmin__environment.keys() | list) | unique | list }}
+        dns_poweradmin__errors: >-
+          {%- set errors = [] -%}
+          {%- if dns_poweradmin__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('Poweradmin needs the environment variables ' ~ (dns_poweradmin__environment_required_all | join(', ')) ~ ', missing or empty: ' ~ (dns_poweradmin__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if dns_poweradmin__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Poweradmin needs the secrets ' ~ (dns_poweradmin__secrets_required_all | join(', ')) ~ ', missing: ' ~ (dns_poweradmin__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if dns_poweradmin__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in poweradmin_environment: ' ~ (dns_poweradmin__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging poweradmin_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ dns_poweradmin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        dns_poweradmin__environment_unknown: >-
+          {{ (dns_poweradmin__container.environment | default({})).keys()
+             | reject('in', dns_poweradmin__environment_allowed) | list }}
+        dns_poweradmin__secrets_unknown: >-
+          {{ dns_poweradmin__secrets | map(attribute='target') | reject('in', dns_poweradmin__secret_files.keys() | list) | list }}
+        dns_poweradmin__errors: >-
+          {%- set errors = [] -%}
+          {%- if dns_poweradmin__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (dns_poweradmin__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if dns_poweradmin__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (dns_poweradmin__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (dns_poweradmin__environment_allowed) and the secrets ' ~ (dns_poweradmin__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create Poweradmin directories'
       ansible.builtin.file:
@@ -128,3 +190,4 @@
       vars:
         container_name: "{{ dns_poweradmin__container.name }}"
         container_image: "{{ dns_poweradmin__container.image }}"
+        container_schedule: "{{ dns_poweradmin__autoupdate_schedule }}"

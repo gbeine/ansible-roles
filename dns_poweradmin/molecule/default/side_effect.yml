@@ -8,8 +8,93 @@
 
   vars:
     dns_poweradmin__test_case: "{{ dns_poweradmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    dns_poweradmin__test_vars: "{{ dns_poweradmin__test_common | combine(dns_poweradmin__test_case.role_vars) }}"
+    dns_poweradmin__test_checked_files:
+      - '/etc/containers/systemd/poweradmin.container'
 
   tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ dns_poweradmin__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ dns_poweradmin__test_checked_files }}"
+      register: 'dns_poweradmin__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run dns_poweradmin with poweradmin_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_container: [ 'environment' ]
+        dns_poweradmin__test_invalid:
+          message: 'poweradmin_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run dns_poweradmin with two secrets of the same name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_secrets: "{{ dns_poweradmin__test_vars.poweradmin_secrets + [{'name': 'poweradmin_session_key', 'data': 'x', 'target': 'PA_ADMIN_PASSWORD'}] }}"
+        dns_poweradmin__test_invalid:
+          message: 'two secrets of the same name'
+          search: '^the names of poweradmin_secrets have to be unique$'
+
+    - name: 'Run dns_poweradmin with MySQL without the secret of the database password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_environment: "{{ dns_poweradmin__test_vars.poweradmin_environment | combine({'DB_TYPE': 'mysql', 'DB_HOST': 'db', 'DB_USER': 'pa', 'DB_NAME': 'pa'}) }}"
+        dns_poweradmin__test_invalid:
+          message: 'MySQL without the secret of the database password'
+          search: 'needs the secrets DB_PASS,\s+missing: DB_PASS\.'
+
+    - name: 'Run dns_poweradmin with the session key in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_environment: "{{ dns_poweradmin__test_vars.poweradmin_environment | combine({'PA_SESSION_KEY': 'molecule'}) }}"
+        dns_poweradmin__test_invalid:
+          message: 'the session key in the environment'
+          search: 'must not be set in poweradmin_environment:\s+PA_SESSION_KEY\.'
+
+    - name: 'Run dns_poweradmin with the file variable of the session key in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_environment: "{{ dns_poweradmin__test_vars.poweradmin_environment | combine({'PA_SESSION_KEY__FILE': '/run/secrets/poweradmin_session_key'}) }}"
+        dns_poweradmin__test_invalid:
+          message: 'the file variable of the session key in the environment'
+          search: 'must not be set in poweradmin_environment:\s+PA_SESSION_KEY__FILE\.'
+
+    - name: 'Run dns_poweradmin with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_environment: "{{ dns_poweradmin__test_vars.poweradmin_environment | combine({'PA_FOO': 'bar'}) }}"
+        dns_poweradmin__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: PA_FOO\.'
+
+    - name: 'Run dns_poweradmin with an unknown environment variable in poweradmin_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_container:
+          environment:
+            FOO: 'bar'
+        dns_poweradmin__test_invalid:
+          message: 'an unknown environment variable in poweradmin_container'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run dns_poweradmin with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        poweradmin_secrets: "{{ dns_poweradmin__test_vars.poweradmin_secrets + [{'name': 'poweradmin_molecule_token', 'data': 'x', 'target': 'PA_HEALTH_TOKEN'}] }}"
+        dns_poweradmin__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: PA_HEALTH_TOKEN\.'
 
     - name: 'Read the start time of the service before the change'
       ansible.builtin.command: 'systemctl show --property=ActiveEnterTimestampMonotonic --value poweradmin'
@@ -18,15 +103,7 @@
 
     - name: 'Set the role variables with changed environment'
       ansible.builtin.set_fact:
-        "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ dns_poweradmin__test_common
-           | combine(dns_poweradmin__test_case.role_vars)
-           | combine({'poweradmin_environment': dns_poweradmin__test_common.poweradmin_environment
-                                                | combine(dns_poweradmin__test_side_effect_environment)})
-           | dict2items }}
-      loop_control:
-        label: "{{ item.key }}"
+        poweradmin_environment: "{{ dns_poweradmin__test_common.poweradmin_environment | combine(dns_poweradmin__test_side_effect_environment) }}"
 
     - name: 'Run dns_poweradmin with changed environment'
       ansible.builtin.include_role:

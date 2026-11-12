@@ -30,10 +30,14 @@
           - ('IP=' + dns_poweradmin__test_expect.ip) in dns_poweradmin__test_lines
           - dns_poweradmin__test_expect.ip6 is none or ('IP6=' + dns_poweradmin__test_expect.ip6) in dns_poweradmin__test_lines
           - dns_poweradmin__test_expect.ip6 is not none or dns_poweradmin__test_lines | select('match', 'IP6=') | list | length == 0
-          - "'Secret=poweradmin_session_key,type=env,target=PA_SESSION_KEY' in dns_poweradmin__test_lines"
+          # The session key is mounted as file, it is neither part of the quadlet unit nor of the environment
+          - "'Secret=poweradmin_session_key,type=mount,target=/run/secrets/poweradmin_session_key' in dns_poweradmin__test_lines"
+          - dns_poweradmin__test_lines | select('match', 'Environment=.*PA_SESSION_KEY__FILE=/run/secrets/poweradmin_session_key') | list | length == 1
+          - dns_poweradmin__test_lines | select('search', 'type=env') | list | length == 0
+          - dns_poweradmin__test_lines | select('search', 'molecule-session-key') | list | length == 0
           - dns_poweradmin__test_lines | select('match', 'Environment=.*DB_TYPE=sqlite') | list | length == 1
           - dns_poweradmin__test_lines | select('match', 'Environment=.*DNS_NS1=ns1\\.example\\.test') | list | length == 1
-          - dns_poweradmin__test_lines | select('search', 'PA_SESSION_KEY=') | list | length == 0
+          - dns_poweradmin__test_lines | select('search', '[ ="]PA_SESSION_KEY=') | list | length == 0
           - dns_poweradmin__test_lines | select('search', 'custom\\.php|PA_CONFIG_PATH') | list | length == 0
         fail_msg: "{{ dns_poweradmin__test_quadlet.content | b64decode }}"
       vars:
@@ -49,6 +53,23 @@
       ansible.builtin.assert:
         that:
           - dns_poweradmin__test_secret.rc == 0
+
+    # The image reads PA_SESSION_KEY from PA_SESSION_KEY__FILE and writes it to the generated settings.php
+    - name: 'Read the session key in the configuration of Poweradmin'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'poweradmin', 'grep', '-c', "'session_key' => 'molecule-session-key-0123456789abcdef'", '/app/config/settings.php' ]
+      register: 'dns_poweradmin__test_session_key'
+      changed_when: false
+      failed_when: false
+      until: dns_poweradmin__test_session_key.stdout == '1'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the session key was read from the secret file'
+      ansible.builtin.assert:
+        that:
+          - dns_poweradmin__test_session_key.stdout == '1'
+        fail_msg: "{{ dns_poweradmin__test_session_key.stdout }} {{ dns_poweradmin__test_session_key.stderr }}"
 
     - name: 'Read the state of the poweradmin service'
       ansible.builtin.command: 'systemctl is-active poweradmin'

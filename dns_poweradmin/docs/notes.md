@@ -8,7 +8,9 @@ Use `latest` for the newest release line.
 
 All variables are set with `poweradmin_environment`, which is merged over the defaults of the role.
 Variables carrying secrets are passed as podman secrets with `poweradmin_secrets` and must not be set in `poweradmin_environment`.
-Every secret is created with `podman secret create` and passed into the container as environment variable `target`.
+Every secret has a `name`, the `data` and the `target`, the usual name of the variable, e.g. `PA_SESSION_KEY`.
+The role creates the secret with `podman secret create`, mounts it to `/run/secrets/<name>` and sets `<target>__FILE` (two underscores),
+the image reads the variable from this file, so the secret is neither part of the quadlet unit nor of the environment of the container.
 
 The role requires the following variables and checks them before it changes anything:
 
@@ -23,9 +25,10 @@ The role requires the following variables and checks them before it changes anyt
 
 The role also sets `DB_FILE` to `/db/pdns.db` (in `db` below `poweradmin_home`) and `PA_TIMEZONE` to `poweradmin_timezone`.
 
-The following variables carry secrets and are rejected in `poweradmin_environment`:
+The following variables carry secrets, they are the allowed targets of `poweradmin_secrets` and are rejected in `poweradmin_environment`:
 `DB_PASS`, `PA_SESSION_KEY`, `PA_ADMIN_PASSWORD`, `PA_PDNS_API_KEY`, `PA_PDNS_WEBSERVER_PASSWORD`, `PA_SMTP_PASSWORD`, `PA_RECAPTCHA_SECRET_KEY`,
-`PA_LDAP_BIND_PASSWORD`, `PA_OIDC_AZURE_CLIENT_SECRET`, `PA_OIDC_GOOGLE_CLIENT_SECRET`, `PA_OIDC_GENERIC_CLIENT_SECRET`, `PA_SAML_SP_PRIVATE_KEY`, `PA_HEALTH_TOKEN`.
+`PA_LDAP_BIND_PASSWORD`, `PA_OIDC_AZURE_CLIENT_SECRET`, `PA_OIDC_GOOGLE_CLIENT_SECRET`, `PA_OIDC_GENERIC_CLIENT_SECRET`, `PA_SAML_SP_PRIVATE_KEY`.
+`DB_SSL_KEY` is the path of a key file in the container, not a secret.
 
 Set `PA_SESSION_KEY` as secret, otherwise the container generates a new session key on every start and all sessions are lost.
 
@@ -70,10 +73,30 @@ The container loads the Poweradmin schema into an empty database on startup.
 With `PA_CREATE_ADMIN: 'true'` it creates an initial admin user, set the password as secret with target `PA_ADMIN_PASSWORD`,
 otherwise it is generated and printed to the log of the container.
 
+### Allowed variables
+
+The role only allows the environment variables in `dns_poweradmin__environment_allowed` and the secrets above,
+it stops before any change if unknown variables or secrets are set.
+This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
+The check uses the environment and the secrets of the container after merging `poweradmin_container`,
+so variables set with `poweradmin_container.environment` are checked as well.
+The allowed variables are generated from `docker-entrypoint.sh` of Poweradmin v4.4.3, the release of the tag `stable`,
+without the internal variables of the script and the variables carrying secrets,
+and the file variables of the secrets. The role sets them from `poweradmin_secrets`, they must not be set in `poweradmin_environment`.
+Newer releases (`latest`) know additional variables, e.g. `DB_CHARSET` or `PA_HEALTH_TOKEN`, the list is generated again for a new release line.
+
+### Validation
+
+The role checks before any change that `poweradmin_secrets` is a list of entries with `name`, `data` and `target` and unique names,
+that the required variables and secrets are set, that neither a secret nor its file variable is set in `poweradmin_environment`
+and that only allowed variables and secrets are used.
+If `poweradmin_container` is no dictionary, merging it with the default fails before anything changes.
+
 ### Changes and restarts
 
 A running container is restarted when a secret or the quadlet unit changed, e.g. after changing `poweradmin_environment`.
 The first start of the container does not trigger an additional restart.
+Updates of the image are done by `container_update` with `poweradmin_autoupdate_enabled: true` and `poweradmin_autoupdate_schedule`.
 
 ### Migration from `settings.php`
 
@@ -83,7 +106,7 @@ The role does not generate this file anymore and does not mount it, set the vari
 | Former variable | Now |
 |---|---|
 | `poweradmin_db_type`, `poweradmin_db_host`, `poweradmin_db_port`, `poweradmin_db_user`, `poweradmin_db_name` | `DB_TYPE`, `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_NAME` |
-| `poweradmin_db_charset`, `poweradmin_db_file` | `DB_CHARSET`, `DB_FILE` |
+| `poweradmin_db_charset`, `poweradmin_db_file` | `DB_FILE`, `DB_CHARSET` is only known by releases after 4.4 (`latest`) |
 | `poweradmin_db_pass` | secret with target `DB_PASS` |
 | `poweradmin_dns_ns1` … `poweradmin_dns_ns4`, `poweradmin_dns_hostmaster` | `DNS_NS1` … `DNS_NS4`, `DNS_HOSTMASTER` |
 | `poweradmin_pa_dns_ttl`, `poweradmin_pa_dns_soa_*` | `PA_DNS_TTL`, `PA_DNS_SOA_*` |
@@ -107,6 +130,13 @@ The former default `poweradmin_db_type` was `sqlite`, but the role required `pow
 The default tag changed from `latest` to `stable`, which may be an older release line, set `poweradmin_version: 'latest'` to keep it.
 Remove the former `settings.php` in `poweradmin_home`, it contains the database password and the session key in plain text.
 
+Later changes of the role:
+
+- The secrets are mounted as files and read with `<target>__FILE`, before they were passed as environment variables, `poweradmin_secrets` stays the same.
+- `PA_HEALTH_TOKEN` is not a secret of the role anymore, the release of `stable` does not know it.
+- `poweradmin_publish` is removed, set the ports with `poweradmin_container.publish`.
+- The tags are `dns` and `dns_poweradmin`.
+
 ### Tests
 
 The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs on a macOS controller, the base VM has to be Debian 13.
@@ -119,8 +149,12 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | `molecule-poweradmin-ipv6` | Container with IPv4 and IPv6 address, SQLite |
 
 `prepare` sets up podman and the network `podman-molecule` with the role `container_podman` and pulls the image.
-`side_effect` changes `PA_APP_TITLE` and checks that the running service is restarted.
-`verify` checks the quadlet unit including the secret and the environment, the podman secret, the service and the container addresses,
+`side_effect` runs the role with `poweradmin_container` not a dictionary, two secrets of the same name, MySQL without the secret of the database password,
+the session key and its file variable in the environment, an unknown environment variable in `poweradmin_environment` and in `poweradmin_container.environment` and an unknown secret
+and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
+then it changes `PA_APP_TITLE` and checks that the running service is restarted.
+`verify` checks the quadlet unit with the mounted secret, `PA_SESSION_KEY__FILE` and the environment without the session key, the podman secret,
+the session key read from the file in the generated `settings.php`, the service and the container addresses,
 requests the login page via IPv4 and IPv6 and checks the title of the side effect and the SQLite database.
 The VMs need access to Docker Hub.
 
