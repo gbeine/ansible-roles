@@ -9,8 +9,101 @@
   vars:
     database_postgresql__test_case: "{{ database_postgresql__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     database_postgresql__test_vars: "{{ database_postgresql__test_common | combine(database_postgresql__test_case.role_vars) }}"
+    database_postgresql__test_checked_files:
+      - '/etc/containers/systemd/postgresql.container'
 
   tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_postgresql__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_postgresql__test_checked_files }}"
+      register: 'database_postgresql__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run database_postgresql with postgresql_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_container: [ 'environment' ]
+        database_postgresql__test_invalid:
+          message: 'postgresql_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_postgresql with POSTGRES_USER in postgresql_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_environment:
+          POSTGRES_USER: 'molecule'
+        database_postgresql__test_invalid:
+          message: 'POSTGRES_USER in postgresql_environment'
+          search: 'Unknown environment variables: POSTGRES_USER\.'
+
+    - name: 'Run database_postgresql with the file variable of the password in postgresql_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_environment:
+          POSTGRES_PASSWORD_FILE: '/run/secrets/postgres_password'
+        database_postgresql__test_invalid:
+          message: 'the file variable of the password in postgresql_environment'
+          search: 'must not be set in postgresql_environment:\s+POSTGRES_PASSWORD_FILE\.'
+
+    - name: 'Run database_postgresql with the password in postgresql_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_container:
+          environment:
+            POSTGRES_PASSWORD: 'molecule'
+        database_postgresql__test_invalid:
+          message: 'the password in postgresql_container'
+          search: 'Unknown environment variables: POSTGRES_PASSWORD\.'
+
+    - name: 'Run database_postgresql with an unknown secret in postgresql_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_container:
+          secrets:
+            - 'postgres_password,type=mount,target=/run/secrets/postgres_password'
+            - 'postgres_molecule,type=env,target=PGPASSWORD'
+        database_postgresql__test_invalid:
+          message: 'an unknown secret in postgresql_container'
+          search: 'Unknown secrets: postgres_molecule\.'
+
+    - name: 'Run database_postgresql with an unknown setting (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_settings: "{{ database_postgresql__test_vars.postgresql_settings | combine({'max_connectionz': 10}) }}"
+        database_postgresql__test_invalid:
+          message: 'an unknown setting'
+          search: '^Unknown settings for PostgreSQL 18: max_connectionz,'
+
+    - name: 'Run database_postgresql with an account without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_accounts: "{{ database_postgresql__test_vars.postgresql_accounts + [{'name': 'molecule_nopass'}] }}"
+        database_postgresql__test_invalid:
+          message: 'an account without password'
+          search: '^Accounts without password in postgresql_passwords: molecule_nopass\.$'
+
+    - name: 'Run database_postgresql with an entry of postgresql_hba without method (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_hba:
+          - type: 'host'
+            database: 'all'
+            user: 'all'
+            address: '0.0.0.0/0'
+        database_postgresql__test_invalid:
+          message: 'an entry of postgresql_hba without method'
+          search: '^postgresql_hba entries need type, database, user and method\.$'
 
     - name: 'Read the main PID of PostgreSQL before the change'
       ansible.builtin.command: 'systemctl show --property=MainPID --value postgresql'

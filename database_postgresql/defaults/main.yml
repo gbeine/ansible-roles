@@ -15,7 +15,6 @@ database_postgresql__network: "{{ postgresql_network | mandatory }}"
 database_postgresql__hostname: "{{ postgresql_hostname | mandatory }}"
 database_postgresql__timezone: "{{ postgresql_timezone | mandatory }}"
 database_postgresql__labels: "{{ postgresql_labels }}"
-database_postgresql__publish: "{{ postgresql_publish | default([]) }}"
 
 database_postgresql__password: "{{ postgresql_password | default('') }}"
 database_postgresql__passwords: "{{ postgresql_passwords | default({}) }}"
@@ -32,6 +31,9 @@ database_postgresql__server_hba: "{{ postgresql_hba | default(database_postgresq
 database_postgresql__configure_from_primary: "{{ postgresql_configure_from_primary | default(false) }}"
 
 database_postgresql__container: "{{ database_postgresql__podman_container_default | combine(postgresql_container | default({})) }}"
+
+# Variables of the image, e.g. POSTGRES_INITDB_ARGS, the role sets POSTGRES_PASSWORD_FILE itself
+database_postgresql__environment: "{{ database_postgresql__environment_default | combine(postgresql_environment | default({})) }}"
 
 database_postgresql__autoupdate_enabled: "{{ postgresql_autoupdate_enabled | default(false) }}"
 database_postgresql__autoupdate_schedule: "{{ postgresql_autoupdate_schedule }}"
@@ -72,6 +74,22 @@ database_postgresql__gid: 70
 
 database_postgresql__port: 5432
 
+database_postgresql__environment_default: {}
+
+# The password of postgres is mounted as file, the image reads POSTGRES_PASSWORD from the file variable
+database_postgresql__secret_name: 'postgres_password'
+database_postgresql__secret_files:
+  POSTGRES_PASSWORD: 'POSTGRES_PASSWORD_FILE'
+database_postgresql__secrets_dir: '/run/secrets'
+
+# Variables of the image (docker-entrypoint.sh of docker-library/postgres) that can be set with postgresql_environment,
+# the other variables (POSTGRES_USER, POSTGRES_DB, PGDATA, …) are set by the role or would break it
+database_postgresql__environment_allowed:
+  - 'POSTGRES_INITDB_ARGS'
+  - 'POSTGRES_INITDB_WALDIR'
+  # The file variables of the secrets, set by the role
+  - 'POSTGRES_PASSWORD_FILE'
+
 database_postgresql__podman_name: 'postgresql'
 database_postgresql__podman_image: 'docker.io/library/postgres'
 
@@ -92,9 +110,12 @@ database_postgresql__podman_container_default:
   network: "{{ database_postgresql__network }}"
   timezone: "{{ database_postgresql__timezone }}"
   labels: "{{ database_postgresql__labels | default(omit) }}"
-  publish: "{{ database_postgresql__publish }}"
+  # Set with postgresql_environment, the file variable of the password is always set
+  environment: >-
+    {{ database_postgresql__environment
+       | combine({ database_postgresql__secret_files.POSTGRES_PASSWORD: database_postgresql__secrets_dir ~ '/' ~ database_postgresql__secret_name }) }}
   secrets:
-    - 'postgres_password,type=env,target=POSTGRES_PASSWORD'
+    - "{{ database_postgresql__secret_name }},type=mount,target={{ database_postgresql__secrets_dir }}/{{ database_postgresql__secret_name }}"
   volumes:
     - '/etc/localtime:/etc/localtime:ro'
     - '/etc/timezone:/etc/timezone:ro'

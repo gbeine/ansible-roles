@@ -69,7 +69,9 @@ The default allows local connections without password and connections from every
 
 ### Accounts, databases, privileges and replication slots
 
-The password of the user `postgres` is set with `postgresql_password`, it is passed as podman secret and used by `initdb` when the cluster is created.
+The password of the user `postgres` is set with `postgresql_password` and used by `initdb` when the cluster is created.
+The role creates the podman secret `postgres_password`, mounts it to `/run/secrets/postgres_password` and sets `POSTGRES_PASSWORD_FILE`,
+so the password is neither part of the quadlet unit nor of the environment of the container.
 Changing the password later does not change the password of an existing cluster.
 
 - `postgresql_accounts` supports the options `name`, `comment` and `attributes` (`role_attr_flags`), see the [postgresql_user module](https://docs.ansible.com/ansible/latest/collections/community/postgresql/postgresql_user_module.html).
@@ -98,6 +100,33 @@ postgresql_privileges:
 
 The role fails before it changes anything if an account has no password in `postgresql_passwords`.
 
+### Container
+
+Ports, volumes and additional hosts (`etc_hosts`) are changed with `postgresql_container`, it is merged over the default of the container.
+The merge is not recursive, `publish` and `volumes` replace the values of the default completely.
+`postgresql_environment` sets variables of the image, e.g. `POSTGRES_INITDB_ARGS`, the role always adds `POSTGRES_PASSWORD_FILE`.
+`postgresql_container.environment` replaces the environment including the file variable of the password, use `postgresql_environment` instead.
+
+### Allowed variables
+
+The role only allows the environment variables `POSTGRES_INITDB_ARGS` and `POSTGRES_INITDB_WALDIR` of the image and the secret of `postgresql_password`,
+it stops before any change if other variables are set in `postgresql_environment` or `postgresql_container` or other secrets in `postgresql_container`.
+This prevents unexpected behavior by accident, e.g. by `POSTGRES_PASSWORD` in plain text, `PGDATA` or `POSTGRES_USER`,
+which would break the data directory or the management of the accounts by the role.
+The allow list contains the file variable `POSTGRES_PASSWORD_FILE` as well, the role sets it from `postgresql_password`,
+it must not be set in `postgresql_environment`.
+
+### Validation
+
+The role checks before any change that `postgresql_version` is a supported version, that only allowed environment variables and secrets are set in the container,
+that `POSTGRES_PASSWORD_FILE` is not set in `postgresql_environment` and that `postgresql_password` is not empty.
+It checks that every key of `postgresql_settings` is a setting of the version or contains a dot (settings of extensions),
+that every account has a password in `postgresql_passwords`, every entry of `postgresql_accounts`, `postgresql_databases` and `postgresql_slots` has `name`
+and every entry of `postgresql_hba` has `type`, `database`, `user` and `method`.
+The message only names the failing checks.
+Finally it checks that the data directory contains no data of another major version (see Upgrade to a new major version).
+If `postgresql_container` is no dictionary, merging it with the default fails before anything changes.
+
 ### Restart and updates
 
 PostgreSQL is restarted if the configuration or the access configuration changed, or if it was running and the secret or the quadlet unit changed.
@@ -116,18 +145,23 @@ Updates of the image within the major version are done by `container_update` wit
 | `postgresql_enable_replication_standby` and `postgresql_primary_conninfo`, `postgresql_primary_slot_name`, `postgresql_hot_standby` | `postgresql_settings` with the parameter names |
 | `postgresql_log_timezone`, `postgresql_datestyle`, `postgresql_lc_*`, `postgresql_default_text_search_config` | `postgresql_settings` with the parameter names |
 | `podman___update_mode` | `postgresql_autoupdate_enabled` |
+| `postgresql_publish` | `postgresql_container.publish` |
+| the secret as environment variable `POSTGRES_PASSWORD` | the secret mounted as file and `POSTGRES_PASSWORD_FILE` |
+| tag `database_postgresql` | tags `database` and `database_postgresql` |
 | versions before 18 | not supported |
 
 ### Tests
 
 The molecule scenario `default` uses tart with two VMs:
 
-- `molecule-postgresql` runs PostgreSQL 18, `side_effect` changes `max_connections` and checks the restart,
+- `molecule-postgresql` runs PostgreSQL 18, `side_effect` runs the role with `postgresql_container` not a dictionary, `POSTGRES_USER` and `POSTGRES_PASSWORD_FILE` in `postgresql_environment`,
+  `POSTGRES_PASSWORD` and an unknown secret in `postgresql_container`, an unknown setting, an account without password and an entry of `postgresql_hba` without method and checks that it fails with the expected message
+  and the quadlet unit is unchanged (tasks marked `expect ERROR`), then it changes `max_connections` and checks the restart,
   then runs the role with `postgresql_version: 19` and checks that it fails because of the data of PostgreSQL 18 without changing the container,
 - `molecule-postgresql-19` runs the release candidate of PostgreSQL 19.
 
-`verify` checks the quadlet unit, `PG_VERSION` and `postgresql.conf` of the version, the settings of the running server,
-the login of the account with the right and a wrong password over TCP, the owner of the database, the privileges and the replication slot.
+`verify` checks the quadlet unit with the mounted secret and `POSTGRES_PASSWORD_FILE` without the password, `PG_VERSION` and `postgresql.conf` of the version,
+the settings of the running server, the login of `postgres` with the password of the secret and of the account with the right and a wrong password over TCP, the owner of the database, the privileges and the replication slot.
 
 ```
 cd database_postgresql

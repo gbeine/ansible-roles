@@ -25,7 +25,10 @@
         that:
           - database_postgresql__test_lines | select('match', 'Label=') | list | length == 0
           - ('IP=' + database_postgresql__test_ip) in database_postgresql__test_lines
-          - "'Secret=postgres_password,type=env,target=POSTGRES_PASSWORD' in database_postgresql__test_lines"
+          # The password is mounted as file, it is neither part of the quadlet unit nor of the environment
+          - "'Secret=postgres_password,type=mount,target=/run/secrets/postgres_password' in database_postgresql__test_lines"
+          - database_postgresql__test_lines | select('match', 'Environment=.*POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password') | list | length == 1
+          - database_postgresql__test_lines | select('search', 'type=env') | list | length == 0
           - ('Image=' + database_postgresql__test_case.image) in database_postgresql__test_lines
           - database_postgresql__test_lines | select('search', database_postgresql__test_password) | list | length == 0
         fail_msg: "Quadlet: {{ database_postgresql__test_quadlet.content | b64decode }}"
@@ -97,6 +100,14 @@
         fail_msg: "Settings: {{ database_postgresql__test_values | join(', ') }}"
       vars:
         database_postgresql__test_values: "{{ database_postgresql__test_show.results | map(attribute='stdout') | list }}"
+
+    # initdb read the password of postgres from POSTGRES_PASSWORD_FILE
+    - name: 'Log in as postgres with the password of the secret over TCP'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '-e', "PGPASSWORD={{ database_postgresql__test_password }}", 'postgresql',
+                'psql', '-h', "{{ database_postgresql__test_ip }}", '-U', 'postgres', '-tAc', 'SELECT current_user' ]
+      register: 'database_postgresql__test_postgres_login'
+      changed_when: false
 
     - name: 'Log in as molecule_app with the password over TCP'
       ansible.builtin.command:
