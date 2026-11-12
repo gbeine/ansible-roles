@@ -1,0 +1,202 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_redis__test_case: "{{ database_redis__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_redis__test_vars: "{{ database_redis__test_case.role_vars }}"
+    database_redis__test_config: "{{ database_redis__test_vars.redis_config | default({}) }}"
+    database_redis__test_users: "{{ database_redis__test_vars.redis_users | default([]) }}"
+    database_redis__test_passwords: "{{ database_redis__test_vars.redis_passwords | default({}) }}"
+    database_redis__test_secrets: "{{ database_redis__test_vars.redis_secrets | default([]) }}"
+    database_redis__test_checked_files:
+      - "{{ database_redis__test_quadlet_path }}"
+      - "{{ database_redis__test_vars.redis_home }}/redis.conf"
+      - "{{ database_redis__test_vars.redis_home }}/users.acl"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_redis__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_redis__test_checked_files }}"
+      register: 'database_redis__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_redis with redis_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_container: [ 'environment' ]
+        database_redis__test_invalid:
+          message: 'redis_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_redis with redis_config as string like the former role (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: 'maxmemory 64mb'
+        database_redis__test_invalid:
+          message: 'redis_config as string'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_redis with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: "{{ database_redis__test_config | combine({'max-memory': '64mb'}) }}"
+        database_redis__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options: max-memory\. Allowed are the options of Redis and of its modules'
+
+    - name: 'Run database_redis with the former name of an option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: "{{ database_redis__test_config | combine({'slaveof': '10.89.0.99 6379'}) }}"
+        database_redis__test_invalid:
+          message: 'the former name of an option'
+          search: '^Former names of options, use the current names: slaveof is replicaof\.$'
+
+    - name: 'Run database_redis with an option set by the role (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: "{{ database_redis__test_config | combine({'dir': '/tmp'}) }}"
+        database_redis__test_invalid:
+          message: 'an option set by the role'
+          search: '^Options set by the role must not be set in redis_config: dir\.$'
+
+    - name: 'Run database_redis with requirepass (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: "{{ database_redis__test_config | combine({'requirepass': 'molecule'}) }}"
+        database_redis__test_invalid:
+          message: 'requirepass'
+          search: 'requirepass: the password of the user default is set with redis_users and redis_passwords\.$'
+
+    - name: 'Run database_redis with a password in redis_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: "{{ database_redis__test_config | combine({'masterauth': 'molecule'}) }}"
+        database_redis__test_invalid:
+          message: 'a password in redis_config'
+          search: '^Passwords must not be set in redis_config, set them with redis_secrets: masterauth\.$'
+
+    - name: 'Run database_redis with true as value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_config: "{{ database_redis__test_config | combine({'appendonly': true}) }}"
+        database_redis__test_invalid:
+          message: 'true as value'
+          search: '^Options of Redis need a value, e.g. yes instead of true: appendonly\.$'
+
+    - name: 'Run database_redis with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_secrets: [ { name: 'redis_masterauth', data: 'x' } ]
+        database_redis__test_invalid:
+          message: 'a secret without target'
+          search: '^redis_secrets entries need name, data and target$'
+
+    - name: 'Run database_redis with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_secrets: "{{ database_redis__test_secrets + [{'name': 'redis_requirepass', 'data': 'x', 'target': 'requirepass'}] }}"
+        database_redis__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: requirepass\.'
+
+    - name: 'Run database_redis with a user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_users: "{{ database_redis__test_users + [{'name': 'worker', 'rules': ['~jobs:*', '+@list']}] }}"
+        database_redis__test_invalid:
+          message: 'a user without password'
+          search: '^Users without password in redis_passwords: worker, only the user default may have no password\.$'
+
+    - name: 'Run database_redis with a password in the rules of a user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_users: "{{ database_redis__test_users + [{'name': 'worker', 'rules': ['~jobs:*', '>secret']}] }}"
+        redis_passwords: "{{ database_redis__test_passwords | combine({'worker': 'molecule-worker-password'}) }}"
+        database_redis__test_invalid:
+          message: 'a password in the rules of a user'
+          search: '^Passwords are set with redis_passwords and on or off with enabled, rules must not contain passwords, nopass, on or off: worker\.$'
+
+    - name: 'Run database_redis with an unknown environment variable in redis_container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        redis_container: { environment: { FOO: 'bar' } }
+        database_redis__test_invalid:
+          message: 'an unknown environment variable in redis_container'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run database_redis with the changed configuration'
+      when: database_redis__test_case.side_effect | default(false)
+      block:
+
+        # The change is only a restart if Redis runs
+        - name: 'Wait until Redis answers'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'redis', 'redis-cli', 'PING' ]
+          register: 'database_redis__test_ready'
+          until: (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('PONG|NOAUTH')
+          retries: 30
+          delay: 2
+          changed_when: false
+          failed_when: false
+
+        - name: 'Read the log of Redis'
+          when: (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is not search('PONG|NOAUTH')
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', 'redis', '-n', '50', '--no-pager' ]
+          register: 'database_redis__test_journal'
+          changed_when: false
+
+        - name: 'Assert that Redis runs'
+          ansible.builtin.assert:
+            that:
+              - (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('PONG|NOAUTH')
+            fail_msg: "{{ database_redis__test_journal.stdout_lines | default([]) }}"
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'redis' ]
+          register: 'database_redis__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            redis_config: "{{ database_redis__test_config | combine(database_redis__test_side_effect_config) }}"
+
+        - name: 'Run database_redis with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'database_redis'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'redis' ]
+          register: 'database_redis__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed redis.conf and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_redis__config_result is changed
+              - database_redis__quadlet_result is not changed
+              - database_redis__test_started_after.stdout | int > database_redis__test_started_before.stdout | int
+            fail_msg: >-
+              redis.conf changed: {{ database_redis__config_result is changed }},
+              quadlet changed: {{ database_redis__quadlet_result is changed }},
+              start before {{ database_redis__test_started_before.stdout }}, after {{ database_redis__test_started_after.stdout }}

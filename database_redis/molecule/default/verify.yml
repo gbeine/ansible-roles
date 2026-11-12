@@ -1,0 +1,211 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_redis__test_case: "{{ database_redis__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_redis__expect: "{{ database_redis__test_case.expect }}"
+    database_redis__test_home: "{{ database_redis__test_case.role_vars.redis_home }}"
+    # The passwords of the test case, they must not appear in the files of the role
+    database_redis__test_plain: >-
+      {{ (database_redis__test_case.role_vars.redis_passwords | default({})).values() | list
+         + (database_redis__test_case.role_vars.redis_secrets | default([])) | map(attribute='data') | list }}
+    # redis-cli in the container, as the user default with its password if it has one
+    database_redis__test_default: "{{ database_redis__expect.users | selectattr('name', 'eq', 'default') | first | default({}) }}"
+    database_redis__test_cli_default: >-
+      {{ [ 'podman', 'exec' ]
+         + ([ '--env', 'REDISCLI_AUTH=' ~ database_redis__test_default.password ] if database_redis__test_default.password is defined else [])
+         + [ 'redis', 'redis-cli', '--no-auth-warning', '--raw' ] }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_redis__test_quadlet_path }}"
+      register: 'database_redis__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_redis__test_image) in database_redis__test_quadlet_lines
+          - ('IP=' + database_redis__expect.ip) in database_redis__test_quadlet_lines
+          - database_redis__expect.ip6 is none or ('IP6=' + database_redis__expect.ip6) in database_redis__test_quadlet_lines
+          - database_redis__expect.ip6 is not none or database_redis__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_redis__expect.quadlet | reject('in', database_redis__test_quadlet_lines) | list | length == 0
+          - database_redis__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          # The passwords are mounted as files, they are never part of the unit
+          - database_redis__test_plain | select('in', database_redis__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ database_redis__test_quadlet.content | b64decode }}"
+      vars:
+        database_redis__test_quadlet_lines: "{{ (database_redis__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the redis service'
+      ansible.builtin.command: 'systemctl is-active redis'
+      register: 'database_redis__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the redis container'
+      ansible.builtin.command: 'podman inspect redis'
+      register: 'database_redis__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service and the container addresses'
+      ansible.builtin.assert:
+        that:
+          - database_redis__test_service.stdout == 'active'
+          - database_redis__test_net.IPAddress == database_redis__expect.ip
+          - database_redis__expect.ip6 is none or database_redis__test_net.GlobalIPv6Address == database_redis__expect.ip6
+        fail_msg: >-
+          service {{ database_redis__test_service.stdout }},
+          IPv4 {{ database_redis__test_net.IPAddress }}, IPv6 {{ database_redis__test_net.GlobalIPv6Address }}
+      vars:
+        database_redis__test_container: "{{ (database_redis__test_inspect.stdout | from_json)[0] }}"
+        database_redis__test_net: "{{ database_redis__test_container.NetworkSettings.Networks[database_redis__test_case.role_vars.redis_network] }}"
+
+    - name: 'Read the files of Redis'
+      ansible.builtin.stat:
+        path: "{{ database_redis__test_home }}/{{ item }}"
+      loop: [ 'data', 'redis.conf', 'users.acl', 'data/redis.conf' ]
+      register: 'database_redis__test_files'
+
+    - name: 'Assert the owner and the permissions of the files'
+      ansible.builtin.assert:
+        that:
+          - database_redis__test_stat.data.isdir | default(false)
+          - database_redis__test_stat.data.uid == 999 and database_redis__test_stat.data.gid == 1000
+          - database_redis__test_stat.data.mode == '0750'
+          - database_redis__test_stat['redis.conf'].uid == 999 and database_redis__test_stat['redis.conf'].mode == '0640'
+          - database_redis__test_stat['users.acl'].uid == 999 and database_redis__test_stat['users.acl'].mode == '0600'
+          # The file of the former role is removed
+          - not database_redis__test_stat['data/redis.conf'].exists
+        fail_msg: >-
+          {% for name, stat in database_redis__test_stat.items() %}{{ name }}
+          {{ (stat.uid | string ~ ':' ~ stat.gid | string ~ ' ' ~ stat.mode) if stat.exists else 'missing' }}{{ ', ' if not loop.last }}{% endfor %}
+      vars:
+        database_redis__test_stat: "{{ dict(database_redis__test_files.results | map(attribute='item') | zip(database_redis__test_files.results | map(attribute='stat'))) }}"
+
+    - name: 'Read redis.conf and the ACL file'
+      ansible.builtin.slurp:
+        src: "{{ database_redis__test_home }}/{{ item }}"
+      loop: [ 'redis.conf', 'users.acl' ]
+      register: 'database_redis__test_contents'
+      no_log: true
+
+    - name: 'Assert redis.conf and the ACL file'
+      ansible.builtin.assert:
+        that:
+          - database_redis__expect.config | reject('in', database_redis__test_config_lines) | list | length == 0
+          - database_redis__expect.acl | reject('in', database_redis__test_acl_lines) | list | length == 0
+          # The passwords are only stored as hashes and in the secrets
+          - database_redis__test_plain | select('in', database_redis__test_text) | list | length == 0
+        fail_msg: >-
+          redis.conf {{ database_redis__test_config_lines }},
+          users.acl {{ database_redis__test_acl_lines | map('regex_replace', '#[0-9a-f]{64}', '#<hash>') | list }}
+      vars:
+        database_redis__test_config_lines: "{{ (database_redis__test_contents.results[0].content | b64decode).splitlines() }}"
+        database_redis__test_acl_lines: "{{ (database_redis__test_contents.results[1].content | b64decode).splitlines() }}"
+        database_redis__test_text: "{{ database_redis__test_contents.results | map(attribute='content') | map('b64decode') | join('') }}"
+
+    - name: 'Wait until Redis answers'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'redis', 'redis-cli', 'PING' ]
+      register: 'database_redis__test_ready'
+      until: (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('PONG|NOAUTH')
+      retries: 30
+      delay: 2
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the log of Redis'
+      when: (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is not search('PONG|NOAUTH')
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'redis', '-n', '50', '--no-pager' ]
+      register: 'database_redis__test_journal'
+      changed_when: false
+
+    - name: 'Assert that Redis runs'
+      ansible.builtin.assert:
+        that:
+          - (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('PONG|NOAUTH')
+        fail_msg: "{{ database_redis__test_journal.stdout_lines | default([]) }}"
+
+    # Without a password for the user default, every connection needs AUTH
+    - name: 'Assert the authentication of the user default'
+      ansible.builtin.assert:
+        that:
+          - (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('NOAUTH' if database_redis__test_default.password is defined else '^PONG$')
+        fail_msg: "PING without password: {{ database_redis__test_ready.stdout }} {{ database_redis__test_ready.stderr | default('') }}"
+
+    - name: 'Read the configuration and the modules as the user default'
+      ansible.builtin.command:
+        argv: "{{ database_redis__test_cli_default + item }}"
+      loop:
+        - [ 'CONFIG', 'GET', 'databases' ]
+        - [ 'CONFIG', 'GET', 'masterauth' ]
+        - [ 'MODULE', 'LIST' ]
+      register: 'database_redis__test_admin'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert the configuration and the modules'
+      ansible.builtin.assert:
+        that:
+          - database_redis__test_admin.results[0].stdout_lines == [ 'databases', database_redis__expect.databases ]
+          # The secret is read from the included file, backslash and double quote included
+          - database_redis__expect.masterauth is none or database_redis__test_admin.results[1].stdout_lines == [ 'masterauth', database_redis__expect.masterauth ]
+          # The entrypoint loads the modules of the image
+          - database_redis__test_admin.results[2].stdout_lines | select('eq', 'search') | list | length == 1
+        fail_msg: >-
+          databases {{ database_redis__test_admin.results[0].stdout_lines }},
+          masterauth set {{ database_redis__test_admin.results[1].stdout_lines | length > 1 and database_redis__test_admin.results[1].stdout_lines[1] | length > 0 }},
+          modules {{ database_redis__test_admin.results[2].stdout_lines }}
+
+    - name: 'Run commands as the user app'
+      when: database_redis__test_app.password is defined
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'podman', 'exec', '--env', 'REDISCLI_AUTH=' ~ database_redis__test_app.password,
+               'redis', 'redis-cli', '--no-auth-warning', '--user', 'app' ] + item }}
+      loop:
+        - [ 'SET', 'app:molecule', 'value' ]
+        - [ 'SET', 'other:molecule', 'value' ]
+        - [ 'FLUSHALL' ]
+      register: 'database_redis__test_app_commands'
+      changed_when: false
+      # redis-cli fails on error replies, the replies are checked below
+      failed_when: false
+      no_log: true
+      vars:
+        database_redis__test_app: "{{ database_redis__expect.users | selectattr('name', 'eq', 'app') | first | default({}) }}"
+
+    - name: 'Assert the permissions of the user app'
+      when: database_redis__test_app_commands is not skipped
+      ansible.builtin.assert:
+        that:
+          - database_redis__test_app_commands.results[0].stdout == 'OK'
+          - (database_redis__test_app_commands.results[1].stdout ~ database_redis__test_app_commands.results[1].stderr) is search('NOPERM')
+          - (database_redis__test_app_commands.results[2].stdout ~ database_redis__test_app_commands.results[2].stderr) is search('NOPERM')
+        fail_msg: "{{ database_redis__test_app_commands.results | map(attribute='stdout') | list }} {{ database_redis__test_app_commands.results | map(attribute='stderr') | list }}"
+
+    - name: 'Authenticate as the disabled user'
+      when: database_redis__test_case.role_vars.redis_passwords.disabled is defined
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '--env', "REDISCLI_AUTH={{ database_redis__test_case.role_vars.redis_passwords.disabled }}",
+                'redis', 'redis-cli', '--no-auth-warning', '--user', 'disabled', 'PING' ]
+      register: 'database_redis__test_disabled'
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 'Assert that the disabled user cannot authenticate'
+      when: database_redis__test_disabled is not skipped
+      ansible.builtin.assert:
+        that:
+          - (database_redis__test_disabled.stdout ~ database_redis__test_disabled.stderr) is search('WRONGPASS|AUTH failed')
+        fail_msg: "{{ database_redis__test_disabled.stdout }} {{ database_redis__test_disabled.stderr }}"

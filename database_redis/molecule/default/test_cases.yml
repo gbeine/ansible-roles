@@ -1,0 +1,106 @@
+---
+# Network created by container_podman in prepare.yml
+database_redis__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+database_redis__test_image: 'docker.io/library/redis:8-alpine'
+database_redis__test_quadlet_path: '/etc/containers/systemd/redis.container'
+
+# A valid change of the side effect, redis.conf changes and Redis has to restart
+database_redis__test_side_effect_config:
+  maxmemory: '128mb'
+
+database_redis__test_cases:
+
+  # Only the mandatory variables, the user default without password like the image
+  - name: 'molecule-redis-default'
+    role_vars:
+      redis_home: '/opt/redis'
+      redis_ip: '10.89.0.70'
+      redis_network: 'podman-molecule'
+      redis_hostname: 'redis-default'
+      redis_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.70'
+      ip6: ~
+      quadlet:
+        - 'Exec=redis-server /usr/local/etc/redis/redis.conf'
+        - 'Volume=/opt/redis/data:/data'
+        - 'Volume=/opt/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro'
+        - 'Volume=/opt/redis/users.acl:/etc/redis/users.acl:ro'
+      config:
+        - 'daemonize no'
+        - 'dir /data'
+        - 'aclfile /etc/redis/users.acl'
+        - 'bind * -::*'
+        - 'port 6379'
+      acl:
+        - 'user default on nopass sanitize-payload ~* &* +@all'
+      databases: '16'
+      users: []
+      masterauth: ~
+
+  # IPv6, labels, options, users with passwords and a secret with backslash and double quote
+  - name: 'molecule-redis'
+    role_vars:
+      redis_home: '/opt/redis'
+      redis_ip: '10.89.0.71'
+      redis_ipv6: 'fd00:89::71'
+      redis_network: 'podman-molecule'
+      redis_hostname: 'redis-molecule'
+      redis_timezone: 'Europe/Berlin'
+      redis_labels:
+        traefik.enable: 'false'
+      redis_config:
+        databases: 4
+        save: [ '3600 1', '300 100' ]
+        maxmemory: '64mb'
+        appendonly: 'yes'
+      redis_users:
+        - name: 'default'
+          rules: [ '~*', '&*', '+@all' ]
+        - name: 'app'
+          rules: [ '~app:*', '+@all', '-@dangerous' ]
+        - name: 'disabled'
+          rules: [ '~*', '+@read' ]
+          enabled: false
+      redis_passwords:
+        default: 'molecule-default-password'
+        app: 'molecule-app-password'
+        disabled: 'molecule-disabled-password'
+      redis_secrets:
+        - name: 'redis_masterauth'
+          data: 'molecule-master\pass"word'
+          target: 'masterauth'
+    side_effect: true
+    expect:
+      ip: '10.89.0.71'
+      ip6: 'fd00:89::71'
+      quadlet:
+        - 'Exec=redis-server /usr/local/etc/redis/redis.conf'
+        - 'Volume=/opt/redis/data:/data'
+        - 'Secret=redis_masterauth,type=mount,target=/run/secrets/redis_masterauth,uid=999,gid=1000,mode=0400'
+        - 'Label=traefik.enable=false'
+      config:
+        - 'aclfile /etc/redis/users.acl'
+        - 'databases 4'
+        - 'save 3600 1'
+        - 'save 300 100'
+        - 'maxmemory 128mb'
+        - 'appendonly yes'
+        - 'include /run/secrets/redis_masterauth'
+      acl:
+        - "user default reset ~* &* +@all on #{{ 'molecule-default-password' | hash('sha256') }}"
+        - "user app reset ~app:* +@all -@dangerous on #{{ 'molecule-app-password' | hash('sha256') }}"
+        - "user disabled reset ~* +@read off #{{ 'molecule-disabled-password' | hash('sha256') }}"
+      databases: '4'
+      users:
+        - { name: 'default', password: 'molecule-default-password' }
+        - { name: 'app', password: 'molecule-app-password' }
+      masterauth: 'molecule-master\pass"word'

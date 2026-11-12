@@ -1,0 +1,95 @@
+---
+# Checks one instance against database_redis__expect
+
+- name: "Read the quadlet unit of {{ database_redis__expect.name }}"
+  ansible.builtin.slurp:
+    src: "/etc/containers/systemd/{{ database_redis__expect.name }}.container"
+  register: 'database_redis__test_quadlet'
+
+# Every quadlet unit only contains the secrets and the files of its own instance
+- name: "Assert the addresses, the files and the secrets of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - ('IP=' + database_redis__expect.ip) in database_redis__test_quadlet_lines
+      - database_redis__expect.ip6 is none or ('IP6=' + database_redis__expect.ip6) in database_redis__test_quadlet_lines
+      - database_redis__expect.ip6 is not none or database_redis__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+      - ('Volume=' + database_redis__expect.home + '/redis.conf:/usr/local/etc/redis/redis.conf:ro') in database_redis__test_quadlet_lines
+      - ('Volume=' + database_redis__expect.home + '/users.acl:/etc/redis/users.acl:ro') in database_redis__test_quadlet_lines
+      - >-
+        database_redis__test_quadlet_lines | select('match', 'Secret=') | map('regex_replace', '^Secret=', '') | list | sort
+        == database_redis__expect.secrets | sort
+    fail_msg: "{{ database_redis__test_quadlet_lines | select('match', '(IP6?|Secret|Volume)=') | list }}"
+  vars:
+    database_redis__test_quadlet_lines: "{{ (database_redis__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+- name: "Read redis.conf of {{ database_redis__expect.name }}"
+  ansible.builtin.slurp:
+    src: "{{ database_redis__expect.home }}/redis.conf"
+  register: 'database_redis__test_config'
+
+- name: "Assert redis.conf of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - database_redis__expect.config | reject('in', database_redis__test_config_lines) | list | length == 0
+    fail_msg: "{{ database_redis__test_config_lines }}"
+  vars:
+    database_redis__test_config_lines: "{{ (database_redis__test_config.content | b64decode).splitlines() }}"
+
+- name: "Read the state of the service {{ database_redis__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'systemctl', 'is-active', "{{ database_redis__expect.name }}" ]
+  register: 'database_redis__test_service'
+  changed_when: false
+  failed_when: false
+
+- name: "Inspect the container {{ database_redis__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'podman', 'inspect', "{{ database_redis__expect.name }}" ]
+  register: 'database_redis__test_inspect'
+  changed_when: false
+
+- name: "Assert the service and the addresses of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - database_redis__test_service.stdout == 'active'
+      - database_redis__test_net.IPAddress == database_redis__expect.ip
+      - database_redis__expect.ip6 is none or database_redis__test_net.GlobalIPv6Address == database_redis__expect.ip6
+    fail_msg: >-
+      service {{ database_redis__test_service.stdout }},
+      IPv4 {{ database_redis__test_net.IPAddress }}, IPv6 {{ database_redis__test_net.GlobalIPv6Address }}
+  vars:
+    database_redis__test_container: "{{ (database_redis__test_inspect.stdout | from_json)[0] }}"
+    database_redis__test_net: "{{ database_redis__test_container.NetworkSettings.Networks['podman-molecule'] }}"
+
+- name: "Wait until {{ database_redis__expect.name }} answers"
+  ansible.builtin.command:
+    argv: [ 'podman', 'exec', "{{ database_redis__expect.name }}", 'redis-cli', 'PING' ]
+  register: 'database_redis__test_ready'
+  until: (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('PONG|NOAUTH')
+  retries: 30
+  delay: 2
+  changed_when: false
+  failed_when: false
+
+- name: "Assert the authentication of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - (database_redis__test_ready.stdout ~ database_redis__test_ready.stderr | default('')) is search('NOAUTH' if database_redis__expect.password else '^PONG$')
+    fail_msg: "PING without password: {{ database_redis__test_ready.stdout }} {{ database_redis__test_ready.stderr | default('') }}"
+
+# The secret of the instance is included in its redis.conf
+- name: "Read masterauth of {{ database_redis__expect.name }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ [ 'podman', 'exec' ]
+         + ([ '--env', 'REDISCLI_AUTH=' ~ database_redis__expect.password ] if database_redis__expect.password else [])
+         + [ database_redis__expect.name, 'redis-cli', '--no-auth-warning', '--raw', 'CONFIG', 'GET', 'masterauth' ] }}
+  register: 'database_redis__test_masterauth'
+  changed_when: false
+  no_log: true
+
+- name: "Assert masterauth of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - database_redis__test_masterauth.stdout_lines == [ 'masterauth', database_redis__expect.masterauth ]
+    fail_msg: "masterauth set: {{ database_redis__test_masterauth.stdout_lines | length > 1 }}"

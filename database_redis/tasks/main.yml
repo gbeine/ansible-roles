@@ -1,38 +1,275 @@
 ---
 
-- name: 'Install Redis using podman'
-  tags: [ 'database_redis' ]
+- name: 'Install Redis'
+  tags: [ 'database', 'database_redis' ]
   block:
 
-    - name: 'Create Redis directory'
+    # A failing template in the variables (e.g. an unknown filter, redis_config or redis_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_redis__container | length > 0
+          - database_redis__config | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_redis__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_redis__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_redis__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_redis__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('redis_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('redis_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of redis_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='data') | map('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-   set _ = errors.append('the data of redis_secrets must not contain line breaks') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - database_redis__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_redis__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_redis__options: "{{ database_redis__config.keys() | list }}"
+        database_redis__options_role: >-
+          {{ database_redis__options
+             | select('in', (database_redis__config_role.keys() | list) + (database_redis__config_rejected.keys() | list))
+             | list }}
+        database_redis__options_secrets: "{{ database_redis__options | select('in', database_redis__secrets_allowed) | list }}"
+        database_redis__options_aliases: "{{ database_redis__options | select('in', database_redis__config_aliases.keys() | list) | list }}"
+        database_redis__options_unknown: >-
+          {{ database_redis__options
+             | reject('in', database_redis__config_allowed)
+             | reject('in', database_redis__options_role + database_redis__options_secrets + database_redis__options_aliases)
+             | list }}
+        database_redis__values: >-
+          {%- set values = [] -%}
+          {%- for option, value in database_redis__config.items() if value is not none and value is not sameas false -%}
+          {%-   for item in (value if value is sequence and value is not string else [ value ]) -%}
+          {%-     set _ = values.append({ 'option': option, 'value': item }) -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ values }}
+        database_redis__options_true: "{{ database_redis__values | selectattr('value', 'sameas', true) | map(attribute='option') | unique | list }}"
+        database_redis__options_invalid: >-
+          {{ database_redis__values | rejectattr('value', 'boolean')
+             | rejectattr('value', 'string') | rejectattr('value', 'number')
+             | map(attribute='option') | unique | list }}
+        database_redis__options_lines: >-
+          {{ database_redis__values | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\r\n]')
+             | map(attribute='option') | unique | list }}
+        database_redis__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_redis__options_role | length > 0 -%}
+          {%-   set _ = errors.append('Options set by the role must not be set in redis_config: ' ~ (database_redis__options_role | join(', ')) ~ '.') -%}
+          {%-   for option in database_redis__options_role if option in database_redis__config_rejected -%}
+          {%-     set _ = errors.append(option ~ ': ' ~ database_redis__config_rejected[option] ~ '.') -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {%- if database_redis__options_secrets | length > 0 -%}
+          {%-   set _ = errors.append('Passwords must not be set in redis_config, set them with redis_secrets: ' ~ (database_redis__options_secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_redis__options_aliases | length > 0 -%}
+          {%-   set renamed = [] -%}
+          {%-   for option in database_redis__options_aliases -%}
+          {%-     set _ = renamed.append(option ~ ' is ' ~ database_redis__config_aliases[option]) -%}
+          {%-   endfor -%}
+          {%-   set _ = errors.append('Former names of options, use the current names: ' ~ (renamed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_redis__options_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options: ' ~ (database_redis__options_unknown | join(', ')) ~ '. Allowed are the options of Redis and of its modules (database_redis__config_allowed).') -%}
+          {%- endif -%}
+          {%- if database_redis__options_true | length > 0 -%}
+          {%-   set _ = errors.append('Options of Redis need a value, e.g. yes instead of true: ' ~ (database_redis__options_true | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_redis__options_invalid | length > 0 -%}
+          {%-   set _ = errors.append('Values have to be strings, numbers or lists of them: ' ~ (database_redis__options_invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_redis__options_lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (database_redis__options_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_redis__port | string is not match('^[0-9]+$') -%}
+          {%-   set _ = errors.append('The port has to be a number.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the users'
+      ansible.builtin.assert:
+        that:
+          - database_redis__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_redis__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_redis__errors: >-
+          {%- set errors = [] -%}
+          {%- set users = database_redis__users -%}
+          {%- set passwords = database_redis__passwords -%}
+          {%- if users is not sequence or users is string or users is mapping -%}
+          {%-   set _ = errors.append('redis_users has to be a list.') -%}
+          {%- elif users | reject('mapping') | list | length > 0 or users | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('redis_users entries need name.') -%}
+          {%- else -%}
+          {%-   set names = users | map(attribute='name') | map('string') | list -%}
+          {%-   if names | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of redis_users have to be unique.') -%}
+          {%-   endif -%}
+          {%-   set invalid = names | reject('match', database_redis__user_name_pattern) | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('Invalid user names: ' ~ (invalid | join(', ')) ~ ', allowed are letters, digits and _ . @ -.') -%}
+          {%-   endif -%}
+          {%-   set ns = namespace(rules=[], password_rules=[], enabled=[]) -%}
+          {%-   for user in users -%}
+          {%-     set rules = user.rules | default([]) -%}
+          {%-     if rules is not sequence or rules is string or rules is mapping or rules | reject('string') | list | length > 0 -%}
+          {%-       set ns.rules = ns.rules + [ user.name ] -%}
+          {%-     else -%}
+          {%-       for rule in rules -%}
+          {%-         if rule is search('[\r\n]') or (rule is search(' ') and not (rule.startswith('(') and rule.endswith(')'))) -%}
+          {%-           set ns.rules = ns.rules + [ user.name ] -%}
+          {%-         elif rule | lower in database_redis__acl_rules_rejected or rule[:1] in database_redis__acl_rules_rejected_prefixes -%}
+          {%-           set ns.password_rules = ns.password_rules + [ user.name ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-     if user.enabled is defined and user.enabled is not boolean -%}
+          {%-       set ns.enabled = ns.enabled + [ user.name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.rules | length > 0 -%}
+          {%-     set _ = errors.append('rules have to be a list of ACL rules without spaces and line breaks, spaces only inside of selectors in parentheses: ' ~ (ns.rules | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.password_rules | length > 0 -%}
+          {%-     set _ = errors.append('Passwords are set with redis_passwords and on or off with enabled, rules must not contain passwords, nopass, on or off: ' ~ (ns.password_rules | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.enabled | length > 0 -%}
+          {%-     set _ = errors.append('enabled has to be a boolean: ' ~ (ns.enabled | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if passwords is not mapping -%}
+          {%-     set _ = errors.append('redis_passwords has to be a dictionary.') -%}
+          {%-   else -%}
+          {%-     set missing = names | reject('eq', 'default') | reject('in', passwords.keys() | list) | list -%}
+          {%-     if missing | length > 0 -%}
+          {%-       set _ = errors.append('Users without password in redis_passwords: ' ~ (missing | join(', ')) ~ ', only the user default may have no password.') -%}
+          {%-     endif -%}
+          {%-     set unknown = passwords.keys() | reject('in', names) | list -%}
+          {%-     if unknown | length > 0 -%}
+          {%-       set _ = errors.append('Passwords of unknown users in redis_passwords: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-     set empty = passwords | dict2items | selectattr('value', 'in', ['', none]) | map(attribute='key') | list -%}
+          {%-     if empty | length > 0 -%}
+          {%-       set _ = errors.append('Empty passwords in redis_passwords: ' ~ (empty | join(', ')) ~ '.') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging redis_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_redis__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_redis__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_redis__environment_unknown: >-
+          {{ (database_redis__container.environment | default({})).keys() | reject('in', database_redis__environment_allowed) | list }}
+        database_redis__secrets_unknown: >-
+          {{ database_redis__secrets | map(attribute='target') | reject('in', database_redis__secrets_allowed) | list }}
+        database_redis__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_redis__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_redis__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_redis__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_redis__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (database_redis__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (database_redis__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of Redis'
       ansible.builtin.file:
-        mode: '750'
-        path: "{{ database_redis__podman_home }}/data"
+        path: "{{ database_redis__home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
         state: 'directory'
 
-    - name: 'Create Redis configuration file'
-      ansible.builtin.copy:
-        content: "{{ database_redis__config }}"
-        dest: "{{ database_redis__podman_home }}/data/redis.conf"
-        mode: '640'
-      when: 'database_redis__config | length > 0'
+    # Redis runs as the user redis of the image
+    - name: 'Create the data directory'
+      ansible.builtin.file:
+        path: "{{ database_redis__podman_data_dir }}"
+        owner: "{{ database_redis__data_owner }}"
+        group: "{{ database_redis__data_group }}"
+        mode: '0750'
+        state: 'directory'
+
+    # The former role wrote redis_config to the data directory, Redis never read it,
+    # with an unknown file in /data the entrypoint does not fix the permissions of the data
+    - name: 'Remove the unused configuration file of the former role'
+      ansible.builtin.file:
+        path: "{{ database_redis__podman_data_dir }}/redis.conf"
+        state: 'absent'
+
+    - name: 'Generate redis.conf'
+      ansible.builtin.template:
+        src: 'redis.conf.j2'
+        dest: "{{ database_redis__podman_config_file }}"
+        owner: "{{ database_redis__data_owner }}"
+        group: "{{ database_redis__data_group }}"
+        mode: '0640'
+      register: 'database_redis__config_result'
+
+    - name: 'Generate the ACL file'
+      no_log: true
+      ansible.builtin.template:
+        src: 'users.acl.j2'
+        dest: "{{ database_redis__podman_acl_file }}"
+        owner: "{{ database_redis__data_owner }}"
+        group: "{{ database_redis__data_group }}"
+        mode: '0600'
+      register: 'database_redis__acl_result'
+
+    # Every secret is a line of redis.conf, included from the file of the secret
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        # Redis reads the value in double quotes, backslashes and double quotes are escaped,
+        # Jinja of Ansible does not unescape string literals, bs is one backslash
+        data: >-
+          {%- set bs = '\\' | first -%}
+          {{ item.target }} "{{ item.data | string | replace(bs, bs ~ bs) | replace('"', bs ~ '"') }}"
+      loop: "{{ database_redis__secrets }}"
+      register: 'database_redis__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ database_redis__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[database_redis__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ database_redis__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Install Redis container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ database_redis__container.name }}"
         hostname: "{{ database_redis__container.hostname }}"
@@ -41,15 +278,15 @@
         ip6: "{{ database_redis__container.ipv6 | default(omit) }}"
         network: "{{ database_redis__container.network }}"
         timezone: "{{ database_redis__container.timezone }}"
-        expose: "{{ database_redis__container.expose | default(omit) }}"
-        publish: "{{ database_redis__container.publish | default(omit) }}"
-        etc_hosts: "{{ database_redis__container.etc_hosts | default(omit) }}"
-        secrets: "{{ database_redis__container.secrets | default(omit) }}"
+        command: "{{ database_redis__container.command | default(omit) }}"
         env: "{{ database_redis__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_redis__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_redis__container.expose | default(omit) }}"
         label: "{{ database_redis__container.labels | default(omit) }}"
+        publish: "{{ database_redis__container.publish | default(omit) }}"
+        secrets: "{{ database_redis__container.secrets | default(omit) }}"
         volume: "{{ database_redis__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
@@ -63,17 +300,37 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'database_redis__quadlet_result'
 
     - name: 'Start and enable container'
       ansible.builtin.systemd_service:
         name: "{{ database_redis__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if database_redis__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        database_redis__running: >-
+          {{ (ansible_facts.services[database_redis__container.name + '.service'].state | default('')) == 'running' }}
+        database_redis__restart: >-
+          {{ database_redis__running | bool
+             and (database_redis__secrets_result is changed
+                  or database_redis__quadlet_result is changed
+                  or database_redis__config_result is changed
+                  or database_redis__acl_result is changed) }}
       when: 'not ansible_check_mode'
 
-    - name: 'Wait for Redis port to be opened'
+    # Roles depending on Redis start after the port is open
+    - name: 'Wait for the port of Redis'
       ansible.builtin.wait_for:
         host: "{{ database_redis__container.ip }}"
         port: "{{ database_redis__port }}"
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_redis__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_redis__container.name }}"
+        container_image: "{{ database_redis__container.image }}"
+        container_schedule: "{{ database_redis__autoupdate_schedule }}"

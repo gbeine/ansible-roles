@@ -5,42 +5,413 @@
 # https://ansible-roles.org/roles/database-redis
 #
 
-database_redis__use_podman: "{{ redis_use_podman | default(true) }}"
-
 database_redis__home: "{{ redis_home | mandatory }}"
 database_redis__ip: "{{ redis_ip | mandatory }}"
 database_redis__ipv6: "{{ redis_ipv6 }}"
 database_redis__network: "{{ redis_network | mandatory }}"
 database_redis__hostname: "{{ redis_hostname | mandatory }}"
 database_redis__timezone: "{{ redis_timezone | mandatory }}"
+database_redis__labels: "{{ redis_labels }}"
+
+database_redis__version: "{{ redis_version | default('8-alpine') }}"
 
 database_redis__container: "{{ database_redis__podman_container_default | combine(redis_container | default({})) }}"
+database_redis__environment: "{{ redis_environment | default({}) }}"
+database_redis__secrets: "{{ redis_secrets | default([]) }}"
 
-database_redis__config: "{{ redis_config | default('') }}"
-database_redis__port: "{{ redis_port | default(6379) }}"
+# The options of redis.conf, a string or number writes "option value", a list one line per element,
+# false or null removes the option
+database_redis__config: "{{ database_redis__config_default | combine(redis_config | default({})) }}"
+
+# ACL users with name, rules and enabled, the passwords are set with redis_passwords
+database_redis__users: "{{ redis_users | default([]) }}"
+database_redis__passwords: "{{ redis_passwords | default({}) }}"
+
+database_redis__autoupdate_enabled: "{{ redis_autoupdate_enabled | default(false) }}"
+database_redis__autoupdate_schedule: "{{ redis_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-database_redis__uid: 999
-database_redis__gid: "{{ database_redis__uid }}"
+# The variables of docker-entrypoint.sh of redis/docker-library-redis 8.10.3, TZ is set by the timezone of the container
+database_redis__environment_allowed:
+  - 'SKIP_FIX_PERMS'
+  - 'SKIP_DROP_PRIVS'
+
+database_redis__config_default:
+  bind: '* -::*'
+  port: 6379
+
+# The options set by the role, they are written before the options of redis_config and must not be set there
+database_redis__config_role:
+  daemonize: 'no'
+  dir: "{{ database_redis__data_dir }}"
+  aclfile: "{{ database_redis__acl_file }}"
+
+# Options that are replaced by the role: include by the secrets, user and requirepass by redis_users
+database_redis__config_rejected:
+  include: 'the role includes the secrets of redis_secrets'
+  user: 'users are defined in redis_users'
+  requirepass: 'the password of the user default is set with redis_users and redis_passwords'
+
+# The options carrying a password, they are set with redis_secrets
+database_redis__secrets_allowed:
+  - 'masterauth'
+  - 'tls-key-file-pass'
+  - 'tls-client-key-file-pass'
+
+database_redis__secrets_dir: '/run/secrets'
+
+# Password rules of ACL, the passwords are set with redis_passwords and enabled controls on and off
+database_redis__acl_rules_rejected: [ 'nopass', 'on', 'off' ]
+database_redis__acl_rules_rejected_prefixes: [ '>', '<', '#', '!' ]
+
+# The user default of Redis, used if redis_users does not contain default
+database_redis__acl_default: 'user default on nopass sanitize-payload ~* &* +@all'
+
+# The names of the users of redis_users
+database_redis__user_name_pattern: '^[A-Za-z0-9_.@-]+$'
+
+database_redis__config_allowed: "{{ database_redis__config_allowed_server + database_redis__config_allowed_modules }}"
+
+# User and group redis of the image
+database_redis__data_owner: 999
+database_redis__data_group: 1000
+
+database_redis__port: "{{ database_redis__config.port | default(6379) }}"
 
 database_redis__podman_name: 'redis'
-database_redis__podman_image: 'docker.io/redis'
-database_redis__podman_tag: "{{ redis_podman_tag | default('8-alpine') }}"
+database_redis__podman_image: 'docker.io/library/redis'
 
-database_redis__podman_home: "{{ database_redis__home }}"
+database_redis__podman_data_dir: "{{ database_redis__home }}/data"
+database_redis__podman_config_file: "{{ database_redis__home }}/redis.conf"
+database_redis__podman_acl_file: "{{ database_redis__home }}/users.acl"
+
+database_redis__data_dir: '/data'
+database_redis__config_file: '/usr/local/etc/redis/redis.conf'
+# Outside the directory of redis.conf, the entrypoint only checks the permissions if redis.conf is alone there
+database_redis__acl_file: '/etc/redis/users.acl'
 
 database_redis__podman_container_default:
   name: "{{ database_redis__podman_name }}"
   hostname: "{{ database_redis__hostname }}"
-  image: "{{ database_redis__podman_image }}:{{ database_redis__podman_tag }}"
+  image: "{{ database_redis__podman_image }}:{{ database_redis__version }}"
   ip: "{{ database_redis__ip }}"
   ipv6: "{{ database_redis__ipv6 | default(omit) }}"
   network: "{{ database_redis__network }}"
   timezone: "{{ database_redis__timezone }}"
+  labels: "{{ database_redis__labels | default(omit) }}"
+  environment: "{{ database_redis__environment }}"
+  command: [ 'redis-server', "{{ database_redis__config_file }}" ]
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
-    - "{{ database_redis__podman_home }}/data:/data"
+    - "{{ database_redis__podman_data_dir }}:{{ database_redis__data_dir }}"
+    - "{{ database_redis__podman_config_file }}:{{ database_redis__config_file }}:ro"
+    - "{{ database_redis__podman_acl_file }}:{{ database_redis__acl_file }}:ro"
+  # The secrets are mounted for the user of the image
+  secrets: >-
+    {{ database_redis__podman_secrets
+       if (database_redis__secrets is sequence and database_redis__secrets is not string and database_redis__secrets | length > 0)
+       else omit }}
+
+# The podman secrets of redis_secrets, entries without name are left out, the validation of the secrets reports them
+database_redis__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- for secret in database_redis__secrets if secret is mapping and secret.name is defined -%}
+  {%-   set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ database_redis__secrets_dir ~ '/' ~ secret.name
+                               ~ ',uid=' ~ database_redis__data_owner ~ ',gid=' ~ database_redis__data_group ~ ',mode=0400') -%}
+  {%- endfor -%}
+  {{ secrets }}
+
+# Generated from src/config.c of Redis 8.10.3, without the hidden options and the aliases,
+# the options set by the role and the secrets, plus the directives rename-command and loadmodule
+database_redis__config_allowed_server:
+  - 'acl-pubsub-default'
+  - 'acllog-max-len'
+  - 'active-defrag-cycle-max'
+  - 'active-defrag-cycle-min'
+  - 'active-defrag-ignore-bytes'
+  - 'active-defrag-max-scan-fields'
+  - 'active-defrag-threshold-lower'
+  - 'active-defrag-threshold-upper'
+  - 'active-expire-effort'
+  - 'activedefrag'
+  - 'activerehashing'
+  - 'always-show-logo'
+  - 'aof-load-corrupt-tail-max-size'
+  - 'aof-load-truncated'
+  - 'aof-rewrite-cpulist'
+  - 'aof-rewrite-incremental-fsync'
+  - 'aof-timestamp-enabled'
+  - 'aof-use-rdb-preamble'
+  - 'appenddirname'
+  - 'appendfilename'
+  - 'appendfsync'
+  - 'appendonly'
+  - 'array-slice-size'
+  - 'array-sparse-kmax'
+  - 'array-sparse-kmin'
+  - 'auto-aof-rewrite-min-size'
+  - 'auto-aof-rewrite-percentage'
+  - 'backup-sealed-ttl'
+  - 'backupdirname'
+  - 'bgsave-cpulist'
+  - 'bind'
+  - 'bind-source-addr'
+  - 'bio-cpulist'
+  - 'busy-reply-threshold'
+  - 'client-output-buffer-limit'
+  - 'client-query-buffer-limit'
+  - 'cluster-allow-pubsubshard-when-down'
+  - 'cluster-allow-reads-when-down'
+  - 'cluster-allow-replica-migration'
+  - 'cluster-announce-bus-port'
+  - 'cluster-announce-hostname'
+  - 'cluster-announce-human-nodename'
+  - 'cluster-announce-ip'
+  - 'cluster-announce-port'
+  - 'cluster-announce-tls-port'
+  - 'cluster-bus-port-protected-mode'
+  - 'cluster-compatibility-sample-ratio'
+  - 'cluster-config-file'
+  - 'cluster-enabled'
+  - 'cluster-link-sendbuf-limit'
+  - 'cluster-migration-barrier'
+  - 'cluster-node-timeout'
+  - 'cluster-port'
+  - 'cluster-preferred-endpoint-type'
+  - 'cluster-replica-no-failover'
+  - 'cluster-replica-validity-factor'
+  - 'cluster-require-full-coverage'
+  - 'cluster-slot-migration-handoff-max-lag-bytes'
+  - 'cluster-slot-migration-write-pause-timeout'
+  - 'cluster-slot-stats-enabled'
+  - 'crash-log-enabled'
+  - 'crash-memcheck-enabled'
+  - 'databases'
+  - 'dbfilename'
+  - 'disable-thp'
+  - 'dynamic-hz'
+  - 'enable-debug-command'
+  - 'enable-module-command'
+  - 'enable-protected-configs'
+  - 'hash-max-listpack-entries'
+  - 'hash-max-listpack-value'
+  - 'hash-max-template-entries'
+  - 'hash-min-template-entries'
+  - 'hash-rdb-load-max-template-entries'
+  - 'hash-rdb-load-min-template-entries'
+  - 'hash-rdb-load-template-disassembly-threshold'
+  - 'hide-user-data-from-log'
+  - 'hll-sparse-max-bytes'
+  - 'hz'
+  - 'ignore-warnings'
+  - 'io-threads'
+  - 'jemalloc-bg-thread'
+  - 'key-memory-histograms'
+  - 'latency-monitor-threshold'
+  - 'latency-tracking'
+  - 'latency-tracking-info-percentiles'
+  - 'lazyfree-lazy-eviction'
+  - 'lazyfree-lazy-expire'
+  - 'lazyfree-lazy-server-del'
+  - 'lazyfree-lazy-user-del'
+  - 'lazyfree-lazy-user-flush'
+  - 'lfu-decay-time'
+  - 'lfu-log-factor'
+  - 'list-compress-depth'
+  - 'list-max-listpack-size'
+  - 'loadmodule'
+  - 'locale-collate'
+  - 'logfile'
+  - 'loglevel'
+  - 'lookahead'
+  - 'masteruser'
+  - 'max-new-connections-per-cycle'
+  - 'max-new-tls-connections-per-cycle'
+  - 'maxclients'
+  - 'maxmemory'
+  - 'maxmemory-clients'
+  - 'maxmemory-eviction-tenacity'
+  - 'maxmemory-policy'
+  - 'maxmemory-samples'
+  - 'min-replicas-max-lag'
+  - 'min-replicas-to-write'
+  - 'no-appendfsync-on-rewrite'
+  - 'notify-keyspace-events'
+  - 'oom-score-adj'
+  - 'oom-score-adj-values'
+  - 'pidfile'
+  - 'port'
+  - 'preload-file'
+  - 'proc-title-template'
+  - 'propagation-error-behavior'
+  - 'protected-mode'
+  - 'proto-max-bulk-len'
+  - 'rdb-del-sync-files'
+  - 'rdb-save-incremental-fsync'
+  - 'rdbchecksum'
+  - 'rdbcompression'
+  - 'rename-command'
+  - 'repl-backlog-size'
+  - 'repl-backlog-ttl'
+  - 'repl-compression'
+  - 'repl-compression-max-latency'
+  - 'repl-disable-tcp-nodelay'
+  - 'repl-diskless-load'
+  - 'repl-diskless-sync'
+  - 'repl-diskless-sync-delay'
+  - 'repl-diskless-sync-max-replicas'
+  - 'repl-ping-replica-period'
+  - 'repl-timeout'
+  - 'replica-announce-ip'
+  - 'replica-announce-port'
+  - 'replica-announced'
+  - 'replica-full-sync-buffer-limit'
+  - 'replica-ignore-disk-write-errors'
+  - 'replica-ignore-maxmemory'
+  - 'replica-lazy-flush'
+  - 'replica-priority'
+  - 'replica-read-only'
+  - 'replica-serve-stale-data'
+  - 'replicaof'
+  - 'sanitize-dump-payload'
+  - 'save'
+  - 'server-cpulist'
+  - 'set-max-intset-entries'
+  - 'set-max-listpack-entries'
+  - 'set-max-listpack-value'
+  - 'set-proc-title'
+  - 'shutdown-on-sigint'
+  - 'shutdown-on-sigterm'
+  - 'shutdown-timeout'
+  - 'slowlog-entry-max-argc'
+  - 'slowlog-entry-max-string-len'
+  - 'slowlog-log-slower-than'
+  - 'slowlog-max-len'
+  - 'socket-mark-id'
+  - 'stop-writes-on-bgsave-error'
+  - 'stream-idmp-duration'
+  - 'stream-idmp-maxsize'
+  - 'stream-node-max-bytes'
+  - 'stream-node-max-entries'
+  - 'supervised'
+  - 'syslog-enabled'
+  - 'syslog-facility'
+  - 'syslog-ident'
+  - 'tcp-backlog'
+  - 'tcp-keepalive'
+  - 'timeout'
+  - 'tls-auth-clients'
+  - 'tls-auth-clients-user'
+  - 'tls-ca-cert-dir'
+  - 'tls-ca-cert-file'
+  - 'tls-cert-file'
+  - 'tls-ciphers'
+  - 'tls-ciphersuites'
+  - 'tls-client-cert-file'
+  - 'tls-client-key-file'
+  - 'tls-cluster'
+  - 'tls-dh-params-file'
+  - 'tls-expected-peer-name'
+  - 'tls-key-file'
+  - 'tls-port'
+  - 'tls-prefer-server-ciphers'
+  - 'tls-protocols'
+  - 'tls-replication'
+  - 'tls-session-cache-size'
+  - 'tls-session-cache-timeout'
+  - 'tls-session-caching'
+  - 'tracking-table-max-keys'
+  - 'unixsocket'
+  - 'unixsocketperm'
+  - 'zset-max-listpack-entries'
+  - 'zset-max-listpack-value'
+
+# Generated from the configs of RediSearch, RedisTimeSeries and RedisBloom v8.10.1, the modules of the image
+database_redis__config_allowed_modules:
+  - 'search-bg-index-sleep-duration-us'
+  - 'search-bg-index-sleep-gap'
+  - 'search-bm25std-tanh-factor'
+  - 'search-cursor-max-idle'
+  - 'search-default-dialect'
+  - 'search-default-scorer'
+  - 'search-disk-buffer-percentage'
+  - 'search-disk-drop-read-cache'
+  - 'search-disk-max-open-files'
+  - 'search-disk-use-direct-reads'
+  - 'search-enable-unstable-features'
+  - 'search-ext-load'
+  - 'search-fork-gc-run-interval'
+  - 'search-fork-gc-sleep-before-exit'
+  - 'search-friso-ini'
+  - 'search-gc-scan-size'
+  - 'search-index-cursor-limit'
+  - 'search-indexer-yield-every-ops'
+  - 'search-max-aggregate-groups'
+  - 'search-max-aggregate-results'
+  - 'search-max-doctablesize'
+  - 'search-max-prefix-expansions'
+  - 'search-max-search-results'
+  - 'search-min-operation-workers'
+  - 'search-min-phonetic-term-len'
+  - 'search-min-prefix'
+  - 'search-min-stem-len'
+  - 'search-monitor-expiration'
+  - 'search-multi-text-slop'
+  - 'search-no-gc'
+  - 'search-no-mem-pools'
+  - 'search-on-oom'
+  - 'search-on-timeout'
+  - 'search-partial-indexed-docs'
+  - 'search-raw-docid-encoding'
+  - 'search-tiered-hnsw-buffer-limit'
+  - 'search-timeout'
+  - 'search-union-iterator-heap'
+  - 'search-vss-max-resize'
+  - 'search-workers'
+  - 'search-workers-priority-bias-threshold'
+  - 'ts-chunk-size-bytes'
+  - 'ts-compaction-policy'
+  - 'ts-duplicate-policy'
+  - 'ts-encoding'
+  - 'ts-ignore-max-time-diff'
+  - 'ts-ignore-max-val-diff'
+  - 'ts-libmr-protocol'
+  - 'ts-num-threads'
+  - 'ts-retention-policy'
+  - 'ts-topology-events'
+  - 'bf-error-rate'
+  - 'bf-initial-size'
+  - 'bf-expansion-factor'
+  - 'cf-bucket-size'
+  - 'cf-initial-size'
+  - 'cf-max-iterations'
+  - 'cf-expansion-factor'
+  - 'cf-max-expansions'
+
+# The former names of options in src/config.c of Redis 8.10.3, the validation names the current one
+database_redis__config_aliases:
+  aof_rewrite_cpulist: 'aof-rewrite-cpulist'
+  bgsave_cpulist: 'bgsave-cpulist'
+  bio_cpulist: 'bio-cpulist'
+  cluster-slave-no-failover: 'cluster-replica-no-failover'
+  cluster-slave-validity-factor: 'cluster-replica-validity-factor'
+  hash-max-ziplist-entries: 'hash-max-listpack-entries'
+  hash-max-ziplist-value: 'hash-max-listpack-value'
+  list-max-ziplist-size: 'list-max-listpack-size'
+  lua-time-limit: 'busy-reply-threshold'
+  min-slaves-max-lag: 'min-replicas-max-lag'
+  min-slaves-to-write: 'min-replicas-to-write'
+  repl-ping-slave-period: 'repl-ping-replica-period'
+  server_cpulist: 'server-cpulist'
+  slave-announce-ip: 'replica-announce-ip'
+  slave-announce-port: 'replica-announce-port'
+  slave-ignore-maxmemory: 'replica-ignore-maxmemory'
+  slave-lazy-flush: 'replica-lazy-flush'
+  slave-priority: 'replica-priority'
+  slave-read-only: 'replica-read-only'
+  slave-serve-stale-data: 'replica-serve-stale-data'
+  slaveof: 'replicaof'
+  zset-max-ziplist-entries: 'zset-max-listpack-entries'
+  zset-max-ziplist-value: 'zset-max-listpack-value'
