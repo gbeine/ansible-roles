@@ -1,0 +1,168 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_mybibliotheca__test_case: "{{ app_mybibliotheca__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_mybibliotheca__test_vars: "{{ app_mybibliotheca__test_case.role_vars }}"
+    app_mybibliotheca__test_environment: "{{ app_mybibliotheca__test_vars.mybibliotheca_environment | default({}) }}"
+    app_mybibliotheca__test_secrets: "{{ app_mybibliotheca__test_vars.mybibliotheca_secrets | default([]) }}"
+    app_mybibliotheca__test_admin: "{{ app_mybibliotheca__test_vars.mybibliotheca_admin }}"
+    app_mybibliotheca__test_checked_files:
+      - "{{ app_mybibliotheca__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_mybibliotheca__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_mybibliotheca__test_checked_files }}"
+      register: 'app_mybibliotheca__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_mybibliotheca with mybibliotheca_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_container: [ 'environment' ]
+        app_mybibliotheca__test_invalid:
+          message: 'mybibliotheca_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_mybibliotheca with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_secrets: "{{ app_mybibliotheca__test_secrets + [ { 'name': 'mybibliotheca_other', 'data': 'x' } ] }}"
+        app_mybibliotheca__test_invalid:
+          message: 'a secret without target'
+          search: '^mybibliotheca_secrets entries need name, data and target$'
+
+    - name: 'Run app_mybibliotheca without SECRET_KEY (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_secrets: "{{ app_mybibliotheca__test_secrets | rejectattr('target', 'eq', 'SECRET_KEY') | list }}"
+        app_mybibliotheca__test_invalid:
+          message: 'no SECRET_KEY'
+          search: '^MyBibliotheca needs the secrets SECRET_KEY, missing: SECRET_KEY\.$'
+
+    - name: 'Run app_mybibliotheca without PostgreSQL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | dict2items | rejectattr('key', 'match', 'POSTGRES_') | items2dict }}"
+        mybibliotheca_secrets: "{{ app_mybibliotheca__test_secrets | rejectattr('target', 'match', 'POSTGRES_') | list }}"
+        app_mybibliotheca__test_invalid:
+          message: 'no PostgreSQL'
+          search: '^MyBibliotheca needs PostgreSQL, set the environment variables POSTGRES_HOST, POSTGRES_DB, POSTGRES_USER or the secret POSTGRES_DSN, missing or empty: POSTGRES_HOST, POSTGRES_DB, POSTGRES_USER\. MyBibliotheca needs one of the secrets POSTGRES_PASSWORD, POSTGRES_DSN for PostgreSQL\.$'
+
+    - name: 'Run app_mybibliotheca with the password of PostgreSQL in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | combine({ 'POSTGRES_PASSWORD': 'molecule' }) }}"
+        app_mybibliotheca__test_invalid:
+          message: 'the password of PostgreSQL in the environment'
+          search: '^Secrets must not be set in mybibliotheca_environment: POSTGRES_PASSWORD\.$'
+
+    - name: 'Run app_mybibliotheca with KUZU_FORCE_RESET (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | combine({ 'KUZU_FORCE_RESET': 'true', 'SECURITY_PASSWORD_SALT': 'salt' }) }}"
+        app_mybibliotheca__test_invalid:
+          message: 'KUZU_FORCE_RESET and SECURITY_PASSWORD_SALT'
+          search: '^Unknown environment variables: KUZU_FORCE_RESET, SECURITY_PASSWORD_SALT\.'
+
+    - name: 'Run app_mybibliotheca with the development administrator as secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_secrets: "{{ app_mybibliotheca__test_secrets + [ { 'name': 'mybibliotheca_dev_admin', 'data': 'x', 'target': 'DEV_ADMIN_PASSWORD' } ] }}"
+        app_mybibliotheca__test_invalid:
+          message: 'the development administrator as secret'
+          search: '^Unknown secrets: DEV_ADMIN_PASSWORD\.'
+
+    - name: 'Run app_mybibliotheca with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | combine({ 'UPDATE_CHECK_ENABLED': 'yes' }) }}"
+        app_mybibliotheca__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: UPDATE_CHECK_ENABLED\.$'
+
+    - name: 'Run app_mybibliotheca with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | combine({ 'SITE_NAME': 'Molecule\nLibrary' }) }}"
+        app_mybibliotheca__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: SITE_NAME\.$'
+
+    - name: 'Run app_mybibliotheca with too many workers (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | combine({ 'WORKERS': '64' }) }}"
+        app_mybibliotheca__test_invalid:
+          message: 'too many workers'
+          search: '^WORKERS has to be a number from 1 to 32, got 64\.$'
+
+    - name: 'Run app_mybibliotheca with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_admin: "{{ app_mybibliotheca__test_admin | dict2items | rejectattr('key', 'eq', 'password') | items2dict }}"
+        app_mybibliotheca__test_invalid:
+          message: 'an administrator without password'
+          search: '^mybibliotheca_admin needs a password\.$'
+
+    - name: 'Run app_mybibliotheca with a weak password of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mybibliotheca_admin: "{{ app_mybibliotheca__test_admin | combine({ 'password': 'onlyletters' }) }}"
+        app_mybibliotheca__test_invalid:
+          message: 'a weak password of the administrator'
+          search: '^The password of mybibliotheca_admin needs 8 to 128 characters with a letter and a digit or a special character\.$'
+
+    - name: 'Change the environment and the administrator'
+      when: app_mybibliotheca__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mybibliotheca' ]
+          register: 'app_mybibliotheca__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            mybibliotheca_environment: "{{ app_mybibliotheca__test_environment | combine(app_mybibliotheca__test_case.side_effect.environment) }}"
+            mybibliotheca_admin: "{{ app_mybibliotheca__test_admin | combine(app_mybibliotheca__test_case.side_effect.admin) }}"
+
+        - name: 'Run app_mybibliotheca with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_mybibliotheca'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mybibliotheca' ]
+          register: 'app_mybibliotheca__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed administrator'
+          ansible.builtin.assert:
+            that:
+              - app_mybibliotheca__quadlet_result is changed
+              - app_mybibliotheca__admin_result is changed
+              - not app_mybibliotheca__admin_result.created
+              - app_mybibliotheca__test_started_after.stdout | int > app_mybibliotheca__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_mybibliotheca__quadlet_result is changed }}, administrator changed: {{ app_mybibliotheca__admin_result is changed }},
+              created: {{ app_mybibliotheca__admin_result.created | default('') }},
+              start before {{ app_mybibliotheca__test_started_before.stdout }}, after {{ app_mybibliotheca__test_started_after.stdout }}

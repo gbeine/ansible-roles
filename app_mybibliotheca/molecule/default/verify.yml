@@ -1,0 +1,186 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_mybibliotheca__test_case: "{{ app_mybibliotheca__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_mybibliotheca__expect: "{{ app_mybibliotheca__test_case.expect }}"
+    app_mybibliotheca__test_url: "http://{{ app_mybibliotheca__expect.ip }}:5054"
+    app_mybibliotheca__test_admin: "{{ app_mybibliotheca__test_case.role_vars.mybibliotheca_admin }}"
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_mybibliotheca__test_plain: >-
+      {{ app_mybibliotheca__test_case.role_vars.mybibliotheca_secrets | map(attribute='data') | list
+         + [ app_mybibliotheca__test_admin.password ]
+         + ([ app_mybibliotheca__test_case.side_effect.admin.password ] if app_mybibliotheca__test_case.side_effect is defined else []) }}
+    # The password of the administrator is accepted, the former password and a wrong password are refused
+    app_mybibliotheca__test_logins: >-
+      {{ [ { 'name': 'password', 'password': app_mybibliotheca__expect.admin.password, 'allowed': true },
+           { 'name': 'wrong', 'password': 'molecule-wrong-password-9', 'allowed': false } ]
+         + ([ { 'name': 'former', 'password': app_mybibliotheca__expect.admin.former_password, 'allowed': false } ]
+            if app_mybibliotheca__expect.admin.former_password is defined else []) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_mybibliotheca__test_quadlet_path }}"
+      register: 'app_mybibliotheca__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_mybibliotheca__test_image) in app_mybibliotheca__test_quadlet_lines
+          - ('IP=' + app_mybibliotheca__expect.ip) in app_mybibliotheca__test_quadlet_lines
+          - app_mybibliotheca__expect.ip6 is none or ('IP6=' + app_mybibliotheca__expect.ip6) in app_mybibliotheca__test_quadlet_lines
+          - app_mybibliotheca__expect.ip6 is not none or app_mybibliotheca__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_mybibliotheca__expect.quadlet | reject('in', app_mybibliotheca__test_quadlet_lines) | list | length == 0
+          - app_mybibliotheca__test_quadlet_lines | select('search', 'type=mount') | list | length == 0
+          - app_mybibliotheca__test_plain | select('in', app_mybibliotheca__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_mybibliotheca__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        app_mybibliotheca__test_quadlet_lines: "{{ (app_mybibliotheca__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the mybibliotheca service'
+      ansible.builtin.command: 'systemctl is-active mybibliotheca'
+      register: 'app_mybibliotheca__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the mybibliotheca container'
+      ansible.builtin.command: 'podman inspect mybibliotheca'
+      register: 'app_mybibliotheca__test_inspect'
+      changed_when: false
+
+    # podman shows the secrets passed with type=env masked, the passwords of the administrator are never part of the environment
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__test_service.stdout == 'active'
+          - app_mybibliotheca__test_net.IPAddress == app_mybibliotheca__expect.ip
+          - app_mybibliotheca__expect.ip6 is none or app_mybibliotheca__test_net.GlobalIPv6Address == app_mybibliotheca__expect.ip6
+          - app_mybibliotheca__expect.env | reject('in', app_mybibliotheca__test_env) | list | length == 0
+          - app_mybibliotheca__test_plain | select('in', app_mybibliotheca__test_env | join(' ')) | list | length == 0
+          - app_mybibliotheca__test_env | select('match', '(KUZU_FORCE_RESET|DEV_ADMIN_[A-Z]+|API_TEST_TOKEN)=') | list | length == 0
+        fail_msg: >-
+          service {{ app_mybibliotheca__test_service.stdout }},
+          IPv4 {{ app_mybibliotheca__test_net.IPAddress }}, IPv6 {{ app_mybibliotheca__test_net.GlobalIPv6Address }},
+          environment {{ app_mybibliotheca__test_env | reject('search', '(SECRET_KEY|PASSWORD|DSN)=') | join(', ') }}
+      vars:
+        app_mybibliotheca__test_container: "{{ (app_mybibliotheca__test_inspect.stdout | from_json)[0] }}"
+        app_mybibliotheca__test_net: "{{ app_mybibliotheca__test_container.NetworkSettings.Networks[app_mybibliotheca__test_case.role_vars.mybibliotheca_network] }}"
+        app_mybibliotheca__test_env: "{{ app_mybibliotheca__test_container.Config.Env }}"
+
+    # With an administrator the setup is completed, the health check and the status are not redirected to the onboarding
+    - name: 'Read the health check and the state of the setup'
+      ansible.builtin.uri:
+        url: "{{ app_mybibliotheca__test_url }}{{ item }}"
+        follow_redirects: 'none'
+        return_content: true
+      loop: [ '/health', '/auth/setup/status' ]
+      register: 'app_mybibliotheca__test_status'
+
+    - name: 'Assert the health check and the state of the setup'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__test_health.status | default('') == 'healthy'
+          - app_mybibliotheca__test_setup.setup_completed | default(false)
+          - app_mybibliotheca__test_setup.user_count | default(0) == 1
+          - app_mybibliotheca__test_setup.persistence_backend | default('') == 'postgres'
+        fail_msg: "health {{ app_mybibliotheca__test_health | to_json }}, setup {{ app_mybibliotheca__test_setup | to_json }}"
+      vars:
+        app_mybibliotheca__test_health: "{{ app_mybibliotheca__test_status.results[0].json | default({}) }}"
+        app_mybibliotheca__test_setup: "{{ app_mybibliotheca__test_status.results[1].json | default({}) }}"
+
+    # The uri module only returns the last cookie of a redirect, curl keeps all cookies of the session in a file
+    - name: 'Log in with the login form'
+      block:
+
+        - name: 'Create the cookie files'
+          ansible.builtin.tempfile:
+            suffix: '.cookies'
+          loop: "{{ app_mybibliotheca__test_logins | map(attribute='name') | list }}"
+          register: 'app_mybibliotheca__test_cookie_files'
+
+        - name: 'Read the login form'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error', '--fail',
+                    '--cookie', "{{ item.path }}", '--cookie-jar', "{{ item.path }}",
+                    "{{ app_mybibliotheca__test_url }}/auth/login" ]
+          loop: "{{ app_mybibliotheca__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: 'app_mybibliotheca__test_login_form'
+          changed_when: false
+
+        - name: 'Log in with the password, a wrong password and the former password'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.0.path }}", '--cookie-jar', "{{ item.0.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code} %{redirect_url}',
+                    '--data-urlencode', "csrf_token={{ item.1.stdout | regex_search('name=\"csrf_token\" type=\"hidden\" value=\"([^\"]+)\"', '\\1') | first }}",
+                    '--data-urlencode', "username={{ app_mybibliotheca__expect.admin.name }}",
+                    '--data-urlencode', "password={{ item.2.password }}",
+                    "{{ app_mybibliotheca__test_url }}/auth/login" ]
+          loop: "{{ app_mybibliotheca__test_cookie_files.results | zip(app_mybibliotheca__test_login_form.results, app_mybibliotheca__test_logins) | list }}"
+          loop_control:
+            label: "{{ item.2.name }}"
+          register: 'app_mybibliotheca__test_login'
+          changed_when: false
+          no_log: true
+
+        # Only administrators may open the dashboard of the administration, without login it answers 401
+        - name: 'Read the dashboard of the administration with the sessions'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.path }}", '--cookie-jar', "{{ item.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code} %{redirect_url}',
+                    "{{ app_mybibliotheca__test_url }}/admin/dashboard" ]
+          loop: "{{ app_mybibliotheca__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: 'app_mybibliotheca__test_dashboard'
+          changed_when: false
+
+      always:
+
+        - name: 'Remove the cookie files'
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: 'absent'
+          loop: "{{ app_mybibliotheca__test_cookie_files.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+    # A successful login redirects to the start page, a refused one shows the login form again (200)
+    - name: 'Assert the logins and the administration'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__test_logged_in == app_mybibliotheca__test_logins | map(attribute='allowed') | list
+          - app_mybibliotheca__test_dashboard.results[0].stdout is match('200 ')
+          - app_mybibliotheca__test_dashboard.results[1:] | map(attribute='stdout') | reject('match', '(401 |302 .*/login)') | list | length == 0
+        fail_msg: >-
+          logins {{ app_mybibliotheca__test_logins | map(attribute='name') | zip(app_mybibliotheca__test_responses) | list | to_json }},
+          dashboard {{ app_mybibliotheca__test_dashboard.results | map(attribute='stdout') | list }}
+      vars:
+        app_mybibliotheca__test_responses: "{{ app_mybibliotheca__test_login.results | map(attribute='stdout') | list }}"
+        app_mybibliotheca__test_logged_in: >-
+          {{ app_mybibliotheca__test_responses | map('regex_search', '^302 (?!.*/(login|forced_password_change|setup|onboarding)).*$')
+             | map('ternary', true, false) | list }}
+
+    - name: 'Read the users in PostgreSQL'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ app_mybibliotheca__test_database.name }}", 'psql', '-U', "{{ app_mybibliotheca__test_database.user }}",
+                '-d', "{{ app_mybibliotheca__test_database.database }}", '-tAc', 'SELECT username, is_admin, is_active FROM users ORDER BY username' ]
+      register: 'app_mybibliotheca__test_users'
+      changed_when: false
+
+    - name: 'Assert the administrator in PostgreSQL'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__test_users.stdout_lines == [ app_mybibliotheca__expect.admin.name ~ '|t|t' ]
+        fail_msg: "users {{ app_mybibliotheca__test_users.stdout_lines | to_json }}"

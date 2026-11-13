@@ -1,0 +1,305 @@
+---
+
+- name: 'Deploy MyBibliotheca'
+  tags: [ 'app', 'app_mybibliotheca' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or mybibliotheca_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_mybibliotheca__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_mybibliotheca__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_mybibliotheca__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_mybibliotheca__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('mybibliotheca_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('mybibliotheca_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of mybibliotheca_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # A new installation uses PostgreSQL only if the database is configured, otherwise it uses Kuzu
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_mybibliotheca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_mybibliotheca__set: "{{ app_mybibliotheca__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_mybibliotheca__targets: "{{ app_mybibliotheca__secrets | map(attribute='target') | list }}"
+        app_mybibliotheca__dsn: "{{ 'POSTGRES_DSN' in app_mybibliotheca__targets }}"
+        app_mybibliotheca__environment_needed: >-
+          {{ app_mybibliotheca__environment_required + ([] if app_mybibliotheca__dsn | bool else app_mybibliotheca__environment_database) }}
+        app_mybibliotheca__environment_missing: "{{ app_mybibliotheca__environment_needed | reject('in', app_mybibliotheca__set) | list }}"
+        app_mybibliotheca__secrets_missing: "{{ app_mybibliotheca__secrets_required | reject('in', app_mybibliotheca__targets) | list }}"
+        app_mybibliotheca__secrets_in_environment: >-
+          {{ (app_mybibliotheca__targets + app_mybibliotheca__secret_variables) | select('in', app_mybibliotheca__environment.keys() | list) | unique | list }}
+        app_mybibliotheca__secrets_lines: >-
+          {{ app_mybibliotheca__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_mybibliotheca__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_mybibliotheca__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('MyBibliotheca needs PostgreSQL, set the environment variables ' ~ (app_mybibliotheca__environment_needed | join(', ')) ~ ' or the secret POSTGRES_DSN, missing or empty: ' ~ (app_mybibliotheca__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_mybibliotheca__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('MyBibliotheca needs the secrets ' ~ (app_mybibliotheca__secrets_required | join(', ')) ~ ', missing: ' ~ (app_mybibliotheca__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_mybibliotheca__secrets_database | select('in', app_mybibliotheca__targets) | list | length == 0 -%}
+          {%-   set _ = errors.append('MyBibliotheca needs one of the secrets ' ~ (app_mybibliotheca__secrets_database | join(', ')) ~ ' for PostgreSQL.') -%}
+          {%- endif -%}
+          {%- if app_mybibliotheca__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in mybibliotheca_environment: ' ~ (app_mybibliotheca__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_mybibliotheca__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_mybibliotheca__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_mybibliotheca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_mybibliotheca__workers: "{{ app_mybibliotheca__environment.WORKERS | default('1') | string }}"
+        app_mybibliotheca__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_mybibliotheca__environment.items() if value is not none -%}
+          {%-   if key in app_mybibliotheca__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_mybibliotheca__workers is not match('^[0-9]+$')
+                 or (app_mybibliotheca__workers | int) < app_mybibliotheca__workers_min
+                 or (app_mybibliotheca__workers | int) > app_mybibliotheca__workers_max -%}
+          {%-   set _ = errors.append('WORKERS has to be a number from ' ~ app_mybibliotheca__workers_min ~ ' to ' ~ app_mybibliotheca__workers_max ~ ', got ' ~ app_mybibliotheca__workers ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The password policy of MyBibliotheca: the minimum length, a letter and a digit or a special character
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_mybibliotheca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_mybibliotheca__password_minimum: >-
+          {{ [ [ (app_mybibliotheca__environment.PASSWORD_MIN_LENGTH | default(app_mybibliotheca__password_length) | int(app_mybibliotheca__password_length)),
+                 app_mybibliotheca__password_length_min ] | max, app_mybibliotheca__password_length_max ] | min }}
+        app_mybibliotheca__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_mybibliotheca__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('mybibliotheca_admin has to be a dictionary with name, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | reject('in', app_mybibliotheca__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in mybibliotheca_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_mybibliotheca__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.name | default('') | string) is not match(app_mybibliotheca__admin_name_pattern) -%}
+          {%-     set _ = errors.append('mybibliotheca_admin needs a name of up to 64 letters, digits and . - _.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_mybibliotheca__admin_email_pattern) -%}
+          {%-     set _ = errors.append('mybibliotheca_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none -%}
+          {%-     set _ = errors.append('mybibliotheca_admin needs a password.') -%}
+          {%-   elif (admin.password | string | length) < (app_mybibliotheca__password_minimum | int)
+                     or (admin.password | string | length) > app_mybibliotheca__password_length_max
+                     or (admin.password | string) is not search('[A-Za-z]')
+                     or (admin.password | string) is not search('[^A-Za-z]') -%}
+          {%-     set _ = errors.append('The password of mybibliotheca_admin needs ' ~ app_mybibliotheca__password_minimum ~ ' to ' ~ app_mybibliotheca__password_length_max ~ ' characters with a letter and a digit or a special character.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging mybibliotheca_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_mybibliotheca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without mybibliotheca_secrets
+        app_mybibliotheca__container_secrets: >-
+          {{ app_mybibliotheca__container.secrets
+             if (app_mybibliotheca__container.secrets is defined and app_mybibliotheca__container.secrets is sequence and app_mybibliotheca__container.secrets is not string)
+             else [] }}
+        app_mybibliotheca__environment_unknown: >-
+          {{ (app_mybibliotheca__container.environment | default({})).keys() | reject('in', app_mybibliotheca__environment_allowed) | list }}
+        app_mybibliotheca__secrets_unknown: >-
+          {{ app_mybibliotheca__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_mybibliotheca__secrets_allowed) | list }}
+        app_mybibliotheca__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_mybibliotheca__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_mybibliotheca__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_mybibliotheca__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_mybibliotheca__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of MyBibliotheca (app_mybibliotheca__environment_allowed) and the secrets ' ~ (app_mybibliotheca__secrets_allowed | join(', '))
+                                    ~ ', the administrator is set with mybibliotheca_admin.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The entrypoint sets the owner of the data to 1000 and the mode to 0755
+    - name: 'Create the directories of MyBibliotheca'
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - { path: "{{ app_mybibliotheca__home }}", owner: 0 }
+        - { path: "{{ app_mybibliotheca__home }}/data", owner: "{{ app_mybibliotheca__data_owner }}" }
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_mybibliotheca__secrets }}"
+      register: 'app_mybibliotheca__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_mybibliotheca__container.name }}"
+        hostname: "{{ app_mybibliotheca__container.hostname }}"
+        image: "{{ app_mybibliotheca__container.image }}"
+        ip: "{{ app_mybibliotheca__container.ip }}"
+        ip6: "{{ app_mybibliotheca__container.ipv6 | default(omit) }}"
+        network: "{{ app_mybibliotheca__container.network }}"
+        timezone: "{{ app_mybibliotheca__container.timezone }}"
+        command: "{{ app_mybibliotheca__container.command | default(omit) }}"
+        env: "{{ app_mybibliotheca__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_mybibliotheca__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_mybibliotheca__container.expose | default(omit) }}"
+        label: "{{ app_mybibliotheca__container.labels | default(omit) }}"
+        publish: "{{ app_mybibliotheca__container.publish | default(omit) }}"
+        secrets: "{{ app_mybibliotheca__container.secrets | default(omit) }}"
+        volume: "{{ app_mybibliotheca__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_mybibliotheca__container.requires is defined %}
+          Requires={{ app_mybibliotheca__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_mybibliotheca__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ app_mybibliotheca__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if app_mybibliotheca__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        app_mybibliotheca__running: >-
+          {{ (ansible_facts.services[app_mybibliotheca__container.name + '.service'].state | default('')) == 'running' }}
+        app_mybibliotheca__restart: >-
+          {{ app_mybibliotheca__running | bool
+             and (app_mybibliotheca__secrets_result is changed or app_mybibliotheca__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    # The schema preflight runs before Gunicorn listens. Without users every page except the login (/auth/login)
+    # and the onboarding redirects to the setup, the login answers 200 in both cases
+    - name: 'Wait for MyBibliotheca'
+      ansible.builtin.uri:
+        url: "http://{{ app_mybibliotheca__ip }}:{{ app_mybibliotheca__port }}/auth/login"
+        follow_redirects: 'none'
+      register: 'app_mybibliotheca__ready'
+      until: app_mybibliotheca__ready.status | default(-1) == 200
+      retries: 150
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of MyBibliotheca'
+      when:
+        - not ansible_check_mode
+        - app_mybibliotheca__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_mybibliotheca__container.name }}", '-n', '150', '--no-pager' ]
+      register: 'app_mybibliotheca__journal'
+      changed_when: false
+
+    - name: 'Assert that MyBibliotheca answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__journal is skipped
+        fail_msg: "{{ app_mybibliotheca__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # Before the first user exists everybody may claim the administrator in the onboarding,
+    # the module creates it with the services of MyBibliotheca and fails if PostgreSQL is not the active backend.
+    # The password is an option with no_log, it is passed to Python on stdin
+    - name: 'Create the administrator'
+      when: 'not ansible_check_mode'
+      app_mybibliotheca_admin:
+        container: "{{ app_mybibliotheca__container.name }}"
+        name: "{{ app_mybibliotheca__admin.name | string }}"
+        email: "{{ app_mybibliotheca__admin.email | string }}"
+        password: "{{ app_mybibliotheca__admin.password | string }}"
+      register: 'app_mybibliotheca__admin_result'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_mybibliotheca__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_mybibliotheca__container.name }}"
+        container_image: "{{ app_mybibliotheca__container.image }}"
+        container_schedule: "{{ app_mybibliotheca__autoupdate_schedule }}"
