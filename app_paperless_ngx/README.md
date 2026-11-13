@@ -7,4 +7,4 @@ container_link: https://github.com/paperless-ngx/paperless-ngx/pkgs/container/pa
 documentation_link: https://docs.paperless-ngx.com/
 ---
 
-Installs and configures Paperless-ngx as a podman quadlet.
+Installs and configures Paperless-ngx, including its administrator, as a podman quadlet.

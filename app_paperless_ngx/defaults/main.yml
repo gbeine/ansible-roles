@@ -12,44 +12,348 @@ app_paperless_ngx__network: "{{ paperless_ngx_network | mandatory }}"
 app_paperless_ngx__hostname: "{{ paperless_ngx_hostname | mandatory }}"
 app_paperless_ngx__timezone: "{{ paperless_ngx_timezone | mandatory }}"
 app_paperless_ngx__labels: "{{ paperless_ngx_labels | default({}) }}"
-app_paperless_ngx__secrets: "{{ paperless_ngx_secrets | default([]) }}"
+
+# The user and group of the directories, the image runs Paperless-ngx as the user paperless with this uid and gid
+app_paperless_ngx__uid: "{{ paperless_ngx_uid | default(1000) }}"
+app_paperless_ngx__gid: "{{ paperless_ngx_gid | default(app_paperless_ngx__uid) }}"
 
 app_paperless_ngx__version: "{{ paperless_ngx_version | default('latest') }}"
 
-app_paperless_ngx__container: "{{ app_paperless_ngx__container_default | combine(paperless_ngx_container | default({})) }}"
+app_paperless_ngx__container: "{{ app_paperless_ngx__podman_container_default | combine(paperless_ngx_container | default({})) }}"
+
+# The configuration of Paperless-ngx, merged over the default
+app_paperless_ngx__environment: "{{ app_paperless_ngx__environment_default | combine(paperless_ngx_environment | default({})) }}"
+
+# Secrets with name, data and target, e.g. PAPERLESS_SECRET_KEY, PAPERLESS_REDIS or PAPERLESS_DBPASS
+app_paperless_ngx__secrets: "{{ paperless_ngx_secrets | default([]) }}"
+
+# The administrator of Paperless-ngx with name, email and password
+app_paperless_ngx__admin: "{{ paperless_ngx_admin | mandatory }}"
 
 app_paperless_ngx__autoupdate_enabled: "{{ paperless_ngx_autoupdate_enabled | default(false) }}"
+app_paperless_ngx__autoupdate_schedule: "{{ paperless_ngx_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-app_paperless_ngx__uid: '1000'
-app_paperless_ngx__gid: "{{ app_paperless_ngx__uid }}"
-
 app_paperless_ngx__podman_name: 'paperless-ngx'
 app_paperless_ngx__podman_image: 'ghcr.io/paperless-ngx/paperless-ngx'
-app_paperless_ngx__podman_tag: "{{ app_paperless_ngx__version }}"
 
-app_paperless_ngx__podman_home: "{{ app_paperless_ngx__home }}"
+app_paperless_ngx__port: "{{ app_paperless_ngx__environment.PAPERLESS_PORT | default(8000) }}"
 
-app_paperless_ngx__container_default:
+app_paperless_ngx__environment_default:
+  USERMAP_UID: "{{ app_paperless_ngx__uid | string }}"
+  USERMAP_GID: "{{ app_paperless_ngx__gid | string }}"
+  PAPERLESS_TIME_ZONE: "{{ app_paperless_ngx__timezone }}"
+
+app_paperless_ngx__database_engines: [ 'sqlite', 'postgresql', 'mariadb' ]
+
+# Without PAPERLESS_SECRET_KEY Paperless-ngx does not start, the broker Redis is always needed
+app_paperless_ngx__secrets_required: [ 'PAPERLESS_SECRET_KEY', 'PAPERLESS_REDIS' ]
+
+app_paperless_ngx__secret_variables: "{{ app_paperless_ngx__secret_files.keys() | list }}"
+app_paperless_ngx__secrets_dir: '/run/secrets'
+
+# The file variables of the secrets
+app_paperless_ngx__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if app_paperless_ngx__secrets is sequence and app_paperless_ngx__secrets is not string and app_paperless_ngx__secrets is not mapping -%}
+  {%-   for secret in app_paperless_ngx__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in app_paperless_ngx__secret_files -%}
+  {%-     set _ = environment.update({ app_paperless_ngx__secret_files[secret.target]: app_paperless_ngx__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The environment of the container, the role writes booleans in lower case
+app_paperless_ngx__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in (app_paperless_ngx__environment | combine(app_paperless_ngx__environment_secrets_files)).items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+app_paperless_ngx__admin_keys: [ 'name', 'email', 'password' ]
+# The names of users of Django
+app_paperless_ngx__admin_name_pattern: '^[A-Za-z0-9@.+_-]{1,150}$'
+app_paperless_ngx__admin_email_pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+app_paperless_ngx__password_length: 8
+
+app_paperless_ngx__podman_container_default:
   name: "{{ app_paperless_ngx__podman_name }}"
   hostname: "{{ app_paperless_ngx__hostname }}"
-  image: "{{ app_paperless_ngx__podman_image }}:{{ app_paperless_ngx__podman_tag }}"
+  image: "{{ app_paperless_ngx__podman_image }}:{{ app_paperless_ngx__version }}"
   ip: "{{ app_paperless_ngx__ip }}"
   ipv6: "{{ app_paperless_ngx__ipv6 | default(omit) }}"
   network: "{{ app_paperless_ngx__network }}"
   timezone: "{{ app_paperless_ngx__timezone }}"
-  labels: "{{ app_paperless_ngx__labels }}"
-  secrets: >-
-    {{ (app_paperless_ngx__secrets | map(attribute='name') | zip(app_paperless_ngx__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
-      if (app_paperless_ngx__secrets | length > 0)
-      else omit }}
+  labels: "{{ app_paperless_ngx__labels | default(omit) }}"
+  # Set with paperless_ngx_environment and paperless_ngx_secrets, merged over the default
+  environment: "{{ app_paperless_ngx__environment_container }}"
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ app_paperless_ngx__podman_home }}/data:/usr/src/paperless/data:Z"
-    - "{{ app_paperless_ngx__podman_home }}/media:/usr/src/paperless/media:Z"
-    - "{{ app_paperless_ngx__podman_home }}/export:/usr/src/paperless/export:Z"
-    - "{{ app_paperless_ngx__podman_home }}/consume:/usr/src/paperless/consume:Z"
+    - "{{ app_paperless_ngx__home }}/data:/usr/src/paperless/data:Z"
+    - "{{ app_paperless_ngx__home }}/media:/usr/src/paperless/media:Z"
+    - "{{ app_paperless_ngx__home }}/export:/usr/src/paperless/export:Z"
+    - "{{ app_paperless_ngx__home }}/consume:/usr/src/paperless/consume:Z"
+  # Entries without name are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (app_paperless_ngx__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ app_paperless_ngx__secrets_dir ~ '/\1') | list)
+      if (app_paperless_ngx__secrets is sequence and app_paperless_ngx__secrets is not string and app_paperless_ngx__secrets | length > 0)
+      else omit }}
+
+# Generated from the secrets of src of Paperless-ngx v3.4.2, the image reads every PAPERLESS_*_FILE into the variable without _FILE
+app_paperless_ngx__secret_files:
+  PAPERLESS_SECRET_KEY: 'PAPERLESS_SECRET_KEY_FILE'
+  PAPERLESS_DBPASS: 'PAPERLESS_DBPASS_FILE'
+  PAPERLESS_REDIS: 'PAPERLESS_REDIS_FILE'
+  PAPERLESS_READ_CACHE_REDIS_URL: 'PAPERLESS_READ_CACHE_REDIS_URL_FILE'
+  PAPERLESS_EMAIL_HOST_PASSWORD: 'PAPERLESS_EMAIL_HOST_PASSWORD_FILE'
+  PAPERLESS_AI_LLM_API_KEY: 'PAPERLESS_AI_LLM_API_KEY_FILE'
+  PAPERLESS_AI_LLM_EMBEDDING_API_KEY: 'PAPERLESS_AI_LLM_EMBEDDING_API_KEY_FILE'
+  PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET: 'PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET_FILE'
+  PAPERLESS_OUTLOOK_OAUTH_CLIENT_SECRET: 'PAPERLESS_OUTLOOK_OAUTH_CLIENT_SECRET_FILE'
+  PAPERLESS_REMOTE_OCR_API_KEY: 'PAPERLESS_REMOTE_OCR_API_KEY_FILE'
+  PAPERLESS_SOCIALACCOUNT_PROVIDERS: 'PAPERLESS_SOCIALACCOUNT_PROVIDERS_FILE'
+
+# The options read with get_bool_from_env in src of Paperless-ngx v3.4.2
+app_paperless_ngx__environment_booleans:
+  - 'PAPERLESS_ACCOUNT_ALLOW_SIGNUPS'
+  - 'PAPERLESS_ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS'
+  - 'PAPERLESS_ACCOUNT_SESSION_REMEMBER'
+  - 'PAPERLESS_AI_ENABLED'
+  - 'PAPERLESS_AI_LLM_ALLOW_INTERNAL_ENDPOINTS'
+  - 'PAPERLESS_AUDIT_LOG_ENABLED'
+  - 'PAPERLESS_CONSUMER_BARCODE_RETAIN_SPLIT_PAGES'
+  - 'PAPERLESS_CONSUMER_BARCODE_TIFF_SUPPORT'
+  - 'PAPERLESS_CONSUMER_COLLATE_DOUBLE_SIDED_TIFF_SUPPORT'
+  - 'PAPERLESS_CONSUMER_DELETE_DUPLICATES'
+  - 'PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE'
+  - 'PAPERLESS_CONSUMER_ENABLE_BARCODES'
+  - 'PAPERLESS_CONSUMER_ENABLE_COLLATE_DOUBLE_SIDED'
+  - 'PAPERLESS_CONSUMER_ENABLE_TAG_BARCODE'
+  - 'PAPERLESS_CONSUMER_RECURSIVE'
+  - 'PAPERLESS_CONSUMER_STORE_BARCODE_VALUES'
+  - 'PAPERLESS_CONSUMER_SUBDIRS_AS_TAGS'
+  - 'PAPERLESS_CONSUMER_TAG_BARCODE_SPLIT'
+  - 'PAPERLESS_DB_READ_CACHE_ENABLED'
+  - 'PAPERLESS_DEBUG'
+  - 'PAPERLESS_DISABLE_REGULAR_LOGIN'
+  - 'PAPERLESS_EMAIL_ALLOW_INTERNAL_HOSTS'
+  - 'PAPERLESS_EMAIL_USE_SSL'
+  - 'PAPERLESS_EMAIL_USE_TLS'
+  - 'PAPERLESS_ENABLE_COMPRESSION'
+  - 'PAPERLESS_ENABLE_GPG_DECRYPTOR'
+  - 'PAPERLESS_ENABLE_HTTP_REMOTE_USER'
+  - 'PAPERLESS_ENABLE_HTTP_REMOTE_USER_API'
+  - 'PAPERLESS_ENABLE_UPDATE_CHECK'
+  - 'PAPERLESS_FILENAME_FORMAT_REMOVE_NONE'
+  - 'PAPERLESS_OCR_DESKEW'
+  - 'PAPERLESS_OCR_ROTATE_PAGES'
+  - 'PAPERLESS_REDIRECT_LOGIN_TO_SSO'
+  - 'PAPERLESS_REMOTE_OCR_ALLOW_INTERNAL_ENDPOINTS'
+  - 'PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_SYNC_GROUPS'
+  - 'PAPERLESS_SOCIAL_AUTO_SIGNUP'
+  - 'PAPERLESS_TIKA_ENABLED'
+  - 'PAPERLESS_USE_X_FORWARD_HOST'
+  - 'PAPERLESS_USE_X_FORWARD_PORT'
+  - 'PAPERLESS_WEBHOOKS_ALLOW_INTERNAL_REQUESTS'
+
+# Generated from the PAPERLESS_* variables in src of Paperless-ngx v3.4.2 without tests and the variables of the s6 scripts of the image,
+# without the secrets and PAPERLESS_ADMIN_* (the role manages the administrator), plus the file variables of the secrets
+app_paperless_ngx__environment_allowed:
+  - 'PAPERLESS_ACCOUNT_ALLOW_SIGNUPS'
+  - 'PAPERLESS_ACCOUNT_DEFAULT_GROUPS'
+  - 'PAPERLESS_ACCOUNT_DEFAULT_HTTP_PROTOCOL'
+  - 'PAPERLESS_ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS'
+  - 'PAPERLESS_ACCOUNT_EMAIL_VERIFICATION'
+  - 'PAPERLESS_ACCOUNT_SESSION_REMEMBER'
+  - 'PAPERLESS_ADVANCED_FUZZY_SEARCH_THRESHOLD'
+  - 'PAPERLESS_AI_ENABLED'
+  - 'PAPERLESS_AI_LLM_ALLOW_INTERNAL_ENDPOINTS'
+  - 'PAPERLESS_AI_LLM_BACKEND'
+  - 'PAPERLESS_AI_LLM_CONTEXT_SIZE'
+  - 'PAPERLESS_AI_LLM_EMBEDDING_BACKEND'
+  - 'PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE'
+  - 'PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT'
+  - 'PAPERLESS_AI_LLM_EMBEDDING_MODEL'
+  - 'PAPERLESS_AI_LLM_ENDPOINT'
+  - 'PAPERLESS_AI_LLM_EXTRA_PARAMS'
+  - 'PAPERLESS_AI_LLM_MODEL'
+  - 'PAPERLESS_AI_LLM_OUTPUT_LANGUAGE'
+  - 'PAPERLESS_AI_LLM_REQUEST_TIMEOUT'
+  - 'PAPERLESS_ALLAUTH_TRUSTED_CLIENT_IP_HEADER'
+  - 'PAPERLESS_ALLAUTH_TRUSTED_PROXY_COUNT'
+  - 'PAPERLESS_ALLOWED_HOSTS'
+  - 'PAPERLESS_APPS'
+  - 'PAPERLESS_APP_LOGO'
+  - 'PAPERLESS_APP_TITLE'
+  - 'PAPERLESS_ARCHIVE_FILE_GENERATION'
+  - 'PAPERLESS_AUDIT_LOG_ENABLED'
+  - 'PAPERLESS_AUTO_LOGIN_USERNAME'
+  - 'PAPERLESS_CACHE_BACKEND'
+  - 'PAPERLESS_CHANNELS_BACKEND'
+  - 'PAPERLESS_CLASSIFIER_MATCH_THRESHOLD'
+  - 'PAPERLESS_CONFIGURATION_PATH'
+  - 'PAPERLESS_CONSUMER_ASN_BARCODE_PREFIX'
+  - 'PAPERLESS_CONSUMER_BARCODE_DPI'
+  - 'PAPERLESS_CONSUMER_BARCODE_MAX_PAGES'
+  - 'PAPERLESS_CONSUMER_BARCODE_RETAIN_SPLIT_PAGES'
+  - 'PAPERLESS_CONSUMER_BARCODE_STRING'
+  - 'PAPERLESS_CONSUMER_BARCODE_TIFF_SUPPORT'
+  - 'PAPERLESS_CONSUMER_BARCODE_UPSCALE'
+  - 'PAPERLESS_CONSUMER_COLLATE_DOUBLE_SIDED_SUBDIR_NAME'
+  - 'PAPERLESS_CONSUMER_COLLATE_DOUBLE_SIDED_TIFF_SUPPORT'
+  - 'PAPERLESS_CONSUMER_DELETE_DUPLICATES'
+  - 'PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE'
+  - 'PAPERLESS_CONSUMER_ENABLE_BARCODES'
+  - 'PAPERLESS_CONSUMER_ENABLE_COLLATE_DOUBLE_SIDED'
+  - 'PAPERLESS_CONSUMER_ENABLE_TAG_BARCODE'
+  - 'PAPERLESS_CONSUMER_IGNORE_DIRS'
+  - 'PAPERLESS_CONSUMER_IGNORE_PATTERNS'
+  - 'PAPERLESS_CONSUMER_POLLING_INTERVAL'
+  - 'PAPERLESS_CONSUMER_RECURSIVE'
+  - 'PAPERLESS_CONSUMER_STABILITY_DELAY'
+  - 'PAPERLESS_CONSUMER_STORE_BARCODE_VALUES'
+  - 'PAPERLESS_CONSUMER_SUBDIRS_AS_TAGS'
+  - 'PAPERLESS_CONSUMER_TAG_BARCODE_MAPPING'
+  - 'PAPERLESS_CONSUMER_TAG_BARCODE_SPLIT'
+  - 'PAPERLESS_CONSUMPTION_DIR'
+  - 'PAPERLESS_COOKIE_PREFIX'
+  - 'PAPERLESS_CORS_ALLOWED_HOSTS'
+  - 'PAPERLESS_CSRF_TRUSTED_ORIGINS'
+  - 'PAPERLESS_DATA_DIR'
+  - 'PAPERLESS_DATE_ORDER'
+  - 'PAPERLESS_DATE_PARSER_LANGUAGES'
+  - 'PAPERLESS_DBENGINE'
+  - 'PAPERLESS_DBHOST'
+  - 'PAPERLESS_DBNAME'
+  - 'PAPERLESS_DBPORT'
+  - 'PAPERLESS_DBSSLCERT'
+  - 'PAPERLESS_DBSSLKEY'
+  - 'PAPERLESS_DBSSLMODE'
+  - 'PAPERLESS_DBSSLROOTCERT'
+  - 'PAPERLESS_DBUSER'
+  - 'PAPERLESS_DB_OPTIONS'
+  - 'PAPERLESS_DB_POOLSIZE'
+  - 'PAPERLESS_DB_READ_CACHE_ENABLED'
+  - 'PAPERLESS_DB_TIMEOUT'
+  - 'PAPERLESS_DEBUG'
+  - 'PAPERLESS_DISABLE_REGULAR_LOGIN'
+  - 'PAPERLESS_EMAIL_ALLOW_INTERNAL_HOSTS'
+  - 'PAPERLESS_EMAIL_CERTIFICATE_LOCATION'
+  - 'PAPERLESS_EMAIL_FROM'
+  - 'PAPERLESS_EMAIL_GNUPG_HOME'
+  - 'PAPERLESS_EMAIL_HOST'
+  - 'PAPERLESS_EMAIL_HOST_USER'
+  - 'PAPERLESS_EMAIL_PARSE_DEFAULT_LAYOUT'
+  - 'PAPERLESS_EMAIL_PORT'
+  - 'PAPERLESS_EMAIL_TASK_CRON'
+  - 'PAPERLESS_EMAIL_USE_SSL'
+  - 'PAPERLESS_EMAIL_USE_TLS'
+  - 'PAPERLESS_EMPTY_TRASH_DELAY'
+  - 'PAPERLESS_EMPTY_TRASH_DIR'
+  - 'PAPERLESS_EMPTY_TRASH_TASK_CRON'
+  - 'PAPERLESS_ENABLE_COMPRESSION'
+  - 'PAPERLESS_ENABLE_GPG_DECRYPTOR'
+  - 'PAPERLESS_ENABLE_HTTP_REMOTE_USER'
+  - 'PAPERLESS_ENABLE_HTTP_REMOTE_USER_API'
+  - 'PAPERLESS_ENABLE_UPDATE_CHECK'
+  - 'PAPERLESS_FILENAME_DATE_ORDER'
+  - 'PAPERLESS_FILENAME_FORMAT'
+  - 'PAPERLESS_FILENAME_FORMAT_REMOVE_NONE'
+  - 'PAPERLESS_FORCE_SCRIPT_NAME'
+  - 'PAPERLESS_GMAIL_OAUTH_CLIENT_ID'
+  - 'PAPERLESS_HTTP_REMOTE_USER_HEADER_NAME'
+  - 'PAPERLESS_IGNORE_DATES'
+  - 'PAPERLESS_INDEX_TASK_CRON'
+  - 'PAPERLESS_LLM_INDEX_TASK_CRON'
+  - 'PAPERLESS_LOGGING_DIR'
+  - 'PAPERLESS_LOGOUT_REDIRECT_URL'
+  - 'PAPERLESS_LOGROTATE_MAX_BACKUPS'
+  - 'PAPERLESS_LOGROTATE_MAX_SIZE'
+  - 'PAPERLESS_MATCH_REGEX_TIMEOUT_SECONDS'
+  - 'PAPERLESS_MAX_IMAGE_PIXELS'
+  - 'PAPERLESS_MEDIA_ROOT'
+  - 'PAPERLESS_MODEL_FILE'
+  - 'PAPERLESS_NUMBER_OF_SUGGESTED_DATES'
+  - 'PAPERLESS_OAUTH_CALLBACK_BASE_URL'
+  - 'PAPERLESS_OCR_CLEAN'
+  - 'PAPERLESS_OCR_COLOR_CONVERSION_STRATEGY'
+  - 'PAPERLESS_OCR_DESKEW'
+  - 'PAPERLESS_OCR_IMAGE_DPI'
+  - 'PAPERLESS_OCR_LANGUAGE'
+  - 'PAPERLESS_OCR_MAX_IMAGE_PIXELS'
+  - 'PAPERLESS_OCR_MODE'
+  - 'PAPERLESS_OCR_OUTPUT_TYPE'
+  - 'PAPERLESS_OCR_PAGES'
+  - 'PAPERLESS_OCR_ROTATE_PAGES'
+  - 'PAPERLESS_OCR_ROTATE_PAGES_THRESHOLD'
+  - 'PAPERLESS_OCR_SKIP_ARCHIVE_FILE'
+  - 'PAPERLESS_OCR_USER_ARGS'
+  - 'PAPERLESS_OUTLOOK_OAUTH_CLIENT_ID'
+  - 'PAPERLESS_POST_CONSUME_SCRIPT'
+  - 'PAPERLESS_PRE_CONSUME_SCRIPT'
+  - 'PAPERLESS_PROXY_SSL_HEADER'
+  - 'PAPERLESS_READ_CACHE_TTL'
+  - 'PAPERLESS_REDIRECT_LOGIN_TO_SSO'
+  - 'PAPERLESS_REDIS_PREFIX'
+  - 'PAPERLESS_REMOTE_OCR_ALLOW_INTERNAL_ENDPOINTS'
+  - 'PAPERLESS_REMOTE_OCR_ENDPOINT'
+  - 'PAPERLESS_REMOTE_OCR_ENGINE'
+  - 'PAPERLESS_REMOTE_OCR_MODE'
+  - 'PAPERLESS_SANITY_TASK_CRON'
+  - 'PAPERLESS_SCRATCH_DIR'
+  - 'PAPERLESS_SEARCH_LANGUAGE'
+  - 'PAPERLESS_SESSION_COOKIE_AGE'
+  - 'PAPERLESS_SHARE_LINK_BUNDLE_CLEANUP_CRON'
+  - 'PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_DEFAULT_GROUPS'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_MFA_TRUSTED_AMR'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_SYNC_GROUPS'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_SYNC_GROUPS_CLAIM'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_SYNC_STAFF_GROUP'
+  - 'PAPERLESS_SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP'
+  - 'PAPERLESS_SOCIAL_AUTO_SIGNUP'
+  - 'PAPERLESS_STATICDIR'
+  - 'PAPERLESS_STATIC_URL'
+  - 'PAPERLESS_TASK_WORKERS'
+  - 'PAPERLESS_THREADS_PER_WORKER'
+  - 'PAPERLESS_THUMBNAIL_FONT_NAME'
+  - 'PAPERLESS_TIKA_ENABLED'
+  - 'PAPERLESS_TIKA_ENDPOINT'
+  - 'PAPERLESS_TIKA_GOTENBERG_ENDPOINT'
+  - 'PAPERLESS_TIME_ZONE'
+  - 'PAPERLESS_TOKEN_THROTTLE_RATE'
+  - 'PAPERLESS_TRAIN_TASK_CRON'
+  - 'PAPERLESS_TRASH_DIR'
+  - 'PAPERLESS_TRUSTED_PROXIES'
+  - 'PAPERLESS_URL'
+  - 'PAPERLESS_USE_X_FORWARD_HOST'
+  - 'PAPERLESS_USE_X_FORWARD_PORT'
+  - 'PAPERLESS_WEBHOOKS_ALLOWED_PORTS'
+  - 'PAPERLESS_WEBHOOKS_ALLOWED_SCHEMES'
+  - 'PAPERLESS_WEBHOOKS_ALLOW_INTERNAL_REQUESTS'
+  - 'PAPERLESS_WORKER_TIMEOUT'
+  - 'PAPERLESS_WORKFLOW_SCHEDULED_TASK_CRON'
+  - 'USERMAP_UID'
+  - 'USERMAP_GID'
+  - 'PAPERLESS_OCR_LANGUAGES'
+  - 'PAPERLESS_PORT'
+  - 'PAPERLESS_BIND_ADDR'
+  - 'PAPERLESS_WEBSERVER_WORKERS'
+  - 'PAPERLESS_ENABLE_FLOWER'
+  - 'PAPERLESS_CONSUMER_DISABLE'
+  - 'PAPERLESS_SECRET_KEY_FILE'
+  - 'PAPERLESS_DBPASS_FILE'
+  - 'PAPERLESS_REDIS_FILE'
+  - 'PAPERLESS_READ_CACHE_REDIS_URL_FILE'
+  - 'PAPERLESS_EMAIL_HOST_PASSWORD_FILE'
+  - 'PAPERLESS_AI_LLM_API_KEY_FILE'
+  - 'PAPERLESS_AI_LLM_EMBEDDING_API_KEY_FILE'
+  - 'PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET_FILE'
+  - 'PAPERLESS_OUTLOOK_OAUTH_CLIENT_SECRET_FILE'
+  - 'PAPERLESS_REMOTE_OCR_API_KEY_FILE'
+  - 'PAPERLESS_SOCIALACCOUNT_PROVIDERS_FILE'

@@ -1,0 +1,167 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_paperless_ngx__test_case: "{{ app_paperless_ngx__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_paperless_ngx__test_vars: "{{ app_paperless_ngx__test_case.role_vars }}"
+    app_paperless_ngx__test_environment: "{{ app_paperless_ngx__test_vars.paperless_ngx_environment | default({}) }}"
+    app_paperless_ngx__test_secrets: "{{ app_paperless_ngx__test_vars.paperless_ngx_secrets | default([]) }}"
+    app_paperless_ngx__test_checked_files:
+      - "{{ app_paperless_ngx__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_paperless_ngx__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_paperless_ngx__test_checked_files }}"
+      register: 'app_paperless_ngx__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_paperless_ngx with paperless_ngx_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_container: [ 'environment' ]
+        app_paperless_ngx__test_invalid:
+          message: 'paperless_ngx_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_paperless_ngx with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_secrets: [ { name: 'paperless_secret_key', data: 'x' } ]
+        app_paperless_ngx__test_invalid:
+          message: 'a secret without target'
+          search: '^paperless_ngx_secrets entries need name, data and target$'
+
+    - name: 'Run app_paperless_ngx without PAPERLESS_SECRET_KEY (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_secrets: "{{ app_paperless_ngx__test_secrets | rejectattr('target', 'eq', 'PAPERLESS_SECRET_KEY') | list }}"
+        app_paperless_ngx__test_invalid:
+          message: 'no PAPERLESS_SECRET_KEY'
+          search: '^Paperless-ngx needs the secrets PAPERLESS_SECRET_KEY, PAPERLESS_REDIS.*, missing: PAPERLESS_SECRET_KEY\.$'
+
+    - name: 'Run app_paperless_ngx with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_secrets: "{{ app_paperless_ngx__test_secrets + [ { 'name': 'paperless_unknown', 'data': 'molecule', 'target': 'PAPERLESS_URL' } ] }}"
+        app_paperless_ngx__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: PAPERLESS_URL\.'
+
+    - name: 'Run app_paperless_ngx with the database password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine({ 'PAPERLESS_DBPASS': 'molecule' }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'the database password in the environment'
+          search: '^Secrets and their file variables must not be set in paperless_ngx_environment: PAPERLESS_DBPASS\.$'
+
+    - name: 'Run app_paperless_ngx with postgresql without the database host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine({ 'PAPERLESS_DBENGINE': 'postgresql', 'PAPERLESS_DBHOST': '' }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'postgresql without the database host'
+          search: '^PAPERLESS_DBENGINE postgresql needs PAPERLESS_DBHOST\.'
+
+    - name: 'Run app_paperless_ngx with an invalid database engine (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine({ 'PAPERLESS_DBENGINE': 'mysql' }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'an invalid database engine'
+          search: '^PAPERLESS_DBENGINE has to be one of sqlite, postgresql, mariadb, got mysql\.'
+
+    - name: 'Run app_paperless_ngx with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine({ 'PAPERLESS_OCR_DESKEW': 'maybe' }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: PAPERLESS_OCR_DESKEW\.$'
+
+    - name: 'Run app_paperless_ngx with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine({ 'PAPERLESS_URL': \"https://paperless\nexample.org\" }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: PAPERLESS_URL\.$'
+
+    - name: 'Run app_paperless_ngx with the password of the administrator in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine({ 'PAPERLESS_ADMIN_PASSWORD': 'molecule-password' }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'the password of the administrator in the environment'
+          search: '^Unknown environment variables: PAPERLESS_ADMIN_PASSWORD\. .*the administrator is set with paperless_ngx_admin\.$'
+
+    - name: 'Run app_paperless_ngx with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_admin: { name: 'paperless-admin', email: 'admin@example.org' }
+        app_paperless_ngx__test_invalid:
+          message: 'an administrator without password'
+          search: '^paperless_ngx_admin needs a password\.$'
+
+    - name: 'Run app_paperless_ngx with a short password of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        paperless_ngx_admin: "{{ app_paperless_ngx__test_admin | combine({ 'password': 'short' }) }}"
+        app_paperless_ngx__test_invalid:
+          message: 'a short password of the administrator'
+          search: '^The password of paperless_ngx_admin needs at least 8 characters\.$'
+
+    - name: 'Run app_paperless_ngx with the changed title and password'
+      when: app_paperless_ngx__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'paperless-ngx' ]
+          register: 'app_paperless_ngx__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            paperless_ngx_environment: "{{ app_paperless_ngx__test_environment | combine(app_paperless_ngx__test_case.side_effect.environment) }}"
+            paperless_ngx_admin: "{{ app_paperless_ngx__test_admin | combine(app_paperless_ngx__test_case.side_effect.admin) }}"
+
+        - name: 'Run app_paperless_ngx with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_paperless_ngx'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'paperless-ngx' ]
+          register: 'app_paperless_ngx__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed password'
+          ansible.builtin.assert:
+            that:
+              - app_paperless_ngx__quadlet_result is changed
+              - app_paperless_ngx__admin_result is changed
+              - not app_paperless_ngx__admin_result.created
+              - app_paperless_ngx__test_started_after.stdout | int > app_paperless_ngx__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_paperless_ngx__quadlet_result is changed }}, administrator changed: {{ app_paperless_ngx__admin_result is changed }},
+              created: {{ app_paperless_ngx__admin_result.created | default('') }},
+              start before {{ app_paperless_ngx__test_started_before.stdout }}, after {{ app_paperless_ngx__test_started_after.stdout }}

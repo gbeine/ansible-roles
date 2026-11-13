@@ -1,0 +1,136 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_paperless_ngx__test_case: "{{ app_paperless_ngx__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_paperless_ngx__expect: "{{ app_paperless_ngx__test_case.expect }}"
+    app_paperless_ngx__test_url: "http://{{ app_paperless_ngx__expect.ip }}:8000"
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_paperless_ngx__test_plain: >-
+      {{ (app_paperless_ngx__test_case.role_vars.paperless_ngx_secrets | default([])) | map(attribute='data') | list
+         + [ app_paperless_ngx__test_admin.password ]
+         + ([ app_paperless_ngx__test_case.side_effect.admin.password ] if app_paperless_ngx__test_case.side_effect is defined else []) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_paperless_ngx__test_quadlet_path }}"
+      register: 'app_paperless_ngx__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_paperless_ngx__test_image) in app_paperless_ngx__test_quadlet_lines
+          - ('IP=' + app_paperless_ngx__expect.ip) in app_paperless_ngx__test_quadlet_lines
+          - app_paperless_ngx__expect.ip6 is none or ('IP6=' + app_paperless_ngx__expect.ip6) in app_paperless_ngx__test_quadlet_lines
+          - app_paperless_ngx__expect.ip6 is not none or app_paperless_ngx__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_paperless_ngx__expect.quadlet | reject('in', app_paperless_ngx__test_quadlet_lines) | list | length == 0
+          - app_paperless_ngx__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_paperless_ngx__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_paperless_ngx__test_plain | select('in', app_paperless_ngx__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_paperless_ngx__test_quadlet.content | b64decode }}"
+      vars:
+        app_paperless_ngx__test_quadlet_lines: "{{ (app_paperless_ngx__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the Paperless-ngx service'
+      ansible.builtin.command: 'systemctl is-active paperless-ngx'
+      register: 'app_paperless_ngx__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the Paperless-ngx container'
+      ansible.builtin.command: 'podman inspect paperless-ngx'
+      register: 'app_paperless_ngx__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_paperless_ngx__test_service.stdout == 'active'
+          - app_paperless_ngx__test_net.IPAddress == app_paperless_ngx__expect.ip
+          - app_paperless_ngx__expect.ip6 is none or app_paperless_ngx__test_net.GlobalIPv6Address == app_paperless_ngx__expect.ip6
+          - app_paperless_ngx__expect.env | reject('in', app_paperless_ngx__test_env) | list | length == 0
+          - app_paperless_ngx__test_plain | select('in', app_paperless_ngx__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_paperless_ngx__test_service.stdout }},
+          IPv4 {{ app_paperless_ngx__test_net.IPAddress }}, IPv6 {{ app_paperless_ngx__test_net.GlobalIPv6Address }},
+          environment {{ app_paperless_ngx__test_env | join(', ') }}
+      vars:
+        app_paperless_ngx__test_container: "{{ (app_paperless_ngx__test_inspect.stdout | from_json)[0] }}"
+        app_paperless_ngx__test_net: "{{ app_paperless_ngx__test_container.NetworkSettings.Networks[app_paperless_ngx__test_case.role_vars.paperless_ngx_network] }}"
+        app_paperless_ngx__test_env: "{{ app_paperless_ngx__test_container.Config.Env }}"
+
+    - name: 'Log in to the API as the administrator'
+      ansible.builtin.uri:
+        url: "{{ app_paperless_ngx__test_url }}/api/profile/"
+        url_username: "{{ app_paperless_ngx__expect.admin.name }}"
+        url_password: "{{ item.password }}"
+        force_basic_auth: true
+        headers:
+          Accept: 'application/json'
+        status_code: [ 200, 401, 403 ]
+        return_content: true
+      loop: >-
+        {{ [ { 'password': app_paperless_ngx__expect.admin.password, 'allowed': true } ]
+           + ([ { 'password': app_paperless_ngx__expect.admin.former_password, 'allowed': false } ] if app_paperless_ngx__expect.admin.former_password is defined else []) }}
+      loop_control:
+        label: "{{ 'password' if item.allowed else 'former password' }}"
+      register: 'app_paperless_ngx__test_login'
+      no_log: true
+
+    - name: 'Read the administrator and the settings of the user interface'
+      ansible.builtin.uri:
+        url: "{{ app_paperless_ngx__test_url }}{{ item }}"
+        url_username: "{{ app_paperless_ngx__expect.admin.name }}"
+        url_password: "{{ app_paperless_ngx__expect.admin.password }}"
+        force_basic_auth: true
+        headers:
+          Accept: 'application/json'
+        return_content: true
+      loop:
+        - "/api/users/?username__iexact={{ app_paperless_ngx__expect.admin.name }}"
+        - '/api/ui_settings/'
+      register: 'app_paperless_ngx__test_api'
+      no_log: true
+
+    - name: 'Assert the login, the administrator and the title'
+      ansible.builtin.assert:
+        that:
+          - app_paperless_ngx__test_logins == app_paperless_ngx__test_login.results | map(attribute='item.allowed') | map('ternary', 200, 401) | list
+          - app_paperless_ngx__test_user.is_superuser
+          - app_paperless_ngx__test_user.email == app_paperless_ngx__test_admin.email
+          - app_paperless_ngx__expect.title is none or app_paperless_ngx__expect.title in app_paperless_ngx__test_api.results[1].content
+        fail_msg: >-
+          logins {{ app_paperless_ngx__test_logins }}, user {{ app_paperless_ngx__test_user | to_json }},
+          settings {{ app_paperless_ngx__test_api.results[1].content | default('') }}
+      vars:
+        # Django REST framework answers 403 for a wrong password with basic authentication
+        app_paperless_ngx__test_logins: "{{ app_paperless_ngx__test_login.results | map(attribute='status') | map('regex_replace', '^403$', '401') | map('int') | list }}"
+        app_paperless_ngx__test_user: "{{ (app_paperless_ngx__test_api.results[0].content | from_json).results | first | default({}) }}"
+
+    - name: 'Read the tables of Paperless-ngx in PostgreSQL'
+      when: app_paperless_ngx__test_case.database is not none
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ app_paperless_ngx__test_database.password, app_paperless_ngx__test_database.name ] + app_paperless_ngx__test_database.tables }}"
+      register: 'app_paperless_ngx__test_tables'
+      changed_when: false
+
+    - name: 'Read the state of the sqlite database'
+      when: app_paperless_ngx__test_case.database is none
+      ansible.builtin.stat:
+        path: "{{ app_paperless_ngx__test_case.role_vars.paperless_ngx_home }}/data/db.sqlite3"
+      register: 'app_paperless_ngx__test_sqlite'
+
+    - name: 'Assert the database of Paperless-ngx'
+      ansible.builtin.assert:
+        that:
+          - app_paperless_ngx__test_case.database is none or 'documents_document' in app_paperless_ngx__test_tables.stdout_lines
+          - app_paperless_ngx__test_case.database is not none or app_paperless_ngx__test_sqlite.stat.exists
+        fail_msg: "tables {{ app_paperless_ngx__test_tables.stdout_lines | default([]) | to_json }}, sqlite {{ app_paperless_ngx__test_sqlite.stat | default({}) | to_json }}"

@@ -1,0 +1,122 @@
+---
+# Network created by container_podman in prepare.yml
+app_paperless_ngx__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_paperless_ngx__test_image: 'ghcr.io/paperless-ngx/paperless-ngx:latest'
+app_paperless_ngx__test_quadlet_path: '/etc/containers/systemd/paperless-ngx.container'
+
+# Redis and the database started by prepare.yml, test credentials only
+app_paperless_ngx__test_redis:
+  name: 'molecule-redis'
+  image: 'docker.io/library/redis:7'
+  ip: '10.89.0.21'
+  ready: [ 'redis-cli', 'ping' ]
+
+app_paperless_ngx__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  password: 'molecule-db-password'
+  env:
+    POSTGRES_DB: 'paperless'
+    POSTGRES_USER: 'paperless'
+    POSTGRES_PASSWORD: 'molecule-db-password'
+  # The server listens on TCP after the initialization
+  ready: [ 'psql', '-h', '127.0.0.1', '-U', 'paperless', '-d', 'paperless', '-c', 'SELECT 1' ]
+  tables: [ 'psql', '-h', '127.0.0.1', '-U', 'paperless', '-d', 'paperless', '-tAc', "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'" ]
+
+app_paperless_ngx__test_admin:
+  name: 'paperless-admin'
+  email: 'admin@example.org'
+  password: 'molecule-admin-password'
+
+app_paperless_ngx__test_cases:
+
+  # Only the mandatory variables, sqlite, Redis and the administrator
+  - name: 'molecule-paperless-default'
+    database: ~
+    role_vars:
+      paperless_ngx_home: '/opt/paperless'
+      paperless_ngx_ip: '10.89.0.90'
+      paperless_ngx_network: 'podman-molecule'
+      paperless_ngx_hostname: 'paperless-default'
+      paperless_ngx_timezone: 'Europe/Berlin'
+      paperless_ngx_secrets:
+        - name: 'paperless_secret_key'
+          data: 'molecule-secret-key-default'
+          target: 'PAPERLESS_SECRET_KEY'
+        - name: 'paperless_redis'
+          data: 'redis://10.89.0.21:6379'
+          target: 'PAPERLESS_REDIS'
+      paperless_ngx_admin: "{{ app_paperless_ngx__test_admin }}"
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/paperless/data:/usr/src/paperless/data:Z'
+        - 'Secret=paperless_redis,type=mount,target=/run/secrets/paperless_redis'
+      env:
+        - 'USERMAP_UID=1000'
+        - 'PAPERLESS_TIME_ZONE=Europe/Berlin'
+        - 'PAPERLESS_SECRET_KEY_FILE=/run/secrets/paperless_secret_key'
+        - 'PAPERLESS_REDIS_FILE=/run/secrets/paperless_redis'
+      title: ~
+      admin: { name: 'paperless-admin', password: 'molecule-admin-password' }
+
+  # IPv6, labels, PostgreSQL, options and the administrator
+  - name: 'molecule-paperless'
+    database: 'postgresql'
+    role_vars:
+      paperless_ngx_home: '/opt/paperless'
+      paperless_ngx_ip: '10.89.0.91'
+      paperless_ngx_ipv6: 'fd00:89::91'
+      paperless_ngx_network: 'podman-molecule'
+      paperless_ngx_hostname: 'paperless-molecule'
+      paperless_ngx_timezone: 'Europe/Berlin'
+      paperless_ngx_labels:
+        traefik.enable: 'false'
+      paperless_ngx_environment:
+        PAPERLESS_DBENGINE: 'postgresql'
+        PAPERLESS_DBHOST: '10.89.0.20'
+        PAPERLESS_DBUSER: 'paperless'
+        PAPERLESS_DBNAME: 'paperless'
+        PAPERLESS_OCR_LANGUAGE: 'deu+eng'
+        PAPERLESS_APP_TITLE: 'Molecule Archive'
+        PAPERLESS_ENABLE_UPDATE_CHECK: false
+      paperless_ngx_secrets:
+        - name: 'paperless_secret_key'
+          data: 'molecule-secret-key'
+          target: 'PAPERLESS_SECRET_KEY'
+        - name: 'paperless_redis'
+          data: 'redis://10.89.0.21:6379'
+          target: 'PAPERLESS_REDIS'
+        - name: 'paperless_dbpass'
+          data: 'molecule-db-password'
+          target: 'PAPERLESS_DBPASS'
+      paperless_ngx_admin: "{{ app_paperless_ngx__test_admin }}"
+    # The title changes and Paperless-ngx has to restart, the password of the administrator changes
+    side_effect:
+      environment:
+        PAPERLESS_APP_TITLE: 'Molecule Changed'
+      admin:
+        password: 'molecule-admin-changed'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Label=traefik.enable=false'
+        - 'Secret=paperless_dbpass,type=mount,target=/run/secrets/paperless_dbpass'
+      env:
+        - 'PAPERLESS_DBENGINE=postgresql'
+        - 'PAPERLESS_ENABLE_UPDATE_CHECK=false'
+        - 'PAPERLESS_APP_TITLE=Molecule Changed'
+        - 'PAPERLESS_DBPASS_FILE=/run/secrets/paperless_dbpass'
+      title: 'Molecule Changed'
+      admin: { name: 'paperless-admin', password: 'molecule-admin-changed', former_password: 'molecule-admin-password' }
