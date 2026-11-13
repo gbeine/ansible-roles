@@ -1,0 +1,257 @@
+---
+
+- name: 'Deploy Meilisearch'
+  tags: [ 'app', 'app_meilisearch' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or meilisearch_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_meilisearch__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_meilisearch__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_meilisearch__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_meilisearch__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('meilisearch_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('meilisearch_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of meilisearch_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # In production Meilisearch refuses to start without a master key of at least 16 bytes
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_meilisearch__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_meilisearch__targets: "{{ app_meilisearch__secrets | map(attribute='target') | list }}"
+        app_meilisearch__secrets_missing: "{{ app_meilisearch__secrets_required | reject('in', app_meilisearch__targets) | list }}"
+        app_meilisearch__master_key: >-
+          {{ app_meilisearch__secrets | selectattr('target', 'eq', 'MEILI_MASTER_KEY') | map(attribute='data') | map('string') | first | default('') }}
+        app_meilisearch__env: "{{ app_meilisearch__environment.MEILI_ENV | default('') | string }}"
+        app_meilisearch__secrets_in_environment: >-
+          {{ (app_meilisearch__targets + app_meilisearch__secret_variables) | select('in', app_meilisearch__environment.keys() | list) | unique | list }}
+        app_meilisearch__secrets_lines: >-
+          {{ app_meilisearch__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_meilisearch__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_meilisearch__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Meilisearch needs the secrets ' ~ (app_meilisearch__secrets_required | join(', ')) ~ ', missing: ' ~ (app_meilisearch__secrets_missing | join(', ')) ~ '.') -%}
+          {%- elif (app_meilisearch__master_key | length) < app_meilisearch__master_key_length -%}
+          {%-   set _ = errors.append('The secret MEILI_MASTER_KEY needs at least ' ~ app_meilisearch__master_key_length ~ ' characters.') -%}
+          {%- endif -%}
+          {%- if app_meilisearch__env not in app_meilisearch__environments -%}
+          {%-   set _ = errors.append('MEILI_ENV has to be one of ' ~ (app_meilisearch__environments | join(', ')) ~ ', got ' ~ app_meilisearch__env ~ '.') -%}
+          {%- endif -%}
+          {%- if app_meilisearch__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in meilisearch_environment: ' ~ (app_meilisearch__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_meilisearch__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_meilisearch__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_meilisearch__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_meilisearch__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_meilisearch__environment.items() if value is not none -%}
+          {%-   if key in app_meilisearch__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging meilisearch_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_meilisearch__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without meilisearch_secrets
+        app_meilisearch__container_secrets: >-
+          {{ app_meilisearch__container.secrets
+             if (app_meilisearch__container.secrets is defined and app_meilisearch__container.secrets is sequence and app_meilisearch__container.secrets is not string)
+             else [] }}
+        app_meilisearch__environment_unknown: >-
+          {{ (app_meilisearch__container.environment | default({})).keys() | reject('in', app_meilisearch__environment_allowed) | list }}
+        app_meilisearch__secrets_unknown: >-
+          {{ app_meilisearch__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_meilisearch__secrets_allowed) | list }}
+        app_meilisearch__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_meilisearch__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_meilisearch__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_meilisearch__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_meilisearch__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Meilisearch (app_meilisearch__environment_allowed) and the secrets ' ~ (app_meilisearch__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs Meilisearch as root
+    - name: 'Create the directories of Meilisearch'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+      loop:
+        - "{{ app_meilisearch__home }}"
+        - "{{ app_meilisearch__home }}/data"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_meilisearch__secrets }}"
+      register: 'app_meilisearch__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_meilisearch__container.name }}"
+        hostname: "{{ app_meilisearch__container.hostname }}"
+        image: "{{ app_meilisearch__container.image }}"
+        ip: "{{ app_meilisearch__container.ip }}"
+        ip6: "{{ app_meilisearch__container.ipv6 | default(omit) }}"
+        network: "{{ app_meilisearch__container.network }}"
+        timezone: "{{ app_meilisearch__container.timezone }}"
+        command: "{{ app_meilisearch__container.command | default(omit) }}"
+        env: "{{ app_meilisearch__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_meilisearch__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_meilisearch__container.expose | default(omit) }}"
+        label: "{{ app_meilisearch__container.labels | default(omit) }}"
+        publish: "{{ app_meilisearch__container.publish | default(omit) }}"
+        secrets: "{{ app_meilisearch__container.secrets | default(omit) }}"
+        volume: "{{ app_meilisearch__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_meilisearch__container.requires is defined %}
+          Requires={{ app_meilisearch__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_meilisearch__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Meilisearch'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_meilisearch__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_meilisearch__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_meilisearch__running: >-
+              {{ (ansible_facts.services[app_meilisearch__container.name + '.service'].state | default('')) == 'running' }}
+            app_meilisearch__restart: >-
+              {{ app_meilisearch__running | bool
+                 and (app_meilisearch__secrets_result is changed or app_meilisearch__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_meilisearch__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_meilisearch__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_meilisearch__container.name ~ ' did not start' ] + app_meilisearch__start_journal.stdout_lines }}"
+
+    # The health check is the only route without the master key
+    - name: 'Wait for Meilisearch'
+      ansible.builtin.uri:
+        url: "http://{{ app_meilisearch__ip }}:{{ app_meilisearch__port }}/health"
+        return_content: true
+      register: 'app_meilisearch__ready'
+      until: (app_meilisearch__ready.json | default({})).status | default('') == 'available'
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Meilisearch'
+      when:
+        - not ansible_check_mode
+        - (app_meilisearch__ready.json | default({})).status | default('') != 'available'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_meilisearch__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_meilisearch__journal'
+      changed_when: false
+
+    - name: 'Assert that Meilisearch is available'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__journal is skipped
+        fail_msg: "{{ app_meilisearch__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_meilisearch__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_meilisearch__container.name }}"
+        container_image: "{{ app_meilisearch__container.image }}"
+        container_schedule: "{{ app_meilisearch__autoupdate_schedule }}"

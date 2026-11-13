@@ -1,0 +1,117 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_meilisearch__test_case: "{{ app_meilisearch__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_meilisearch__expect: "{{ app_meilisearch__test_case.expect }}"
+    app_meilisearch__test_url: "http://{{ app_meilisearch__expect.ip }}:7700"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_meilisearch__test_quadlet_path }}"
+      register: 'app_meilisearch__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_meilisearch__test_image) in app_meilisearch__test_quadlet_lines
+          - ('IP=' + app_meilisearch__expect.ip) in app_meilisearch__test_quadlet_lines
+          - app_meilisearch__expect.ip6 is none or ('IP6=' + app_meilisearch__expect.ip6) in app_meilisearch__test_quadlet_lines
+          - app_meilisearch__expect.ip6 is not none or app_meilisearch__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_meilisearch__expect.quadlet | reject('in', app_meilisearch__test_quadlet_lines) | list | length == 0
+          - app_meilisearch__expect.master_key not in (app_meilisearch__test_quadlet.content | b64decode)
+        fail_msg: "{{ app_meilisearch__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        app_meilisearch__test_quadlet_lines: "{{ (app_meilisearch__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the meilisearch service'
+      ansible.builtin.command: 'systemctl is-active meilisearch'
+      register: 'app_meilisearch__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the meilisearch container'
+      ansible.builtin.command: 'podman inspect meilisearch'
+      register: 'app_meilisearch__test_inspect'
+      changed_when: false
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ app_meilisearch__test_case.role_vars.meilisearch_home }}/data/data.ms"
+      register: 'app_meilisearch__test_data'
+
+    # podman shows the secrets passed with type=env masked
+    - name: 'Assert the service, the container addresses, the environment and the data'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__test_service.stdout == 'active'
+          - app_meilisearch__test_net.IPAddress == app_meilisearch__expect.ip
+          - app_meilisearch__expect.ip6 is none or app_meilisearch__test_net.GlobalIPv6Address == app_meilisearch__expect.ip6
+          - app_meilisearch__expect.env | reject('in', app_meilisearch__test_env) | list | length == 0
+          - app_meilisearch__expect.master_key not in (app_meilisearch__test_env | join(' '))
+          - app_meilisearch__test_data.stat.isdir | default(false)
+        fail_msg: >-
+          service {{ app_meilisearch__test_service.stdout }},
+          IPv4 {{ app_meilisearch__test_net.IPAddress }}, IPv6 {{ app_meilisearch__test_net.GlobalIPv6Address }},
+          environment {{ app_meilisearch__test_env | reject('search', 'KEY') | join(', ') }}, data {{ app_meilisearch__test_data.stat.exists }}
+      vars:
+        app_meilisearch__test_container: "{{ (app_meilisearch__test_inspect.stdout | from_json)[0] }}"
+        app_meilisearch__test_net: "{{ app_meilisearch__test_container.NetworkSettings.Networks[app_meilisearch__test_case.role_vars.meilisearch_network] }}"
+        app_meilisearch__test_env: "{{ app_meilisearch__test_container.Config.Env }}"
+
+    - name: 'Read the health check'
+      ansible.builtin.uri:
+        url: "{{ app_meilisearch__test_url }}/health"
+        return_content: true
+      register: 'app_meilisearch__test_health'
+
+    # The master key protects all routes except the health check
+    - name: 'Read the version without and with the master key'
+      ansible.builtin.uri:
+        url: "{{ app_meilisearch__test_url }}/version"
+        headers: "{{ { 'Authorization': 'Bearer ' ~ app_meilisearch__expect.master_key } if item else {} }}"
+        return_content: true
+        status_code: [ 200, 401 ]
+      loop: [ false, true ]
+      loop_control:
+        label: "{{ 'with master key' if item else 'without master key' }}"
+      register: 'app_meilisearch__test_version'
+      no_log: true
+
+    # On molecule-meilisearch the side effect added the document before the restart
+    - name: 'Add the document of the search test'
+      when: app_meilisearch__test_case.side_effect is not defined
+      ansible.builtin.include_tasks: 'tasks/add_document.yml'
+
+    - name: 'Search the document'
+      ansible.builtin.uri:
+        url: "{{ app_meilisearch__test_url }}/indexes/molecule/search"
+        method: 'POST'
+        headers:
+          Authorization: "Bearer {{ app_meilisearch__expect.master_key }}"
+        body_format: 'json'
+        body:
+          q: 'bookmarks'
+        return_content: true
+      register: 'app_meilisearch__test_search'
+      no_log: true
+
+    - name: 'Assert the health check, the master key and the search'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__test_health.json.status | default('') == 'available'
+          - app_meilisearch__test_version.results | map(attribute='status') | list == [ 401, 200 ]
+          - app_meilisearch__test_version.results[1].json.pkgVersion | default('') == '1.41.0'
+          - app_meilisearch__test_search.json.hits | default([]) | map(attribute='id') | list == [ app_meilisearch__test_document.id ]
+        fail_msg: >-
+          health {{ app_meilisearch__test_health.json | default({}) | to_json }},
+          version {{ app_meilisearch__test_version.results | map(attribute='status') | list }} {{ app_meilisearch__test_version.results[1].json | default({}) | to_json }},
+          search {{ app_meilisearch__test_search.json | default({}) | to_json }}

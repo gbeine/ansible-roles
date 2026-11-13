@@ -1,0 +1,31 @@
+---
+# Adds the document of the search test to the index molecule and waits until Meilisearch indexed it
+
+- name: 'Add the document to the index molecule'
+  ansible.builtin.uri:
+    url: "{{ app_meilisearch__test_url }}/indexes/molecule/documents"
+    method: 'POST'
+    headers:
+      Authorization: "Bearer {{ app_meilisearch__test_case.expect.master_key }}"
+    body_format: 'json'
+    body: [ "{{ app_meilisearch__test_document }}" ]
+    status_code: [ 202 ]
+  register: 'app_meilisearch__test_add'
+  no_log: true
+
+- name: 'Wait until Meilisearch indexed the document'
+  ansible.builtin.uri:
+    url: "{{ app_meilisearch__test_url }}/tasks/{{ app_meilisearch__test_add.json.taskUid }}"
+    headers:
+      Authorization: "Bearer {{ app_meilisearch__test_case.expect.master_key }}"
+  register: 'app_meilisearch__test_task'
+  until: app_meilisearch__test_task.json.status | default('') in [ 'succeeded', 'failed', 'canceled' ]
+  retries: 30
+  delay: 2
+  no_log: true
+
+- name: 'Assert the indexing of the document'
+  ansible.builtin.assert:
+    that:
+      - app_meilisearch__test_task.json.status == 'succeeded'
+    fail_msg: "task {{ app_meilisearch__test_task.json.status | default('') }}, error {{ app_meilisearch__test_task.json.error | default({}) | to_json }}"
