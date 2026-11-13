@@ -1,0 +1,150 @@
+---
+
+- name: 'Deploy the Chrome of Karakeep'
+  tags: [ 'app', 'app_karakeep_chrome' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or karakeep_chrome_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_karakeep_chrome__container | length > 0
+        quiet: true
+
+    # The flags are passed to Chrome one by one, a line break would split the Exec line of the quadlet unit
+    - name: 'Validate the flags of Chrome'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep_chrome__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep_chrome__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_karakeep_chrome__command: "{{ app_karakeep_chrome__container.command | default([]) }}"
+        app_karakeep_chrome__errors: >-
+          {%- set errors = [] -%}
+          {%- set command = app_karakeep_chrome__command -%}
+          {%- if command is not sequence or command is string or command is mapping -%}
+          {%-   set _ = errors.append('karakeep_chrome_container.command has to be a list of the flags of Chrome.') -%}
+          {%- elif command | reject('string') | list | length > 0 -%}
+          {%-   set _ = errors.append('The flags of Chrome in karakeep_chrome_container.command have to be strings.') -%}
+          {%- elif command | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-   set _ = errors.append('The flags of Chrome must not contain line breaks: ' ~ (command | select('search', '[\r\n]') | map('regex_replace', '[\r\n].*$', '') | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging karakeep_chrome_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep_chrome__unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ app_karakeep_chrome__unknown | join(', ') }}.
+          The Chrome of Karakeep reads no environment variables, allowed is {{ app_karakeep_chrome__environment_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        app_karakeep_chrome__unknown: >-
+          {{ (app_karakeep_chrome__container.environment | default({})).keys() | reject('in', app_karakeep_chrome__environment_allowed) | list }}
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_karakeep_chrome__container.name }}"
+        hostname: "{{ app_karakeep_chrome__container.hostname }}"
+        image: "{{ app_karakeep_chrome__container.image }}"
+        ip: "{{ app_karakeep_chrome__container.ip }}"
+        ip6: "{{ app_karakeep_chrome__container.ipv6 | default(omit) }}"
+        network: "{{ app_karakeep_chrome__container.network }}"
+        timezone: "{{ app_karakeep_chrome__container.timezone }}"
+        command: "{{ app_karakeep_chrome__container.command | default(omit) }}"
+        init: "{{ app_karakeep_chrome__container.init | default(omit) }}"
+        env: "{{ app_karakeep_chrome__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_karakeep_chrome__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_karakeep_chrome__container.expose | default(omit) }}"
+        label: "{{ app_karakeep_chrome__container.labels | default(omit) }}"
+        publish: "{{ app_karakeep_chrome__container.publish | default(omit) }}"
+        volume: "{{ app_karakeep_chrome__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_karakeep_chrome__container.requires is defined %}
+          Requires={{ app_karakeep_chrome__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_karakeep_chrome__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start the Chrome of Karakeep'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_karakeep_chrome__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_karakeep_chrome__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_karakeep_chrome__running: >-
+              {{ (ansible_facts.services[app_karakeep_chrome__container.name + '.service'].state | default('')) == 'running' }}
+            app_karakeep_chrome__restart: "{{ app_karakeep_chrome__running | bool and app_karakeep_chrome__quadlet_result is changed }}"
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_karakeep_chrome__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_karakeep_chrome__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_karakeep_chrome__container.name ~ ' did not start' ] + app_karakeep_chrome__start_journal.stdout_lines }}"
+
+    - name: 'Wait for the DevTools of Chrome'
+      ansible.builtin.uri:
+        url: "http://{{ app_karakeep_chrome__ip }}:{{ app_karakeep_chrome__port }}/json/version"
+      register: 'app_karakeep_chrome__ready'
+      until: app_karakeep_chrome__ready.status | default(-1) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of the Chrome of Karakeep'
+      when:
+        - not ansible_check_mode
+        - app_karakeep_chrome__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_karakeep_chrome__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_karakeep_chrome__journal'
+      changed_when: false
+
+    - name: 'Assert that the DevTools of Chrome answer'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep_chrome__journal is skipped
+        fail_msg: "{{ app_karakeep_chrome__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_karakeep_chrome__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_karakeep_chrome__container.name }}"
+        container_image: "{{ app_karakeep_chrome__container.image }}"
+        container_schedule: "{{ app_karakeep_chrome__autoupdate_schedule }}"

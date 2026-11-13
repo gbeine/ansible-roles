@@ -1,0 +1,92 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_karakeep_chrome__test_case: "{{ app_karakeep_chrome__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_karakeep_chrome__expect: "{{ app_karakeep_chrome__test_case.expect }}"
+    app_karakeep_chrome__test_url: "http://{{ app_karakeep_chrome__expect.ip }}:9222"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_karakeep_chrome__test_quadlet_path }}"
+      register: 'app_karakeep_chrome__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_karakeep_chrome__test_image) in app_karakeep_chrome__test_quadlet_lines
+          - ('IP=' + app_karakeep_chrome__expect.ip) in app_karakeep_chrome__test_quadlet_lines
+          - app_karakeep_chrome__expect.ip6 is none or ('IP6=' + app_karakeep_chrome__expect.ip6) in app_karakeep_chrome__test_quadlet_lines
+          - app_karakeep_chrome__expect.ip6 is not none or app_karakeep_chrome__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_karakeep_chrome__expect.quadlet | reject('in', app_karakeep_chrome__test_quadlet_lines) | list | length == 0
+          - "'RunInit=true' in app_karakeep_chrome__test_quadlet_lines"
+        fail_msg: "{{ app_karakeep_chrome__test_quadlet_lines | to_json }}"
+      vars:
+        app_karakeep_chrome__test_quadlet_lines: "{{ (app_karakeep_chrome__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the karakeep-chrome service'
+      ansible.builtin.command: 'systemctl is-active karakeep-chrome'
+      register: 'app_karakeep_chrome__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the karakeep-chrome container'
+      ansible.builtin.command: 'podman inspect karakeep-chrome'
+      register: 'app_karakeep_chrome__test_inspect'
+      changed_when: false
+
+    # The image runs Chrome as nobody, the flags are the arguments of the entrypoint
+    - name: 'Assert the service, the container addresses, the user, the flags and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep_chrome__test_service.stdout == 'active'
+          - app_karakeep_chrome__test_net.IPAddress == app_karakeep_chrome__expect.ip
+          - app_karakeep_chrome__expect.ip6 is none or app_karakeep_chrome__test_net.GlobalIPv6Address == app_karakeep_chrome__expect.ip6
+          - app_karakeep_chrome__test_container.Config.User | default('') == '65534:65534'
+          - app_karakeep_chrome__test_container.Config.Cmd == app_karakeep_chrome__expect.flags
+          - app_karakeep_chrome__expect.env | reject('in', app_karakeep_chrome__test_container.Config.Env) | list | length == 0
+        fail_msg: >-
+          service {{ app_karakeep_chrome__test_service.stdout }},
+          IPv4 {{ app_karakeep_chrome__test_net.IPAddress }}, IPv6 {{ app_karakeep_chrome__test_net.GlobalIPv6Address }},
+          user {{ app_karakeep_chrome__test_container.Config.User | default('') }}, flags {{ app_karakeep_chrome__test_container.Config.Cmd | to_json }},
+          environment {{ app_karakeep_chrome__test_container.Config.Env | join(', ') }}
+      vars:
+        app_karakeep_chrome__test_container: "{{ (app_karakeep_chrome__test_inspect.stdout | from_json)[0] }}"
+        app_karakeep_chrome__test_net: "{{ app_karakeep_chrome__test_container.NetworkSettings.Networks[app_karakeep_chrome__test_case.role_vars.karakeep_chrome_network] }}"
+
+    - name: 'Read the version of the DevTools'
+      ansible.builtin.uri:
+        url: "{{ app_karakeep_chrome__test_url }}/json/version"
+        return_content: true
+      register: 'app_karakeep_chrome__test_version'
+
+    # Karakeep connects to Chrome like this, a new tab shows that Chrome really works
+    - name: 'Open a new tab'
+      ansible.builtin.uri:
+        url: "{{ app_karakeep_chrome__test_url }}/json/new?about:blank"
+        method: 'PUT'
+        return_content: true
+      register: 'app_karakeep_chrome__test_tab'
+
+    - name: 'Close the new tab'
+      ansible.builtin.uri:
+        url: "{{ app_karakeep_chrome__test_url }}/json/close/{{ app_karakeep_chrome__test_tab.json.id }}"
+        return_content: true
+      when: app_karakeep_chrome__test_tab.json.id is defined
+
+    - name: 'Assert the DevTools and the tab'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep_chrome__test_version.json.Browser | default('') is search('Chrome|Chromium')
+          - app_karakeep_chrome__test_version.json.webSocketDebuggerUrl | default('') is match('ws://')
+          - app_karakeep_chrome__test_tab.json.type | default('') == 'page'
+          - app_karakeep_chrome__test_tab.json.url | default('') == 'about:blank'
+        fail_msg: "version {{ app_karakeep_chrome__test_version.json | default({}) | to_json }}, tab {{ app_karakeep_chrome__test_tab.json | default({}) | to_json }}"

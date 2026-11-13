@@ -1,0 +1,110 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_karakeep_chrome__test_case: "{{ app_karakeep_chrome__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_karakeep_chrome__test_vars: "{{ app_karakeep_chrome__test_case.role_vars }}"
+    app_karakeep_chrome__test_checked_files:
+      - "{{ app_karakeep_chrome__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_karakeep_chrome__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_karakeep_chrome__test_checked_files }}"
+      register: 'app_karakeep_chrome__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_karakeep_chrome with karakeep_chrome_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_container: [ 'command' ]
+        app_karakeep_chrome__test_invalid:
+          message: 'karakeep_chrome_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_karakeep_chrome with the flags as string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_container:
+          command: '--disable-gpu --lang=de-DE'
+        app_karakeep_chrome__test_invalid:
+          message: 'the flags as string'
+          search: '^karakeep_chrome_container.command has to be a list of the flags of Chrome\.$'
+
+    - name: 'Run app_karakeep_chrome with a flag that is no string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_container:
+          command: [ '--disable-gpu', 42 ]
+        app_karakeep_chrome__test_invalid:
+          message: 'a flag that is no string'
+          search: '^The flags of Chrome in karakeep_chrome_container.command have to be strings\.$'
+
+    - name: 'Run app_karakeep_chrome with a line break in a flag (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_container:
+          command: [ '--disable-gpu', "--lang=de-DE\n--no-sandbox" ]
+        app_karakeep_chrome__test_invalid:
+          message: 'a line break in a flag'
+          search: '^The flags of Chrome must not contain line breaks: --lang=de-DE\.$'
+
+    - name: 'Run app_karakeep_chrome with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_container:
+          environment:
+            TZ: 'Europe/Berlin'
+            CHROME_FLAGS: '--no-sandbox'
+        app_karakeep_chrome__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: CHROME_FLAGS\.'
+
+    - name: 'Change the flags of Chrome'
+      when: app_karakeep_chrome__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'karakeep-chrome' ]
+          register: 'app_karakeep_chrome__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed flags'
+          ansible.builtin.set_fact:
+            karakeep_chrome_container: "{{ app_karakeep_chrome__test_case.side_effect.karakeep_chrome_container }}"
+
+        - name: 'Run app_karakeep_chrome with the changed flags'
+          ansible.builtin.include_role:
+            name: 'app_karakeep_chrome'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'karakeep-chrome' ]
+          register: 'app_karakeep_chrome__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_karakeep_chrome__quadlet_result is changed
+              - app_karakeep_chrome__test_started_after.stdout | int > app_karakeep_chrome__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_karakeep_chrome__quadlet_result is changed }},
+              start before {{ app_karakeep_chrome__test_started_before.stdout }}, after {{ app_karakeep_chrome__test_started_after.stdout }}
