@@ -1,0 +1,55 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_joplin__test_network }}"
+    podman_default_network: "{{ app_joplin__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_joplin__test_case: "{{ app_joplin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_joplin__test_services: "{{ [ app_joplin__test_database ] if app_joplin__test_case.database is not none else [] }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop: "{{ [ app_joplin__test_image ] + app_joplin__test_services | map(attribute='image') | list }}"
+      register: 'app_joplin__test_pull'
+      until: app_joplin__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ item.name }}"
+        image: "{{ item.image }}"
+        network: "{{ app_joplin__test_network.name }}"
+        ip: "{{ item.ip }}"
+        env: "{{ item.env }}"
+        state: 'started'
+      loop: "{{ app_joplin__test_services }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 'Wait for the initialization of the database'
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ item.password, item.name ] + item.ready }}"
+      loop: "{{ app_joplin__test_services }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: 'app_joplin__test_ready'
+      until: app_joplin__test_ready.rc == 0
+      retries: 60
+      delay: 2
+      changed_when: false

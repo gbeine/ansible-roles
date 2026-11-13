@@ -1,0 +1,168 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_joplin__test_case: "{{ app_joplin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_joplin__test_vars: "{{ app_joplin__test_case.role_vars }}"
+    app_joplin__test_environment: "{{ app_joplin__test_vars.joplin_environment | default({}) }}"
+    app_joplin__test_secrets: "{{ app_joplin__test_vars.joplin_secrets | default([]) }}"
+    app_joplin__test_checked_files:
+      - "{{ app_joplin__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_joplin__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_joplin__test_checked_files }}"
+      register: 'app_joplin__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_joplin with joplin_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_container: [ 'environment' ]
+        app_joplin__test_invalid:
+          message: 'joplin_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_joplin with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_secrets: [ { name: 'joplin_database_password', data: 'x' } ]
+        app_joplin__test_invalid:
+          message: 'a secret without target'
+          search: '^joplin_secrets entries need name, data and target$'
+
+    - name: 'Run app_joplin with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_secrets: "{{ app_joplin__test_secrets + [ { 'name': 'joplin_unknown', 'data': 'molecule', 'target': 'DEFAULT_ADMIN_PASSWORD' } ] }}"
+        app_joplin__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: DEFAULT_ADMIN_PASSWORD\.'
+
+    - name: 'Run app_joplin with the database password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'POSTGRES_PASSWORD': 'molecule' }) }}"
+        app_joplin__test_invalid:
+          message: 'the database password in the environment'
+          search: '^Secrets must not be set in joplin_environment: POSTGRES_PASSWORD\.$'
+
+    - name: 'Run app_joplin without APP_BASE_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'APP_BASE_URL': '' }) }}"
+        app_joplin__test_invalid:
+          message: 'no APP_BASE_URL'
+          search: '^Joplin Server needs the environment variables APP_BASE_URL, missing or empty: APP_BASE_URL\.$'
+
+    - name: 'Run app_joplin with an invalid database client (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'DB_CLIENT': 'mysql' }) }}"
+        app_joplin__test_invalid:
+          message: 'an invalid database client'
+          search: '^DB_CLIENT has to be one of sqlite3, pg, got mysql\.$'
+
+    - name: 'Run app_joplin with pg without the database host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'DB_CLIENT': 'pg', 'POSTGRES_HOST': '' }) }}"
+        app_joplin__test_invalid:
+          message: 'pg without the database host'
+          search: '^DB_CLIENT pg needs POSTGRES_HOST and the secret POSTGRES_PASSWORD or the secret POSTGRES_CONNECTION_STRING\.$'
+
+    - name: 'Run app_joplin with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'SIGNUP_ENABLED': 'maybe' }) }}"
+        app_joplin__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: SIGNUP_ENABLED\.$'
+
+    - name: 'Run app_joplin with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'APP_NAME': \"Molecule\nNotes\" }) }}"
+        app_joplin__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: APP_NAME\.$'
+
+    - name: 'Run app_joplin with the default password of the administrator in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_environment: "{{ app_joplin__test_environment | combine({ 'DEFAULT_ADMIN_PASSWORD': 'molecule-password' }) }}"
+        app_joplin__test_invalid:
+          message: 'the default password of the administrator in the environment'
+          search: '^Unknown environment variables: DEFAULT_ADMIN_PASSWORD\. .*the administrator is set with joplin_admin\.$'
+
+    - name: 'Run app_joplin with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_admin: { email: 'admin@example.org' }
+        app_joplin__test_invalid:
+          message: 'an administrator without password'
+          search: '^joplin_admin needs a password\.$'
+
+    - name: 'Run app_joplin with a short password of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        joplin_admin: "{{ app_joplin__test_admin | combine({ 'password': 'short' }) }}"
+        app_joplin__test_invalid:
+          message: 'a short password of the administrator'
+          search: '^The password of joplin_admin needs at least 8 characters\.$'
+
+    - name: 'Run app_joplin with the changed name and password'
+      when: app_joplin__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'joplin' ]
+          register: 'app_joplin__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            joplin_environment: "{{ app_joplin__test_environment | combine(app_joplin__test_case.side_effect.environment) }}"
+            joplin_admin: "{{ app_joplin__test_admin | combine(app_joplin__test_case.side_effect.admin) }}"
+
+        - name: 'Run app_joplin with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_joplin'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'joplin' ]
+          register: 'app_joplin__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed password'
+          ansible.builtin.assert:
+            that:
+              - app_joplin__quadlet_result is changed
+              - app_joplin__admin_result is changed
+              - not app_joplin__admin_result.created
+              - not app_joplin__admin_result.taken_over
+              - app_joplin__test_started_after.stdout | int > app_joplin__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_joplin__quadlet_result is changed }}, administrator changed: {{ app_joplin__admin_result is changed }},
+              created: {{ app_joplin__admin_result.created | default('') }}, taken over: {{ app_joplin__admin_result.taken_over | default('') }},
+              start before {{ app_joplin__test_started_before.stdout }}, after {{ app_joplin__test_started_after.stdout }}

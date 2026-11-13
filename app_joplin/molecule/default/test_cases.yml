@@ -1,0 +1,102 @@
+---
+# Network created by container_podman in prepare.yml
+app_joplin__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_joplin__test_image: 'docker.io/joplin/server:latest'
+app_joplin__test_quadlet_path: '/etc/containers/systemd/joplin.container'
+
+# The database started by prepare.yml, test credentials only
+app_joplin__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  password: 'molecule-db-password'
+  env:
+    POSTGRES_DB: 'joplin'
+    POSTGRES_USER: 'joplin'
+    POSTGRES_PASSWORD: 'molecule-db-password'
+  # The server listens on TCP after the initialization
+  ready: [ 'psql', '-h', '127.0.0.1', '-U', 'joplin', '-d', 'joplin', '-c', 'SELECT 1' ]
+  users: [ 'psql', '-h', '127.0.0.1', '-U', 'joplin', '-d', 'joplin', '-tAc', 'SELECT email FROM users WHERE is_admin = 1' ]
+
+# Joplin Server rejects weak passwords (zxcvbn score below 3)
+app_joplin__test_admin:
+  email: 'admin@example.org'
+  password: 'Molecule-Joplin-Admin-7q2x'
+
+app_joplin__test_cases:
+
+  # Only the mandatory variables, sqlite3 and the administrator
+  - name: 'molecule-joplin-default'
+    database: ~
+    role_vars:
+      joplin_home: '/opt/joplin'
+      joplin_ip: '10.89.0.90'
+      joplin_network: 'podman-molecule'
+      joplin_hostname: 'joplin-default'
+      joplin_timezone: 'Europe/Berlin'
+      joplin_environment:
+        APP_BASE_URL: 'http://10.89.0.90:22300'
+      joplin_admin: "{{ app_joplin__test_admin }}"
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/joplin/data:/home/joplin/data:Z'
+      env:
+        - 'APP_BASE_URL=http://10.89.0.90:22300'
+        - 'DB_CLIENT=sqlite3'
+        - 'SQLITE_DATABASE=/home/joplin/data/db.sqlite'
+      admin: { email: 'admin@example.org', password: 'Molecule-Joplin-Admin-7q2x', full_name: 'Admin' }
+
+  # IPv6, labels, PostgreSQL, options and the administrator with a name
+  - name: 'molecule-joplin'
+    database: 'pg'
+    role_vars:
+      joplin_home: '/opt/joplin'
+      joplin_ip: '10.89.0.91'
+      joplin_ipv6: 'fd00:89::91'
+      joplin_network: 'podman-molecule'
+      joplin_hostname: 'joplin-molecule'
+      joplin_timezone: 'Europe/Berlin'
+      joplin_labels:
+        traefik.enable: 'false'
+      joplin_environment:
+        APP_BASE_URL: 'http://10.89.0.91:22300'
+        APP_NAME: 'Molecule Notes'
+        DB_CLIENT: 'pg'
+        POSTGRES_HOST: '10.89.0.20'
+        POSTGRES_USER: 'joplin'
+        POSTGRES_DATABASE: 'joplin'
+        SIGNUP_ENABLED: false
+      joplin_secrets:
+        - name: 'joplin_database_password'
+          data: 'molecule-db-password'
+          target: 'POSTGRES_PASSWORD'
+      joplin_admin: "{{ app_joplin__test_admin | combine({ 'full_name': 'Molecule Admin' }) }}"
+    # The name of the application changes and Joplin Server has to restart, the password of the administrator changes
+    side_effect:
+      environment:
+        APP_NAME: 'Molecule Changed'
+      admin:
+        full_name: 'Molecule Admin'
+        password: 'Changed-Joplin-Admin-9k4w'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Label=traefik.enable=false'
+        - 'Secret=joplin_database_password,type=env,target=POSTGRES_PASSWORD'
+      env:
+        - 'DB_CLIENT=pg'
+        - 'POSTGRES_HOST=10.89.0.20'
+        - 'SIGNUP_ENABLED=false'
+        - 'APP_NAME=Molecule Changed'
+      admin: { email: 'admin@example.org', password: 'Changed-Joplin-Admin-9k4w', former_password: 'Molecule-Joplin-Admin-7q2x', full_name: 'Molecule Admin' }

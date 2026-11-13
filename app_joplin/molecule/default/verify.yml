@@ -1,0 +1,148 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_joplin__test_case: "{{ app_joplin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_joplin__expect: "{{ app_joplin__test_case.expect }}"
+    app_joplin__test_url: "http://{{ app_joplin__expect.ip }}:22300"
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_joplin__test_plain: >-
+      {{ (app_joplin__test_case.role_vars.joplin_secrets | default([])) | map(attribute='data') | list
+         + [ app_joplin__test_admin.password ]
+         + ([ app_joplin__test_case.side_effect.admin.password ] if app_joplin__test_case.side_effect is defined else []) }}
+    app_joplin__test_passwords: "{{ [ app_joplin__expect.admin.password ] + ([ app_joplin__expect.admin.former_password ] if app_joplin__expect.admin.former_password is defined else []) }}"
+    app_joplin__test_app_name: "{{ (app_joplin__expect.env | select('match', 'APP_NAME=') | first | default('APP_NAME=Joplin Server')).split('=', 1)[1] }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_joplin__test_quadlet_path }}"
+      register: 'app_joplin__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_joplin__test_image) in app_joplin__test_quadlet_lines
+          - ('IP=' + app_joplin__expect.ip) in app_joplin__test_quadlet_lines
+          - app_joplin__expect.ip6 is none or ('IP6=' + app_joplin__expect.ip6) in app_joplin__test_quadlet_lines
+          - app_joplin__expect.ip6 is not none or app_joplin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_joplin__expect.quadlet | reject('in', app_joplin__test_quadlet_lines) | list | length == 0
+          - app_joplin__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_joplin__test_quadlet_lines | select('search', 'type=mount') | list | length == 0
+          - app_joplin__test_plain | select('in', app_joplin__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_joplin__test_quadlet.content | b64decode }}"
+      vars:
+        app_joplin__test_quadlet_lines: "{{ (app_joplin__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the Joplin Server service'
+      ansible.builtin.command: 'systemctl is-active joplin'
+      register: 'app_joplin__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the Joplin Server container'
+      ansible.builtin.command: 'podman inspect joplin'
+      register: 'app_joplin__test_inspect'
+      changed_when: false
+
+    # The secrets are passed with type=env and are part of the environment of the process, they are left out of the message,
+    # the passwords of the administrator never are
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_joplin__test_service.stdout == 'active'
+          - app_joplin__test_net.IPAddress == app_joplin__expect.ip
+          - app_joplin__expect.ip6 is none or app_joplin__test_net.GlobalIPv6Address == app_joplin__expect.ip6
+          - app_joplin__expect.env | reject('in', app_joplin__test_env) | list | length == 0
+          - app_joplin__test_env | select('match', 'DEFAULT_ADMIN_PASSWORD=') | list | length == 0
+          - app_joplin__test_passwords | select('in', app_joplin__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_joplin__test_service.stdout }},
+          IPv4 {{ app_joplin__test_net.IPAddress }}, IPv6 {{ app_joplin__test_net.GlobalIPv6Address }},
+          environment {{ app_joplin__test_env | reject('match', '(POSTGRES_PASSWORD|MAILER_AUTH_PASSWORD)=') | join(', ') }}
+      vars:
+        app_joplin__test_container: "{{ (app_joplin__test_inspect.stdout | from_json)[0] }}"
+        app_joplin__test_net: "{{ app_joplin__test_container.NetworkSettings.Networks[app_joplin__test_case.role_vars.joplin_network] }}"
+        app_joplin__test_env: "{{ app_joplin__test_container.Config.Env }}"
+
+    - name: 'Log in to the API'
+      ansible.builtin.uri:
+        url: "{{ app_joplin__test_url }}/api/sessions"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          email: "{{ item.email }}"
+          password: "{{ item.password }}"
+        status_code: [ 200, 401, 403 ]
+        return_content: true
+      loop: >-
+        {{ [ { 'email': app_joplin__expect.admin.email, 'password': app_joplin__expect.admin.password, 'allowed': true },
+             { 'email': 'admin@localhost', 'password': 'admin', 'allowed': false } ]
+           + ([ { 'email': app_joplin__expect.admin.email, 'password': app_joplin__expect.admin.former_password, 'allowed': false } ]
+              if app_joplin__expect.admin.former_password is defined else []) }}
+      loop_control:
+        label: "{{ item.email }} {{ 'password' if item.allowed else 'refused password' }}"
+      register: 'app_joplin__test_login'
+      no_log: true
+
+    # Only administrators may list the users, the list contains is_admin
+    - name: 'Read the users as the administrator'
+      ansible.builtin.uri:
+        url: "{{ app_joplin__test_url }}/api/users"
+        headers:
+          X-API-AUTH: "{{ (app_joplin__test_login.results[0].content | from_json).id }}"
+        return_content: true
+      register: 'app_joplin__test_users_api'
+      no_log: true
+
+    - name: 'Read the name of the application'
+      ansible.builtin.uri:
+        url: "{{ app_joplin__test_url }}/api/ping"
+        return_content: true
+      register: 'app_joplin__test_ping'
+
+    - name: 'Assert the login, the administrator and the name of the application'
+      ansible.builtin.assert:
+        that:
+          - app_joplin__test_logins == app_joplin__test_login.results | map(attribute='item.allowed') | map('ternary', 200, 403) | list
+          - app_joplin__test_admin_user.is_admin | default(0) | int == 1
+          - app_joplin__test_admin_user.full_name | default('') == app_joplin__expect.admin.full_name
+          - app_joplin__test_user_list | selectattr('email', 'eq', 'admin@localhost') | list | length == 0
+          - (app_joplin__test_ping.content | from_json).message == app_joplin__test_app_name ~ ' is running'
+        fail_msg: >-
+          logins {{ app_joplin__test_logins }},
+          users {{ app_joplin__test_user_list | map(attribute='email') | list | to_json }},
+          administrator {{ app_joplin__test_admin_user | dict2items | selectattr('key', 'in', [ 'email', 'full_name', 'is_admin', 'enabled' ]) | items2dict | to_json }},
+          ping {{ app_joplin__test_ping.content }}
+      vars:
+        # A wrong password is answered with 403, the test maps 401 to it
+        app_joplin__test_logins: "{{ app_joplin__test_login.results | map(attribute='status') | map('regex_replace', '^401$', '403') | map('int') | list }}"
+        app_joplin__test_user_list: "{{ (app_joplin__test_users_api.content | from_json)['items'] }}"
+        app_joplin__test_admin_user: "{{ app_joplin__test_user_list | selectattr('email', 'eq', app_joplin__expect.admin.email) | first | default({}) }}"
+
+    - name: 'Read the administrators in PostgreSQL'
+      when: app_joplin__test_case.database is not none
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ app_joplin__test_database.password, app_joplin__test_database.name ] + app_joplin__test_database.users }}"
+      register: 'app_joplin__test_users'
+      changed_when: false
+
+    - name: 'Read the state of the sqlite database'
+      when: app_joplin__test_case.database is none
+      ansible.builtin.stat:
+        path: "{{ app_joplin__test_case.role_vars.joplin_home }}/data/db.sqlite"
+      register: 'app_joplin__test_sqlite'
+
+    - name: 'Assert the database of Joplin Server'
+      ansible.builtin.assert:
+        that:
+          - app_joplin__test_case.database is none or app_joplin__test_users.stdout_lines == [ app_joplin__expect.admin.email ]
+          - app_joplin__test_case.database is not none or (app_joplin__test_sqlite.stat.exists and app_joplin__test_sqlite.stat.uid == 1001)
+        fail_msg: "administrators {{ app_joplin__test_users.stdout_lines | default([]) | to_json }}, sqlite {{ app_joplin__test_sqlite.stat | default({}) | to_json }}"

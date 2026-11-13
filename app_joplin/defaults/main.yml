@@ -5,6 +5,7 @@
 # https://ansible-roles.org/roles/joplin
 #
 
+app_joplin__home: "{{ joplin_home | mandatory }}"
 app_joplin__ip: "{{ joplin_ip | mandatory }}"
 app_joplin__ipv6: "{{ joplin_ipv6 }}"
 app_joplin__network: "{{ joplin_network | mandatory }}"
@@ -12,28 +13,24 @@ app_joplin__hostname: "{{ joplin_hostname | mandatory }}"
 app_joplin__timezone: "{{ joplin_timezone | mandatory }}"
 app_joplin__labels: "{{ joplin_labels | default({}) }}"
 
+# The owner of the data directory, the image runs Joplin Server as the user joplin with the uid 1001
+app_joplin__uid: "{{ joplin_uid | default(1001) }}"
+
 app_joplin__version: "{{ joplin_version | default('latest') }}"
 
-app_joplin__base_url: "{{ joplin_base_url | mandatory }}"
-app_joplin__port: "{{ joplin_port | default(22300) }}"
+app_joplin__container: "{{ app_joplin__podman_container_default | combine(joplin_container | default({})) }}"
 
-app_joplin__db_type: 'pg'
-app_joplin__db_host: "{{ joplin_db_host | mandatory }}"
-app_joplin__db_port: "{{ joplin_db_port | default(5432) }}"
-app_joplin__db_user: "{{ joplin_db_user | default('joplin') }}"
-app_joplin__db_pass: "{{ joplin_db_pass | mandatory }}"
-app_joplin__db_name: "{{ joplin_db_name | default('joplin') }}"
+# The configuration of Joplin Server, merged over the default, APP_BASE_URL is mandatory
+app_joplin__environment: "{{ app_joplin__environment_default | combine(joplin_environment | default({})) }}"
 
-app_joplin__mailer_enabled: "{{ joplin_mailer_enabled | default(false) }}"
-app_joplin__mailer_host: "{{ joplin_mailer_host | default('localhost') }}"
-app_joplin__mailer_port: "{{ joplin_mailer_port | default(25) }}"
-app_joplin__mailer_security: "{{ joplin_mailer_security | default('starttls') }}"
-app_joplin__mailer_auth_user: "{{ joplin_mailer_auth_user | default('') }}"
-app_joplin__mailer_auth_password: "{{ joplin_mailer_auth_password | default('') }}"
-app_joplin__mailer_noreply_name: "{{ joplin_mailer_noreply_name | default('Joplin Server')}}"
-app_joplin__mailer_noreply_mail: "{{ joplin_mailer_noreply_mail | default('no-reply') }}"
+# Secrets with name, data and target, e.g. POSTGRES_PASSWORD or MAILER_AUTH_PASSWORD
+app_joplin__secrets: "{{ joplin_secrets | default([]) }}"
 
-app_joplin__container: "{{ app_joplin__container_default | combine(joplin_container | default({})) }}"
+# The administrator of Joplin Server with email, password and optionally full_name
+app_joplin__admin: "{{ joplin_admin | mandatory }}"
+
+app_joplin__autoupdate_enabled: "{{ joplin_autoupdate_enabled | default(false) }}"
+app_joplin__autoupdate_schedule: "{{ joplin_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
@@ -41,9 +38,37 @@ app_joplin__container: "{{ app_joplin__container_default | combine(joplin_contai
 
 app_joplin__podman_name: 'joplin'
 app_joplin__podman_image: 'docker.io/joplin/server'
-app_joplin__podman_tag: "{{ app_joplin__version }}"
 
-app_joplin__container_default:
+app_joplin__data_dir: '/home/joplin/data'
+
+app_joplin__port: "{{ app_joplin__environment.APP_PORT | default(22300) }}"
+
+app_joplin__environment_default:
+  APP_PORT: 22300
+  DB_CLIENT: 'sqlite3'
+  SQLITE_DATABASE: "{{ app_joplin__data_dir }}/db.sqlite"
+
+# APP_BASE_URL is the public URL of Joplin Server, the clients and the links of the emails use it
+app_joplin__environment_required: [ 'APP_BASE_URL' ]
+
+app_joplin__database_clients: [ 'sqlite3', 'pg' ]
+
+# The environment of the container, the role writes booleans in lower case
+app_joplin__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in app_joplin__environment.items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+app_joplin__admin_keys: [ 'email', 'password', 'full_name' ]
+app_joplin__admin_email_pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+app_joplin__password_length: 8
+
+# The administrator created by the first migration of Joplin Server, the role takes it over
+app_joplin__default_admin_email: 'admin@localhost'
+
+app_joplin__podman_container_default:
   name: "{{ app_joplin__podman_name }}"
   hostname: "{{ app_joplin__hostname }}"
   image: "{{ app_joplin__podman_image }}:{{ app_joplin__version }}"
@@ -51,25 +76,140 @@ app_joplin__container_default:
   ipv6: "{{ app_joplin__ipv6 | default(omit) }}"
   network: "{{ app_joplin__network }}"
   timezone: "{{ app_joplin__timezone }}"
-  environment:
-    APP_BASE_URL: "{{ app_joplin__base_url }}"
-    APP_PORT: "{{ app_joplin__port }}"
-    DB_CLIENT: "{{ app_joplin__db_type }}"
-    POSTGRES_DATABASE: "{{ app_joplin__db_name }}"
-    POSTGRES_USER: "{{ app_joplin__db_user }}"
-    POSTGRES_PORT: "{{ app_joplin__db_port }}"
-    POSTGRES_HOST: "{{ app_joplin__db_host }}"
-    MAILER_ENABLED: "{{ app_joplin__mailer_enabled | ternary(1,0) }}"
-    MAILER_HOST: "{{ app_joplin__mailer_host }}"
-    MAILER_PORT: "{{ app_joplin__mailer_port }}"
-    MAILER_SECURITY: "{{ app_joplin__mailer_security }}"
-    MAILER_AUTH_USER: "{{ app_joplin__mailer_auth_user }}"
-    MAILER_NOREPLY_NAME: "{{ app_joplin__mailer_noreply_name }}"
-    MAILER_NOREPLY_EMAIL: "{{ app_joplin__mailer_noreply_mail }}"
-  labels: "{{ app_joplin__labels }}"
-  secrets:
-    - "joplin_database_password,type=env,target=POSTGRES_PASSWORD"
-    - "joplin_smtp_password,type=env,target=MAILER_AUTH_PASSWORD"
+  labels: "{{ app_joplin__labels | default(omit) }}"
+  # Set with joplin_environment, merged over the default
+  environment: "{{ app_joplin__environment_container }}"
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
+    - "{{ app_joplin__home }}/data:{{ app_joplin__data_dir }}:Z"
+  # Joplin Server reads the secrets only from the environment,
+  # entries without name or target are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (app_joplin__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='name')
+        | zip(app_joplin__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='target'))
+        | map('join', ',type=env,target=') | list)
+      if (app_joplin__secrets is sequence and app_joplin__secrets is not string and app_joplin__secrets | length > 0)
+      else omit }}
+
+# Targets of the secrets in joplin_secrets, Joplin Server reads them only from the environment,
+# the connection strings and the storage drivers may contain passwords and keys of S3
+app_joplin__secrets_allowed:
+  - 'POSTGRES_PASSWORD'
+  - 'POSTGRES_CONNECTION_STRING'
+  - 'SLAVE_POSTGRES_PASSWORD'
+  - 'SLAVE_POSTGRES_CONNECTION_STRING'
+  - 'MAILER_AUTH_PASSWORD'
+  - 'STRIPE_SECRET_KEY'
+  - 'STRIPE_WEBHOOK_SECRET'
+  - 'MFA_ENCRYPTION_KEY'
+  - 'LDAP_1_BIND_PW'
+  - 'LDAP_2_BIND_PW'
+  - 'TRANSCRIBE_API_KEY'
+  - 'STORAGE_DRIVER'
+  - 'STORAGE_DRIVER_FALLBACK'
+
+app_joplin__secret_variables: "{{ app_joplin__secrets_allowed }}"
+
+# The options with a boolean default in packages/server/src/env.ts of Joplin Server v3.7.5
+app_joplin__environment_booleans:
+  - 'SIGNUP_ENABLED'
+  - 'TERMS_ENABLED'
+  - 'ACCOUNT_TYPES_ENABLED'
+  - 'ERROR_STACK_TRACES'
+  - 'COOKIES_SECURE'
+  - 'RUNNING_IN_DOCKER'
+  - 'IS_ADMIN_INSTANCE'
+  - 'LOCAL_AUTH_ENABLED'
+  - 'DB_SLOW_QUERY_LOG_ENABLED'
+  - 'DB_AUTO_MIGRATION'
+  - 'DB_ALLOW_INCOMPLETE_MIGRATIONS'
+  - 'DB_USE_SLAVE'
+  - 'MAILER_ENABLED'
+  - 'USER_DATA_AUTO_DELETE_ENABLED'
+  - 'EVENTS_AUTO_DELETE_ENABLED'
+  - 'LDAP_1_ENABLED'
+  - 'LDAP_1_USER_AUTO_CREATION'
+  - 'LDAP_2_ENABLED'
+  - 'LDAP_2_USER_AUTO_CREATION'
+  - 'SAML_ENABLED'
+  - 'TRANSCRIBE_ENABLED'
+
+# Generated from defaultEnvValues in packages/server/src/env.ts of Joplin Server v3.7.5,
+# without the secrets and DEFAULT_ADMIN_PASSWORD, the role sets the administrator with joplin_admin
+app_joplin__environment_allowed:
+  - 'APP_NAME'
+  - 'APP_PORT'
+  - 'SIGNUP_ENABLED'
+  - 'TERMS_ENABLED'
+  - 'ACCOUNT_TYPES_ENABLED'
+  - 'ERROR_STACK_TRACES'
+  - 'COOKIES_SECURE'
+  - 'RUNNING_IN_DOCKER'
+  - 'HEARTBEAT_MESSAGE_SCHEDULE'
+  - 'DELETE_EXPIRED_SESSIONS_SCHEDULE'
+  - 'LOG_LEVEL'
+  - 'IS_ADMIN_INSTANCE'
+  - 'INSTANCE_NAME'
+  - 'MAX_TIME_DRIFT'
+  - 'NTP_SERVER'
+  - 'LOCAL_AUTH_ENABLED'
+  - 'APP_BASE_URL'
+  - 'USER_CONTENT_BASE_URL'
+  - 'API_BASE_URL'
+  - 'JOPLINAPP_BASE_URL'
+  - 'TERMS_URL'
+  - 'PRIVACY_URL'
+  - 'CORS_ALLOWED_DOMAINS'
+  - 'DB_CLIENT'
+  - 'DB_SLOW_QUERY_LOG_ENABLED'
+  - 'DB_SLOW_QUERY_LOG_MIN_DURATION'
+  - 'DB_AUTO_MIGRATION'
+  - 'DB_ALLOW_INCOMPLETE_MIGRATIONS'
+  - 'DB_USE_SLAVE'
+  - 'DB_MAX_CONNECTIONS'
+  - 'POSTGRES_DATABASE'
+  - 'POSTGRES_USER'
+  - 'POSTGRES_HOST'
+  - 'POSTGRES_PORT'
+  - 'SLAVE_POSTGRES_DATABASE'
+  - 'SLAVE_POSTGRES_USER'
+  - 'SLAVE_POSTGRES_HOST'
+  - 'SLAVE_POSTGRES_PORT'
+  - 'SQLITE_DATABASE'
+  - 'SLAVE_SQLITE_DATABASE'
+  - 'MAILER_ENABLED'
+  - 'MAILER_HOST'
+  - 'MAILER_PORT'
+  - 'MAILER_SECURITY'
+  - 'MAILER_AUTH_USER'
+  - 'MAILER_NOREPLY_NAME'
+  - 'MAILER_NOREPLY_EMAIL'
+  - 'SUPPORT_EMAIL'
+  - 'SUPPORT_NAME'
+  - 'BUSINESS_EMAIL'
+  - 'USER_DATA_AUTO_DELETE_ENABLED'
+  - 'USER_DATA_AUTO_DELETE_AFTER_DAYS'
+  - 'MFA_ENABLED'
+  - 'EVENTS_AUTO_DELETE_ENABLED'
+  - 'EVENTS_AUTO_DELETE_AFTER_DAYS'
+  - 'LDAP_1_ENABLED'
+  - 'LDAP_1_USER_AUTO_CREATION'
+  - 'LDAP_1_HOST'
+  - 'LDAP_1_MAIL_ATTRIBUTE'
+  - 'LDAP_1_FULLNAME_ATTRIBUTE'
+  - 'LDAP_1_BASE_DN'
+  - 'LDAP_1_BIND_DN'
+  - 'LDAP_1_TLS_CA_FILE'
+  - 'LDAP_2_ENABLED'
+  - 'LDAP_2_USER_AUTO_CREATION'
+  - 'LDAP_2_HOST'
+  - 'LDAP_2_MAIL_ATTRIBUTE'
+  - 'LDAP_2_FULLNAME_ATTRIBUTE'
+  - 'LDAP_2_BASE_DN'
+  - 'LDAP_2_BIND_DN'
+  - 'LDAP_2_TLS_CA_FILE'
+  - 'SAML_ENABLED'
+  - 'SAML_IDP_CONFIG_FILE'
+  - 'SAML_SP_CONFIG_FILE'
+  - 'SAML_ORGANIZATION_DISPLAY_NAME'
+  - 'TRANSCRIBE_ENABLED'
+  - 'TRANSCRIBE_BASE_URL'
