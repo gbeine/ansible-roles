@@ -1,0 +1,40 @@
+---
+# Runs monitoring_loki with the invalid role variables passed as include parameters,
+# the role has to fail before the quadlet unit or the secrets change.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run monitoring_loki with invalid variables (expect ERROR): {{ monitoring_loki__test_invalid.message }}"
+  block:
+
+    - name: 'Run monitoring_loki, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'monitoring_loki'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ monitoring_loki__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksums of the checked files after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_loki__test_checked_files }}"
+      register: 'monitoring_loki__test_md5_after'
+
+    - name: 'Assert the run failed before the checked files changed'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__test_failure is search(monitoring_loki__test_invalid.search, multiline=true)
+          - monitoring_loki__test_before | select('equalto', '') | list | length == 0
+          - monitoring_loki__test_after == monitoring_loki__test_before
+        fail_msg: >-
+          Failure: {{ monitoring_loki__test_failure }}
+          Checksums before: {{ monitoring_loki__test_before | join(', ') }},
+          after: {{ monitoring_loki__test_after | join(', ') }}.
+      vars:
+        # Double quotes, so \n is a line break for the anchors of the searches
+        monitoring_loki__test_failure: "{{ [ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ] | join('\n') }}"
+        monitoring_loki__test_before: "{{ monitoring_loki__test_md5_before.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+        monitoring_loki__test_after: "{{ monitoring_loki__test_md5_after.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"

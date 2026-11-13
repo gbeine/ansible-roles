@@ -1,0 +1,80 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_loki__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_loki__test_image: 'docker.io/grafana/loki:latest'
+monitoring_loki__test_quadlet_path: '/etc/containers/systemd/loki.container'
+monitoring_loki__test_config_path: '/opt/loki/config.yaml'
+
+monitoring_loki__test_cases:
+
+  # Only the mandatory variables
+  - name: 'molecule-loki-default'
+    role_vars:
+      loki_home: '/opt/loki'
+      loki_ip: '10.89.0.140'
+      loki_network: 'podman-molecule'
+      loki_hostname: 'loki-default'
+      loki_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.140'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/loki/config.yaml:/etc/loki/config.yaml:ro,Z'
+        - 'Volume=/opt/loki/data:/loki:Z'
+      env:
+        - 'TZ=Europe/Berlin'
+      max_query_series: 500
+      # The jobs of the log lines Loki has to find
+      jobs: [ 'molecule' ]
+
+  # IPv6, labels, limits and the password of the Alertmanager as secret
+  - name: 'molecule-loki'
+    role_vars:
+      loki_home: '/opt/loki'
+      loki_ip: '10.89.0.141'
+      loki_ipv6: 'fd00:89::141'
+      loki_network: 'podman-molecule'
+      loki_hostname: 'loki-molecule'
+      loki_timezone: 'Europe/Berlin'
+      loki_labels:
+        traefik.enable: 'true'
+      loki_config:
+        limits_config:
+          reject_old_samples: true
+          max_query_series: 1000
+        ruler:
+          alertmanager_url: 'http://localhost:9093'
+          alertmanager_client:
+            basic_auth_username: 'molecule'
+            basic_auth_password: '${LOKI_ALERTMANAGER_PASSWORD}'
+      loki_secrets:
+        - name: 'loki_alertmanager_password'
+          data: 'molecule-alertmanager-password'
+          target: 'LOKI_ALERTMANAGER_PASSWORD'
+    side_effect:
+      config:
+        limits_config:
+          reject_old_samples: true
+          max_query_series: 500
+    expect:
+      ip: '10.89.0.141'
+      ip6: 'fd00:89::141'
+      quadlet:
+        - 'Volume=/opt/loki/config.yaml:/etc/loki/config.yaml:ro,Z'
+        - 'Volume=/opt/loki/data:/loki:Z'
+        - 'Secret=loki_alertmanager_password,type=env,target=LOKI_ALERTMANAGER_PASSWORD'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+      max_query_series: 500
+      alertmanager_password: true
+      # The line pushed by side_effect before the restart and the line pushed by verify
+      jobs: [ 'molecule-before', 'molecule' ]

@@ -1,0 +1,248 @@
+---
+
+- name: 'Install Loki'
+  tags: [ 'monitoring', 'monitoring_loki' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter, loki_config or loki_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_loki__container | length > 0
+          - monitoring_loki__config | to_json | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_loki__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_loki__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_loki__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('loki_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('loki_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of loki_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | map('string') | reject('match', monitoring_loki__secret_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('the targets of loki_secrets have to match ' ~ monitoring_loki__secret_pattern ~ ': '
+                                      ~ (secrets | map(attribute='target') | map('string') | reject('match', monitoring_loki__secret_pattern) | join(', '))) -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The configuration references the secrets with ${TARGET}, Loki expands them with -config.expand-env=true
+    - name: 'Validate the configuration and the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_loki__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_loki__config_json: "{{ monitoring_loki__config | to_json }}"
+        monitoring_loki__targets: "{{ monitoring_loki__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_loki__targets_unused: >-
+          {{ monitoring_loki__targets | reject('in', monitoring_loki__config_json | regex_findall('\$\{([A-Z0-9_]+)(?::-[^}]*)?\}')) | list }}
+        monitoring_loki__plain_secrets: >-
+          {{ monitoring_loki__config_json
+             | regex_findall('"(' ~ (monitoring_loki__config_secret_keys | join('|')) ~ ')"\s*:\s*(?=\S)(?!"\$\{)(?!null)(?!"")')
+             | unique | list }}
+        monitoring_loki__secrets_in_environment: >-
+          {{ monitoring_loki__targets | select('in', monitoring_loki__environment.keys() | list) | list }}
+        monitoring_loki__lines: >-
+          {{ monitoring_loki__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list
+             + monitoring_loki__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        monitoring_loki__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_loki__targets_unused | length > 0 -%}
+          {%-   set _ = errors.append('These secrets are not referenced in loki_config with ${TARGET}: ' ~ (monitoring_loki__targets_unused | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_loki__plain_secrets | length > 0 -%}
+          {%-   set _ = errors.append('These fields of loki_config carry secrets and have to reference a secret of loki_secrets with ${TARGET}: ' ~ (monitoring_loki__plain_secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_loki__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in loki_environment: ' ~ (monitoring_loki__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_loki__lines | length > 0 -%}
+          {%-   set _ = errors.append('Values and secrets must not contain line breaks: ' ~ (monitoring_loki__lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging loki_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_loki__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_loki__environment_unknown: >-
+          {{ (monitoring_loki__container.environment | default({})).keys() | reject('in', monitoring_loki__environment_allowed) | list }}
+        monitoring_loki__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_loki__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_loki__environment_unknown | join(', ')) ~ ', Loki only reads '
+                                      ~ (monitoring_loki__environment_allowed | join(', ')) ~ ', secrets are set with loki_secrets.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directories of Loki'
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "{{ item.mode }}"
+        state: 'directory'
+      loop:
+        - { path: "{{ monitoring_loki__podman_home }}", owner: 0, mode: '0755' }
+        # The image runs Loki as loki (10001)
+        - { path: "{{ monitoring_loki__podman_data_dir }}", owner: "{{ monitoring_loki__uid }}", mode: '0750' }
+      loop_control:
+        label: "{{ item.path }}"
+
+    # Loki checks the configuration in a throwaway container before it is replaced, unknown fields are errors,
+    # the secrets are replaced by placeholders there
+    - name: 'Generate the configuration'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          {{ monitoring_loki__config | to_nice_yaml(indent=2, sort_keys=false) }}
+        dest: "{{ monitoring_loki__podman_config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+        validate: >-
+          podman run --rm --network none --user 0
+          {% for target in monitoring_loki__secrets | map(attribute='target') %}--env {{ target }}=verify {% endfor %}
+          --volume %s:{{ monitoring_loki__config_file }}:ro {{ monitoring_loki__container.image }}
+          -config.file={{ monitoring_loki__config_file }} -config.expand-env=true -verify-config
+      register: 'monitoring_loki__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_loki__secrets }}"
+      register: 'monitoring_loki__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_loki__container.name }}"
+        hostname: "{{ monitoring_loki__container.hostname }}"
+        image: "{{ monitoring_loki__container.image }}"
+        ip: "{{ monitoring_loki__container.ip }}"
+        ip6: "{{ monitoring_loki__container.ipv6 | default(omit) }}"
+        network: "{{ monitoring_loki__container.network }}"
+        timezone: "{{ monitoring_loki__container.timezone }}"
+        command: "{{ monitoring_loki__container.command | default(omit) }}"
+        env: "{{ monitoring_loki__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_loki__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_loki__container.expose | default(omit) }}"
+        label: "{{ monitoring_loki__container.labels | default(omit) }}"
+        publish: "{{ monitoring_loki__container.publish | default(omit) }}"
+        secrets: "{{ monitoring_loki__container.secrets | default(omit) }}"
+        volume: "{{ monitoring_loki__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if monitoring_loki__container.requires is defined %}
+          Requires={{ monitoring_loki__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'monitoring_loki__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Loki'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_loki__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_loki__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_loki__running: >-
+              {{ (ansible_facts.services[monitoring_loki__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_loki__restart: >-
+              {{ monitoring_loki__running | bool
+                 and (monitoring_loki__secrets_result is changed or monitoring_loki__quadlet_result is changed or monitoring_loki__config_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_loki__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_loki__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ monitoring_loki__container.name ~ ' did not start' ] + monitoring_loki__start_journal.stdout_lines }}"
+
+    # The ingester reports ready some seconds after the start
+    - name: 'Wait for Loki'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_loki__ip }}:{{ monitoring_loki__port }}/ready"
+        return_content: true
+        status_code: [ 200, 503 ]
+      register: 'monitoring_loki__ready'
+      until: monitoring_loki__ready.status | default(-1) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Loki'
+      when:
+        - not ansible_check_mode
+        - monitoring_loki__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_loki__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'monitoring_loki__journal'
+      changed_when: false
+
+    - name: 'Assert that Loki answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__journal is skipped
+        fail_msg: "{{ monitoring_loki__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_loki__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_loki__container.name }}"
+        container_image: "{{ monitoring_loki__container.image }}"
+        container_schedule: "{{ monitoring_loki__autoupdate_schedule }}"

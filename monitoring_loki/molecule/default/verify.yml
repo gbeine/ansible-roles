@@ -1,0 +1,134 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_loki__test_case: "{{ monitoring_loki__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_loki__expect: "{{ monitoring_loki__test_case.expect }}"
+    monitoring_loki__test_ip: "{{ monitoring_loki__expect.ip }}"
+    monitoring_loki__test_url: "http://{{ monitoring_loki__expect.ip }}:3100"
+    monitoring_loki__test_plain: "{{ monitoring_loki__test_case.role_vars.loki_secrets | default([]) | map(attribute='data') | list }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_loki__test_quadlet_path }}"
+      register: 'monitoring_loki__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_loki__test_image) in monitoring_loki__test_quadlet_lines
+          - ('IP=' + monitoring_loki__expect.ip) in monitoring_loki__test_quadlet_lines
+          - monitoring_loki__expect.ip6 is none or ('IP6=' + monitoring_loki__expect.ip6) in monitoring_loki__test_quadlet_lines
+          - monitoring_loki__expect.ip6 is not none or monitoring_loki__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - monitoring_loki__expect.quadlet | reject('in', monitoring_loki__test_quadlet_lines) | list | length == 0
+          - monitoring_loki__test_exec is search('-config.file=/etc/loki/config.yaml')
+          - monitoring_loki__test_exec is search('-config.expand-env=true')
+          - monitoring_loki__test_plain | select('in', monitoring_loki__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ monitoring_loki__test_quadlet_lines | to_json }}"
+      vars:
+        monitoring_loki__test_quadlet_lines: "{{ (monitoring_loki__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+        monitoring_loki__test_exec: "{{ monitoring_loki__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+    - name: 'Read the state of the loki service'
+      ansible.builtin.command: 'systemctl is-active loki'
+      register: 'monitoring_loki__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the loki container'
+      ansible.builtin.command: 'podman inspect loki'
+      register: 'monitoring_loki__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__test_service.stdout == 'active'
+          - monitoring_loki__test_net.IPAddress == monitoring_loki__expect.ip
+          - monitoring_loki__expect.ip6 is none or monitoring_loki__test_net.GlobalIPv6Address == monitoring_loki__expect.ip6
+          - monitoring_loki__expect.env | reject('in', monitoring_loki__test_env) | list | length == 0
+          - monitoring_loki__test_plain | select('in', monitoring_loki__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ monitoring_loki__test_service.stdout }},
+          IPv4 {{ monitoring_loki__test_net.IPAddress }}, IPv6 {{ monitoring_loki__test_net.GlobalIPv6Address }},
+          environment {{ monitoring_loki__test_env | reject('search', 'PASSWORD') | join(', ') }}
+      vars:
+        monitoring_loki__test_container: "{{ (monitoring_loki__test_inspect.stdout | from_json)[0] }}"
+        monitoring_loki__test_net: "{{ monitoring_loki__test_container.NetworkSettings.Networks[monitoring_loki__test_case.role_vars.loki_network] }}"
+        monitoring_loki__test_env: "{{ monitoring_loki__test_container.Config.Env }}"
+
+    - name: 'Read the files of Loki'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: [ '/opt/loki/config.yaml', '/opt/loki/data' ]
+      register: 'monitoring_loki__test_files'
+
+    - name: 'Read the configuration file of Loki'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_loki__test_config_path }}"
+      register: 'monitoring_loki__test_config_file'
+
+    # The configuration references the secret, it does not contain it
+    - name: 'Assert the files of Loki'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__test_files.results[0].stat.mode == '0644'
+          - monitoring_loki__test_files.results[1].stat.uid == 10001
+          - monitoring_loki__test_plain | select('in', monitoring_loki__test_config_content) | list | length == 0
+          - not (monitoring_loki__expect.alertmanager_password | default(false)) or '${LOKI_ALERTMANAGER_PASSWORD}' in monitoring_loki__test_config_content
+        fail_msg: "files {{ monitoring_loki__test_files.results | map(attribute='stat.mode') | list }}, {{ monitoring_loki__test_files.results | map(attribute='stat.uid') | list }}"
+      vars:
+        monitoring_loki__test_config_content: "{{ monitoring_loki__test_config_file.content | b64decode }}"
+
+    - name: 'Read the state, the version and the configuration of Loki'
+      ansible.builtin.uri:
+        url: "{{ monitoring_loki__test_url }}{{ item }}"
+        return_content: true
+      loop: [ '/ready', '/loki/api/v1/status/buildinfo', '/config' ]
+      register: 'monitoring_loki__test_api'
+
+    # /config shows the running configuration with masked secrets
+    - name: 'Assert the state, the version and the running configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__test_api.results[0].content | trim == 'ready'
+          - (monitoring_loki__test_api.results[1].json | default({})).version | default('') | length > 0
+          - monitoring_loki__test_running.analytics.reporting_enabled == false
+          - monitoring_loki__test_running.limits_config.max_query_series | int == monitoring_loki__expect.max_query_series
+          - >-
+            not (monitoring_loki__expect.alertmanager_password | default(false))
+            or (monitoring_loki__test_running.ruler.alertmanager_client.basic_auth_password | default('') | string | length > 0)
+          - monitoring_loki__test_plain | select('in', monitoring_loki__test_api.results[2].content) | list | length == 0
+        fail_msg: >-
+          ready {{ monitoring_loki__test_api.results[0].content | trim }}, buildinfo {{ monitoring_loki__test_api.results[1].json | default({}) | to_json }},
+          analytics {{ monitoring_loki__test_running.analytics | default({}) | to_json }},
+          max_query_series {{ monitoring_loki__test_running.limits_config.max_query_series | default('') }},
+          alertmanager_client {{ (monitoring_loki__test_running.ruler | default({})).alertmanager_client | default({}) | to_json }}
+      vars:
+        monitoring_loki__test_running: "{{ monitoring_loki__test_api.results[2].content | from_yaml }}"
+
+    - name: 'Push a log line'
+      ansible.builtin.include_tasks: 'tasks/push.yml'
+      vars:
+        monitoring_loki__test_job: 'molecule'
+
+    # The ingester makes pushed lines available for queries at once, they are retried to be safe
+    - name: 'Query the log lines'
+      ansible.builtin.uri:
+        url: "{{ monitoring_loki__test_url }}/loki/api/v1/query_range?query={{ ('{job=\"' ~ item ~ '\"}') | urlencode }}&since=1h&limit=10"
+        return_content: true
+      loop: "{{ monitoring_loki__expect.jobs }}"
+      register: 'monitoring_loki__test_query'
+      until: >-
+        (monitoring_loki__test_query.json | default({})).data.result | default([])
+        | map(attribute='values') | flatten | select('search', 'molecule log line of ' ~ item ~ '$') | list | length > 0
+      retries: 15
+      delay: 2
