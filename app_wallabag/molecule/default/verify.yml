@@ -1,0 +1,127 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_wallabag__test_case: "{{ app_wallabag__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_wallabag__expect: "{{ app_wallabag__test_case.expect }}"
+    app_wallabag__test_url: "http://{{ app_wallabag__expect.ip }}"
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_wallabag__test_plain: >-
+      {{ (app_wallabag__test_case.role_vars.wallabag_secrets | default([])) | map(attribute='data') | list
+         + [ app_wallabag__test_admin.password ]
+         + ([ app_wallabag__test_case.side_effect.admin.password ] if app_wallabag__test_case.side_effect is defined else []) }}
+    app_wallabag__test_passwords: "{{ [ app_wallabag__expect.admin.password ] + ([ app_wallabag__expect.admin.former_password ] if app_wallabag__expect.admin.former_password is defined else []) }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_wallabag__test_quadlet_path }}"
+      register: 'app_wallabag__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_wallabag__test_image) in app_wallabag__test_quadlet_lines
+          - ('IP=' + app_wallabag__expect.ip) in app_wallabag__test_quadlet_lines
+          - app_wallabag__expect.ip6 is none or ('IP6=' + app_wallabag__expect.ip6) in app_wallabag__test_quadlet_lines
+          - app_wallabag__expect.ip6 is not none or app_wallabag__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_wallabag__expect.quadlet | reject('in', app_wallabag__test_quadlet_lines) | list | length == 0
+          - app_wallabag__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_wallabag__test_quadlet_lines | select('search', 'type=mount') | list | length == 0
+          - app_wallabag__test_plain | select('in', app_wallabag__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_wallabag__test_quadlet.content | b64decode }}"
+      vars:
+        app_wallabag__test_quadlet_lines: "{{ (app_wallabag__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the wallabag service'
+      ansible.builtin.command: 'systemctl is-active wallabag'
+      register: 'app_wallabag__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the wallabag container'
+      ansible.builtin.command: 'podman inspect wallabag'
+      register: 'app_wallabag__test_inspect'
+      changed_when: false
+
+    # The secrets are passed with type=env and are part of the environment of the process, they are left out of the message,
+    # the passwords of the administrator never are
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__test_service.stdout == 'active'
+          - app_wallabag__test_net.IPAddress == app_wallabag__expect.ip
+          - app_wallabag__expect.ip6 is none or app_wallabag__test_net.GlobalIPv6Address == app_wallabag__expect.ip6
+          - app_wallabag__expect.env | reject('in', app_wallabag__test_env) | list | length == 0
+          - app_wallabag__test_env | select('match', '(MYSQL_ROOT_PASSWORD|POSTGRES_PASSWORD)=') | list | length == 0
+          - app_wallabag__test_passwords | select('in', app_wallabag__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_wallabag__test_service.stdout }},
+          IPv4 {{ app_wallabag__test_net.IPAddress }}, IPv6 {{ app_wallabag__test_net.GlobalIPv6Address }},
+          environment {{ app_wallabag__test_env | reject('match', 'SYMFONY__ENV__(SECRET|DATABASE_PASSWORD|MAILER_DSN)=') | join(', ') }}
+      vars:
+        app_wallabag__test_container: "{{ (app_wallabag__test_inspect.stdout | from_json)[0] }}"
+        app_wallabag__test_net: "{{ app_wallabag__test_container.NetworkSettings.Networks[app_wallabag__test_case.role_vars.wallabag_network] }}"
+        app_wallabag__test_env: "{{ app_wallabag__test_container.Config.Env }}"
+
+    - name: 'Read the information of the API'
+      ansible.builtin.uri:
+        url: "{{ app_wallabag__test_url }}/api/info"
+        return_content: true
+      register: 'app_wallabag__test_info'
+
+    - name: 'Log in with the password, the former password and the default administrator'
+      app_wallabag_test_login:
+        url: "{{ app_wallabag__test_url }}"
+        name: "{{ app_wallabag__test_credentials.name }}"
+        password: "{{ app_wallabag__test_credentials.password }}"
+      register: 'app_wallabag__test_login'
+      loop: >-
+        {{ [ { 'name': app_wallabag__expect.admin.name, 'password': app_wallabag__expect.admin.password, 'allowed': true },
+             { 'name': 'wallabag', 'password': 'wallabag', 'allowed': false } ]
+           + ([ { 'name': app_wallabag__expect.admin.name, 'password': app_wallabag__expect.admin.former_password, 'allowed': false } ]
+              if app_wallabag__expect.admin.former_password is defined else []) }}
+      loop_control:
+        loop_var: 'app_wallabag__test_credentials'
+        label: "{{ app_wallabag__test_credentials.name }} {{ 'password' if app_wallabag__test_credentials.allowed else 'refused password' }}"
+
+    # Only super administrators may open the administration of the users
+    - name: 'Assert the API, the logins and the super administrator'
+      ansible.builtin.assert:
+        that:
+          - (app_wallabag__test_info.content | from_json).appname | default('') == 'wallabag'
+          - app_wallabag__test_login.results | map(attribute='logged_in') | list == app_wallabag__test_login.results | map(attribute='app_wallabag__test_credentials.allowed') | list
+          - (app_wallabag__test_login.results | first).users_page == 200
+        fail_msg: "info {{ app_wallabag__test_info.content }}, logins {{ app_wallabag__test_logins | to_json }}"
+      vars:
+        app_wallabag__test_logins: >-
+          {{ app_wallabag__test_login.results | map('dict2items')
+             | map('selectattr', 'key', 'in', [ 'name', 'logged_in', 'location', 'users_page', 'users_location' ])
+             | map('items2dict') | list }}
+
+    - name: 'Read the users in MariaDB'
+      when: app_wallabag__test_case.database is not none
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', app_wallabag__test_database.name ] + app_wallabag__test_database.users }}"
+      register: 'app_wallabag__test_users'
+      changed_when: false
+
+    - name: 'Read the state of the sqlite database'
+      when: app_wallabag__test_case.database is none
+      ansible.builtin.stat:
+        path: "{{ app_wallabag__test_case.role_vars.wallabag_home }}/data/db/wallabag.sqlite"
+      register: 'app_wallabag__test_sqlite'
+
+    - name: 'Assert the database of wallabag'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__test_case.database is none or app_wallabag__test_users.stdout_lines == [ app_wallabag__expect.admin.name ]
+          - app_wallabag__test_case.database is not none or (app_wallabag__test_sqlite.stat.exists and app_wallabag__test_sqlite.stat.size > 0)
+        fail_msg: "users {{ app_wallabag__test_users.stdout_lines | default([]) | to_json }}, sqlite {{ app_wallabag__test_sqlite.stat | default({}) | to_json }}"

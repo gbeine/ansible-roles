@@ -8,4 +8,4 @@ container_repository: https://github.com/wallabag/docker
 documentation_link: https://doc.wallabag.org/
 ---
 
-Installs and configures wallabag as a podman quadlet.
+Installs and configures wallabag, including its administrator, as a podman quadlet.

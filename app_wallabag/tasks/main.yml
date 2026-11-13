@@ -1,20 +1,190 @@
 ---
 
-- name: 'Deploy Wallabag container'
-  tags: [ 'app_wallabag' ]
+- name: 'Deploy wallabag'
+  tags: [ 'app', 'app_wallabag' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or wallabag_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_wallabag__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallabag__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_wallabag__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_wallabag__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('wallabag_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('wallabag_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of wallabag_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # pdo_mysql and pdo_pgsql need the host, the port and the password of the database
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallabag__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallabag__set: "{{ app_wallabag__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_wallabag__environment_missing: "{{ app_wallabag__environment_required | reject('in', app_wallabag__set) | list }}"
+        app_wallabag__database: "{{ app_wallabag__environment.SYMFONY__ENV__DATABASE_DRIVER | default('', true) | string }}"
+        app_wallabag__targets: "{{ app_wallabag__secrets | map(attribute='target') | list }}"
+        app_wallabag__secrets_needed: >-
+          {{ app_wallabag__secrets_required + ([] if app_wallabag__database == 'pdo_sqlite' else [ 'SYMFONY__ENV__DATABASE_PASSWORD' ]) }}
+        app_wallabag__secrets_missing: "{{ app_wallabag__secrets_needed | reject('in', app_wallabag__targets) | list }}"
+        app_wallabag__database_missing: "{{ app_wallabag__database_external_required | reject('in', app_wallabag__set) | list }}"
+        app_wallabag__secrets_in_environment: >-
+          {{ (app_wallabag__targets + app_wallabag__secret_variables) | select('in', app_wallabag__environment.keys() | list) | unique | list }}
+        app_wallabag__secrets_lines: >-
+          {{ app_wallabag__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_wallabag__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_wallabag__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('wallabag needs the environment variables ' ~ (app_wallabag__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_wallabag__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallabag__database not in app_wallabag__database_drivers -%}
+          {%-   set _ = errors.append('SYMFONY__ENV__DATABASE_DRIVER has to be one of ' ~ (app_wallabag__database_drivers | join(', ')) ~ ', got ' ~ app_wallabag__database ~ '.') -%}
+          {%- elif app_wallabag__database != 'pdo_sqlite' and app_wallabag__database_missing | length > 0 -%}
+          {%-   set _ = errors.append('SYMFONY__ENV__DATABASE_DRIVER ' ~ app_wallabag__database ~ ' needs ' ~ (app_wallabag__database_external_required | join(', ')) ~ ', missing or empty: ' ~ (app_wallabag__database_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallabag__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('wallabag needs the secrets ' ~ (app_wallabag__secrets_needed | join(', ')) ~ ', missing: ' ~ (app_wallabag__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallabag__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in wallabag_environment: ' ~ (app_wallabag__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallabag__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_wallabag__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallabag__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallabag__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_wallabag__environment.items() if value is not none -%}
+          {%-   if key in app_wallabag__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallabag__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallabag__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_wallabag__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('wallabag_admin has to be a dictionary with name, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | reject('in', app_wallabag__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in wallabag_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_wallabag__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.name | default('') | string) is not match(app_wallabag__admin_name_pattern) -%}
+          {%-     set _ = errors.append('wallabag_admin needs a name of up to 180 letters, digits and @ . + - _.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_wallabag__admin_email_pattern) -%}
+          {%-     set _ = errors.append('wallabag_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none -%}
+          {%-     set _ = errors.append('wallabag_admin needs a password.') -%}
+          {%-   elif (admin.password | string | length) < app_wallabag__password_length -%}
+          {%-     set _ = errors.append('The password of wallabag_admin needs at least ' ~ app_wallabag__password_length ~ ' characters.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging wallabag_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallabag__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without wallabag_secrets
+        app_wallabag__container_secrets: >-
+          {{ app_wallabag__container.secrets
+             if (app_wallabag__container.secrets is defined and app_wallabag__container.secrets is sequence and app_wallabag__container.secrets is not string)
+             else [] }}
+        app_wallabag__environment_unknown: >-
+          {{ (app_wallabag__container.environment | default({})).keys() | reject('in', app_wallabag__environment_allowed) | list }}
+        app_wallabag__secrets_unknown: >-
+          {{ app_wallabag__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_wallabag__secrets_allowed) | list }}
+        app_wallabag__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_wallabag__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_wallabag__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallabag__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_wallabag__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of wallabag (app_wallabag__environment_allowed) and the secrets ' ~ (app_wallabag__secrets_allowed | join(', '))
+                                    ~ ', the administrator is set with wallabag_admin.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs PHP and nginx as nobody
+    - name: 'Create the directories of wallabag'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: 'nobody'
-        group: 'nogroup'
-        mode: "{{ item.mode | default('0755') }}"
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: '0755'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_wallabag__podman_data_dir }}"
-        - dest: "{{ app_wallabag__podman_images_dir }}"
-        - dest: "{{ app_wallabag__podman_var_dir }}"
+      loop:
+        - { path: "{{ app_wallabag__home }}", owner: 0 }
+        - { path: "{{ app_wallabag__home }}/data", owner: "{{ app_wallabag__uid }}" }
+        - { path: "{{ app_wallabag__home }}/images", owner: "{{ app_wallabag__uid }}" }
+        - { path: "{{ app_wallabag__home }}/var", owner: "{{ app_wallabag__uid }}" }
+      loop_control:
+        label: "{{ item.path }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -22,33 +192,11 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items:
-        - name: 'wallabag_mysql_root_password'
-          data: "{{ app_wallabag__mysql_root_password }}"
-        - name: 'wallabag_postgres_password'
-          data: "{{ app_wallabag__postgres_password }}"
-        - name: 'wallabag_symfony_env_database_password'
-          data: "{{ app_wallabag__db_pass }}"
-        - name: 'wallabag_symfony_env_mailer_dsn'
-          data: "{{ app_wallabag__mailer_dsn }}"
-        - name: 'wallabag_symfony_env_secret'
-          data: "{{ app_wallabag__secret }}"
-      when: 'item.data | length > 0'
+      loop: "{{ app_wallabag__secrets }}"
+      register: 'app_wallabag__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_wallabag__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_wallabag__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_wallabag__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -59,11 +207,12 @@
         ip6: "{{ app_wallabag__container.ipv6 | default(omit) }}"
         network: "{{ app_wallabag__container.network }}"
         timezone: "{{ app_wallabag__container.timezone }}"
+        command: "{{ app_wallabag__container.command | default(omit) }}"
         env: "{{ app_wallabag__container.environment | default(omit) }}"
         etc_hosts: "{{ app_wallabag__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_wallabag__container.expose | default(omit) }}"
         label: "{{ app_wallabag__container.labels | default(omit) }}"
         publish: "{{ app_wallabag__container.publish | default(omit) }}"
-        expose: "{{ app_wallabag__container.expose | default(omit) }}"
         secrets: "{{ app_wallabag__container.secrets | default(omit) }}"
         volume: "{{ app_wallabag__container.volumes | default(omit) }}"
         quadlet_options: |
@@ -80,20 +229,66 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_wallabag__quadlet_result'
 
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_wallabag__container.name }}"
         daemon_reload: true
-        state: 'started'
+        state: "{{ 'restarted' if app_wallabag__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_wallabag__running: >-
+          {{ (ansible_facts.services[app_wallabag__container.name + '.service'].state | default('')) == 'running' }}
+        app_wallabag__restart: >-
+          {{ app_wallabag__running | bool
+             and (app_wallabag__secrets_result is changed or app_wallabag__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
+    # The image runs composer install on every start before nginx listens, the first start takes a while
+    - name: 'Wait for wallabag'
+      ansible.builtin.uri:
+        url: "http://{{ app_wallabag__ip }}/api/info"
+      register: 'app_wallabag__ready'
+      until: app_wallabag__ready.status | default(-1) == 200
+      retries: 150
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of wallabag'
+      when:
+        - not ansible_check_mode
+        - app_wallabag__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_wallabag__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_wallabag__journal'
+      changed_when: false
+
+    - name: 'Assert that wallabag answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__journal is skipped
+        fail_msg: "{{ app_wallabag__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # Installs wallabag once if the schema is missing, the password is an option with no_log, it is passed to PHP on stdin
+    - name: 'Install wallabag and create the administrator'
+      when: 'not ansible_check_mode'
+      app_wallabag_admin:
+        container: "{{ app_wallabag__container.name }}"
+        name: "{{ app_wallabag__admin.name | string }}"
+        email: "{{ app_wallabag__admin.email | string }}"
+        password: "{{ app_wallabag__admin.password | string }}"
+        default_name: "{{ app_wallabag__default_admin_name }}"
+      register: 'app_wallabag__admin_result'
+
     - name: 'Enable autoupdate on container'
-      when: 'app_wallabag__autoupdate_enabled'
-      include_role:
+      when: 'app_wallabag__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_wallabag__container.name }}"
         container_image: "{{ app_wallabag__container.image }}"
+        container_schedule: "{{ app_wallabag__autoupdate_schedule }}"

@@ -1,0 +1,169 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_wallabag__test_case: "{{ app_wallabag__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_wallabag__test_vars: "{{ app_wallabag__test_case.role_vars }}"
+    app_wallabag__test_environment: "{{ app_wallabag__test_vars.wallabag_environment | default({}) }}"
+    app_wallabag__test_secrets: "{{ app_wallabag__test_vars.wallabag_secrets | default([]) }}"
+    app_wallabag__test_checked_files:
+      - "{{ app_wallabag__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_wallabag__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_wallabag__test_checked_files }}"
+      register: 'app_wallabag__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_wallabag with wallabag_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_container: [ 'environment' ]
+        app_wallabag__test_invalid:
+          message: 'wallabag_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_wallabag with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_secrets: [ { name: 'wallabag_secret', data: 'x' } ]
+        app_wallabag__test_invalid:
+          message: 'a secret without target'
+          search: '^wallabag_secrets entries need name, data and target$'
+
+    - name: 'Run app_wallabag without SYMFONY__ENV__SECRET (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_secrets: "{{ app_wallabag__test_secrets | rejectattr('target', 'eq', 'SYMFONY__ENV__SECRET') | list }}"
+        app_wallabag__test_invalid:
+          message: 'no SYMFONY__ENV__SECRET'
+          search: '^wallabag needs the secrets SYMFONY__ENV__SECRET.*, missing: SYMFONY__ENV__SECRET\.$'
+
+    - name: 'Run app_wallabag with the root password of the database as secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_secrets: "{{ app_wallabag__test_secrets + [ { 'name': 'wallabag_mysql_root_password', 'data': 'molecule', 'target': 'MYSQL_ROOT_PASSWORD' } ] }}"
+        app_wallabag__test_invalid:
+          message: 'the root password of the database as secret'
+          search: '^Unknown secrets: MYSQL_ROOT_PASSWORD\.'
+
+    - name: 'Run app_wallabag with the database password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_environment: "{{ app_wallabag__test_environment | combine({ 'SYMFONY__ENV__DATABASE_PASSWORD': 'molecule' }) }}"
+        app_wallabag__test_invalid:
+          message: 'the database password in the environment'
+          search: '^Secrets must not be set in wallabag_environment: SYMFONY__ENV__DATABASE_PASSWORD\.$'
+
+    - name: 'Run app_wallabag without SYMFONY__ENV__DOMAIN_NAME (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_environment: "{{ app_wallabag__test_environment | combine({ 'SYMFONY__ENV__DOMAIN_NAME': '' }) }}"
+        app_wallabag__test_invalid:
+          message: 'no SYMFONY__ENV__DOMAIN_NAME'
+          search: '^wallabag needs the environment variables SYMFONY__ENV__DOMAIN_NAME, missing or empty: SYMFONY__ENV__DOMAIN_NAME\.$'
+
+    - name: 'Run app_wallabag with an invalid database driver (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_environment: "{{ app_wallabag__test_environment | combine({ 'SYMFONY__ENV__DATABASE_DRIVER': 'mysql' }) }}"
+        app_wallabag__test_invalid:
+          message: 'an invalid database driver'
+          search: '^SYMFONY__ENV__DATABASE_DRIVER has to be one of pdo_sqlite, pdo_mysql, pdo_pgsql, got mysql\.'
+
+    - name: 'Run app_wallabag with pdo_mysql without the port of the database (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_environment: "{{ app_wallabag__test_environment | combine({ 'SYMFONY__ENV__DATABASE_DRIVER': 'pdo_mysql', 'SYMFONY__ENV__DATABASE_HOST': '10.89.0.20', 'SYMFONY__ENV__DATABASE_PORT': '' }) }}"
+        app_wallabag__test_invalid:
+          message: 'pdo_mysql without the port of the database'
+          search: '^SYMFONY__ENV__DATABASE_DRIVER pdo_mysql needs SYMFONY__ENV__DATABASE_HOST, SYMFONY__ENV__DATABASE_PORT, missing or empty: SYMFONY__ENV__DATABASE_PORT\.'
+
+    - name: 'Run app_wallabag with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_environment: "{{ app_wallabag__test_environment | combine({ 'SYMFONY__ENV__FOSUSER_REGISTRATION': 'maybe' }) }}"
+        app_wallabag__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: SYMFONY__ENV__FOSUSER_REGISTRATION\.$'
+
+    - name: 'Run app_wallabag with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_environment: "{{ app_wallabag__test_environment | combine({ 'SYMFONY__ENV__SERVER_NAME': \"Molecule\nReader\" }) }}"
+        app_wallabag__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: SYMFONY__ENV__SERVER_NAME\.$'
+
+    - name: 'Run app_wallabag with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_admin: { name: 'molecule-admin', email: 'admin@example.org' }
+        app_wallabag__test_invalid:
+          message: 'an administrator without password'
+          search: '^wallabag_admin needs a password\.$'
+
+    - name: 'Run app_wallabag with a short password of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallabag_admin: "{{ app_wallabag__test_admin | combine({ 'password': 'short' }) }}"
+        app_wallabag__test_invalid:
+          message: 'a short password of the administrator'
+          search: '^The password of wallabag_admin needs at least 8 characters\.$'
+
+    - name: 'Run app_wallabag with the changed name and password'
+      when: app_wallabag__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'wallabag' ]
+          register: 'app_wallabag__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            wallabag_environment: "{{ app_wallabag__test_environment | combine(app_wallabag__test_case.side_effect.environment) }}"
+            wallabag_admin: "{{ app_wallabag__test_admin | combine(app_wallabag__test_case.side_effect.admin) }}"
+
+        - name: 'Run app_wallabag with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_wallabag'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'wallabag' ]
+          register: 'app_wallabag__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed password'
+          ansible.builtin.assert:
+            that:
+              - app_wallabag__quadlet_result is changed
+              - app_wallabag__admin_result is changed
+              - not app_wallabag__admin_result.created
+              - not app_wallabag__admin_result.taken_over
+              - not app_wallabag__admin_result.installed
+              - app_wallabag__test_started_after.stdout | int > app_wallabag__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_wallabag__quadlet_result is changed }}, administrator changed: {{ app_wallabag__admin_result is changed }},
+              created: {{ app_wallabag__admin_result.created | default('') }}, taken over: {{ app_wallabag__admin_result.taken_over | default('') }},
+              start before {{ app_wallabag__test_started_before.stdout }}, after {{ app_wallabag__test_started_after.stdout }}

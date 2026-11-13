@@ -1,0 +1,114 @@
+---
+# Network created by container_podman in prepare.yml
+app_wallabag__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_wallabag__test_image: 'docker.io/wallabag/wallabag:latest'
+app_wallabag__test_quadlet_path: '/etc/containers/systemd/wallabag.container'
+
+# The database started by prepare.yml, test credentials only
+app_wallabag__test_database:
+  name: 'molecule-mariadb'
+  image: 'docker.io/library/mariadb:11'
+  ip: '10.89.0.20'
+  env:
+    MARIADB_DATABASE: 'wallabag'
+    MARIADB_USER: 'wallabag'
+    MARIADB_PASSWORD: 'molecule-db-password'
+    MARIADB_ROOT_PASSWORD: 'molecule-root-password'
+  # The server listens on TCP after the initialization
+  ready: [ 'mariadb', '-h', '127.0.0.1', '-u', 'wallabag', '-pmolecule-db-password', 'wallabag', '-e', 'SELECT 1' ]
+  users: [ 'mariadb', '-h', '127.0.0.1', '-u', 'wallabag', '-pmolecule-db-password', 'wallabag', '-NBe', 'SELECT username FROM wallabag_user' ]
+
+app_wallabag__test_admin:
+  name: 'molecule-admin'
+  email: 'admin@example.org'
+  password: 'molecule-admin-password'
+
+app_wallabag__test_cases:
+
+  # Only the mandatory variables, sqlite and the administrator
+  - name: 'molecule-wallabag-default'
+    database: ~
+    role_vars:
+      wallabag_home: '/opt/wallabag'
+      wallabag_ip: '10.89.0.90'
+      wallabag_network: 'podman-molecule'
+      wallabag_hostname: 'wallabag-default'
+      wallabag_timezone: 'Europe/Berlin'
+      wallabag_environment:
+        SYMFONY__ENV__DOMAIN_NAME: 'http://10.89.0.90'
+      wallabag_secrets:
+        - name: 'wallabag_secret'
+          data: 'molecule-secret-default'
+          target: 'SYMFONY__ENV__SECRET'
+      wallabag_admin: "{{ app_wallabag__test_admin }}"
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/wallabag/data:/var/www/wallabag/data:Z'
+        - 'Secret=wallabag_secret,type=env,target=SYMFONY__ENV__SECRET'
+      env:
+        - 'SYMFONY__ENV__DOMAIN_NAME=http://10.89.0.90'
+        - 'SYMFONY__ENV__DATABASE_DRIVER=pdo_sqlite'
+      admin: { name: 'molecule-admin', password: 'molecule-admin-password' }
+
+  # IPv6, labels, MariaDB, options and the administrator
+  - name: 'molecule-wallabag'
+    database: 'pdo_mysql'
+    role_vars:
+      wallabag_home: '/opt/wallabag'
+      wallabag_ip: '10.89.0.91'
+      wallabag_ipv6: 'fd00:89::91'
+      wallabag_network: 'podman-molecule'
+      wallabag_hostname: 'wallabag-molecule'
+      wallabag_timezone: 'Europe/Berlin'
+      wallabag_labels:
+        traefik.enable: 'false'
+      wallabag_environment:
+        SYMFONY__ENV__DOMAIN_NAME: 'http://10.89.0.91'
+        SYMFONY__ENV__DATABASE_DRIVER: 'pdo_mysql'
+        SYMFONY__ENV__DATABASE_HOST: '10.89.0.20'
+        SYMFONY__ENV__DATABASE_PORT: 3306
+        SYMFONY__ENV__DATABASE_NAME: 'wallabag'
+        SYMFONY__ENV__DATABASE_USER: 'wallabag'
+        SYMFONY__ENV__DATABASE_CHARSET: 'utf8mb4'
+        SYMFONY__ENV__SERVER_NAME: 'Molecule Reader'
+        SYMFONY__ENV__FOSUSER_REGISTRATION: false
+      wallabag_secrets:
+        - name: 'wallabag_secret'
+          data: 'molecule-secret'
+          target: 'SYMFONY__ENV__SECRET'
+        - name: 'wallabag_database_password'
+          data: 'molecule-db-password'
+          target: 'SYMFONY__ENV__DATABASE_PASSWORD'
+        - name: 'wallabag_mailer_dsn'
+          data: 'smtp://wallabag:molecule-mail-password@10.89.0.25:25'
+          target: 'SYMFONY__ENV__MAILER_DSN'
+      wallabag_admin: "{{ app_wallabag__test_admin }}"
+    # The name of the server changes and wallabag has to restart, the password of the administrator changes
+    side_effect:
+      environment:
+        SYMFONY__ENV__SERVER_NAME: 'Molecule Changed'
+      admin:
+        password: 'molecule-admin-changed'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Label=traefik.enable=false'
+        - 'Secret=wallabag_database_password,type=env,target=SYMFONY__ENV__DATABASE_PASSWORD'
+        - 'Secret=wallabag_mailer_dsn,type=env,target=SYMFONY__ENV__MAILER_DSN'
+      env:
+        - 'SYMFONY__ENV__DATABASE_DRIVER=pdo_mysql'
+        - 'SYMFONY__ENV__DATABASE_PORT=3306'
+        - 'SYMFONY__ENV__FOSUSER_REGISTRATION=false'
+        - 'SYMFONY__ENV__SERVER_NAME=Molecule Changed'
+      admin: { name: 'molecule-admin', password: 'molecule-admin-changed', former_password: 'molecule-admin-password' }

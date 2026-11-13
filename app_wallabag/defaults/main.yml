@@ -15,35 +15,19 @@ app_wallabag__labels: "{{ wallabag_labels | default({}) }}"
 
 app_wallabag__version: "{{ wallabag_version | default('latest') }}"
 
-app_wallabag__db_type: "{{ wallabag_db_type | default('pdo_mysql') }}"
-app_wallabag__db_host: "{{ wallabag_db_host | mandatory }}"
-app_wallabag__db_port: "{{ wallabag_db_port | default(3306) }}"
-app_wallabag__db_user: "{{ wallabag_db_user | default('wallabag') }}"
-app_wallabag__db_pass: "{{ wallabag_db_pass | mandatory }}"
-app_wallabag__db_name: "{{ wallabag_db_name | default('wallabag') }}"
-app_wallabag__db_charset: "{{ wallabag_db_charset | default('utf8mb4') }}"
+app_wallabag__container: "{{ app_wallabag__podman_container_default | combine(wallabag_container | default({})) }}"
 
-app_wallabag__url: "{{ wallabag_url | mandatory }}"
-app_wallabag__secret: "{{ wallabag_secret | mandatory }}"
-app_wallabag__locale: "{{ wallabag_locale | default('en') }}"
-app_wallabag__server_name: "{{ wallabag_server_name | default('Wallabag') }}"
-app_wallabag__mailer_dsn: "smtp://{{ app_wallabag__mail_user if app_wallabag__mail_user | length > 0 }}{{':' + app_wallabag__mail_password if app_wallabag__mail_user | length > 0 and app_wallabag__mail_password | length > 0}}{{ '@' if app_wallabag__mail_user | length > 0 }}{{ app_wallabag__mail_host + ':' + app_wallabag__mail_port | string }}/"
-app_wallabag__from_email: "{{ wallabag_from_email | mandatory }}"
-app_wallabag__fosuser_registration: "{{ wallabag_user_registration | default(false) }}"
-app_wallabag__fosuser_confirmation: "{{ wallabag_user_confirmation | default(true) }}"
+# The configuration of wallabag, merged over the default, SYMFONY__ENV__DOMAIN_NAME is mandatory
+app_wallabag__environment: "{{ app_wallabag__environment_default | combine(wallabag_environment | default({})) }}"
 
-app_wallabag__container: "{{ app_wallabag__container_default | combine(wallabag_container | default({})) }}"
+# Secrets with name, data and target, SYMFONY__ENV__SECRET is mandatory
+app_wallabag__secrets: "{{ wallabag_secrets | default([]) }}"
 
-app_wallabag__mail_host: "{{ wallabag_mail_host | default('127.0.0.1') }}"
-app_wallabag__mail_port: "{{ wallabag_mail_port | default(25) }}"
-app_wallabag__mail_user: "{{ wallabag_mail_user | default('') }}"
-app_wallabag__mail_password: "{{ wallabag_mail_password | default('') }}"
-
-app_wallabag__mysql_root_password: "{{ wallabag_mysql_root_password | default('') }}"
-app_wallabag__postgres_password: "{{ wallabag_postgres_password | default('') }}"
-app_wallabag__postgres_user: "{{ wallabag_postgres_user | default('') }}"
+# The administrator of wallabag with name, email and password
+app_wallabag__admin: "{{ wallabag_admin | mandatory }}"
 
 app_wallabag__autoupdate_enabled: "{{ wallabag_autoupdate_enabled | default(false) }}"
+app_wallabag__autoupdate_schedule: "{{ wallabag_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
@@ -51,45 +35,105 @@ app_wallabag__autoupdate_enabled: "{{ wallabag_autoupdate_enabled | default(fals
 
 app_wallabag__podman_name: 'wallabag'
 app_wallabag__podman_image: 'docker.io/wallabag/wallabag'
-app_wallabag__podman_tag: "{{ app_wallabag__version }}"
 
-app_wallabag__podman_home: "{{ app_wallabag__home }}"
+# The image runs PHP and nginx as nobody
+app_wallabag__uid: 65534
 
-app_wallabag__podman_data_dir: "{{ app_wallabag__podman_home }}/data"
-app_wallabag__podman_images_dir: "{{ app_wallabag__podman_home }}/images"
-app_wallabag__podman_var_dir: "{{ app_wallabag__podman_home }}/var"
+app_wallabag__environment_default:
+  SYMFONY__ENV__DATABASE_DRIVER: 'pdo_sqlite'
 
-app_wallabag__container_default:
+# The domain name is the public URL of wallabag, it is used in links and emails
+app_wallabag__environment_required: [ 'SYMFONY__ENV__DOMAIN_NAME' ]
+
+# Without SYMFONY__ENV__SECRET the image uses a secret that is public in its repository
+app_wallabag__secrets_required: [ 'SYMFONY__ENV__SECRET' ]
+
+app_wallabag__database_drivers: [ 'pdo_sqlite', 'pdo_mysql', 'pdo_pgsql' ]
+
+# The image waits for external databases with nc on the host and the port
+app_wallabag__database_external_required: [ 'SYMFONY__ENV__DATABASE_HOST', 'SYMFONY__ENV__DATABASE_PORT' ]
+
+# The environment of the container, the values are written to the YAML file parameters.yml, booleans in lower case
+app_wallabag__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in app_wallabag__environment.items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+app_wallabag__admin_keys: [ 'name', 'email', 'password' ]
+# The names of users of wallabag (FOSUserBundle)
+app_wallabag__admin_name_pattern: '^[A-Za-z0-9@.+_-]{1,180}$'
+app_wallabag__admin_email_pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+app_wallabag__password_length: 8
+
+# The administrator created by wallabag:install, the role takes it over
+app_wallabag__default_admin_name: 'wallabag'
+
+app_wallabag__podman_container_default:
   name: "{{ app_wallabag__podman_name }}"
   hostname: "{{ app_wallabag__hostname }}"
-  image: "{{ app_wallabag__podman_image }}:{{ app_wallabag__podman_tag }}"
+  image: "{{ app_wallabag__podman_image }}:{{ app_wallabag__version }}"
   ip: "{{ app_wallabag__ip }}"
   ipv6: "{{ app_wallabag__ipv6 | default(omit) }}"
   network: "{{ app_wallabag__network }}"
   timezone: "{{ app_wallabag__timezone }}"
-  environment:
-    POSTGRES_USER: "{{ app_wallabag__postgres_user }}"
-    SYMFONY__ENV__DATABASE_DRIVER: "{{ app_wallabag__db_type }}"
-    SYMFONY__ENV__DATABASE_HOST: "{{ app_wallabag__db_host }}"
-    SYMFONY__ENV__DATABASE_PORT: "{{ app_wallabag__db_port }}"
-    SYMFONY__ENV__DATABASE_NAME: "{{ app_wallabag__db_name }}"
-    SYMFONY__ENV__DATABASE_USER: "{{ app_wallabag__db_user }}"
-    SYMFONY__ENV__DATABASE_CHARSET: "{{ app_wallabag__db_charset }}"
-    SYMFONY__ENV__DOMAIN_NAME: "{{ app_wallabag__url }}"
-    SYMFONY__ENV__LOCALE: "{{ app_wallabag__locale }}"
-    SYMFONY__ENV__SERVER_NAME: "{{ app_wallabag__server_name }}"
-    SYMFONY__ENV__FROM_EMAIL: "{{ app_wallabag__from_email }}"
-    SYMFONY__ENV__FOSUSER_REGISTRATION: "{{ app_wallabag__fosuser_registration }}"
-    SYMFONY__ENV__FOSUSER_CONFIRMATION: "{{ app_wallabag__fosuser_confirmation }}"
-  labels: "{{ app_wallabag__labels }}"
-  secrets:
-    - "wallabag_mysql_root_password,type=env,target=MYSQL_ROOT_PASSWORD"
-    - "wallabag_postgres_password,type=env,target=POSTGRES_PASSWORD"
-    - "wallabag_symfony_env_database_password,type=env,target=SYMFONY__ENV__DATABASE_PASSWORD"
-    - "wallabag_symfony_env_mailer_dsn,type=env,target=SYMFONY__ENV__MAILER_DSN"
-    - "wallabag_symfony_env_secret,type=env,target=SYMFONY__ENV__SECRET"
+  labels: "{{ app_wallabag__labels | default(omit) }}"
+  # Set with wallabag_environment, merged over the default
+  environment: "{{ app_wallabag__environment_container }}"
   volumes:
-    - "{{ app_wallabag__podman_data_dir }}:/var/www/wallabag/data"
-    - "{{ app_wallabag__podman_images_dir }}:/var/www/wallabag/web/assets/images"
-    - "{{ app_wallabag__podman_var_dir }}:/var/www/wallabag/var"
+    - "{{ app_wallabag__home }}/data:/var/www/wallabag/data:Z"
+    - "{{ app_wallabag__home }}/images:/var/www/wallabag/web/assets/images:Z"
+    - "{{ app_wallabag__home }}/var:/var/www/wallabag/var:Z"
+  # The image reads the secrets only from the environment,
+  # entries without name or target are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (app_wallabag__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='name')
+        | zip(app_wallabag__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='target'))
+        | map('join', ',type=env,target=') | list)
+      if (app_wallabag__secrets is sequence and app_wallabag__secrets is not string and app_wallabag__secrets | length > 0)
+      else omit }}
 
+# Targets of the secrets in wallabag_secrets, the image writes them with envsubst to parameters.yml,
+# the DSN of the mailer and of Sentry contain passwords and keys
+app_wallabag__secrets_allowed:
+  - 'SYMFONY__ENV__SECRET'
+  - 'SYMFONY__ENV__DATABASE_PASSWORD'
+  - 'SYMFONY__ENV__MAILER_DSN'
+  - 'SYMFONY__ENV__RABBITMQ_PASSWORD'
+  - 'SYMFONY__ENV__REDIS_PASSWORD'
+  - 'SYMFONY__ENV__SENTRY_DSN'
+
+app_wallabag__secret_variables: "{{ app_wallabag__secrets_allowed }}"
+
+# The options of parameters.yml read as booleans
+app_wallabag__environment_booleans:
+  - 'SYMFONY__ENV__FOSUSER_REGISTRATION'
+  - 'SYMFONY__ENV__FOSUSER_CONFIRMATION'
+
+# Generated from root/etc/wallabag/parameters.template.yml and php-wallabag.template.ini of wallabag/docker for wallabag 2.6.15,
+# without the secrets and the variables of the initialization with the root password of the database
+app_wallabag__environment_allowed:
+  - 'PHP_MEMORY_LIMIT'
+  - 'SYMFONY__ENV__DATABASE_DRIVER'
+  - 'SYMFONY__ENV__DATABASE_HOST'
+  - 'SYMFONY__ENV__DATABASE_PORT'
+  - 'SYMFONY__ENV__DATABASE_NAME'
+  - 'SYMFONY__ENV__DATABASE_USER'
+  - 'SYMFONY__ENV__DATABASE_TABLE_PREFIX'
+  - 'SYMFONY__ENV__DATABASE_CHARSET'
+  - 'SYMFONY__ENV__DOMAIN_NAME'
+  - 'SYMFONY__ENV__LOCALE'
+  - 'SYMFONY__ENV__TWOFACTOR_SENDER'
+  - 'SYMFONY__ENV__FOSUSER_REGISTRATION'
+  - 'SYMFONY__ENV__FOSUSER_CONFIRMATION'
+  - 'SYMFONY__ENV__FROM_EMAIL'
+  - 'SYMFONY__ENV__RABBITMQ_HOST'
+  - 'SYMFONY__ENV__RABBITMQ_PORT'
+  - 'SYMFONY__ENV__RABBITMQ_USER'
+  - 'SYMFONY__ENV__RABBITMQ_PREFETCH_COUNT'
+  - 'SYMFONY__ENV__REDIS_SCHEME'
+  - 'SYMFONY__ENV__REDIS_HOST'
+  - 'SYMFONY__ENV__REDIS_PORT'
+  - 'SYMFONY__ENV__REDIS_PATH'
+  - 'SYMFONY__ENV__SERVER_NAME'
