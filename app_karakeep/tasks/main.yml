@@ -1,0 +1,312 @@
+---
+
+- name: 'Deploy Karakeep'
+  tags: [ 'app', 'app_karakeep' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or karakeep_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_karakeep__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_karakeep__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_karakeep__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('karakeep_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('karakeep_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of karakeep_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # NEXTAUTH_URL and NEXTAUTH_SECRET are mandatory, Meilisearch needs its address and its master key
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_karakeep__set: "{{ app_karakeep__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_karakeep__targets: "{{ app_karakeep__secrets | map(attribute='target') | list }}"
+        app_karakeep__environment_missing: "{{ app_karakeep__environment_required | reject('in', app_karakeep__set) | list }}"
+        app_karakeep__secrets_missing: "{{ app_karakeep__secrets_required | reject('in', app_karakeep__targets) | list }}"
+        app_karakeep__meilisearch_set: "{{ app_karakeep__meilisearch_pair | select('in', app_karakeep__set + app_karakeep__targets) | list }}"
+        app_karakeep__secrets_in_environment: >-
+          {{ (app_karakeep__targets + app_karakeep__secret_variables) | select('in', app_karakeep__environment.keys() | list) | unique | list }}
+        app_karakeep__role_in_environment: >-
+          {{ app_karakeep__environment_role.keys() | select('in', app_karakeep__environment.keys() | list) | list }}
+        app_karakeep__secrets_lines: >-
+          {{ app_karakeep__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_karakeep__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_karakeep__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('Karakeep needs the environment variables ' ~ (app_karakeep__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_karakeep__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Karakeep needs the secrets ' ~ (app_karakeep__secrets_required | join(', ')) ~ ', missing: ' ~ (app_karakeep__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__meilisearch_set | length == 1 -%}
+          {%-   set _ = errors.append('Meilisearch needs MEILI_ADDR in karakeep_environment and the secret MEILI_MASTER_KEY, only ' ~ (app_karakeep__meilisearch_set | join(', ')) ~ ' is set.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in karakeep_environment: ' ~ (app_karakeep__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__role_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('These variables are set by the role and must not be set in karakeep_environment: ' ~ (app_karakeep__role_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_karakeep__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_karakeep__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_karakeep__environment.items() if value is not none -%}
+          {%-   if key in app_karakeep__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The limits of the names, emails and passwords of Karakeep
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_karakeep__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_karakeep__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('karakeep_admin has to be a dictionary with name, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | reject('in', app_karakeep__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in karakeep_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_karakeep__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set name = admin.name | default('') | string -%}
+          {%-   if name | length == 0 or name | length > app_karakeep__admin_name_length or (name ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('karakeep_admin needs a name of up to ' ~ app_karakeep__admin_name_length ~ ' characters without line breaks.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_karakeep__admin_email_pattern) -%}
+          {%-     set _ = errors.append('karakeep_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none -%}
+          {%-     set _ = errors.append('karakeep_admin needs a password.') -%}
+          {%-   elif (admin.password | string | length) < app_karakeep__password_length_min
+                     or (admin.password | string | length) > app_karakeep__password_length_max -%}
+          {%-     set _ = errors.append('The password of karakeep_admin needs ' ~ app_karakeep__password_length_min ~ ' to ' ~ app_karakeep__password_length_max ~ ' characters.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging karakeep_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without karakeep_secrets
+        app_karakeep__container_secrets: >-
+          {{ app_karakeep__container.secrets
+             if (app_karakeep__container.secrets is defined and app_karakeep__container.secrets is sequence and app_karakeep__container.secrets is not string)
+             else [] }}
+        # The variables set by the role (DATA_DIR) are part of the environment of the container, not of the allow list
+        app_karakeep__environment_unknown: >-
+          {{ (app_karakeep__container.environment | default({})).keys()
+             | reject('in', app_karakeep__environment_allowed + (app_karakeep__environment_role.keys() | list)) | list }}
+        app_karakeep__secrets_unknown: >-
+          {{ app_karakeep__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_karakeep__secrets_allowed) | list }}
+        app_karakeep__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_karakeep__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_karakeep__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_karakeep__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Karakeep (app_karakeep__environment_allowed) and the secrets ' ~ (app_karakeep__secrets_allowed | join(', '))
+                                    ~ ', the administrator is set with karakeep_admin.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs the migration, the web interface and the workers as root
+    - name: 'Create the directories of Karakeep'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+      loop:
+        - "{{ app_karakeep__home }}"
+        - "{{ app_karakeep__home }}/data"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_karakeep__secrets }}"
+      register: 'app_karakeep__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_karakeep__container.name }}"
+        hostname: "{{ app_karakeep__container.hostname }}"
+        image: "{{ app_karakeep__container.image }}"
+        ip: "{{ app_karakeep__container.ip }}"
+        ip6: "{{ app_karakeep__container.ipv6 | default(omit) }}"
+        network: "{{ app_karakeep__container.network }}"
+        timezone: "{{ app_karakeep__container.timezone }}"
+        command: "{{ app_karakeep__container.command | default(omit) }}"
+        env: "{{ app_karakeep__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_karakeep__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_karakeep__container.expose | default(omit) }}"
+        label: "{{ app_karakeep__container.labels | default(omit) }}"
+        publish: "{{ app_karakeep__container.publish | default(omit) }}"
+        secrets: "{{ app_karakeep__container.secrets | default(omit) }}"
+        volume: "{{ app_karakeep__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_karakeep__container.requires is defined %}
+          Requires={{ app_karakeep__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_karakeep__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Karakeep'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_karakeep__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_karakeep__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_karakeep__running: >-
+              {{ (ansible_facts.services[app_karakeep__container.name + '.service'].state | default('')) == 'running' }}
+            app_karakeep__restart: >-
+              {{ app_karakeep__running | bool
+                 and (app_karakeep__secrets_result is changed or app_karakeep__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_karakeep__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_karakeep__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_karakeep__container.name ~ ' did not start' ] + app_karakeep__start_journal.stdout_lines }}"
+
+    # s6 starts the web interface after the migration of the database, the health check answers then
+    - name: 'Wait for Karakeep'
+      ansible.builtin.uri:
+        url: "http://{{ app_karakeep__ip }}:{{ app_karakeep__port }}/api/health"
+        return_content: true
+      register: 'app_karakeep__ready'
+      until: (app_karakeep__ready.json | default({})).status | default('') == 'ok'
+      retries: 150
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Karakeep'
+      when:
+        - not ansible_check_mode
+        - (app_karakeep__ready.json | default({})).status | default('') != 'ok'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_karakeep__container.name }}", '-n', '150', '--no-pager' ]
+      register: 'app_karakeep__journal'
+      changed_when: false
+
+    - name: 'Assert that Karakeep answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__journal is skipped
+        fail_msg: "{{ app_karakeep__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # Without users the first user who signs up becomes the administrator, the module creates it in the database of Karakeep.
+    # The password is an option with no_log, it is passed to node on stdin
+    - name: 'Create the administrator'
+      when: 'not ansible_check_mode'
+      app_karakeep_admin:
+        container: "{{ app_karakeep__container.name }}"
+        name: "{{ app_karakeep__admin.name | string }}"
+        email: "{{ app_karakeep__admin.email | string }}"
+        password: "{{ app_karakeep__admin.password | string }}"
+      register: 'app_karakeep__admin_result'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_karakeep__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_karakeep__container.name }}"
+        container_image: "{{ app_karakeep__container.image }}"
+        container_schedule: "{{ app_karakeep__autoupdate_schedule }}"

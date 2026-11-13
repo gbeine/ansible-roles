@@ -1,0 +1,176 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_karakeep__test_case: "{{ app_karakeep__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_karakeep__test_vars: "{{ app_karakeep__test_case.role_vars }}"
+    app_karakeep__test_environment: "{{ app_karakeep__test_vars.karakeep_environment }}"
+    app_karakeep__test_secrets: "{{ app_karakeep__test_vars.karakeep_secrets }}"
+    app_karakeep__test_admin: "{{ app_karakeep__test_vars.karakeep_admin }}"
+    app_karakeep__test_checked_files:
+      - "{{ app_karakeep__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_karakeep__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_karakeep__test_checked_files }}"
+      register: 'app_karakeep__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_karakeep with karakeep_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_container: [ 'environment' ]
+        app_karakeep__test_invalid:
+          message: 'karakeep_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_karakeep with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_secrets: "{{ app_karakeep__test_secrets + [ { 'name': 'karakeep_other', 'data': 'x' } ] }}"
+        app_karakeep__test_invalid:
+          message: 'a secret without target'
+          search: '^karakeep_secrets entries need name, data and target$'
+
+    - name: 'Run app_karakeep without NEXTAUTH_SECRET (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_secrets: "{{ app_karakeep__test_secrets | rejectattr('target', 'eq', 'NEXTAUTH_SECRET') | list }}"
+        app_karakeep__test_invalid:
+          message: 'no NEXTAUTH_SECRET'
+          search: '^Karakeep needs the secrets NEXTAUTH_SECRET, missing: NEXTAUTH_SECRET\.$'
+
+    - name: 'Run app_karakeep without NEXTAUTH_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | dict2items | rejectattr('key', 'eq', 'NEXTAUTH_URL') | items2dict }}"
+        app_karakeep__test_invalid:
+          message: 'no NEXTAUTH_URL'
+          search: '^Karakeep needs the environment variables NEXTAUTH_URL, missing or empty: NEXTAUTH_URL\.$'
+
+    - name: 'Run app_karakeep with Meilisearch without the master key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | combine({ 'MEILI_ADDR': 'http://10.89.0.20:7700' }) }}"
+        karakeep_secrets: "{{ app_karakeep__test_secrets | rejectattr('target', 'eq', 'MEILI_MASTER_KEY') | list }}"
+        app_karakeep__test_invalid:
+          message: 'Meilisearch without the master key'
+          search: '^Meilisearch needs MEILI_ADDR in karakeep_environment and the secret MEILI_MASTER_KEY, only MEILI_ADDR is set\.$'
+
+    - name: 'Run app_karakeep with NEXTAUTH_SECRET in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | combine({ 'NEXTAUTH_SECRET': 'molecule-plain-secret' }) }}"
+        app_karakeep__test_invalid:
+          message: 'NEXTAUTH_SECRET in the environment'
+          search: '^Secrets must not be set in karakeep_environment: NEXTAUTH_SECRET\.$'
+
+    - name: 'Run app_karakeep with DATA_DIR in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | combine({ 'DATA_DIR': '/srv' }) }}"
+        app_karakeep__test_invalid:
+          message: 'DATA_DIR in the environment'
+          search: '^These variables are set by the role and must not be set in karakeep_environment: DATA_DIR\.$'
+
+    - name: 'Run app_karakeep with the demo mode (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | combine({ 'DEMO_MODE': 'true' }) }}"
+        app_karakeep__test_invalid:
+          message: 'the demo mode'
+          search: '^Unknown environment variables: DEMO_MODE\.'
+
+    - name: 'Run app_karakeep with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_secrets: "{{ app_karakeep__test_secrets + [ { 'name': 'karakeep_demo_password', 'data': 'x', 'target': 'DEMO_MODE_PASSWORD' } ] }}"
+        app_karakeep__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: DEMO_MODE_PASSWORD\.'
+
+    - name: 'Run app_karakeep with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | combine({ 'DISABLE_SIGNUPS': 'yes' }) }}"
+        app_karakeep__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: DISABLE_SIGNUPS\.$'
+
+    - name: 'Run app_karakeep with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_environment: "{{ app_karakeep__test_environment | combine({ 'OCR_LANGS': 'eng\ndeu' }) }}"
+        app_karakeep__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: OCR_LANGS\.$'
+
+    - name: 'Run app_karakeep with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_admin: "{{ app_karakeep__test_admin | dict2items | rejectattr('key', 'eq', 'password') | items2dict }}"
+        app_karakeep__test_invalid:
+          message: 'an administrator without password'
+          search: '^karakeep_admin needs a password\.$'
+
+    - name: 'Run app_karakeep with a short password of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_admin: "{{ app_karakeep__test_admin | combine({ 'password': 'short12' }) }}"
+        app_karakeep__test_invalid:
+          message: 'a short password of the administrator'
+          search: '^The password of karakeep_admin needs 8 to 128 characters\.$'
+
+    - name: 'Change the environment and the administrator'
+      when: app_karakeep__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'karakeep' ]
+          register: 'app_karakeep__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            karakeep_environment: "{{ app_karakeep__test_case.side_effect.environment }}"
+            karakeep_admin: "{{ app_karakeep__test_case.side_effect.admin }}"
+
+        - name: 'Run app_karakeep with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_karakeep'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'karakeep' ]
+          register: 'app_karakeep__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed administrator'
+          ansible.builtin.assert:
+            that:
+              - app_karakeep__quadlet_result is changed
+              - app_karakeep__admin_result is changed
+              - not app_karakeep__admin_result.created
+              - app_karakeep__test_started_after.stdout | int > app_karakeep__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_karakeep__quadlet_result is changed }}, administrator changed: {{ app_karakeep__admin_result is changed }},
+              created: {{ app_karakeep__admin_result.created | default('') }},
+              start before {{ app_karakeep__test_started_before.stdout }}, after {{ app_karakeep__test_started_after.stdout }}

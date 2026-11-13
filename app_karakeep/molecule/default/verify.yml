@@ -1,0 +1,229 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_karakeep__test_case: "{{ app_karakeep__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_karakeep__expect: "{{ app_karakeep__test_case.expect }}"
+    app_karakeep__test_url: "http://{{ app_karakeep__expect.ip }}:3000"
+    app_karakeep__test_admin: "{{ app_karakeep__test_case.role_vars.karakeep_admin }}"
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_karakeep__test_plain: >-
+      {{ app_karakeep__test_case.role_vars.karakeep_secrets | map(attribute='data') | list
+         + [ app_karakeep__test_admin.password ]
+         + ([ app_karakeep__test_case.side_effect.admin.password ] if app_karakeep__test_case.side_effect is defined else []) }}
+    # The password of the administrator is accepted, the former password and a wrong password are refused
+    app_karakeep__test_logins: >-
+      {{ [ { 'name': 'password', 'password': app_karakeep__expect.admin.password, 'allowed': true },
+           { 'name': 'wrong', 'password': 'molecule-wrong-password-9', 'allowed': false } ]
+         + ([ { 'name': 'former', 'password': app_karakeep__expect.admin.former_password, 'allowed': false } ]
+            if app_karakeep__expect.admin.former_password is defined else []) }}
+    # Reads the users from the database of Karakeep with better-sqlite3 of the image
+    app_karakeep__test_users_script: >-
+      const Database = require('better-sqlite3');
+      const db = new Database('/data/db.db', { readonly: true, fileMustExist: true });
+      console.log(JSON.stringify(db.prepare('SELECT name, email, role, emailVerified FROM user ORDER BY email').all()));
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_karakeep__test_quadlet_path }}"
+      register: 'app_karakeep__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_karakeep__test_image) in app_karakeep__test_quadlet_lines
+          - ('IP=' + app_karakeep__expect.ip) in app_karakeep__test_quadlet_lines
+          - app_karakeep__expect.ip6 is none or ('IP6=' + app_karakeep__expect.ip6) in app_karakeep__test_quadlet_lines
+          - app_karakeep__expect.ip6 is not none or app_karakeep__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_karakeep__expect.quadlet | reject('in', app_karakeep__test_quadlet_lines) | list | length == 0
+          - app_karakeep__test_quadlet_lines | select('search', 'type=mount') | list | length == 0
+          - app_karakeep__test_plain | select('in', app_karakeep__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_karakeep__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        app_karakeep__test_quadlet_lines: "{{ (app_karakeep__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the karakeep service'
+      ansible.builtin.command: 'systemctl is-active karakeep'
+      register: 'app_karakeep__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the karakeep container'
+      ansible.builtin.command: 'podman inspect karakeep'
+      register: 'app_karakeep__test_inspect'
+      changed_when: false
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: '/opt/karakeep/data/db.db'
+      register: 'app_karakeep__test_database'
+
+    # podman shows the secrets passed with type=env masked, the passwords of the administrator are never part of the environment
+    - name: 'Assert the service, the container addresses, the environment and the database'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__test_service.stdout == 'active'
+          - app_karakeep__test_net.IPAddress == app_karakeep__expect.ip
+          - app_karakeep__expect.ip6 is none or app_karakeep__test_net.GlobalIPv6Address == app_karakeep__expect.ip6
+          - app_karakeep__expect.env | reject('in', app_karakeep__test_env) | list | length == 0
+          - app_karakeep__test_plain | select('in', app_karakeep__test_env | join(' ')) | list | length == 0
+          - app_karakeep__test_env | select('match', 'DEMO_MODE') | list | length == 0
+          - app_karakeep__test_database.stat.exists
+        fail_msg: >-
+          service {{ app_karakeep__test_service.stdout }},
+          IPv4 {{ app_karakeep__test_net.IPAddress }}, IPv6 {{ app_karakeep__test_net.GlobalIPv6Address }},
+          database {{ app_karakeep__test_database.stat.exists }},
+          environment {{ app_karakeep__test_env | reject('search', '(SECRET|KEY|PASSWORD|TOKEN)=') | join(', ') }}
+      vars:
+        app_karakeep__test_container: "{{ (app_karakeep__test_inspect.stdout | from_json)[0] }}"
+        app_karakeep__test_net: "{{ app_karakeep__test_container.NetworkSettings.Networks[app_karakeep__test_case.role_vars.karakeep_network] }}"
+        app_karakeep__test_env: "{{ app_karakeep__test_container.Config.Env }}"
+
+    - name: 'Read the health check'
+      ansible.builtin.uri:
+        url: "{{ app_karakeep__test_url }}/api/health"
+        return_content: true
+      register: 'app_karakeep__test_health'
+
+    - name: 'Assert the health check'
+      ansible.builtin.assert:
+        that:
+          - (app_karakeep__test_health.json | default({})).status | default('') == 'ok'
+        fail_msg: "health {{ app_karakeep__test_health.json | default({}) | to_json }}"
+
+    # better-auth checks the origin of the requests, it has to be NEXTAUTH_URL.
+    # curl keeps the session cookie of the sign-in in a file for the API
+    - name: 'Sign in and use the API'
+      block:
+
+        - name: 'Create the cookie files'
+          ansible.builtin.tempfile:
+            suffix: '.cookies'
+          loop: "{{ app_karakeep__test_logins | map(attribute='name') | list }}"
+          register: 'app_karakeep__test_cookie_files'
+
+        - name: 'Sign in with the password, a wrong password and the former password'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.0.path }}", '--cookie-jar', "{{ item.0.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                    '--header', 'Content-Type: application/json',
+                    '--header', "Origin: {{ app_karakeep__test_url }}",
+                    '--data-binary', '@-',
+                    "{{ app_karakeep__test_url }}/api/auth/sign-in/email" ]
+            stdin: "{{ { 'email': app_karakeep__expect.admin.email, 'password': item.1.password } | to_json }}"
+          loop: "{{ app_karakeep__test_cookie_files.results | zip(app_karakeep__test_logins) | list }}"
+          loop_control:
+            label: "{{ item.1.name }}"
+          register: 'app_karakeep__test_login'
+          changed_when: false
+          no_log: true
+
+        # The REST API accepts the session cookie, without a session it answers 401
+        - name: 'Read the signed in user with the sessions'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.path }}",
+                    '--write-out', '\n%{http_code}',
+                    "{{ app_karakeep__test_url }}/api/v1/users/me" ]
+          loop: "{{ app_karakeep__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: 'app_karakeep__test_me'
+          changed_when: false
+
+        - name: 'Create a bookmark and search it with Meilisearch'
+          when: app_karakeep__test_case.services
+          block:
+
+            - name: 'Create a text bookmark'
+              ansible.builtin.command:
+                argv: [ 'curl', '--silent', '--show-error', '--fail',
+                        '--cookie', "{{ app_karakeep__test_cookie_files.results[0].path }}",
+                        '--header', 'Content-Type: application/json',
+                        '--header', "Origin: {{ app_karakeep__test_url }}",
+                        '--data-binary', '{"type": "text", "text": "molecule zebrafinch bookmark"}',
+                        "{{ app_karakeep__test_url }}/api/v1/bookmarks" ]
+              register: 'app_karakeep__test_bookmark'
+              changed_when: false
+
+            # The workers index the bookmark asynchronously
+            - name: 'Search the bookmark'
+              ansible.builtin.command:
+                argv: [ 'curl', '--silent', '--show-error', '--fail',
+                        '--cookie', "{{ app_karakeep__test_cookie_files.results[0].path }}",
+                        "{{ app_karakeep__test_url }}/api/v1/bookmarks/search?q=zebrafinch" ]
+              register: 'app_karakeep__test_search'
+              until: >-
+                (app_karakeep__test_search.stdout | default('{}', true) | from_json).bookmarks | default([])
+                | map(attribute='id') | select('eq', (app_karakeep__test_bookmark.stdout | from_json).id) | list | length > 0
+              retries: 30
+              delay: 4
+              changed_when: false
+
+      always:
+
+        - name: 'Remove the cookie files'
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: 'absent'
+          loop: "{{ app_karakeep__test_cookie_files.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+    # A successful sign-in answers 200, a refused one 401
+    - name: 'Assert the sign-ins and the signed in user'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__test_responses == app_karakeep__test_logins | map(attribute='allowed') | map('ternary', '200', '401') | list
+          - app_karakeep__test_me.results[0].stdout_lines[-1] == '200'
+          - (app_karakeep__test_me.results[0].stdout_lines[:-1] | join('\n') | from_json).email == app_karakeep__expect.admin.email
+          - (app_karakeep__test_me.results[0].stdout_lines[:-1] | join('\n') | from_json).name == app_karakeep__expect.admin.name
+          - app_karakeep__test_me.results[1:] | map(attribute='stdout_lines') | map('last') | reject('eq', '401') | list | length == 0
+        fail_msg: >-
+          sign-ins {{ app_karakeep__test_logins | map(attribute='name') | zip(app_karakeep__test_responses) | list | to_json }},
+          users {{ app_karakeep__test_me.results | map(attribute='stdout') | list | to_json }}
+      vars:
+        app_karakeep__test_responses: "{{ app_karakeep__test_login.results | map(attribute='stdout') | list }}"
+
+    - name: 'Read the users in the database of Karakeep'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '-w', '/app/apps/workers', 'karakeep', 'node', '-e', "{{ app_karakeep__test_users_script }}" ]
+      register: 'app_karakeep__test_users'
+      changed_when: false
+
+    - name: 'Assert the administrator in the database'
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__test_user_list | length == 1
+          - app_karakeep__test_user_list[0].name == app_karakeep__expect.admin.name
+          - app_karakeep__test_user_list[0].email == app_karakeep__expect.admin.email
+          - app_karakeep__test_user_list[0].role == 'admin'
+          - app_karakeep__test_user_list[0].emailVerified | int == 1
+        fail_msg: "users {{ app_karakeep__test_user_list | to_json }}"
+      vars:
+        app_karakeep__test_user_list: "{{ app_karakeep__test_users.stdout_lines[-1] | from_json }}"
+
+    # The workers crawl with the Chrome of Karakeep, the DevTools have to be reachable from the container
+    - name: 'Read the version of Chrome from the container of Karakeep'
+      when: app_karakeep__test_case.services
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'karakeep', 'node', '-e',
+                "fetch('http://{{ app_karakeep__test_chrome.ip }}:9222/json/version').then(r => r.json()).then(j => console.log(j.Browser))" ]
+      register: 'app_karakeep__test_chrome_version'
+      changed_when: false
+
+    - name: 'Assert that Chrome is reachable'
+      when: app_karakeep__test_case.services
+      ansible.builtin.assert:
+        that:
+          - app_karakeep__test_chrome_version.stdout is search('(Chrome|Chromium)/')
+        fail_msg: "Chrome {{ app_karakeep__test_chrome_version.stdout }}"

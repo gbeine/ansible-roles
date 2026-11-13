@@ -1,0 +1,62 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_karakeep__test_network }}"
+    podman_default_network: "{{ app_karakeep__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_karakeep__test_case: "{{ app_karakeep__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify signs in with curl, it keeps the cookies of the session in a file
+    - name: 'Install curl'
+      ansible.builtin.apt:
+        name: 'curl'
+        state: 'present'
+        update_cache: true
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ app_karakeep__test_image }}"
+      register: 'app_karakeep__test_pull'
+      until: app_karakeep__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    # Meilisearch and the Chrome of Karakeep are deployed with their roles
+    - name: 'Deploy Meilisearch'
+      when: app_karakeep__test_case.services
+      ansible.builtin.include_role:
+        name: 'app_meilisearch'
+      vars:
+        meilisearch_home: '/opt/meilisearch'
+        meilisearch_ip: "{{ app_karakeep__test_meilisearch.ip }}"
+        meilisearch_network: "{{ app_karakeep__test_network.name }}"
+        meilisearch_hostname: 'meilisearch'
+        meilisearch_timezone: 'Europe/Berlin'
+        meilisearch_secrets:
+          - name: 'meilisearch_master_key'
+            data: "{{ app_karakeep__test_meilisearch.master_key }}"
+            target: 'MEILI_MASTER_KEY'
+
+    - name: 'Deploy the Chrome of Karakeep'
+      when: app_karakeep__test_case.services
+      ansible.builtin.include_role:
+        name: 'app_karakeep_chrome'
+      vars:
+        karakeep_chrome_ip: "{{ app_karakeep__test_chrome.ip }}"
+        karakeep_chrome_network: "{{ app_karakeep__test_network.name }}"
+        karakeep_chrome_hostname: 'karakeep-chrome'
+        karakeep_chrome_timezone: 'Europe/Berlin'
