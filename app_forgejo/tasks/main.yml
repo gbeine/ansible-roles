@@ -1,42 +1,234 @@
 ---
 
-- name: 'Deploy Forgejo container'
-  tags: [ 'app_forgejo' ]
+- name: 'Deploy Forgejo'
+  tags: [ 'app', 'app_forgejo' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or forgejo_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_forgejo__container | length > 0
+        quiet: true
+
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_forgejo__invalid: >-
+          {%- set errors = [] -%}
+          {%- set keys = app_forgejo__keys -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('forgejo_keys has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set unknown = keys.keys() | reject('in', app_forgejo__keys_families.keys() | list) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('unknown entries in forgejo_keys: ' ~ unknown | join(', ')
+                                        ~ ', allowed are ' ~ app_forgejo__keys_families.keys() | join(', ')) -%}
+          {%-   endif -%}
+          {%-   for family, definition in app_forgejo__keys_families.items() if family in keys -%}
+          {%-     set values = keys[family] -%}
+          {%-     set pattern = app_forgejo__keys_pattern_free if definition.options is none else app_forgejo__keys_pattern -%}
+          {%-     if values is not sequence or values is string or values is mapping -%}
+          {%-       set _ = errors.append('forgejo_keys.' ~ family ~ ' has to be a list') -%}
+          {%-     else -%}
+          {%-       set invalid = values | select('string') | reject('match', pattern) | list
+                                  + values | select('string') | select('search', '__') | list
+                                  + values | reject('string') | map('string') | list -%}
+          {%-       if invalid | length > 0 -%}
+          {%-         set _ = errors.append('forgejo_keys.' ~ family ~ ' contains invalid keys, allowed are '
+                                            ~ ('letters, digits and _ . -' if definition.options is none else 'lower case letters, digits and _ . -')
+                                            ~ ' without __: ' ~ invalid | unique | join(', ')) -%}
+          {%-       elif values | unique | list | length != values | length -%}
+          {%-         set _ = errors.append('forgejo_keys.' ~ family ~ ' contains duplicate keys') -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_forgejo__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_forgejo__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('forgejo_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('forgejo_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of forgejo_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # mysql and postgres need the host, the database, the user and the password
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_forgejo__database: "{{ app_forgejo__environment.FORGEJO__database__DB_TYPE | default('mysql', true) | string }}"
+        app_forgejo__targets: "{{ app_forgejo__secrets | map(attribute='target') | list }}"
+        app_forgejo__set: "{{ app_forgejo__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_forgejo__secrets_needed: >-
+          {{ app_forgejo__secrets_required + ([] if app_forgejo__database == 'sqlite3' else [ 'FORGEJO__database__PASSWD' ]) }}
+        app_forgejo__secrets_missing: "{{ app_forgejo__secrets_needed | reject('in', app_forgejo__targets) | list }}"
+        app_forgejo__database_missing: >-
+          {{ [] if app_forgejo__database == 'sqlite3' else app_forgejo__environment_database | reject('in', app_forgejo__set) | list }}
+        app_forgejo__secrets_in_environment: >-
+          {{ (app_forgejo__targets + app_forgejo__secret_variables + app_forgejo__secret_files.values() | list)
+             | select('in', app_forgejo__environment.keys() | list) | unique | list }}
+        app_forgejo__secrets_lines: >-
+          {{ app_forgejo__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_forgejo__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_forgejo__database not in app_forgejo__database_types -%}
+          {%-   set _ = errors.append('FORGEJO__database__DB_TYPE has to be one of ' ~ (app_forgejo__database_types | join(', ')) ~ ', got ' ~ app_forgejo__database ~ '.') -%}
+          {%- elif app_forgejo__database_missing | length > 0 -%}
+          {%-   set _ = errors.append('FORGEJO__database__DB_TYPE ' ~ app_forgejo__database ~ ' needs ' ~ (app_forgejo__environment_database | join(', ')) ~ ', missing: ' ~ (app_forgejo__database_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_forgejo__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Forgejo needs the secrets ' ~ (app_forgejo__secrets_needed | join(', ')) ~ ', missing: ' ~ (app_forgejo__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_forgejo__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in forgejo_environment: ' ~ (app_forgejo__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_forgejo__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_forgejo__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Forgejo reads true and false as booleans, the key is the last part of the name of the variable
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_forgejo__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_forgejo__environment.items() if value is not none -%}
+          {%-   if key is match('^FORGEJO__') and (key.split('__') | last) in app_forgejo__environment_booleans
+                   and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_forgejo__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_forgejo__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('forgejo_admin has to be a dictionary with name, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | reject('in', app_forgejo__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in forgejo_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_forgejo__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.name | default('') | string) is not match(app_forgejo__admin_name_pattern) -%}
+          {%-     set _ = errors.append('forgejo_admin needs a name of letters, digits and _ . - starting with a letter or a digit.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_forgejo__admin_email_pattern) -%}
+          {%-     set _ = errors.append('forgejo_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none -%}
+          {%-     set _ = errors.append('forgejo_admin needs a password.') -%}
+          {%-   elif (admin.password | string | length) < app_forgejo__password_length -%}
+          {%-     set _ = errors.append('The password of forgejo_admin needs at least ' ~ app_forgejo__password_length ~ ' characters.') -%}
+          {%-   elif (admin.password | string ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('The password of forgejo_admin must not contain line breaks.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging forgejo_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_forgejo__environment_unknown: >-
+          {{ (app_forgejo__container.environment | default({})).keys() | reject('in', app_forgejo__environment_allowed) | list }}
+        app_forgejo__secrets_unknown: >-
+          {{ app_forgejo__secrets | map(attribute='target') | reject('in', app_forgejo__secret_variables) | list }}
+        app_forgejo__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_forgejo__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_forgejo__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_forgejo__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_forgejo__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the options of app.ini (app_forgejo__environment_allowed) and the secrets of app_forgejo__secret_files,'
+                                    ~ ' options with a free section or key in their name need the section or key in forgejo_keys ('
+                                    ~ (app_forgejo__keys_families.keys() | join(', ')) ~ ').') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image changes the owner of the directories of /data to USER_UID and USER_GID
+    - name: 'Create the directory of Forgejo'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ app_forgejo__home }}"
         owner: "{{ app_forgejo__uid }}"
         group: "{{ app_forgejo__gid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_forgejo__podman_home }}"
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'forgejo_database_passwd'
-        data: "{{ app_forgejo__db_pass }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_forgejo__secrets }}"
+      register: 'app_forgejo__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_forgejo__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_forgejo__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_forgejo__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name:  'Install container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_forgejo__container.name }}"
         hostname: "{{ app_forgejo__container.hostname }}"
@@ -45,6 +237,7 @@
         ip6: "{{ app_forgejo__container.ipv6 | default(omit) }}"
         network: "{{ app_forgejo__container.network }}"
         timezone: "{{ app_forgejo__container.timezone }}"
+        command: "{{ app_forgejo__container.command | default(omit) }}"
         env: "{{ app_forgejo__container.environment | default(omit) }}"
         etc_hosts: "{{ app_forgejo__container.etc_hosts | default(omit) }}"
         expose: "{{ app_forgejo__container.expose | default(omit) }}"
@@ -66,20 +259,67 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_forgejo__quadlet_result'
 
+    # The image writes the variables to app.ini on every start
     - name: 'Start and enable container'
-      ansible.builtin.systemd:
+      ansible.builtin.systemd_service:
         name: "{{ app_forgejo__container.name }}"
         daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+        state: "{{ 'restarted' if app_forgejo__restart | bool else 'started' }}"
         enabled: true
+      vars:
+        app_forgejo__running: >-
+          {{ (ansible_facts.services[app_forgejo__container.name + '.service'].state | default('')) == 'running' }}
+        app_forgejo__restart: >-
+          {{ app_forgejo__running | bool
+             and (app_forgejo__secrets_result is changed or app_forgejo__quadlet_result is changed) }}
       when: 'not ansible_check_mode'
 
+    # Forgejo migrates the database on start
+    - name: 'Wait for Forgejo'
+      ansible.builtin.uri:
+        url: "http://{{ app_forgejo__ip }}:{{ app_forgejo__port }}/api/healthz"
+      register: 'app_forgejo__ready'
+      until: app_forgejo__ready.status | default(-1) == 200
+      retries: 90
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Forgejo'
+      when:
+        - not ansible_check_mode
+        - app_forgejo__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_forgejo__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_forgejo__journal'
+      changed_when: false
+
+    - name: 'Assert that Forgejo answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__journal is skipped
+        fail_msg: "{{ app_forgejo__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # The password is an option with no_log, it is only sent to the API of Forgejo
+    - name: 'Create the administrator'
+      when: 'not ansible_check_mode'
+      app_forgejo_admin:
+        container: "{{ app_forgejo__container.name }}"
+        url: "http://{{ app_forgejo__ip }}:{{ app_forgejo__port }}"
+        name: "{{ app_forgejo__admin.name | string }}"
+        email: "{{ app_forgejo__admin.email | string }}"
+        password: "{{ app_forgejo__admin.password | string }}"
+      register: 'app_forgejo__admin_result'
+
     - name: 'Enable autoupdate on container'
-      when: 'app_forgejo__autoupdate_enabled'
-      include_role:
+      when: 'app_forgejo__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_forgejo__container.name }}"
         container_image: "{{ app_forgejo__container.image }}"
+        container_schedule: "{{ app_forgejo__autoupdate_schedule }}"

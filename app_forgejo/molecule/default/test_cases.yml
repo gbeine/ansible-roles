@@ -1,0 +1,156 @@
+---
+# Network created by container_podman in prepare.yml
+app_forgejo__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_forgejo__test_image: 'codeberg.org/forgejo/forgejo:17'
+app_forgejo__test_quadlet_path: '/etc/containers/systemd/forgejo.container'
+app_forgejo__test_app_ini_path: '/opt/forgejo/gitea/conf/app.ini'
+
+# Databases started by prepare.yml, test credentials only
+app_forgejo__test_databases:
+  mysql:
+    name: 'molecule-mariadb'
+    image: 'docker.io/library/mariadb:11'
+    ip: '10.89.0.20'
+    port: 3306
+    password: 'molecule-db-password'
+    env:
+      MARIADB_DATABASE: 'forgejo'
+      MARIADB_USER: 'forgejo'
+      MARIADB_PASSWORD: 'molecule-db-password'
+      MARIADB_RANDOM_ROOT_PASSWORD: '1'
+    # The query succeeds after the initialization, the server restarts during the initialization
+    ready: [ 'mariadb', '-h', '127.0.0.1', '-u', 'forgejo', '-pmolecule-db-password', '-e', 'SELECT 1', 'forgejo' ]
+    tables: [ 'mariadb', '-h', '127.0.0.1', '-u', 'forgejo', '-pmolecule-db-password', '-N', '-e', 'SHOW TABLES', 'forgejo' ]
+  postgres:
+    name: 'molecule-postgres'
+    image: 'docker.io/library/postgres:17'
+    ip: '10.89.0.20'
+    port: 5432
+    password: 'molecule-db-password'
+    env:
+      POSTGRES_DB: 'forgejo'
+      POSTGRES_USER: 'forgejo'
+      POSTGRES_PASSWORD: 'molecule-db-password'
+    # The server listens on TCP after the initialization
+    ready: [ 'psql', '-h', '127.0.0.1', '-U', 'forgejo', '-d', 'forgejo', '-c', 'SELECT 1' ]
+    tables: [ 'psql', '-h', '127.0.0.1', '-U', 'forgejo', '-d', 'forgejo', '-tAc', "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'" ]
+
+app_forgejo__test_cases:
+
+  # Only the mandatory variables, MariaDB and the administrator
+  - name: 'molecule-forgejo-default'
+    database: 'mysql'
+    role_vars:
+      forgejo_home: '/opt/forgejo'
+      forgejo_ip: '10.89.0.90'
+      forgejo_network: 'podman-molecule'
+      forgejo_hostname: 'forgejo-default'
+      forgejo_timezone: 'Europe/Berlin'
+      forgejo_uid: 1000
+      forgejo_environment:
+        FORGEJO__database__HOST: '10.89.0.20:3306'
+        FORGEJO__database__NAME: 'forgejo'
+        FORGEJO__database__USER: 'forgejo'
+      forgejo_secrets:
+        - name: 'forgejo_database_passwd'
+          data: 'molecule-db-password'
+          target: 'FORGEJO__database__PASSWD'
+        - name: 'forgejo_secret_key'
+          data: 'molecule-secret-key-default'
+          target: 'FORGEJO__security__SECRET_KEY'
+      forgejo_admin:
+        name: 'forgejo-admin'
+        email: 'admin@example.org'
+        password: 'molecule-admin-password'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/forgejo:/data'
+        - 'Secret=forgejo_database_passwd,type=mount,target=/run/secrets/forgejo_database_passwd'
+      env:
+        - 'USER_UID=1000'
+        - 'FORGEJO__database__DB_TYPE=mysql'
+        - 'FORGEJO__security__INSTALL_LOCK=true'
+        - 'FORGEJO__database__PASSWD__FILE=/run/secrets/forgejo_database_passwd'
+        - 'FORGEJO__security__SECRET_KEY__FILE=/run/secrets/forgejo_secret_key'
+      app_ini: [ 'DB_TYPE = mysql' ]
+      admin: { name: 'forgejo-admin', password: 'molecule-admin-password' }
+      metrics: ~
+
+  # IPv6, labels, PostgreSQL, options with keys, an option, the metrics token and the administrator
+  - name: 'molecule-forgejo'
+    database: 'postgres'
+    role_vars:
+      forgejo_home: '/opt/forgejo'
+      forgejo_ip: '10.89.0.91'
+      forgejo_ipv6: 'fd00:89::91'
+      forgejo_network: 'podman-molecule'
+      forgejo_hostname: 'forgejo-molecule'
+      forgejo_timezone: 'Europe/Berlin'
+      forgejo_uid: 1000
+      forgejo_labels:
+        traefik.enable: 'false'
+      forgejo_keys:
+        git.config: [ 'core.longpaths' ]
+        storage: [ 'molecule' ]
+      forgejo_environment:
+        FORGEJO__database__DB_TYPE: 'postgres'
+        FORGEJO__database__HOST: '10.89.0.20:5432'
+        FORGEJO__database__NAME: 'forgejo'
+        FORGEJO__database__USER: 'forgejo'
+        FORGEJO__server__DOMAIN: 'git.example.org'
+        FORGEJO__ui__DEFAULT_THEME: 'forgejo-dark'
+        FORGEJO__metrics__ENABLED: true
+        FORGEJO__git_0X2E_config__core_0X2E_longpaths: true
+        FORGEJO__storage_0X2E_molecule__STORAGE_TYPE: 'local'
+        FORGEJO__storage_0X2E_molecule__PATH: '/data/molecule-storage'
+      forgejo_secrets:
+        - name: 'forgejo_database_passwd'
+          data: 'molecule-db-password'
+          target: 'FORGEJO__database__PASSWD'
+        - name: 'forgejo_secret_key'
+          data: 'molecule-secret-key'
+          target: 'FORGEJO__security__SECRET_KEY'
+        - name: 'forgejo_metrics_token'
+          data: 'molecule-metrics-token'
+          target: 'FORGEJO__metrics__TOKEN'
+      forgejo_admin:
+        name: 'forgejo-admin'
+        email: 'admin@example.org'
+        password: 'molecule-admin-password'
+    # The theme changes and Forgejo has to restart, the password of the administrator changes with the API
+    side_effect:
+      environment:
+        FORGEJO__ui__DEFAULT_THEME: 'forgejo-light'
+      admin:
+        password: 'molecule-admin-changed'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      quadlet:
+        - 'Volume=/opt/forgejo:/data'
+        - 'Label=traefik.enable=false'
+        - 'Secret=forgejo_metrics_token,type=mount,target=/run/secrets/forgejo_metrics_token'
+      env:
+        - 'FORGEJO__database__DB_TYPE=postgres'
+        - 'FORGEJO__metrics__ENABLED=true'
+        - 'FORGEJO__ui__DEFAULT_THEME=forgejo-light'
+        - 'FORGEJO__metrics__TOKEN__FILE=/run/secrets/forgejo_metrics_token'
+      app_ini:
+        - 'DB_TYPE = postgres'
+        - 'DEFAULT_THEME = forgejo-light'
+        - '[git.config]'
+        - 'core.longpaths = true'
+        - '[storage.molecule]'
+        - 'PATH = /data/molecule-storage'
+      admin: { name: 'forgejo-admin', password: 'molecule-admin-changed', former_password: 'molecule-admin-password' }
+      metrics: { token: 'molecule-metrics-token' }

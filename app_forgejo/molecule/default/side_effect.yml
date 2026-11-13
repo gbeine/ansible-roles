@@ -1,0 +1,192 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_forgejo__test_case: "{{ app_forgejo__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_forgejo__test_vars: "{{ app_forgejo__test_case.role_vars }}"
+    app_forgejo__test_environment: "{{ app_forgejo__test_vars.forgejo_environment | default({}) }}"
+    app_forgejo__test_secrets: "{{ app_forgejo__test_vars.forgejo_secrets | default([]) }}"
+    app_forgejo__test_admin: "{{ app_forgejo__test_vars.forgejo_admin }}"
+    app_forgejo__test_checked_files:
+      - "{{ app_forgejo__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_forgejo__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_forgejo__test_checked_files }}"
+      register: 'app_forgejo__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_forgejo with forgejo_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_container: [ 'environment' ]
+        app_forgejo__test_invalid:
+          message: 'forgejo_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_forgejo with forgejo_keys not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_keys: [ 'storage' ]
+        app_forgejo__test_invalid:
+          message: 'forgejo_keys not a dictionary'
+          search: '^forgejo_keys has to be a dictionary$'
+
+    - name: 'Run app_forgejo with an unknown family in forgejo_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_keys: { storages: [ 'molecule' ] }
+        app_forgejo__test_invalid:
+          message: 'an unknown family in forgejo_keys'
+          search: '^unknown entries in forgejo_keys: storages, allowed are storage, queue, log'
+
+    - name: 'Run app_forgejo with an invalid key in forgejo_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_keys: { storage: [ 'My Storage' ] }
+        app_forgejo__test_invalid:
+          message: 'an invalid key in forgejo_keys'
+          search: '^forgejo_keys.storage contains invalid keys, allowed are lower case letters, digits and _ . - without __: My Storage$'
+
+    - name: 'Run app_forgejo with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_secrets: [ { name: 'forgejo_secret_key', data: 'x' } ]
+        app_forgejo__test_invalid:
+          message: 'a secret without target'
+          search: '^forgejo_secrets entries need name, data and target$'
+
+    - name: 'Run app_forgejo without SECRET_KEY (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_secrets: "{{ app_forgejo__test_secrets | rejectattr('target', 'eq', 'FORGEJO__security__SECRET_KEY') | list }}"
+        app_forgejo__test_invalid:
+          message: 'no SECRET_KEY'
+          search: '^Forgejo needs the secrets FORGEJO__security__SECRET_KEY, FORGEJO__database__PASSWD, missing: FORGEJO__security__SECRET_KEY\.$'
+
+    - name: 'Run app_forgejo with the database password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_environment: "{{ app_forgejo__test_environment | combine({ 'FORGEJO__database__PASSWD': 'molecule' }) }}"
+        app_forgejo__test_invalid:
+          message: 'the database password in the environment'
+          search: '^Secrets and their file variables must not be set in forgejo_environment: FORGEJO__database__PASSWD\.$'
+
+    - name: 'Run app_forgejo with mysql without the database host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_environment: "{{ app_forgejo__test_environment | combine({ 'FORGEJO__database__DB_TYPE': 'mysql', 'FORGEJO__database__HOST': '' }) }}"
+        app_forgejo__test_invalid:
+          message: 'mysql without the database host'
+          search: '^FORGEJO__database__DB_TYPE mysql needs FORGEJO__database__HOST, FORGEJO__database__NAME, FORGEJO__database__USER, missing: FORGEJO__database__HOST\.$'
+
+    - name: 'Run app_forgejo with an invalid database type (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_environment: "{{ app_forgejo__test_environment | combine({ 'FORGEJO__database__DB_TYPE': 'mssql' }) }}"
+        app_forgejo__test_invalid:
+          message: 'an invalid database type'
+          search: '^FORGEJO__database__DB_TYPE has to be one of mysql, postgres, sqlite3, got mssql\.$'
+
+    - name: 'Run app_forgejo with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_environment: "{{ app_forgejo__test_environment | combine({ 'FORGEJO__service__DISABLE_REGISTRATION': 'yes' }) }}"
+        app_forgejo__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: FORGEJO__service__DISABLE_REGISTRATION\.$'
+
+    - name: 'Run app_forgejo with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_environment: "{{ app_forgejo__test_environment | combine({ 'FORGEJO__server__DOMAIN': \"git\nexample.org\" }) }}"
+        app_forgejo__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: FORGEJO__server__DOMAIN\.$'
+
+    - name: 'Run app_forgejo with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_admin: { name: 'forgejo-admin', email: 'admin@example.org' }
+        app_forgejo__test_invalid:
+          message: 'an administrator without password'
+          search: '^forgejo_admin needs a password\.$'
+
+    - name: 'Run app_forgejo with a short password of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_admin: "{{ app_forgejo__test_admin | combine({ 'password': 'short' }) }}"
+        app_forgejo__test_invalid:
+          message: 'a short password of the administrator'
+          search: '^The password of forgejo_admin needs at least 8 characters\.$'
+
+    - name: 'Run app_forgejo with an option of a storage missing in forgejo_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_environment: "{{ app_forgejo__test_environment | combine({ 'FORGEJO__storage_0X2E_minio__STORAGE_TYPE': 'minio' }) }}"
+        app_forgejo__test_invalid:
+          message: 'an option of a storage missing in forgejo_keys'
+          search: '^Unknown environment variables: FORGEJO__storage_0X2E_minio__STORAGE_TYPE\. .*need the section or key in forgejo_keys'
+
+    - name: 'Run app_forgejo with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_secrets: "{{ app_forgejo__test_secrets + [ { 'name': 'forgejo_unknown', 'data': 'molecule', 'target': 'FORGEJO__server__ROOT_URL' } ] }}"
+        app_forgejo__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: FORGEJO__server__ROOT_URL\.'
+
+    - name: 'Run app_forgejo with the changed theme and password'
+      when: app_forgejo__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo' ]
+          register: 'app_forgejo__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            forgejo_environment: "{{ app_forgejo__test_environment | combine(app_forgejo__test_case.side_effect.environment) }}"
+            forgejo_admin: "{{ app_forgejo__test_admin | combine(app_forgejo__test_case.side_effect.admin) }}"
+
+        - name: 'Run app_forgejo with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_forgejo'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo' ]
+          register: 'app_forgejo__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed password'
+          ansible.builtin.assert:
+            that:
+              - app_forgejo__quadlet_result is changed
+              - app_forgejo__admin_result is changed
+              - not app_forgejo__admin_result.created
+              - app_forgejo__test_started_after.stdout | int > app_forgejo__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_forgejo__quadlet_result is changed }}, administrator changed: {{ app_forgejo__admin_result is changed }},
+              created: {{ app_forgejo__admin_result.created | default('') }},
+              start before {{ app_forgejo__test_started_before.stdout }}, after {{ app_forgejo__test_started_after.stdout }}

@@ -1,0 +1,143 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_forgejo__test_case: "{{ app_forgejo__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_forgejo__expect: "{{ app_forgejo__test_case.expect }}"
+    app_forgejo__test_database: "{{ app_forgejo__test_databases[app_forgejo__test_case.database] }}"
+    app_forgejo__test_url: "http://{{ app_forgejo__expect.ip }}:3000"
+    # The secrets and passwords of the test case, they must not be part of the unit or the environment
+    app_forgejo__test_plain: >-
+      {{ (app_forgejo__test_case.role_vars.forgejo_secrets | default([])) | map(attribute='data') | list
+         + [ app_forgejo__test_case.role_vars.forgejo_admin.password ]
+         + ([ app_forgejo__test_case.side_effect.admin.password ] if app_forgejo__test_case.side_effect is defined else []) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_forgejo__test_quadlet_path }}"
+      register: 'app_forgejo__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_forgejo__test_image) in app_forgejo__test_quadlet_lines
+          - ('IP=' + app_forgejo__expect.ip) in app_forgejo__test_quadlet_lines
+          - app_forgejo__expect.ip6 is none or ('IP6=' + app_forgejo__expect.ip6) in app_forgejo__test_quadlet_lines
+          - app_forgejo__expect.ip6 is not none or app_forgejo__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_forgejo__expect.quadlet | reject('in', app_forgejo__test_quadlet_lines) | list | length == 0
+          - app_forgejo__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_forgejo__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_forgejo__test_plain | select('in', app_forgejo__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_forgejo__test_quadlet.content | b64decode }}"
+      vars:
+        app_forgejo__test_quadlet_lines: "{{ (app_forgejo__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the Forgejo service'
+      ansible.builtin.command: 'systemctl is-active forgejo'
+      register: 'app_forgejo__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the Forgejo container'
+      ansible.builtin.command: 'podman inspect forgejo'
+      register: 'app_forgejo__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__test_service.stdout == 'active'
+          - app_forgejo__test_net.IPAddress == app_forgejo__expect.ip
+          - app_forgejo__expect.ip6 is none or app_forgejo__test_net.GlobalIPv6Address == app_forgejo__expect.ip6
+          - app_forgejo__expect.env | reject('in', app_forgejo__test_env) | list | length == 0
+          - app_forgejo__test_plain | select('in', app_forgejo__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_forgejo__test_service.stdout }},
+          IPv4 {{ app_forgejo__test_net.IPAddress }}, IPv6 {{ app_forgejo__test_net.GlobalIPv6Address }},
+          environment {{ app_forgejo__test_env | join(', ') }}
+      vars:
+        app_forgejo__test_container: "{{ (app_forgejo__test_inspect.stdout | from_json)[0] }}"
+        app_forgejo__test_net: "{{ app_forgejo__test_container.NetworkSettings.Networks[app_forgejo__test_case.role_vars.forgejo_network] }}"
+        app_forgejo__test_env: "{{ app_forgejo__test_container.Config.Env }}"
+
+    # environment-to-ini writes the variables to app.ini on every start
+    - name: 'Read app.ini'
+      ansible.builtin.slurp:
+        src: "{{ app_forgejo__test_app_ini_path }}"
+      register: 'app_forgejo__test_app_ini'
+
+    - name: 'Assert app.ini'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__expect.app_ini | reject('in', app_forgejo__test_app_ini_lines) | list | length == 0
+          - "'INSTALL_LOCK = true' in app_forgejo__test_app_ini_lines"
+        fail_msg: "missing {{ app_forgejo__expect.app_ini | reject('in', app_forgejo__test_app_ini_lines) | list }}"
+      vars:
+        app_forgejo__test_app_ini_lines: "{{ (app_forgejo__test_app_ini.content | b64decode).splitlines() | map('trim') | list }}"
+
+    - name: 'Read the health of Forgejo'
+      ansible.builtin.uri:
+        url: "{{ app_forgejo__test_url }}/api/healthz"
+        return_content: true
+      register: 'app_forgejo__test_health'
+
+    - name: 'Log in as the administrator'
+      ansible.builtin.uri:
+        url: "{{ app_forgejo__test_url }}/api/v1/user"
+        url_username: "{{ app_forgejo__expect.admin.name }}"
+        url_password: "{{ item.password }}"
+        force_basic_auth: true
+        status_code: [ 200, 401 ]
+        return_content: true
+      loop: >-
+        {{ [ { 'password': app_forgejo__expect.admin.password, 'allowed': true } ]
+           + ([ { 'password': app_forgejo__expect.admin.former_password, 'allowed': false } ] if app_forgejo__expect.admin.former_password is defined else []) }}
+      loop_control:
+        label: "{{ 'password' if item.allowed else 'former password' }}"
+      register: 'app_forgejo__test_login'
+      no_log: true
+
+    - name: 'Read the metrics with and without the token'
+      when: app_forgejo__expect.metrics is not none
+      ansible.builtin.uri:
+        url: "{{ app_forgejo__test_url }}/metrics"
+        headers: "{{ { 'Authorization': 'Bearer ' ~ item } if item | length > 0 else {} }}"
+        status_code: [ 200, 401 ]
+      loop:
+        - "{{ (app_forgejo__expect.metrics | default({}, true)).token | default('') }}"
+        - ''
+      register: 'app_forgejo__test_metrics'
+      no_log: true
+
+    - name: 'Assert the health, the administrator and the metrics'
+      ansible.builtin.assert:
+        that:
+          - (app_forgejo__test_health.content | from_json).status == 'pass'
+          - app_forgejo__test_login.results | map(attribute='status') | list == app_forgejo__test_login.results | map(attribute='item.allowed') | map('ternary', 200, 401) | list
+          - (app_forgejo__test_login.results[0].content | from_json).is_admin
+          - app_forgejo__expect.metrics is none or app_forgejo__test_metrics.results | map(attribute='status') | list == [ 200, 401 ]
+        fail_msg: >-
+          health {{ app_forgejo__test_health.content | default('') }},
+          logins {{ app_forgejo__test_login.results | map(attribute='status') | list }},
+          metrics {{ app_forgejo__test_metrics.results | default([]) | map(attribute='status', default='') | list }}
+
+    - name: 'Read the tables of Forgejo in the database'
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ app_forgejo__test_database.password, app_forgejo__test_database.name ] + app_forgejo__test_database.tables }}"
+      register: 'app_forgejo__test_tables'
+      changed_when: false
+
+    - name: 'Assert the tables of Forgejo in the database'
+      ansible.builtin.assert:
+        that:
+          - "'user' in app_forgejo__test_tables.stdout_lines"
+          - "'repository' in app_forgejo__test_tables.stdout_lines"
+        fail_msg: "{{ app_forgejo__test_tables.stdout_lines }}"

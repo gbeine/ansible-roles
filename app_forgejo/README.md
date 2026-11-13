@@ -7,4 +7,4 @@ container_link: https://codeberg.org/forgejo/-/packages/container/forgejo
 documentation_link: https://forgejo.org/docs/latest/
 ---
 
-Installs and configures Forgejo as a podman quadlet.
+Installs and configures Forgejo, including its administrator, as a podman quadlet.

@@ -1,0 +1,58 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_forgejo__test_network }}"
+    podman_default_network: "{{ app_forgejo__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_forgejo__test_case: "{{ app_forgejo__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_forgejo__test_database: "{{ app_forgejo__test_databases[app_forgejo__test_case.database] }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # Codeberg refuses requests with 403 while it is under load, the pull is repeated
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      register: 'app_forgejo__test_pull'
+      until: app_forgejo__test_pull is succeeded
+      retries: 10
+      delay: 30
+      loop:
+        - "{{ app_forgejo__test_image }}"
+        - "{{ app_forgejo__test_database.image }}"
+
+    - name: 'Start the database'
+      containers.podman.podman_container:
+        name: "{{ app_forgejo__test_database.name }}"
+        image: "{{ app_forgejo__test_database.image }}"
+        network: "{{ app_forgejo__test_network.name }}"
+        ip: "{{ app_forgejo__test_database.ip }}"
+        env: "{{ app_forgejo__test_database.env }}"
+        state: 'started'
+
+    - name: 'Wait for the database'
+      ansible.builtin.wait_for:
+        host: "{{ app_forgejo__test_database.ip }}"
+        port: "{{ app_forgejo__test_database.port }}"
+        timeout: 120
+
+    - name: 'Wait for the initialization of the database'
+      ansible.builtin.command:
+        argv: "{{ [ 'podman', 'exec', '-e', 'PGPASSWORD=' ~ app_forgejo__test_database.password, app_forgejo__test_database.name ] + app_forgejo__test_database.ready }}"
+      register: 'app_forgejo__test_ready'
+      until: app_forgejo__test_ready.rc == 0
+      retries: 60
+      delay: 2
+      changed_when: false
