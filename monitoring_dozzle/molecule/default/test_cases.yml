@@ -1,0 +1,123 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_dozzle__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_dozzle__test_image: 'docker.io/amir20/dozzle:latest'
+monitoring_dozzle__test_quadlet_path: '/etc/containers/systemd/dozzle.container'
+monitoring_dozzle__test_users_path: '/opt/dozzle/data/users.yml'
+
+# A container writing a line every two seconds, started by prepare.yml, Dozzle has to show it
+monitoring_dozzle__test_logger:
+  name: 'molecule-logger'
+  image: 'docker.io/library/busybox:latest'
+  line: 'molecule dozzle line'
+
+monitoring_dozzle__test_cases:
+
+  # Only the mandatory variables and one user
+  - name: 'molecule-dozzle-default'
+    role_vars:
+      dozzle_home: '/opt/dozzle'
+      dozzle_ip: '10.89.0.110'
+      dozzle_network: 'podman-molecule'
+      dozzle_hostname: 'dozzle-default'
+      dozzle_timezone: 'Europe/Berlin'
+      dozzle_users:
+        admin:
+          name: 'Molecule Admin'
+          email: 'admin@molecule.test'
+          password: 'molecule-admin-password'
+    expect:
+      ip: '10.89.0.110'
+      ip6: ~
+      # The users who log in, a filter hides the logger from the guest
+      logins:
+        - { username: 'admin', password: 'molecule-admin-password', logger: true }
+      refused:
+        - { username: 'admin', password: 'molecule-wrong-password' }
+      quadlet:
+        - 'Volume=/opt/dozzle/data:/data:Z'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'DOZZLE_AUTH_PROVIDER=simple'
+        - 'DOZZLE_DISABLE_SETUP_WIZARD=true'
+        - 'DOZZLE_MODE=server'
+        - 'DOZZLE_ENABLE_ACTIONS=false'
+        - 'DOZZLE_ENABLE_SHELL=false'
+        - 'DOZZLE_NO_ANALYTICS=true'
+
+  # IPv6, labels, MCP with its token as secret in the environment and a guest with a filter
+  - name: 'molecule-dozzle'
+    role_vars:
+      dozzle_home: '/opt/dozzle'
+      dozzle_ip: '10.89.0.111'
+      dozzle_ipv6: 'fd00:89::111'
+      dozzle_network: 'podman-molecule'
+      dozzle_hostname: 'dozzle-molecule'
+      dozzle_timezone: 'Europe/Berlin'
+      dozzle_labels:
+        traefik.enable: 'true'
+      dozzle_environment:
+        DOZZLE_HOSTNAME: 'molecule-host'
+        DOZZLE_LEVEL: 'debug'
+        DOZZLE_ENABLE_MCP: true
+      dozzle_secrets:
+        - name: 'dozzle_mcp_token'
+          data: 'molecule-mcp-token-0123456789abcdef'
+          target: 'DOZZLE_MCP_TOKEN'
+      dozzle_users:
+        admin:
+          name: 'Molecule Admin'
+          email: 'admin@molecule.test'
+          password: 'molecule-admin-password'
+          roles: [ 'all' ]
+        guest:
+          name: 'Molecule Guest'
+          password: 'molecule-guest-password'
+          filter: 'name=nothing'
+          roles: [ 'none' ]
+    side_effect:
+      environment:
+        DOZZLE_HOSTNAME: 'molecule-host'
+        DOZZLE_LEVEL: 'info'
+        DOZZLE_ENABLE_MCP: true
+      users:
+        admin:
+          name: 'Molecule Admin'
+          email: 'admin@molecule.test'
+          password: 'molecule-admin-changed'
+          roles: [ 'all' ]
+        guest:
+          name: 'Molecule Guest'
+          password: 'molecule-guest-password'
+          filter: 'name=nothing'
+          roles: [ 'none' ]
+    expect:
+      ip: '10.89.0.111'
+      ip6: 'fd00:89::111'
+      logins:
+        - { username: 'admin', password: 'molecule-admin-changed', logger: true }
+        - { username: 'guest', password: 'molecule-guest-password', logger: false }
+      refused:
+        - { username: 'admin', password: 'molecule-wrong-password' }
+        - { username: 'admin', password: 'molecule-admin-password' }
+      quadlet:
+        - 'Volume=/opt/dozzle/data:/data:Z'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock'
+        - 'Secret=dozzle_mcp_token,type=env,target=DOZZLE_MCP_TOKEN'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+        - 'DOZZLE_AUTH_PROVIDER=simple'
+        - 'DOZZLE_DISABLE_SETUP_WIZARD=true'
+        - 'DOZZLE_HOSTNAME=molecule-host'
+        - 'DOZZLE_LEVEL=info'
+        - 'DOZZLE_ENABLE_MCP=true'

@@ -1,0 +1,200 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_dozzle__test_case: "{{ monitoring_dozzle__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_dozzle__expect: "{{ monitoring_dozzle__test_case.expect }}"
+    monitoring_dozzle__test_url: "http://{{ monitoring_dozzle__expect.ip }}:8080"
+    # The secrets and passwords of the test case, they must not be part of the unit, the environment or users.yml
+    monitoring_dozzle__test_plain: >-
+      {{ monitoring_dozzle__test_case.role_vars.dozzle_secrets | default([]) | map(attribute='data') | list
+         + monitoring_dozzle__test_case.role_vars.dozzle_users.values() | map(attribute='password') | list
+         + (monitoring_dozzle__test_case.side_effect.users.values() | map(attribute='password') | list
+            if monitoring_dozzle__test_case.side_effect is defined else []) }}
+    # Checks the passwords against the hashes of users.yml, reads the users file and the logins as JSON on stdin
+    monitoring_dozzle__test_hash_script: |
+      import json, sys, bcrypt
+      data = json.load(sys.stdin)
+      users = json.load(open(data['path']))['users']
+      print(json.dumps([bcrypt.checkpw(login['password'].encode(), users[login['username']]['password'].encode()) for login in data['logins']]))
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_dozzle__test_quadlet_path }}"
+      register: 'monitoring_dozzle__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_dozzle__test_image) in monitoring_dozzle__test_quadlet_lines
+          - ('IP=' + monitoring_dozzle__expect.ip) in monitoring_dozzle__test_quadlet_lines
+          - monitoring_dozzle__expect.ip6 is none or ('IP6=' + monitoring_dozzle__expect.ip6) in monitoring_dozzle__test_quadlet_lines
+          - monitoring_dozzle__expect.ip6 is not none or monitoring_dozzle__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - monitoring_dozzle__expect.quadlet | reject('in', monitoring_dozzle__test_quadlet_lines) | list | length == 0
+          - monitoring_dozzle__test_plain | select('in', monitoring_dozzle__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ monitoring_dozzle__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        monitoring_dozzle__test_quadlet_lines: "{{ (monitoring_dozzle__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the dozzle service'
+      ansible.builtin.command: 'systemctl is-active dozzle'
+      register: 'monitoring_dozzle__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the dozzle container'
+      ansible.builtin.command: 'podman inspect dozzle'
+      register: 'monitoring_dozzle__test_inspect'
+      changed_when: false
+
+    # podman shows the secrets passed with type=env masked
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__test_service.stdout == 'active'
+          - monitoring_dozzle__test_net.IPAddress == monitoring_dozzle__expect.ip
+          - monitoring_dozzle__expect.ip6 is none or monitoring_dozzle__test_net.GlobalIPv6Address == monitoring_dozzle__expect.ip6
+          - monitoring_dozzle__expect.env | reject('in', monitoring_dozzle__test_env) | list | length == 0
+          - monitoring_dozzle__test_plain | select('in', monitoring_dozzle__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ monitoring_dozzle__test_service.stdout }},
+          IPv4 {{ monitoring_dozzle__test_net.IPAddress }}, IPv6 {{ monitoring_dozzle__test_net.GlobalIPv6Address }},
+          environment {{ monitoring_dozzle__test_env | reject('search', 'TOKEN=') | join(', ') }}
+      vars:
+        monitoring_dozzle__test_container: "{{ (monitoring_dozzle__test_inspect.stdout | from_json)[0] }}"
+        monitoring_dozzle__test_net: "{{ monitoring_dozzle__test_container.NetworkSettings.Networks[monitoring_dozzle__test_case.role_vars.dozzle_network] }}"
+        monitoring_dozzle__test_env: "{{ monitoring_dozzle__test_container.Config.Env }}"
+
+    - name: 'Read the users of Dozzle'
+      ansible.builtin.stat:
+        path: "{{ monitoring_dozzle__test_users_path }}"
+      register: 'monitoring_dozzle__test_users_file'
+
+    - name: 'Read the content of the users of Dozzle'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_dozzle__test_users_path }}"
+      register: 'monitoring_dozzle__test_users_content'
+
+    - name: 'Check the passwords against the hashes of the users'
+      ansible.builtin.command:
+        argv: [ 'python3', '-c', "{{ monitoring_dozzle__test_hash_script }}" ]
+        stdin: "{{ { 'path': monitoring_dozzle__test_users_path, 'logins': monitoring_dozzle__expect.logins } | to_json }}"
+      register: 'monitoring_dozzle__test_hashes'
+      changed_when: false
+      no_log: true
+
+    - name: 'Assert the users of Dozzle'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__test_users_file.stat.exists
+          - monitoring_dozzle__test_users_file.stat.mode == '0600'
+          - monitoring_dozzle__test_users_file.stat.pw_name == 'root'
+          - monitoring_dozzle__test_users.keys() | sort == monitoring_dozzle__test_case.role_vars.dozzle_users.keys() | sort
+          - monitoring_dozzle__test_users.values() | map(attribute='password') | reject('match', '^\$2[aby]\$11\$') | list | length == 0
+          - monitoring_dozzle__test_plain | select('in', monitoring_dozzle__test_users_content.content | b64decode) | list | length == 0
+          - monitoring_dozzle__test_hashes.stdout | from_json | reject | list | length == 0
+        fail_msg: >-
+          mode {{ monitoring_dozzle__test_users_file.stat.mode | default('') }}, users {{ monitoring_dozzle__test_users.keys() | list }},
+          passwords match {{ monitoring_dozzle__test_hashes.stdout | default('') }}
+      vars:
+        monitoring_dozzle__test_users: "{{ (monitoring_dozzle__test_users_content.content | b64decode | from_json).users }}"
+
+    - name: 'Read the health check'
+      ansible.builtin.uri:
+        url: "{{ monitoring_dozzle__test_url }}/healthcheck"
+      register: 'monitoring_dozzle__test_health'
+
+    # The token is created with the form of the login, curl keeps the cookie of the session in a file
+    - name: 'Log in and read the containers'
+      block:
+
+        - name: 'Create the cookie files'
+          ansible.builtin.tempfile:
+            suffix: '.cookies'
+          loop: "{{ monitoring_dozzle__expect.logins + monitoring_dozzle__expect.refused }}"
+          loop_control:
+            label: "{{ item.username }}"
+          register: 'monitoring_dozzle__test_cookie_files'
+
+        - name: 'Log in with the passwords, a wrong password and the former password'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie-jar', "{{ item.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                    '--data-urlencode', "username={{ item.item.username }}",
+                    '--data-urlencode', 'password@-',
+                    "{{ monitoring_dozzle__test_url }}/api/token" ]
+            stdin: "{{ item.item.password }}"
+            stdin_add_newline: false
+          loop: "{{ monitoring_dozzle__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item.username }}"
+          register: 'monitoring_dozzle__test_login'
+          changed_when: false
+          no_log: true
+
+        # The version needs a login, without session Dozzle answers 401
+        - name: 'Read the version with the sessions'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                    "{{ monitoring_dozzle__test_url }}/api/version" ]
+          loop: "{{ monitoring_dozzle__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item.username }}"
+          register: 'monitoring_dozzle__test_version'
+          changed_when: false
+
+        # The stream of the events starts with the containers the user may see, curl stops it after 5 seconds
+        - name: 'Read the containers with the sessions of the users'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--no-buffer', '--max-time', '5',
+                    '--cookie', "{{ item.path }}",
+                    "{{ monitoring_dozzle__test_url }}/api/events/stream" ]
+          loop: "{{ monitoring_dozzle__test_cookie_files.results[:monitoring_dozzle__expect.logins | length] }}"
+          loop_control:
+            label: "{{ item.item.username }}"
+          register: 'monitoring_dozzle__test_events'
+          changed_when: false
+          # curl ends with 28 when the time is up
+          failed_when: monitoring_dozzle__test_events.rc not in [ 0, 28 ]
+
+      always:
+
+        - name: 'Remove the cookie files'
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: 'absent'
+          loop: "{{ monitoring_dozzle__test_cookie_files.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.username }}"
+
+    # A successful login answers 200, a refused one 401
+    - name: 'Assert the health check, the logins and the containers'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__test_health.status == 200
+          - monitoring_dozzle__test_responses == monitoring_dozzle__test_expected
+          - monitoring_dozzle__test_versions == monitoring_dozzle__test_expected
+          - monitoring_dozzle__test_seen == monitoring_dozzle__expect.logins | map(attribute='logger') | list
+        fail_msg: >-
+          logins {{ monitoring_dozzle__test_responses }}, versions {{ monitoring_dozzle__test_versions }}, expected {{ monitoring_dozzle__test_expected }},
+          logger seen {{ monitoring_dozzle__test_seen }},
+          events {{ monitoring_dozzle__test_events.results | map(attribute='stdout') | map('truncate', 500) | list | to_json }}
+      vars:
+        monitoring_dozzle__test_expected: >-
+          {{ [ '200' ] * (monitoring_dozzle__expect.logins | length) + [ '401' ] * (monitoring_dozzle__expect.refused | length) }}
+        monitoring_dozzle__test_responses: "{{ monitoring_dozzle__test_login.results | map(attribute='stdout') | list }}"
+        monitoring_dozzle__test_versions: "{{ monitoring_dozzle__test_version.results | map(attribute='stdout') | list }}"
+        monitoring_dozzle__test_seen: >-
+          {{ monitoring_dozzle__test_events.results | map(attribute='stdout')
+             | map('regex_search', '"name":\s*"' ~ monitoring_dozzle__test_logger.name ~ '"') | map('ternary', true, false) | list }}

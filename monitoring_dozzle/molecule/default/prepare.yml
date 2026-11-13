@@ -1,0 +1,47 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ monitoring_dozzle__test_network }}"
+    podman_default_network: "{{ monitoring_dozzle__test_network.name }}"
+    # Dozzle reads the containers with the Docker API of the podman socket
+    podman_socket_enabled: true
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify signs in with curl, it keeps the cookies of the session in a file,
+    # and checks the hashes of users.yml with bcrypt
+    - name: 'Install curl and bcrypt'
+      ansible.builtin.apt:
+        name: [ 'curl', 'python3-bcrypt' ]
+        state: 'present'
+        update_cache: true
+
+    - name: 'Pull the images, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_dozzle__test_image }}"
+        - "{{ monitoring_dozzle__test_logger.image }}"
+      register: 'monitoring_dozzle__test_pull'
+      until: monitoring_dozzle__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Start a container writing logs'
+      containers.podman.podman_container:
+        name: "{{ monitoring_dozzle__test_logger.name }}"
+        image: "{{ monitoring_dozzle__test_logger.image }}"
+        command: [ 'sh', '-c', "while true; do echo '{{ monitoring_dozzle__test_logger.line }}'; sleep 2; done" ]
+        state: 'started'

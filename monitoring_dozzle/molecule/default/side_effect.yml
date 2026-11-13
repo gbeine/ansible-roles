@@ -1,0 +1,184 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_dozzle__test_case: "{{ monitoring_dozzle__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_dozzle__test_vars: "{{ monitoring_dozzle__test_case.role_vars }}"
+    monitoring_dozzle__test_environment: "{{ monitoring_dozzle__test_vars.dozzle_environment | default({}) }}"
+    monitoring_dozzle__test_secrets: "{{ monitoring_dozzle__test_vars.dozzle_secrets | default([]) }}"
+    monitoring_dozzle__test_users: "{{ monitoring_dozzle__test_vars.dozzle_users }}"
+    monitoring_dozzle__test_checked_files:
+      - "{{ monitoring_dozzle__test_quadlet_path }}"
+      - "{{ monitoring_dozzle__test_users_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_dozzle__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_dozzle__test_checked_files }}"
+      register: 'monitoring_dozzle__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run monitoring_dozzle with dozzle_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_container: [ 'environment' ]
+        monitoring_dozzle__test_invalid:
+          message: 'dozzle_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_dozzle with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_secrets: "{{ monitoring_dozzle__test_secrets + [ { 'name': 'dozzle_other', 'data': 'x' } ] }}"
+        monitoring_dozzle__test_invalid:
+          message: 'a secret without target'
+          search: '^dozzle_secrets entries need name, data and target$'
+
+    - name: 'Run monitoring_dozzle without login (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_AUTH_PROVIDER': 'none' }) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'without login'
+          search: '^DOZZLE_AUTH_PROVIDER has to be one of simple, oidc, forward-proxy, got none\.$'
+
+    - name: 'Run monitoring_dozzle with the provider simple without users (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_users: {}
+        monitoring_dozzle__test_invalid:
+          message: 'the provider simple without users'
+          search: '^The provider simple needs at least one user in dozzle_users\.$'
+
+    - name: 'Run monitoring_dozzle with OIDC without issuer (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_AUTH_PROVIDER': 'oidc', 'DOZZLE_AUTH_OIDC_CLIENT_ID': 'dozzle' }) }}"
+        dozzle_secrets: "{{ monitoring_dozzle__test_secrets + [ { 'name': 'dozzle_oidc_secret', 'data': 'molecule-oidc-secret', 'target': 'DOZZLE_AUTH_OIDC_CLIENT_SECRET' } ] }}"
+        monitoring_dozzle__test_invalid:
+          message: 'OIDC without issuer'
+          search: '^The provider oidc needs the environment variables DOZZLE_AUTH_OIDC_ISSUER, DOZZLE_AUTH_OIDC_CLIENT_ID, missing or empty: DOZZLE_AUTH_OIDC_ISSUER\.$'
+
+    - name: 'Run monitoring_dozzle with the token of MCP in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_MCP_TOKEN': 'molecule-plain-token-0123456789abcdef' }) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'the token of MCP in the environment'
+          search: '^Secrets and their file variables must not be set in dozzle_environment: DOZZLE_MCP_TOKEN\.$'
+
+    - name: 'Run monitoring_dozzle with DOZZLE_MODE in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_MODE': 'swarm' }) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'DOZZLE_MODE in the environment'
+          search: '^These variables are set by the role and must not be set in dozzle_environment: DOZZLE_MODE\.$'
+
+    - name: 'Run monitoring_dozzle with a short token of MCP (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_secrets: "{{ monitoring_dozzle__test_secrets | rejectattr('target', 'eq', 'DOZZLE_MCP_TOKEN') | list
+                            + [ { 'name': 'dozzle_mcp_token', 'data': 'molecule-short-token', 'target': 'DOZZLE_MCP_TOKEN' } ] }}"
+        monitoring_dozzle__test_invalid:
+          message: 'a short token of MCP'
+          search: '^The secret DOZZLE_MCP_TOKEN needs at least 32 characters\.$'
+
+    - name: 'Run monitoring_dozzle with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_NAMESPACE': 'default' }) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: DOZZLE_NAMESPACE\.'
+
+    - name: 'Run monitoring_dozzle with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_secrets: "{{ monitoring_dozzle__test_secrets + [ { 'name': 'dozzle_key', 'data': 'x', 'target': 'DOZZLE_KEY' } ] }}"
+        monitoring_dozzle__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: DOZZLE_KEY\.'
+
+    - name: 'Run monitoring_dozzle with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_ENABLE_ACTIONS': 'yes' }) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: DOZZLE_ENABLE_ACTIONS\.$'
+
+    - name: 'Run monitoring_dozzle with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_HOSTNAME': 'molecule\nhost' }) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: DOZZLE_HOSTNAME\.$'
+
+    - name: 'Run monitoring_dozzle with a short password of a user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_users: "{{ monitoring_dozzle__test_users | combine({ 'admin': { 'password': 'short12' } }, recursive=true) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'a short password of a user'
+          search: '^The users of dozzle_users need a password of 8 to 72 characters or a login at GitHub: admin\.$'
+
+    - name: 'Run monitoring_dozzle with an unknown role of a user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_users: "{{ monitoring_dozzle__test_users | combine({ 'admin': { 'roles': [ 'root' ] } }, recursive=true) }}"
+        monitoring_dozzle__test_invalid:
+          message: 'an unknown role of a user'
+          search: '^The roles of dozzle_users have to be a list of .*: admin\.$'
+
+    - name: 'Change the environment and the users'
+      when: monitoring_dozzle__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            dozzle_environment: "{{ monitoring_dozzle__test_case.side_effect.environment }}"
+            dozzle_users: "{{ monitoring_dozzle__test_case.side_effect.users }}"
+
+        - name: 'Run monitoring_dozzle with the changed values'
+          ansible.builtin.include_role:
+            name: 'monitoring_dozzle'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed users'
+          ansible.builtin.assert:
+            that:
+              - monitoring_dozzle__quadlet_result is changed
+              - monitoring_dozzle__users_result is changed
+              - monitoring_dozzle__test_started_after.stdout | int > monitoring_dozzle__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ monitoring_dozzle__quadlet_result is changed }}, users changed: {{ monitoring_dozzle__users_result is changed }},
+              start before {{ monitoring_dozzle__test_started_before.stdout }}, after {{ monitoring_dozzle__test_started_after.stdout }}

@@ -1,0 +1,383 @@
+---
+
+- name: 'Install Dozzle'
+  tags: [ 'monitoring', 'monitoring_dozzle' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or dozzle_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_dozzle__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_dozzle__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_dozzle__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_dozzle__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('dozzle_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('dozzle_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of dozzle_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The login is mandatory, every way to log in needs its variables and secrets
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_dozzle__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_dozzle__secret_targets: "{{ monitoring_dozzle__secrets | map(attribute='target') | list }}"
+        monitoring_dozzle__environment_set: >-
+          {{ monitoring_dozzle__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        monitoring_dozzle__environment_needed: "{{ monitoring_dozzle__auth_environment_required[monitoring_dozzle__auth_provider] | default([]) }}"
+        monitoring_dozzle__environment_missing: "{{ monitoring_dozzle__environment_needed | reject('in', monitoring_dozzle__environment_set) | list }}"
+        monitoring_dozzle__secrets_needed: "{{ monitoring_dozzle__auth_secrets_required[monitoring_dozzle__auth_provider] | default([]) }}"
+        monitoring_dozzle__secrets_missing: "{{ monitoring_dozzle__secrets_needed | reject('in', monitoring_dozzle__secret_targets) | list }}"
+        monitoring_dozzle__secrets_in_environment: >-
+          {{ (monitoring_dozzle__secret_targets + monitoring_dozzle__secret_variables + monitoring_dozzle__secret_files.values() | list)
+             | select('in', monitoring_dozzle__environment.keys() | list) | unique | list }}
+        monitoring_dozzle__role_in_environment: >-
+          {{ monitoring_dozzle__environment_role.keys() | select('in', monitoring_dozzle__environment.keys() | list) | list }}
+        monitoring_dozzle__secrets_env_invalid: >-
+          {{ monitoring_dozzle__secrets | selectattr('target', 'in', monitoring_dozzle__secrets_env)
+             | rejectattr('data', 'string') | map(attribute='name') | list
+             + monitoring_dozzle__secrets | selectattr('target', 'in', monitoring_dozzle__secrets_env)
+             | selectattr('data', 'string') | selectattr('data', 'search', '\s') | map(attribute='name') | list }}
+        monitoring_dozzle__mcp_token_short: >-
+          {{ monitoring_dozzle__secrets | selectattr('target', 'eq', 'DOZZLE_MCP_TOKEN')
+             | map(attribute='data') | map('string') | map('length') | select('lt', monitoring_dozzle__mcp_token_length) | list | length > 0 }}
+        monitoring_dozzle__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_dozzle__auth_provider not in monitoring_dozzle__auth_providers -%}
+          {%-   set _ = errors.append('DOZZLE_AUTH_PROVIDER has to be one of ' ~ (monitoring_dozzle__auth_providers | join(', ')) ~ ', got ' ~ monitoring_dozzle__auth_provider ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__auth_provider == 'simple' and (monitoring_dozzle__users is not mapping or monitoring_dozzle__users | length == 0) -%}
+          {%-   set _ = errors.append('The provider simple needs at least one user in dozzle_users.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('The provider ' ~ monitoring_dozzle__auth_provider ~ ' needs the environment variables ' ~ (monitoring_dozzle__environment_needed | join(', ')) ~ ', missing or empty: ' ~ (monitoring_dozzle__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('The provider ' ~ monitoring_dozzle__auth_provider ~ ' needs the secrets ' ~ (monitoring_dozzle__secrets_needed | join(', ')) ~ ', missing: ' ~ (monitoring_dozzle__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in dozzle_environment: ' ~ (monitoring_dozzle__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__role_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('These variables are set by the role and must not be set in dozzle_environment: ' ~ (monitoring_dozzle__role_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__secrets_env_invalid | length > 0 -%}
+          {%-   set _ = errors.append('Secrets passed in the environment have to be strings without whitespace and line breaks: ' ~ (monitoring_dozzle__secrets_env_invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__mcp_token_short | bool -%}
+          {%-   set _ = errors.append('The secret DOZZLE_MCP_TOKEN needs at least ' ~ monitoring_dozzle__mcp_token_length ~ ' characters.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_dozzle__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_dozzle__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in monitoring_dozzle__environment.items() if value is not none -%}
+          {%-   if key in monitoring_dozzle__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The names, the passwords (bcrypt uses up to 72 bytes) and the roles of Dozzle
+    - name: 'Validate the users'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_dozzle__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_dozzle__errors: >-
+          {%- set errors = [] -%}
+          {%- set users = monitoring_dozzle__users -%}
+          {%- if users is not mapping -%}
+          {%-   set _ = errors.append('dozzle_users has to be a dictionary of the users by their names.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(names=[], entries=[], keys=[], passwords=[], emails=[], roles=[], lines=[]) -%}
+          {%-   for username, user in users.items() -%}
+          {%-     if username is not string or username is not match(monitoring_dozzle__name_pattern) -%}
+          {%-       set ns.names = ns.names + [ username | string ] -%}
+          {%-     elif user is not mapping -%}
+          {%-       set ns.entries = ns.entries + [ username ] -%}
+          {%-     else -%}
+          {%-       if user.keys() | reject('in', monitoring_dozzle__user_keys) | list | length > 0 -%}
+          {%-         set ns.keys = ns.keys + [ username ] -%}
+          {%-       endif -%}
+          {%-       if user.password is defined and user.password is not none -%}
+          {%-         set length = user.password | string | length -%}
+          {%-         if length < monitoring_dozzle__password_length_min or length > monitoring_dozzle__password_length_max -%}
+          {%-           set ns.passwords = ns.passwords + [ username ] -%}
+          {%-         endif -%}
+          {%-       elif user.github is not defined or user.github is none or user.github | string | length == 0 -%}
+          {%-         set ns.passwords = ns.passwords + [ username ] -%}
+          {%-       endif -%}
+          {%-       if user.email is defined and user.email is not none and (user.email | string) is not match(monitoring_dozzle__email_pattern) -%}
+          {%-         set ns.emails = ns.emails + [ username ] -%}
+          {%-       endif -%}
+          {%-       set roles = user.roles | default([], true) -%}
+          {%-       if roles is not sequence or roles is string or roles is mapping
+                       or roles | map('string') | map('regex_replace', '^\^', '') | map('lower') | reject('in', monitoring_dozzle__user_roles) | list | length > 0 -%}
+          {%-         set ns.roles = ns.roles + [ username ] -%}
+          {%-       endif -%}
+          {%-       for key in [ 'name', 'email', 'github', 'filter' ]
+                       if user[key] is defined and user[key] is string and (user[key] ~ '.').splitlines() | length > 1 -%}
+          {%-         set ns.lines = ns.lines + [ username ~ '.' ~ key ] -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.names | length > 0 -%}
+          {%-     set _ = errors.append('The names of dozzle_users have to match ' ~ monitoring_dozzle__name_pattern ~ ': ' ~ (ns.names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.entries | length > 0 -%}
+          {%-     set _ = errors.append('The users of dozzle_users have to be dictionaries: ' ~ (ns.entries | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.keys | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in dozzle_users, allowed are ' ~ (monitoring_dozzle__user_keys | join(', ')) ~ ': ' ~ (ns.keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.passwords | length > 0 -%}
+          {%-     set _ = errors.append('The users of dozzle_users need a password of ' ~ monitoring_dozzle__password_length_min ~ ' to ' ~ monitoring_dozzle__password_length_max ~ ' characters or a login at GitHub: ' ~ (ns.passwords | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.emails | length > 0 -%}
+          {%-     set _ = errors.append('The users of dozzle_users need a valid email: ' ~ (ns.emails | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.roles | length > 0 -%}
+          {%-     set _ = errors.append('The roles of dozzle_users have to be a list of ' ~ (monitoring_dozzle__user_roles | join(', ')) ~ ', optionally with ^ to exclude a role: ' ~ (ns.roles | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of dozzle_users must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging dozzle_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_dozzle__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_dozzle__secrets_allowed: "{{ monitoring_dozzle__secret_files.keys() | list + monitoring_dozzle__secrets_env }}"
+        monitoring_dozzle__environment_unknown: >-
+          {{ (monitoring_dozzle__container.environment | default({})).keys() | reject('in', monitoring_dozzle__environment_allowed) | list }}
+        # The targets are read from the container, dozzle_container may replace the secrets
+        monitoring_dozzle__container_targets: >-
+          {{ (monitoring_dozzle__container.secrets
+              if monitoring_dozzle__container.secrets is defined
+                 and monitoring_dozzle__container.secrets is sequence and monitoring_dozzle__container.secrets is not string
+              else []) | map('regex_search', 'target=([^,]+)', '\1') | select | map('first')
+             | map('regex_replace', '^' ~ monitoring_dozzle__secrets_dir ~ '/.*$', '') | select | list }}
+        monitoring_dozzle__secrets_unknown: >-
+          {{ (monitoring_dozzle__secrets | map(attribute='target') | list + monitoring_dozzle__container_targets)
+             | reject('in', monitoring_dozzle__secrets_allowed) | unique | list }}
+        monitoring_dozzle__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_dozzle__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_dozzle__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_dozzle__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (monitoring_dozzle__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Dozzle (monitoring_dozzle__environment_allowed) and the secrets ' ~ (monitoring_dozzle__secrets_allowed | join(', ')) ~ ', the users are set with dozzle_users.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The module of the users hashes the passwords with bcrypt
+    - name: 'Install bcrypt for the users of Dozzle'
+      ansible.builtin.apt:
+        name: 'python3-bcrypt'
+        state: 'present'
+
+    # The image runs Dozzle as root
+    - name: 'Create the directories of Dozzle'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+      loop:
+        - "{{ monitoring_dozzle__podman_home }}"
+        - "{{ monitoring_dozzle__podman_data_dir }}"
+
+    # Dozzle reads users.yml again when it changes, the users need no restart.
+    # The passwords are an option with no_log
+    - name: 'Write the users of Dozzle'
+      when: monitoring_dozzle__users | length > 0
+      monitoring_dozzle_users:
+        path: "{{ monitoring_dozzle__users_file }}"
+        users: >-
+          {%- set users = [] -%}
+          {%- for username, user in monitoring_dozzle__users.items() -%}
+          {%-   set entry = { 'username': username } -%}
+          {%-   for key in [ 'name', 'email', 'github', 'filter' ] if user[key] is defined and user[key] is not none -%}
+          {%-     set _ = entry.update({ key: user[key] | string }) -%}
+          {%-   endfor -%}
+          {%-   set _ = entry.update({ 'roles': user.roles | default([], true) | map('string') | list }) -%}
+          {%-   set _ = users.append(entry) -%}
+          {%- endfor -%}
+          {{ users }}
+        passwords: >-
+          {%- set passwords = {} -%}
+          {%- for username, user in monitoring_dozzle__users.items() if user.password is defined and user.password is not none -%}
+          {%-   set _ = passwords.update({ username: user.password | string }) -%}
+          {%- endfor -%}
+          {{ passwords }}
+      register: 'monitoring_dozzle__users_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_dozzle__secrets }}"
+      register: 'monitoring_dozzle__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_dozzle__container.name }}"
+        hostname: "{{ monitoring_dozzle__container.hostname }}"
+        image: "{{ monitoring_dozzle__container.image }}"
+        ip: "{{ monitoring_dozzle__container.ip }}"
+        ip6: "{{ monitoring_dozzle__container.ipv6 | default(omit) }}"
+        network: "{{ monitoring_dozzle__container.network }}"
+        timezone: "{{ monitoring_dozzle__container.timezone }}"
+        env: "{{ monitoring_dozzle__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_dozzle__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_dozzle__container.expose | default(omit) }}"
+        label: "{{ monitoring_dozzle__container.labels | default(omit) }}"
+        publish: "{{ monitoring_dozzle__container.publish | default(omit) }}"
+        secrets: "{{ monitoring_dozzle__container.secrets | default(omit) }}"
+        volume: "{{ monitoring_dozzle__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if monitoring_dozzle__container.requires is defined %}
+          Requires={{ monitoring_dozzle__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'monitoring_dozzle__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Dozzle'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_dozzle__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_dozzle__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_dozzle__running: >-
+              {{ (ansible_facts.services[monitoring_dozzle__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_dozzle__restart: >-
+              {{ monitoring_dozzle__running | bool
+                 and (monitoring_dozzle__secrets_result is changed or monitoring_dozzle__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_dozzle__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_dozzle__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ monitoring_dozzle__container.name ~ ' did not start' ] + monitoring_dozzle__start_journal.stdout_lines }}"
+
+    # The health check answers without login below the base path of Dozzle
+    - name: 'Wait for Dozzle'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_dozzle__ip }}:{{ monitoring_dozzle__port }}{{ monitoring_dozzle__base }}healthcheck"
+      vars:
+        monitoring_dozzle__base: "{{ (monitoring_dozzle__environment.DOZZLE_BASE | default('/', true) | string | regex_replace('/*$', '')) ~ '/' }}"
+      register: 'monitoring_dozzle__ready'
+      until: monitoring_dozzle__ready.status | default(-1) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Dozzle'
+      when:
+        - not ansible_check_mode
+        - monitoring_dozzle__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_dozzle__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'monitoring_dozzle__journal'
+      changed_when: false
+
+    - name: 'Assert that Dozzle answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__journal is skipped
+        fail_msg: "{{ monitoring_dozzle__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_dozzle__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_dozzle__container.name }}"
+        container_image: "{{ monitoring_dozzle__container.image }}"
+        container_schedule: "{{ monitoring_dozzle__autoupdate_schedule }}"
