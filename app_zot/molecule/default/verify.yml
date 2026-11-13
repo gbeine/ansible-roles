@@ -1,0 +1,229 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_zot__test_case: "{{ app_zot__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_zot__expect: "{{ app_zot__test_case.expect }}"
+    app_zot__test_registry: "{{ app_zot__expect.ip }}:5000"
+    app_zot__test_url: "http://{{ app_zot__test_registry }}"
+    # The secrets and passwords of the test case, they must not be part of the unit, the environment or the configuration
+    app_zot__test_plain: >-
+      {{ app_zot__test_case.role_vars.zot_secrets | default([]) | map(attribute='data') | map('to_json') | list
+         + app_zot__test_case.role_vars.zot_users.values() | map(attribute='password') | list
+         + (app_zot__test_case.side_effect.users.values() | map(attribute='password') | list
+            if app_zot__test_case.side_effect is defined else []) }}
+    # Checks the passwords against the hashes of htpasswd, reads the path and the users as JSON on stdin
+    app_zot__test_hash_script: |
+      import json, sys, bcrypt
+      data = json.load(sys.stdin)
+      hashes = dict(line.split(':', 1) for line in open(data['path']).read().splitlines() if ':' in line)
+      print(json.dumps([bcrypt.checkpw(user['password'].encode(), ('$2b$' + hashes.get(user['name'], '')[4:]).encode())
+                        if hashes.get(user['name'], '').startswith('$2y$') else False for user in data['users']]))
+    app_zot__test_skopeo: [ 'skopeo', '--command-timeout', '120s' ]
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_zot__test_quadlet_path }}"
+      register: 'app_zot__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_zot__test_image) in app_zot__test_quadlet_lines
+          - ('IP=' + app_zot__expect.ip) in app_zot__test_quadlet_lines
+          - app_zot__expect.ip6 is none or ('IP6=' + app_zot__expect.ip6) in app_zot__test_quadlet_lines
+          - app_zot__expect.ip6 is not none or app_zot__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_zot__expect.quadlet | reject('in', app_zot__test_quadlet_lines) | list | length == 0
+          - app_zot__test_plain | select('in', app_zot__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_zot__test_quadlet_lines | to_json }}"
+      vars:
+        app_zot__test_quadlet_lines: "{{ (app_zot__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the zot service'
+      ansible.builtin.command: 'systemctl is-active zot'
+      register: 'app_zot__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the zot container'
+      ansible.builtin.command: 'podman inspect zot'
+      register: 'app_zot__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_zot__test_service.stdout == 'active'
+          - app_zot__test_net.IPAddress == app_zot__expect.ip
+          - app_zot__expect.ip6 is none or app_zot__test_net.GlobalIPv6Address == app_zot__expect.ip6
+          - app_zot__expect.env | reject('in', app_zot__test_env) | list | length == 0
+          - app_zot__test_plain | select('in', app_zot__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_zot__test_service.stdout }},
+          IPv4 {{ app_zot__test_net.IPAddress }}, IPv6 {{ app_zot__test_net.GlobalIPv6Address }},
+          environment {{ app_zot__test_env | join(', ') }}
+      vars:
+        app_zot__test_container: "{{ (app_zot__test_inspect.stdout | from_json)[0] }}"
+        app_zot__test_net: "{{ app_zot__test_container.NetworkSettings.Networks[app_zot__test_case.role_vars.zot_network] }}"
+        app_zot__test_env: "{{ app_zot__test_container.Config.Env }}"
+
+    - name: 'Read the files of zot'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: [ "{{ app_zot__test_config_path }}", "{{ app_zot__test_htpasswd_path }}" ]
+      register: 'app_zot__test_files'
+
+    - name: 'Read the configuration of zot'
+      ansible.builtin.slurp:
+        src: "{{ app_zot__test_config_path }}"
+      register: 'app_zot__test_config'
+
+    - name: 'Check the passwords against the hashes of htpasswd'
+      ansible.builtin.command:
+        argv: [ 'python3', '-c', "{{ app_zot__test_hash_script }}" ]
+        stdin: "{{ { 'path': app_zot__test_htpasswd_path, 'users': app_zot__expect.users } | to_json }}"
+      register: 'app_zot__test_hashes'
+      changed_when: false
+      no_log: true
+
+    # The configuration has the values of the role and the path of the keys of the sessions, not the keys
+    - name: 'Assert the files and the configuration of zot'
+      ansible.builtin.assert:
+        that:
+          - app_zot__test_files.results | map(attribute='stat.mode') | unique | list == [ '0600' ]
+          - app_zot__test_files.results | map(attribute='stat.pw_name') | unique | list == [ 'root' ]
+          - app_zot__test_hashes.stdout | from_json | reject | list | length == 0
+          - app_zot__test_config_json.http.address == '0.0.0.0'
+          - app_zot__test_config_json.http.port | string == '5000'
+          - app_zot__test_config_json.storage.rootDirectory == '/var/lib/registry'
+          - app_zot__test_config_json.http.auth.htpasswd.path == '/etc/zot/htpasswd'
+          - app_zot__test_config_json.log.level == app_zot__expect.config.log_level
+          - (app_zot__test_config_json.http.auth.sessionKeysFile | default('')) == ('/run/secrets/zot_session_keys.json' if app_zot__expect.config.session_keys else '')
+          - app_zot__test_plain | select('in', app_zot__test_config.content | b64decode) | list | length == 0
+        fail_msg: >-
+          files {{ app_zot__test_files.results | map(attribute='stat.mode') | list }},
+          passwords match {{ app_zot__test_hashes.stdout | default('') }},
+          configuration {{ app_zot__test_config_json | to_json }}
+      vars:
+        app_zot__test_config_json: "{{ app_zot__test_config.content | b64decode | from_json }}"
+
+    - name: 'Read the health check and the web interface'
+      ansible.builtin.uri:
+        url: "{{ app_zot__test_url }}{{ item }}"
+        return_content: true
+      loop: [ '/readyz', '/' ]
+      register: 'app_zot__test_health'
+
+    # Pushes the image as administrator, to molecule and to public on molecule-zot
+    - name: 'Copy an image into the registry as administrator'
+      ansible.builtin.command:
+        argv: "{{ app_zot__test_skopeo + [ 'copy', '--retry-times', '3', '--dest-tls-verify=false', '--dest-creds', app_zot__expect.admin.name ~ ':' ~ app_zot__expect.admin.password,
+                 app_zot__test_source, 'docker://' ~ app_zot__test_registry ~ '/' ~ item ~ '/busybox:latest' ] }}"
+      loop: "{{ [ 'molecule' ] + ([ 'public' ] if app_zot__test_case.access_control else []) }}"
+      register: 'app_zot__test_push'
+      changed_when: false
+      no_log: true
+
+    # Without login and with a wrong password zot answers 401
+    - name: 'Read the tags with the administrator, without login and with a wrong password'
+      ansible.builtin.uri:
+        url: "{{ app_zot__test_url }}/v2/molecule/busybox/tags/list"
+        url_username: "{{ item.name | default(omit) }}"
+        url_password: "{{ item.password | default(omit) }}"
+        force_basic_auth: "{{ item.name is defined }}"
+        status_code: [ 200, 401 ]
+      loop:
+        - "{{ app_zot__expect.admin }}"
+        - {}
+        - { name: "{{ app_zot__expect.admin.name }}", password: 'molecule-wrong-password' }
+      loop_control:
+        index_var: 'app_zot__test_index'
+        label: "{{ app_zot__test_index }}"
+      register: 'app_zot__test_tags'
+      no_log: true
+
+    - name: 'Read the catalog as administrator'
+      ansible.builtin.uri:
+        url: "{{ app_zot__test_url }}/v2/_catalog"
+        url_username: "{{ app_zot__expect.admin.name }}"
+        url_password: "{{ app_zot__expect.admin.password }}"
+        force_basic_auth: true
+      register: 'app_zot__test_catalog'
+      no_log: true
+
+    - name: 'Assert the health check, the web interface, the push and the logins'
+      ansible.builtin.assert:
+        that:
+          - app_zot__test_health.results | map(attribute='status') | list == [ 200, 200 ]
+          - app_zot__test_tags.results | map(attribute='status') | list == [ 200, 401, 401 ]
+          - "'latest' in app_zot__test_tags.results[0].json.tags"
+          - "'molecule/busybox' in app_zot__test_catalog.json.repositories"
+        fail_msg: >-
+          health {{ app_zot__test_health.results | map(attribute='status') | list }},
+          tags {{ app_zot__test_tags.results | map(attribute='status') | list }},
+          catalog {{ app_zot__test_catalog.json | default({}) | to_json }}
+
+    - name: 'Check the access control'
+      when: app_zot__test_case.access_control
+      block:
+
+        # The reader may read, it may neither push nor use its former password
+        - name: 'Read the image as reader with the password and the former password'
+          ansible.builtin.command:
+            argv: "{{ app_zot__test_skopeo + [ 'inspect', '--tls-verify=false', '--creds', app_zot__expect.reader.name ~ ':' ~ item,
+                     'docker://' ~ app_zot__test_registry ~ '/molecule/busybox:latest' ] }}"
+          loop: [ "{{ app_zot__expect.reader.password }}", "{{ app_zot__expect.reader.former_password }}" ]
+          register: 'app_zot__test_reader_read'
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: 'Push an image as reader'
+          ansible.builtin.command:
+            argv: "{{ app_zot__test_skopeo + [ 'copy', '--dest-tls-verify=false', '--dest-creds', app_zot__expect.reader.name ~ ':' ~ app_zot__expect.reader.password,
+                     app_zot__test_source, 'docker://' ~ app_zot__test_registry ~ '/molecule/reader:latest' ] }}"
+          register: 'app_zot__test_reader_push'
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        # anonymousPolicy allows reading public without login, not molecule
+        - name: 'Read the images without login'
+          ansible.builtin.command:
+            argv: "{{ app_zot__test_skopeo + [ 'inspect', '--tls-verify=false', '--no-creds', 'docker://' ~ app_zot__test_registry ~ '/' ~ item ~ '/busybox:latest' ] }}"
+          loop: [ 'public', 'molecule' ]
+          register: 'app_zot__test_anonymous'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Read the metrics as administrator'
+          ansible.builtin.uri:
+            url: "{{ app_zot__test_url }}/metrics"
+            url_username: "{{ app_zot__expect.admin.name }}"
+            url_password: "{{ app_zot__expect.admin.password }}"
+            force_basic_auth: true
+            return_content: true
+          register: 'app_zot__test_metrics'
+          no_log: true
+
+        - name: 'Assert the access control and the metrics'
+          ansible.builtin.assert:
+            that:
+              - app_zot__test_reader_read.results | map(attribute='rc') | map('int') | map('ternary', 'failed', 'ok', 'failed') | list == [ 'ok', 'failed' ]
+              - app_zot__test_reader_push.rc != 0
+              - app_zot__test_anonymous.results | map(attribute='rc') | map('int') | map('ternary', 'failed', 'ok', 'failed') | list == [ 'ok', 'failed' ]
+              - app_zot__test_metrics.content is search('zot_')
+            fail_msg: >-
+              reader read {{ app_zot__test_reader_read.results | map(attribute='rc') | list }},
+              reader push {{ app_zot__test_reader_push.rc }} {{ app_zot__test_reader_push.stderr | default('') | truncate(300) }},
+              anonymous {{ app_zot__test_anonymous.results | map(attribute='rc') | list }}
+              {{ app_zot__test_anonymous.results | map(attribute='stderr') | map('truncate', 300) | list }},
+              metrics {{ app_zot__test_metrics.content | default('') | truncate(200) }}

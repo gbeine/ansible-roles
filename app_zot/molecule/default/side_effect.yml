@@ -1,0 +1,164 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_zot__test_case: "{{ app_zot__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_zot__test_vars: "{{ app_zot__test_case.role_vars }}"
+    app_zot__test_config: "{{ app_zot__test_vars.zot_config | default({}) }}"
+    app_zot__test_secrets: "{{ app_zot__test_vars.zot_secrets | default([]) }}"
+    app_zot__test_users: "{{ app_zot__test_vars.zot_users }}"
+    app_zot__test_checked_files:
+      - "{{ app_zot__test_quadlet_path }}"
+      - "{{ app_zot__test_config_path }}"
+      - "{{ app_zot__test_htpasswd_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_zot__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_zot__test_checked_files }}"
+      register: 'app_zot__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_zot with zot_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_config: [ 'storage' ]
+        app_zot__test_invalid:
+          message: 'zot_config not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_zot with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_secrets: "{{ app_zot__test_secrets + [ { 'name': 'zot_other', 'data': 'x' } ] }}"
+        app_zot__test_invalid:
+          message: 'a secret without target'
+          search: '^zot_secrets entries need name, data and target$'
+
+    - name: 'Run app_zot without login (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_users: {}
+        app_zot__test_invalid:
+          message: 'without login'
+          search: '^zot needs a login, users in zot_users or one of ldap, openid, bearer, mtls in zot_config\.http\.auth\.$'
+
+    - name: 'Run app_zot with the port in zot_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_config: "{{ app_zot__test_config | combine({ 'http': { 'port': '8080' } }, recursive=true) }}"
+        app_zot__test_invalid:
+          message: 'the port in zot_config'
+          search: '^These keys are set by the role and must not be set in zot_config: http\.port\.$'
+
+    - name: 'Run app_zot with a client secret in zot_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_config: >-
+          {{ app_zot__test_config | combine({ 'http': { 'auth': { 'openid': { 'providers': { 'oidc': {
+               'issuer': 'https://id.molecule.test', 'clientid': 'zot', 'clientsecret': 'molecule-plain-secret' } } } } } }, recursive=true) }}
+        app_zot__test_invalid:
+          message: 'a client secret in zot_config'
+          search: '^Secrets and their files are set with zot_secrets and must not be set in zot_config: clientsecret\.'
+
+    - name: 'Run app_zot with LDAP without its secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_config: >-
+          {{ app_zot__test_config | combine({ 'http': { 'auth': { 'ldap': {
+               'address': 'ldap.molecule.test', 'port': 389, 'baseDN': 'ou=people,dc=molecule,dc=test', 'userAttribute': 'uid' } } } }, recursive=true) }}
+        app_zot__test_invalid:
+          message: 'LDAP without its secret'
+          search: '^LDAP needs the secret ZOT_LDAP_CREDENTIALS with bindDN and bindPassword\.$'
+
+    - name: 'Run app_zot with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_secrets: "{{ app_zot__test_secrets + [ { 'name': 'zot_htpasswd', 'data': 'x', 'target': 'ZOT_HTPASSWD' } ] }}"
+        app_zot__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: ZOT_HTPASSWD\.'
+
+    - name: 'Run app_zot with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_environment: { 'ZOT_CONFIG': '/etc/zot/other.json' }
+        app_zot__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: ZOT_CONFIG\.'
+
+    - name: 'Run app_zot with a colon in the name of a user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_users: "{{ app_zot__test_users | combine({ 'molecule:user': { 'password': 'molecule-colon-password' } }) }}"
+        app_zot__test_invalid:
+          message: 'a colon in the name of a user'
+          search: '^The names of zot_users have to match .*: molecule:user\.$'
+
+    - name: 'Run app_zot with a short password of a user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_users: "{{ app_zot__test_users | combine({ 'admin': { 'password': 'short12' } }) }}"
+        app_zot__test_invalid:
+          message: 'a short password of a user'
+          search: '^The users of zot_users need a password of 8 to 72 characters without line breaks: admin\.$'
+
+    # The key is valid for the checks of the role, zot itself rejects it
+    - name: 'Run app_zot with an unknown key of zot (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        zot_config: "{{ app_zot__test_config | combine({ 'storage': { 'molecule': true } }, recursive=true) }}"
+        app_zot__test_invalid:
+          message: 'an unknown key of zot'
+          search: 'zot rejects the configuration(.|\n)*invalid keys: molecule'
+
+    - name: 'Change the configuration and the users'
+      when: app_zot__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'zot' ]
+          register: 'app_zot__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            zot_config: "{{ app_zot__test_config | combine(app_zot__test_case.side_effect.config, recursive=true) }}"
+            zot_users: "{{ app_zot__test_case.side_effect.users }}"
+
+        - name: 'Run app_zot with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_zot'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'zot' ]
+          register: 'app_zot__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart and the changed users'
+          ansible.builtin.assert:
+            that:
+              - app_zot__config_result is changed
+              - app_zot__users_result is changed
+              - app_zot__test_started_after.stdout | int > app_zot__test_started_before.stdout | int
+            fail_msg: >-
+              configuration changed: {{ app_zot__config_result is changed }}, users changed: {{ app_zot__users_result is changed }},
+              start before {{ app_zot__test_started_before.stdout }}, after {{ app_zot__test_started_after.stdout }}

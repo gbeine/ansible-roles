@@ -1,0 +1,122 @@
+---
+# Network created by container_podman in prepare.yml
+app_zot__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_zot__test_image: 'ghcr.io/project-zot/zot:latest'
+app_zot__test_quadlet_path: '/etc/containers/systemd/zot.container'
+app_zot__test_config_path: '/opt/zot/etc/config.json'
+app_zot__test_htpasswd_path: '/opt/zot/etc/htpasswd'
+
+# The image copied into the registry with skopeo
+app_zot__test_source: 'docker://docker.io/library/busybox:latest'
+
+app_zot__test_cases:
+
+  # Only the mandatory variables and one user, without access control every user may push
+  - name: 'molecule-zot-default'
+    role_vars:
+      zot_home: '/opt/zot'
+      zot_ip: '10.89.0.120'
+      zot_network: 'podman-molecule'
+      zot_hostname: 'zot-default'
+      zot_timezone: 'Europe/Berlin'
+      zot_users:
+        admin:
+          password: 'molecule-admin-password'
+    access_control: false
+    expect:
+      ip: '10.89.0.120'
+      ip6: ~
+      admin: { name: 'admin', password: 'molecule-admin-password' }
+      users:
+        - { name: 'admin', password: 'molecule-admin-password' }
+      quadlet:
+        - 'Volume=/opt/zot/etc:/etc/zot:ro,Z'
+        - 'Volume=/opt/zot/data:/var/lib/registry:Z'
+      env:
+        - 'TZ=Europe/Berlin'
+      config:
+        log_level: 'info'
+        session_keys: false
+
+  # IPv6, labels, access control with a reader and anonymous reading of public, the keys of the sessions and the metrics
+  - name: 'molecule-zot'
+    role_vars:
+      zot_home: '/opt/zot'
+      zot_ip: '10.89.0.121'
+      zot_ipv6: 'fd00:89::121'
+      zot_network: 'podman-molecule'
+      zot_hostname: 'zot-molecule'
+      zot_timezone: 'Europe/Berlin'
+      zot_labels:
+        traefik.enable: 'true'
+      zot_config:
+        http:
+          accessControl:
+            adminPolicy:
+              users: [ 'admin' ]
+              actions: [ 'read', 'create', 'update', 'delete' ]
+            # adminPolicy does not include the metrics
+            metrics:
+              users: [ 'admin' ]
+            repositories:
+              'public/**':
+                policies:
+                  - users: [ 'reader' ]
+                    actions: [ 'read' ]
+                defaultPolicy: []
+                anonymousPolicy: [ 'read' ]
+              '**':
+                policies:
+                  - users: [ 'reader' ]
+                    actions: [ 'read' ]
+                defaultPolicy: []
+        extensions:
+          metrics:
+            enable: true
+      zot_secrets:
+        - name: 'zot_session_keys'
+          data:
+            hashKey: 'molecule-hash-key-0123456789abcdef0123456789abcdef0123456789ab'
+            encryptKey: 'molecule-encrypt-key-0123456789ab'
+          target: 'ZOT_SESSION_KEYS'
+      zot_users:
+        admin:
+          password: 'molecule-admin-password'
+        reader:
+          password: 'molecule-reader-password'
+    access_control: true
+    side_effect:
+      config:
+        log:
+          level: 'debug'
+      users:
+        admin:
+          password: 'molecule-admin-password'
+        reader:
+          password: 'molecule-reader-changed'
+    expect:
+      ip: '10.89.0.121'
+      ip6: 'fd00:89::121'
+      admin: { name: 'admin', password: 'molecule-admin-password' }
+      reader: { name: 'reader', password: 'molecule-reader-changed', former_password: 'molecule-reader-password' }
+      users:
+        - { name: 'admin', password: 'molecule-admin-password' }
+        - { name: 'reader', password: 'molecule-reader-changed' }
+      quadlet:
+        - 'Volume=/opt/zot/etc:/etc/zot:ro,Z'
+        - 'Volume=/opt/zot/data:/var/lib/registry:Z'
+        - 'Secret=zot_session_keys,type=mount,target=/run/secrets/zot_session_keys.json'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'TZ=Europe/Berlin'
+      config:
+        log_level: 'debug'
+        session_keys: true

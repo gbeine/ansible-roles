@@ -1,0 +1,419 @@
+---
+
+- name: 'Install zot'
+  tags: [ 'app', 'app_zot' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter, zot_config or zot_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_zot__container | length > 0
+          - app_zot__config | to_json | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_zot__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_zot__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_zot__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_zot__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('zot_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('zot_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of zot_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The login is mandatory, the role sets the port, the storage, the users and the files of the secrets
+    - name: 'Validate the configuration and the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_zot__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_zot__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_zot__input: "{{ zot_config | default({}) }}"
+        app_zot__auth: "{{ (app_zot__config.http | default({})).auth | default({}) }}"
+        app_zot__targets: "{{ app_zot__secrets | map(attribute='target') | list }}"
+        app_zot__role_keys_set: >-
+          {%- set found = [] -%}
+          {%- for path in app_zot__config_role_keys -%}
+          {%-   set ns = namespace(value=app_zot__input, found=true) -%}
+          {%-   for key in path -%}
+          {%-     if ns.found and ns.value is mapping and key in ns.value -%}
+          {%-       set ns.value = ns.value[key] -%}
+          {%-     else -%}
+          {%-       set ns.found = false -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.found -%}
+          {%-     set _ = found.append(path | join('.')) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ found }}
+        app_zot__secret_keys_set: >-
+          {{ app_zot__input | to_json | regex_findall('"(' ~ (app_zot__config_secret_keys | join('|')) ~ ')"\s*:') | unique | list }}
+        app_zot__openid_missing: >-
+          {{ ((app_zot__auth.openid | default({})).providers | default({})).keys()
+             | map('upper') | map('regex_replace', '^(.*)$', 'ZOT_OPENID_\1_CREDENTIALS') | reject('in', app_zot__targets) | list }}
+        app_zot__secrets_in_environment: >-
+          {{ (app_zot__targets + app_zot__secrets_allowed) | select('in', app_zot__environment.keys() | list) | unique | list }}
+        app_zot__lines: >-
+          {{ app_zot__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+        app_zot__secrets_env_lines: >-
+          {{ app_zot__secrets | selectattr('target', 'in', app_zot__secrets_env)
+             | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_zot__errors: >-
+          {%- set errors = [] -%}
+          {%- if (app_zot__users is not mapping or app_zot__users | length == 0)
+                 and app_zot__auth_methods | select('in', app_zot__auth.keys() | list) | list | length == 0 -%}
+          {%-   set _ = errors.append('zot needs a login, users in zot_users or one of ' ~ (app_zot__auth_methods | join(', ')) ~ ' in zot_config.http.auth.') -%}
+          {%- endif -%}
+          {%- if app_zot__role_keys_set | length > 0 -%}
+          {%-   set _ = errors.append('These keys are set by the role and must not be set in zot_config: ' ~ (app_zot__role_keys_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__secret_keys_set | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their files are set with zot_secrets and must not be set in zot_config: ' ~ (app_zot__secret_keys_set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__auth.ldap is defined and 'ZOT_LDAP_CREDENTIALS' not in app_zot__targets -%}
+          {%-   set _ = errors.append('LDAP needs the secret ZOT_LDAP_CREDENTIALS with bindDN and bindPassword.') -%}
+          {%- endif -%}
+          {%- if app_zot__openid_missing | length > 0 -%}
+          {%-   set _ = errors.append('OpenID needs the secrets with clientid and clientsecret of its providers, missing: ' ~ (app_zot__openid_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in zot_environment: ' ~ (app_zot__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (app_zot__lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__secrets_env_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets passed in the environment must not contain line breaks: ' ~ (app_zot__secrets_env_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The names must not contain a colon, bcrypt uses up to 72 bytes of a password
+    - name: 'Validate the users'
+      ansible.builtin.assert:
+        that:
+          - app_zot__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_zot__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_zot__errors: >-
+          {%- set errors = [] -%}
+          {%- set users = app_zot__users -%}
+          {%- if users is not mapping -%}
+          {%-   set _ = errors.append('zot_users has to be a dictionary of the users by their names.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(names=[], entries=[], passwords=[]) -%}
+          {%-   for name, user in users.items() -%}
+          {%-     if name is not string or name is not match(app_zot__name_pattern) -%}
+          {%-       set ns.names = ns.names + [ name | string ] -%}
+          {%-     elif user is not mapping or user.keys() | reject('in', app_zot__user_keys) | list | length > 0 -%}
+          {%-       set ns.entries = ns.entries + [ name ] -%}
+          {%-     elif user.password is not defined or user.password is none
+                       or (user.password | string | length) < app_zot__password_length_min
+                       or (user.password | string | length) > app_zot__password_length_max
+                       or (user.password | string ~ '.').splitlines() | length > 1 -%}
+          {%-       set ns.passwords = ns.passwords + [ name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.names | length > 0 -%}
+          {%-     set _ = errors.append('The names of zot_users have to match ' ~ app_zot__name_pattern ~ ': ' ~ (ns.names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.entries | length > 0 -%}
+          {%-     set _ = errors.append('The users of zot_users have to be dictionaries with ' ~ (app_zot__user_keys | join(', ')) ~ ': ' ~ (ns.entries | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.passwords | length > 0 -%}
+          {%-     set _ = errors.append('The users of zot_users need a password of ' ~ app_zot__password_length_min ~ ' to ' ~ app_zot__password_length_max ~ ' characters without line breaks: ' ~ (ns.passwords | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging zot_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_zot__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_zot__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_zot__environment_unknown: >-
+          {{ (app_zot__container.environment | default({})).keys() | reject('in', app_zot__environment_allowed) | list }}
+        # The targets are read from the container, zot_container may replace the secrets
+        app_zot__container_targets: >-
+          {{ (app_zot__container.secrets
+              if app_zot__container.secrets is defined and app_zot__container.secrets is sequence and app_zot__container.secrets is not string
+              else []) | map('regex_search', 'target=([^,]+)', '\1') | select | map('first')
+             | map('regex_replace', '^' ~ app_zot__secrets_dir ~ '/.*$', '') | select | list }}
+        app_zot__secrets_unknown: >-
+          {{ (app_zot__secrets | map(attribute='target') | list + app_zot__container_targets)
+             | reject('in', app_zot__secrets_allowed) | unique | list }}
+        app_zot__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_zot__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_zot__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_zot__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (app_zot__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_zot__secrets_allowed | join(', ')) ~ ', zot is configured with zot_config.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # zot verify runs the checks of the start, e.g. unknown keys, with the configuration and the secrets in a temporary directory in /run (tmpfs).
+    # The files only exist for zot verify and are always removed, they do not change the host
+    - name: 'Verify the configuration with zot'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Pull the image of zot'
+          containers.podman.podman_image:
+            name: "{{ app_zot__container.image }}"
+
+        - name: 'Create a temporary directory for the verification'
+          ansible.builtin.tempfile:
+            path: '/run'
+            prefix: 'app_zot.'
+            state: 'directory'
+          register: 'app_zot__verify_dir'
+          changed_when: false
+
+        - name: 'Create the directories of the verification'
+          ansible.builtin.file:
+            path: "{{ app_zot__verify_dir.path }}/{{ item }}"
+            mode: '0700'
+            state: 'directory'
+          loop: [ 'etc', 'secrets', 'data' ]
+          changed_when: false
+
+        - name: 'Write the configuration and the users of the verification'
+          ansible.builtin.copy:
+            content: "{{ item.content }}"
+            dest: "{{ app_zot__verify_dir.path }}/etc/{{ item.name }}"
+            mode: '0600'
+          loop:
+            - { name: 'config.json', content: "{{ app_zot__config | to_nice_json }}" }
+            - { name: 'htpasswd', content: '' }
+          loop_control:
+            label: "{{ item.name }}"
+          changed_when: false
+
+        - name: 'Write the secrets of the verification'
+          no_log: true
+          ansible.builtin.copy:
+            content: "{{ item.data if item.data is string else item.data | to_json }}"
+            dest: "{{ app_zot__verify_dir.path }}/secrets/{{ item.name }}{{ '' if item.target in app_zot__secrets_plain else '.json' }}"
+            mode: '0600'
+          loop: "{{ app_zot__secrets | rejectattr('target', 'in', app_zot__secrets_env) | list }}"
+          changed_when: false
+
+        - name: 'Run zot verify'
+          ansible.builtin.command:
+            argv:
+              - 'podman'
+              - 'run'
+              - '--rm'
+              - '--network'
+              - 'none'
+              - '--volume'
+              - "{{ app_zot__verify_dir.path }}/etc:{{ app_zot__config_dir }}:ro"
+              - '--volume'
+              - "{{ app_zot__verify_dir.path }}/secrets:{{ app_zot__secrets_dir }}:ro"
+              - '--volume'
+              - "{{ app_zot__verify_dir.path }}/data:{{ app_zot__registry_dir }}"
+              - "{{ app_zot__container.image }}"
+              - 'verify'
+              - "{{ app_zot__config_dir }}/config.json"
+          register: 'app_zot__verify'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert that zot accepts the configuration'
+          ansible.builtin.assert:
+            that:
+              - app_zot__verify.rc == 0
+            fail_msg: "{{ [ 'zot rejects the configuration (zot_config):' ] + (app_zot__verify.stdout_lines + app_zot__verify.stderr_lines)[-20:] }}"
+            quiet: true
+
+      always:
+
+        - name: 'Remove the temporary directory of the verification'
+          ansible.builtin.file:
+            path: "{{ app_zot__verify_dir.path }}"
+            state: 'absent'
+          when: app_zot__verify_dir.path is defined
+          changed_when: false
+
+    # The htpasswd module hashes the passwords with bcrypt
+    - name: 'Install bcrypt for the users of zot'
+      ansible.builtin.apt:
+        name: 'python3-bcrypt'
+        state: 'present'
+
+    # The image runs zot as root
+    - name: 'Create the directories of zot'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+      loop:
+        - "{{ app_zot__podman_home }}"
+        - "{{ app_zot__podman_etc_dir }}"
+        - "{{ app_zot__podman_data_dir }}"
+
+    # zot reads htpasswd again when it changes, the users need no restart.
+    # The passwords are an option with no_log
+    - name: 'Write the users of zot'
+      when: app_zot__users | length > 0
+      app_zot_htpasswd:
+        path: "{{ app_zot__podman_etc_dir }}/htpasswd"
+        passwords: >-
+          {%- set passwords = {} -%}
+          {%- for name, user in app_zot__users.items() -%}
+          {%-   set _ = passwords.update({ name: user.password | string }) -%}
+          {%- endfor -%}
+          {{ passwords }}
+      register: 'app_zot__users_result'
+
+    - name: 'Write the configuration of zot'
+      ansible.builtin.copy:
+        content: "{{ app_zot__config | to_nice_json }}\n"
+        dest: "{{ app_zot__podman_etc_dir }}/config.json"
+        owner: 'root'
+        group: 'root'
+        mode: '0600'
+      register: 'app_zot__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data if item.data is string else item.data | to_json }}"
+      loop: "{{ app_zot__secrets }}"
+      register: 'app_zot__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_zot__container.name }}"
+        hostname: "{{ app_zot__container.hostname }}"
+        image: "{{ app_zot__container.image }}"
+        ip: "{{ app_zot__container.ip }}"
+        ip6: "{{ app_zot__container.ipv6 | default(omit) }}"
+        network: "{{ app_zot__container.network }}"
+        timezone: "{{ app_zot__container.timezone }}"
+        env: "{{ app_zot__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_zot__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_zot__container.expose | default(omit) }}"
+        label: "{{ app_zot__container.labels | default(omit) }}"
+        publish: "{{ app_zot__container.publish | default(omit) }}"
+        secrets: "{{ app_zot__container.secrets | default(omit) }}"
+        volume: "{{ app_zot__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_zot__container.requires is defined %}
+          Requires={{ app_zot__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_zot__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start zot'
+      when: 'not ansible_check_mode'
+      block:
+
+        # zot reloads only parts of a changed configuration, it is restarted
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_zot__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_zot__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_zot__running: >-
+              {{ (ansible_facts.services[app_zot__container.name + '.service'].state | default('')) == 'running' }}
+            app_zot__restart: >-
+              {{ app_zot__running | bool
+                 and (app_zot__secrets_result is changed or app_zot__quadlet_result is changed or app_zot__config_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_zot__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_zot__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_zot__container.name ~ ' did not start' ] + app_zot__start_journal.stdout_lines }}"
+
+    # The health checks answer without login
+    - name: 'Wait for zot'
+      ansible.builtin.uri:
+        url: "http://{{ app_zot__ip }}:{{ app_zot__port }}/readyz"
+      register: 'app_zot__ready'
+      until: app_zot__ready.status | default(-1) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of zot'
+      when:
+        - not ansible_check_mode
+        - app_zot__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_zot__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_zot__journal'
+      changed_when: false
+
+    - name: 'Assert that zot answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_zot__journal is skipped
+        fail_msg: "{{ app_zot__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_zot__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_zot__container.name }}"
+        container_image: "{{ app_zot__container.image }}"
+        container_schedule: "{{ app_zot__autoupdate_schedule }}"
