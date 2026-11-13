@@ -1,0 +1,180 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_mongo_express__test_case: "{{ database_mongo_express__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_mongo_express__expect: "{{ database_mongo_express__test_case.expect }}"
+    database_mongo_express__test_url: "http://{{ database_mongo_express__expect.ip }}:8081{{ database_mongo_express__expect.base_url }}"
+    # The values of the secrets, they must not be part of the quadlet unit or the plain environment
+    database_mongo_express__test_plain: "{{ database_mongo_express__test_case.role_vars.mongo_express_secrets | map(attribute='data') | list }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_mongo_express__test_quadlet_path }}"
+      register: 'database_mongo_express__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_mongo_express__test_image) in database_mongo_express__test_quadlet_lines
+          - ('IP=' + database_mongo_express__expect.ip) in database_mongo_express__test_quadlet_lines
+          - database_mongo_express__expect.ip6 is none or ('IP6=' + database_mongo_express__expect.ip6) in database_mongo_express__test_quadlet_lines
+          - database_mongo_express__expect.ip6 is not none or database_mongo_express__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_mongo_express__expect.quadlet | reject('in', database_mongo_express__test_quadlet_lines) | list | length == 0
+          - database_mongo_express__test_plain | select('in', database_mongo_express__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ database_mongo_express__test_quadlet_lines | reject('search', 'secret') | list | to_json }}"
+      vars:
+        database_mongo_express__test_quadlet_lines: "{{ (database_mongo_express__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the mongo-express service'
+      ansible.builtin.command: 'systemctl is-active mongo-express'
+      register: 'database_mongo_express__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the mongo-express container'
+      ansible.builtin.command: 'podman inspect mongo-express'
+      register: 'database_mongo_express__test_inspect'
+      changed_when: false
+
+    # The secrets of the sessions and the cookies are passed in the environment, the connection string and the password are files
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__test_service.stdout == 'active'
+          - database_mongo_express__test_net.IPAddress == database_mongo_express__expect.ip
+          - database_mongo_express__expect.ip6 is none or database_mongo_express__test_net.GlobalIPv6Address == database_mongo_express__expect.ip6
+          - database_mongo_express__expect.env | reject('in', database_mongo_express__test_env) | list | length == 0
+          - database_mongo_express__test_env | select('match', 'ME_CONFIG_BASICAUTH_PASSWORD=') | list | length == 0
+          # The image sets the connection string without password, mongo-express prefers the file of the role
+          - database_mongo_express__test_env | select('match', 'ME_CONFIG_MONGODB_URL=') | reject('eq', 'ME_CONFIG_MONGODB_URL=' ~ database_mongo_express__test_image_url) | list | length == 0
+          - database_mongo_express__test_env | select('search', 'molecule-mongodb-password|molecule-admin-password') | list | length == 0
+        fail_msg: >-
+          service {{ database_mongo_express__test_service.stdout }},
+          IPv4 {{ database_mongo_express__test_net.IPAddress }}, IPv6 {{ database_mongo_express__test_net.GlobalIPv6Address }},
+          environment {{ database_mongo_express__test_env | reject('search', 'SECRET=|PASSWORD=|URL=') | join(', ') }}
+      vars:
+        database_mongo_express__test_container: "{{ (database_mongo_express__test_inspect.stdout | from_json)[0] }}"
+        database_mongo_express__test_net: "{{ database_mongo_express__test_container.NetworkSettings.Networks[database_mongo_express__test_case.role_vars.mongo_express_network] }}"
+        database_mongo_express__test_env: "{{ database_mongo_express__test_container.Config.Env }}"
+
+    # The health check is not behind the login, it answers 503 without connection to MongoDB
+    - name: 'Wait until mongo-express is connected to MongoDB'
+      ansible.builtin.uri:
+        url: "{{ database_mongo_express__test_url }}status"
+        return_content: true
+        status_code: [ 200, 503 ]
+      register: 'database_mongo_express__test_status'
+      until: database_mongo_express__test_status.status | default(0) == 200
+      retries: 30
+      delay: 5
+
+    - name: 'Log in with basic authentication'
+      when: database_mongo_express__expect.strategy == 'basic'
+      ansible.builtin.uri:
+        url: "{{ database_mongo_express__test_url }}"
+        url_username: "{{ item.name | default(omit) }}"
+        url_password: "{{ item.password | default(omit) }}"
+        force_basic_auth: "{{ item.name is defined }}"
+        return_content: true
+        status_code: [ 200, 401 ]
+      loop:
+        - { 'name': "{{ database_mongo_express__expect.admin.name }}", 'password': "{{ database_mongo_express__expect.admin.password }}" }
+        - { 'name': "{{ database_mongo_express__expect.admin.name }}", 'password': 'pass' }
+        - {}
+      loop_control:
+        label: "{{ 'password' if item.password | default('') == database_mongo_express__expect.admin.password else 'refused' }}"
+      register: 'database_mongo_express__test_basic'
+      no_log: true
+
+    - name: 'Assert the basic authentication and the databases'
+      when: database_mongo_express__expect.strategy == 'basic'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__test_basic.results | map(attribute='status') | list == [ 200, 401, 401 ]
+          - database_mongo_express__test_basic.results[0].content is search('/db/admin/')
+        fail_msg: "status {{ database_mongo_express__test_basic.results | map(attribute='status') | list }}"
+
+    # The uri module only returns the last cookie of a redirect, curl keeps all cookies of the session in a file
+    - name: 'Log in with the login form'
+      when: database_mongo_express__expect.strategy == 'form'
+      block:
+
+        - name: 'Create the cookie files'
+          ansible.builtin.tempfile:
+            suffix: '.cookies'
+          loop: [ 'password', 'refused' ]
+          register: 'database_mongo_express__test_cookie_files'
+
+        - name: 'Read the login form'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error', '--fail',
+                    '--cookie', "{{ item.path }}", '--cookie-jar', "{{ item.path }}",
+                    "{{ database_mongo_express__test_url }}login" ]
+          loop: "{{ database_mongo_express__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: 'database_mongo_express__test_login_form'
+          changed_when: false
+
+        - name: 'Log in with the password and with a refused password'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.0.path }}", '--cookie-jar', "{{ item.0.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code} %{redirect_url}',
+                    '--data-urlencode', "_csrf={{ item.1.stdout | regex_search('name=\"_csrf\" value=\"([^\"]+)\"', '\\1') | first }}",
+                    '--data-urlencode', "username={{ database_mongo_express__expect.admin.name }}",
+                    '--data-urlencode', "password={{ database_mongo_express__expect.admin.password if item.0.item == 'password' else 'pass' }}",
+                    "{{ database_mongo_express__test_url }}login" ]
+          loop: "{{ database_mongo_express__test_cookie_files.results | zip(database_mongo_express__test_login_form.results) | list }}"
+          loop_control:
+            label: "{{ item.0.item }}"
+          register: 'database_mongo_express__test_login'
+          changed_when: false
+          no_log: true
+
+        - name: 'Read the start page with the sessions'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie', "{{ item.path }}", '--cookie-jar', "{{ item.path }}",
+                    '--write-out', '\n%{http_code} %{redirect_url}',
+                    "{{ database_mongo_express__test_url }}" ]
+          loop: "{{ database_mongo_express__test_cookie_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: 'database_mongo_express__test_start'
+          changed_when: false
+
+      always:
+
+        - name: 'Remove the cookie files'
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: 'absent'
+          loop: "{{ database_mongo_express__test_cookie_files.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+    # A successful login redirects to the base URL, a refused one back to the login form
+    - name: 'Assert the login form and the databases'
+      when: database_mongo_express__expect.strategy == 'form'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__test_logins[0] is match('302 .*' ~ database_mongo_express__expect.base_url ~ '$')
+          - database_mongo_express__test_logins[1] is match('302 .*/login$')
+          - database_mongo_express__test_pages[0] is search('/db/admin/')
+          - database_mongo_express__test_pages[1] is search('\n302 .*/login$')
+        fail_msg: >-
+          logins {{ database_mongo_express__test_logins }},
+          start pages {{ database_mongo_express__test_pages | map('split', '\n') | map('last') | list }}
+      vars:
+        database_mongo_express__test_logins: "{{ database_mongo_express__test_login.results | map(attribute='stdout') | list }}"
+        database_mongo_express__test_pages: "{{ database_mongo_express__test_start.results | map(attribute='stdout') | list }}"

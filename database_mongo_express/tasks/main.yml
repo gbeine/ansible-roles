@@ -1,0 +1,223 @@
+---
+
+- name: 'Install mongo-express'
+  tags: [ 'database', 'database_mongo_express' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or mongo_express_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_mongo_express__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongo_express__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_mongo_express__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_mongo_express__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('mongo_express_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('mongo_express_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of mongo_express_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The login is mandatory, every way to log in needs its variables and secrets
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongo_express__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongo_express__secret_targets: "{{ database_mongo_express__secrets | map(attribute='target') | list }}"
+        database_mongo_express__environment_set: >-
+          {{ database_mongo_express__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        database_mongo_express__environment_needed: >-
+          {{ database_mongo_express__environment_required
+             + database_mongo_express__auth_environment_required[database_mongo_express__auth_strategy] | default([]) }}
+        database_mongo_express__environment_missing: >-
+          {{ database_mongo_express__environment_needed | reject('in', database_mongo_express__environment_set) | list }}
+        database_mongo_express__secrets_needed: >-
+          {{ database_mongo_express__secrets_required
+             + database_mongo_express__auth_secrets_required[database_mongo_express__auth_strategy] | default([]) }}
+        database_mongo_express__secrets_missing: >-
+          {{ database_mongo_express__secrets_needed | reject('in', database_mongo_express__secret_targets) | list }}
+        database_mongo_express__secrets_in_environment: >-
+          {{ (database_mongo_express__secret_targets + database_mongo_express__secret_variables + database_mongo_express__secret_files.values() | list)
+             | select('in', database_mongo_express__environment.keys() | list) | unique | list }}
+        database_mongo_express__role_in_environment: >-
+          {{ database_mongo_express__environment_role.keys() | select('in', database_mongo_express__environment.keys() | list) | list }}
+        database_mongo_express__base_url: "{{ database_mongo_express__environment.ME_CONFIG_SITE_BASEURL | default('/') | string }}"
+        database_mongo_express__secrets_lines: >-
+          {{ database_mongo_express__secrets | selectattr('target', 'in', database_mongo_express__secrets_env)
+             | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        database_mongo_express__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_mongo_express__auth_strategy not in database_mongo_express__auth_strategies -%}
+          {%-   set _ = errors.append('ME_CONFIG_AUTH_STRATEGY has to be one of ' ~ (database_mongo_express__auth_strategies | join(', ')) ~ ', got ' ~ database_mongo_express__auth_strategy ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('mongo-express needs the environment variables ' ~ (database_mongo_express__environment_needed | join(', ')) ~ ', missing or empty: ' ~ (database_mongo_express__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('mongo-express needs the secrets ' ~ (database_mongo_express__secrets_needed | join(', ')) ~ ', missing: ' ~ (database_mongo_express__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in mongo_express_environment: ' ~ (database_mongo_express__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__role_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('These variables are set by the role from ME_CONFIG_AUTH_STRATEGY and must not be set in mongo_express_environment: ' ~ (database_mongo_express__role_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if not (database_mongo_express__base_url.startswith('/') and database_mongo_express__base_url.endswith('/')) -%}
+          {%-   set _ = errors.append('ME_CONFIG_SITE_BASEURL has to start and end with /, got ' ~ database_mongo_express__base_url ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets passed in the environment must not contain line breaks: ' ~ (database_mongo_express__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongo_express__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongo_express__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in database_mongo_express__environment.items() if value is not none -%}
+          {%-   if key in database_mongo_express__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging mongo_express_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_mongo_express__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_mongo_express__secrets_allowed: "{{ database_mongo_express__secret_files.keys() | list + database_mongo_express__secrets_env }}"
+        database_mongo_express__environment_unknown: >-
+          {{ (database_mongo_express__container.environment | default({})).keys() | reject('in', database_mongo_express__environment_allowed) | list }}
+        # The targets are read from the container, mongo_express_container may replace the secrets
+        database_mongo_express__container_targets: >-
+          {{ (database_mongo_express__container.secrets
+              if database_mongo_express__container.secrets is defined
+                 and database_mongo_express__container.secrets is sequence and database_mongo_express__container.secrets is not string
+              else []) | map('regex_search', 'target=([^,]+)', '\1') | select | map('first')
+             | map('regex_replace', '^' ~ database_mongo_express__secrets_dir ~ '/.*$', '') | select | list }}
+        database_mongo_express__secrets_unknown: >-
+          {{ (database_mongo_express__secrets | map(attribute='target') | list + database_mongo_express__container_targets)
+             | reject('in', database_mongo_express__secrets_allowed) | unique | list }}
+        database_mongo_express__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_mongo_express__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_mongo_express__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_mongo_express__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of mongo-express (database_mongo_express__environment_allowed) and the secrets ' ~ (database_mongo_express__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_mongo_express__secrets }}"
+      register: 'database_mongo_express__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_mongo_express__container.name }}"
+        hostname: "{{ database_mongo_express__container.hostname }}"
+        image: "{{ database_mongo_express__container.image }}"
+        ip: "{{ database_mongo_express__container.ip }}"
+        ip6: "{{ database_mongo_express__container.ipv6 | default(omit) }}"
+        network: "{{ database_mongo_express__container.network }}"
+        timezone: "{{ database_mongo_express__container.timezone }}"
+        env: "{{ database_mongo_express__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_mongo_express__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_mongo_express__container.expose | default(omit) }}"
+        label: "{{ database_mongo_express__container.labels | default(omit) }}"
+        publish: "{{ database_mongo_express__container.publish | default(omit) }}"
+        secrets: "{{ database_mongo_express__container.secrets | default(omit) }}"
+        volume: "{{ database_mongo_express__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if database_mongo_express__container.requires is defined %}
+          Requires={{ database_mongo_express__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'database_mongo_express__quadlet_result'
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ database_mongo_express__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if database_mongo_express__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        database_mongo_express__running: >-
+          {{ (ansible_facts.services[database_mongo_express__container.name + '.service'].state | default('')) == 'running' }}
+        database_mongo_express__restart: >-
+          {{ database_mongo_express__running | bool
+             and (database_mongo_express__secrets_result is changed
+                  or database_mongo_express__quadlet_result is changed) }}
+      when: 'not ansible_check_mode'
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_mongo_express__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_mongo_express__container.name }}"
+        container_image: "{{ database_mongo_express__container.image }}"
+        container_schedule: "{{ database_mongo_express__autoupdate_schedule }}"

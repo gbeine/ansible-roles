@@ -1,0 +1,160 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_mongo_express__test_case: "{{ database_mongo_express__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_mongo_express__test_vars: "{{ database_mongo_express__test_case.role_vars }}"
+    database_mongo_express__test_checked_files:
+      - "{{ database_mongo_express__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_mongo_express__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_mongo_express__test_checked_files }}"
+      register: 'database_mongo_express__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run database_mongo_express with mongo_express_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_container: [ 'environment' ]
+        database_mongo_express__test_invalid:
+          message: 'mongo_express_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_mongo_express with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_secrets: "{{ database_mongo_express__test_vars.mongo_express_secrets + [{'name': 'mongo_express_other', 'data': 'x'}] }}"
+        database_mongo_express__test_invalid:
+          message: 'a secret without target'
+          search: '^mongo_express_secrets entries need name, data and target$'
+
+    - name: 'Run database_mongo_express without the connection string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_secrets: "{{ database_mongo_express__test_vars.mongo_express_secrets | rejectattr('target', 'eq', 'ME_CONFIG_MONGODB_URL') | list }}"
+        database_mongo_express__test_invalid:
+          message: 'no connection string'
+          search: '^mongo-express needs the secrets ME_CONFIG_MONGODB_URL, ME_CONFIG_SITE_SESSIONSECRET, ME_CONFIG_BASICAUTH_PASSWORD, missing: ME_CONFIG_MONGODB_URL\.$'
+
+    - name: 'Run database_mongo_express without the password of the login (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_secrets: "{{ database_mongo_express__test_vars.mongo_express_secrets | rejectattr('target', 'eq', 'ME_CONFIG_BASICAUTH_PASSWORD') | list }}"
+        database_mongo_express__test_invalid:
+          message: 'no password of the login'
+          search: '^mongo-express needs the secrets .*, missing: ME_CONFIG_BASICAUTH_PASSWORD\.$'
+
+    - name: 'Run database_mongo_express with the password of the login in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_BASICAUTH_PASSWORD': 'pass'}) }}"
+        database_mongo_express__test_invalid:
+          message: 'the password of the login in the environment'
+          search: '^Secrets and their file variables must not be set in mongo_express_environment: ME_CONFIG_BASICAUTH_PASSWORD\.$'
+
+    - name: 'Run database_mongo_express without a way to log in (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_AUTH_STRATEGY': 'none'}) }}"
+        database_mongo_express__test_invalid:
+          message: 'no way to log in'
+          search: '^ME_CONFIG_AUTH_STRATEGY has to be one of basic, form, oidc, got none\.$'
+
+    - name: 'Run database_mongo_express with ME_CONFIG_BASICAUTH_ENABLED in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_BASICAUTH_ENABLED': false}) }}"
+        database_mongo_express__test_invalid:
+          message: 'ME_CONFIG_BASICAUTH_ENABLED in the environment'
+          search: '^These variables are set by the role from ME_CONFIG_AUTH_STRATEGY and must not be set in mongo_express_environment: ME_CONFIG_BASICAUTH_ENABLED\.$'
+
+    - name: 'Run database_mongo_express with a base URL without slash at the end (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_SITE_BASEURL': '/mongo'}) }}"
+        database_mongo_express__test_invalid:
+          message: 'a base URL without slash at the end'
+          search: '^ME_CONFIG_SITE_BASEURL has to start and end with /, got /mongo\.$'
+
+    - name: 'Run database_mongo_express with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_OPTIONS_NO_DELETE': 'yes'}) }}"
+        database_mongo_express__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: ME_CONFIG_OPTIONS_NO_DELETE\.$'
+
+    - name: 'Run database_mongo_express with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_BASICAUTH_USERNAME': 'molecule\nadmin'}) }}"
+        database_mongo_express__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: ME_CONFIG_BASICAUTH_USERNAME\.$'
+
+    - name: 'Run database_mongo_express with NODE_ENV in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'NODE_ENV': 'test'}) }}"
+        database_mongo_express__test_invalid:
+          message: 'NODE_ENV in the environment'
+          search: '^Unknown environment variables: NODE_ENV\.'
+
+    - name: 'Run database_mongo_express with the root password of MongoDB as secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongo_express_secrets: "{{ database_mongo_express__test_vars.mongo_express_secrets + [{'name': 'mongo_express_root', 'data': 'x', 'target': 'MONGO_INITDB_ROOT_PASSWORD'}] }}"
+        database_mongo_express__test_invalid:
+          message: 'the root password of MongoDB as secret'
+          search: '^Unknown secrets: MONGO_INITDB_ROOT_PASSWORD\.'
+
+    - name: 'Run database_mongo_express with the changed environment'
+      when: database_mongo_express__test_case.side_effect | default(false)
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongo-express' ]
+          register: 'database_mongo_express__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine(database_mongo_express__test_side_effect_environment) }}"
+
+        - name: 'Run database_mongo_express with the changed environment'
+          ansible.builtin.include_role:
+            name: 'database_mongo_express'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongo-express' ]
+          register: 'database_mongo_express__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_mongo_express__quadlet_result is changed
+              - database_mongo_express__test_started_after.stdout | int > database_mongo_express__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ database_mongo_express__quadlet_result is changed }},
+              start before {{ database_mongo_express__test_started_before.stdout }}, after {{ database_mongo_express__test_started_after.stdout }}
