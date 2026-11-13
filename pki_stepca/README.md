@@ -7,4 +7,4 @@ container_link: https://hub.docker.com/r/smallstep/step-ca
 documentation_link: https://smallstep.com/docs/step-ca/
 ---
 
-Installs and configures step-ca as a podman quadlet.
+Installs and configures step-ca, the certificate authority of smallstep, including its initialization as a podman quadlet.

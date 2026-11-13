@@ -11,55 +11,158 @@ pki_stepca__ipv6: "{{ stepca_ipv6 }}"
 pki_stepca__network: "{{ stepca_network | mandatory }}"
 pki_stepca__hostname: "{{ stepca_hostname | mandatory }}"
 pki_stepca__timezone: "{{ stepca_timezone | mandatory }}"
-pki_stepca__labels: "{{ stepca_labels | default({}) }}"
-pki_stepca__publish: "{{ stepca_publish | default([]) }}"
+pki_stepca__labels: "{{ stepca_labels }}"
 
-pki_stepca__init_name: "{{ stepca_init_name | mandatory }}"
-pki_stepca__init_dns_name: "{{ stepca_init_dns_name | mandatory }}"
-pki_stepca__init_remote_management: "{{ stepca_init_remote_management | default(true) }}"
-pki_stepca__init_provisioner_name: "{{ stepca_init_provisioner_name | default('admin') }}"
-pki_stepca__init_admin_subject: "{{ stepca_init_admin_subject | default('step') }}"
-pki_stepca__init_address: "{{ stepca_init_address | default(':9000') }}"
-pki_stepca__init_ssh: "{{ stepca_init_ssh | default(true) }}"
-pki_stepca__init_acme: "{{ stepca_init_acme | default(true) }}"
-pki_stepca__init_password: "{{ stepca_init_password | mandatory }}"
+pki_stepca__version: "{{ stepca_version | default('latest') }}"
 
 pki_stepca__container: "{{ pki_stepca__podman_container_default | combine(stepca_container | default({})) }}"
 
+# step-ca reads no variables besides TZ
+pki_stepca__environment: "{{ pki_stepca__environment_default | combine(stepca_environment | default({})) }}"
+
+# The variables of the initialization (DOCKER_STEPCA_INIT_*), only set in the container of the initialization
+pki_stepca__init_environment: "{{ pki_stepca__init_environment_default | combine(stepca_init_environment | default({})) }}"
+
+# Secrets with name, data and target, all secrets of step-ca are only needed by the initialization and mounted as files there
+pki_stepca__secrets: "{{ stepca_secrets | default([]) }}"
+
+# Merged recursively into the ca.json created by the initialization, lists are replaced
+pki_stepca__config: "{{ pki_stepca__config_current | combine(stepca_config | default({}), recursive=true) }}"
+
+pki_stepca__autoupdate_enabled: "{{ stepca_autoupdate_enabled | default(false) }}"
+pki_stepca__autoupdate_schedule: "{{ stepca_autoupdate_schedule }}"
+
 #
-# podman defaults
+# Defaults - do not change
 #
 
+pki_stepca__environment_default:
+  TZ: "{{ pki_stepca__timezone }}"
+
+pki_stepca__environment_allowed: [ 'TZ' ]
+
+# The defaults of the former variables of the role
+pki_stepca__init_environment_default:
+  DOCKER_STEPCA_INIT_PROVISIONER_NAME: 'admin'
+  DOCKER_STEPCA_INIT_ADMIN_SUBJECT: 'step'
+  DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: true
+  DOCKER_STEPCA_INIT_SSH: true
+  DOCKER_STEPCA_INIT_ACME: true
+
+pki_stepca__init_environment_required: [ 'DOCKER_STEPCA_INIT_NAME', 'DOCKER_STEPCA_INIT_DNS_NAMES' ]
+
+# Set by the role, the port is changed with stepca_container.publish
+pki_stepca__init_environment_role:
+  DOCKER_STEPCA_INIT_ADDRESS: ':9000'
+
+pki_stepca__init_environment_booleans:
+  - 'DOCKER_STEPCA_INIT_ACME'
+  - 'DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT'
+  - 'DOCKER_STEPCA_INIT_SSH'
+
+# The variables of docker/entrypoint.sh of step-ca v0.30.2 without the secrets, the variables set by the role and the file variables of the secrets
+pki_stepca__init_environment_allowed:
+  - 'DOCKER_STEPCA_INIT_ACME'
+  - 'DOCKER_STEPCA_INIT_ADMIN_SUBJECT'
+  - 'DOCKER_STEPCA_INIT_DEPLOYMENT_TYPE'
+  - 'DOCKER_STEPCA_INIT_DNS_NAMES'
+  - 'DOCKER_STEPCA_INIT_NAME'
+  - 'DOCKER_STEPCA_INIT_PROVISIONER_NAME'
+  - 'DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT'
+  - 'DOCKER_STEPCA_INIT_SSH'
+  - 'DOCKER_STEPCA_INIT_WITH_CA_URL'
+  # Set by the role
+  - 'DOCKER_STEPCA_INIT_ADDRESS'
+  # The file variables of the secrets, set by the role
+  - 'DOCKER_STEPCA_INIT_PASSWORD_FILE'
+  - 'DOCKER_STEPCA_INIT_ROOT_FILE'
+  - 'DOCKER_STEPCA_INIT_KEY_FILE'
+  - 'DOCKER_STEPCA_INIT_KEY_PASSWORD_FILE'
+
+# The entrypoint reads the password and an existing root from these files (docker/entrypoint.sh of step-ca v0.30.2)
+pki_stepca__secret_files:
+  DOCKER_STEPCA_INIT_PASSWORD: 'DOCKER_STEPCA_INIT_PASSWORD_FILE'
+  DOCKER_STEPCA_INIT_ROOT: 'DOCKER_STEPCA_INIT_ROOT_FILE'
+  DOCKER_STEPCA_INIT_KEY: 'DOCKER_STEPCA_INIT_KEY_FILE'
+  DOCKER_STEPCA_INIT_KEY_PASSWORD: 'DOCKER_STEPCA_INIT_KEY_PASSWORD_FILE'
+
+pki_stepca__secret_variables: "{{ pki_stepca__secret_files.keys() | list }}"
+pki_stepca__secrets_required: [ 'DOCKER_STEPCA_INIT_PASSWORD' ]
+pki_stepca__secrets_dir: '/run/secrets'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+pki_stepca__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if pki_stepca__secrets is sequence and pki_stepca__secrets is not string and pki_stepca__secrets is not mapping -%}
+  {%-   for secret in pki_stepca__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in pki_stepca__secret_files -%}
+  {%-     set _ = environment.update({ pki_stepca__secret_files[secret.target]: pki_stepca__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The environment of the container of the initialization, the DNS names may be a list, booleans in lower case
+pki_stepca__init_environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in (pki_stepca__environment | combine(pki_stepca__init_environment) | combine(pki_stepca__init_environment_role)).items() -%}
+  {%-   if value is boolean -%}
+  {%-     set value = value | string | lower -%}
+  {%-   elif value is sequence and value is not string and value is not mapping -%}
+  {%-     set value = value | join(',') -%}
+  {%-   endif -%}
+  {%-   set _ = environment.update({ key: value }) -%}
+  {%- endfor -%}
+  {{ environment | combine(pki_stepca__environment_secrets_files) }}
+
+# The podman secrets of stepca_secrets, only mounted in the container of the initialization
+pki_stepca__podman_init_secrets: >-
+  {%- set secrets = [] -%}
+  {%- if pki_stepca__secrets is sequence and pki_stepca__secrets is not string and pki_stepca__secrets is not mapping -%}
+  {%-   for secret in pki_stepca__secrets if secret is mapping and secret.name is defined -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ pki_stepca__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ secrets }}
+
+# The keys of ca.json that may be changed with stepca_config (authority/config/config.go of step-ca v0.30.2),
+# the keys, certificates, the address and the provisioners are created by the initialization and managed with the step CLI
+pki_stepca__config_keys: [ 'federatedRoots', 'insecureAddress', 'dnsNames', 'logger', 'db', 'monitoring', 'authority', 'tls', 'templates', 'commonName', 'crl', 'metricsAddress' ]
+pki_stepca__config_authority_keys: [ 'template', 'claims', 'policy', 'disableIssuedAtCheck', 'backdate', 'enableAdmin', 'disableGetSSHHosts' ]
+
+# The ca.json read after the initialization, empty in check mode before the initialization
+pki_stepca__config_current: >-
+  {{ (pki_stepca__config_read.content | b64decode | from_json)
+     if (pki_stepca__config_read.content | default('') | length > 0) else {} }}
+
+# The file the entrypoint checks, the initialization runs if it is missing
+pki_stepca__config_file: "{{ pki_stepca__podman_home }}/config/ca.json"
+
+# The message of the entrypoint after the initialization
+pki_stepca__init_message: 'will only be displayed once'
+
+pki_stepca__port: 9000
+
+# The user step of the image
 pki_stepca__uid: 1000
 pki_stepca__gid: "{{ pki_stepca__uid }}"
 
 pki_stepca__podman_name: 'stepca'
 pki_stepca__podman_image: 'docker.io/smallstep/step-ca'
+pki_stepca__podman_tag: "{{ pki_stepca__version }}"
+pki_stepca__podman_init_name: "{{ pki_stepca__container.name }}-init"
 
 pki_stepca__podman_home: "{{ pki_stepca__home }}"
 
 pki_stepca__podman_container_default:
   name: "{{ pki_stepca__podman_name }}"
   hostname: "{{ pki_stepca__hostname }}"
-  image: "{{ pki_stepca__podman_image }}"
+  image: "{{ pki_stepca__podman_image }}:{{ pki_stepca__podman_tag }}"
   ip: "{{ pki_stepca__ip }}"
   ipv6: "{{ pki_stepca__ipv6 | default(omit) }}"
   network: "{{ pki_stepca__network }}"
   timezone: "{{ pki_stepca__timezone }}"
-  environment:
-    DOCKER_STEPCA_INIT_NAME: "{{ pki_stepca__init_name }}"
-    DOCKER_STEPCA_INIT_DNS_NAMES: "{{ pki_stepca__init_dns_name | join(',') }}"
-    DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "{{ pki_stepca__init_remote_management | ternary('true', 'false') }}"
-    DOCKER_STEPCA_INIT_PROVISIONER_NAME: "{{ pki_stepca__init_provisioner_name }}"
-    DOCKER_STEPCA_INIT_ADMIN_SUBJECT: "{{ pki_stepca__init_admin_subject }}"
-    DOCKER_STEPCA_INIT_ADDRESS: "{{ pki_stepca__init_address }}"
-    DOCKER_STEPCA_INIT_SSH: "{{ pki_stepca__init_ssh | ternary('true', 'false') }}"
-    DOCKER_STEPCA_INIT_ACME: "{{ pki_stepca__init_acme | ternary('true', 'false') }}"
-  labels: "{{ pki_stepca__labels }}"
-  publish: "{{ pki_stepca__publish }}"
-  secrets:
-    - "stepca_init_password,type=env,target=DOCKER_STEPCA_INIT_PASSWORD"
+  # Set with stepca_environment, the variables of the initialization are not part of the quadlet unit
+  environment: "{{ pki_stepca__environment }}"
+  labels: "{{ pki_stepca__labels | default(omit) }}"
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
-    - "{{ pki_stepca__podman_home }}:/home/step"
+    - "{{ pki_stepca__podman_home }}:/home/step:Z"

@@ -1,0 +1,198 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_stepca__test_case: "{{ pki_stepca__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_stepca__test_vars: "{{ pki_stepca__test_case.role_vars }}"
+    pki_stepca__test_init: "{{ pki_stepca__test_vars.stepca_init_environment }}"
+    pki_stepca__test_secrets: "{{ pki_stepca__test_vars.stepca_secrets }}"
+    pki_stepca__test_config: "{{ pki_stepca__test_vars.stepca_config | default({}) }}"
+    pki_stepca__test_checked_files:
+      - "{{ pki_stepca__test_quadlet_path }}"
+      - "{{ pki_stepca__test_home }}/config/ca.json"
+    # The root of the CA must not change, the initialization must not run again
+    pki_stepca__test_root: "{{ pki_stepca__test_home }}/certs/root_ca.crt"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ pki_stepca__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_stepca__test_checked_files }}"
+      register: 'pki_stepca__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run pki_stepca with stepca_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_container: [ 'environment' ]
+        pki_stepca__test_invalid:
+          message: 'stepca_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run pki_stepca with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_secrets: "{{ pki_stepca__test_secrets + [ { 'name': 'stepca_other', 'data': 'x' } ] }}"
+        pki_stepca__test_invalid:
+          message: 'a secret without target'
+          search: '^stepca_secrets entries need name, data and target$'
+
+    - name: 'Run pki_stepca without the password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_secrets: []
+        pki_stepca__test_invalid:
+          message: 'without the password'
+          search: '^The initialization of step-ca needs the secrets DOCKER_STEPCA_INIT_PASSWORD, missing: DOCKER_STEPCA_INIT_PASSWORD\.$'
+
+    - name: 'Run pki_stepca without the name of the CA (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_init_environment: "{{ pki_stepca__test_init | dict2items | rejectattr('key', 'eq', 'DOCKER_STEPCA_INIT_NAME') | items2dict }}"
+        pki_stepca__test_invalid:
+          message: 'without the name of the CA'
+          search: '^The initialization of step-ca needs DOCKER_STEPCA_INIT_NAME, DOCKER_STEPCA_INIT_DNS_NAMES in stepca_init_environment, missing or empty: DOCKER_STEPCA_INIT_NAME\.$'
+
+    - name: 'Run pki_stepca with the password in the environment of the initialization (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_init_environment: "{{ pki_stepca__test_init | combine({ 'DOCKER_STEPCA_INIT_PASSWORD': 'molecule-plain-password' }) }}"
+        pki_stepca__test_invalid:
+          message: 'the password in the environment of the initialization'
+          search: '^Secrets and their file variables must not be set in stepca_environment or stepca_init_environment: DOCKER_STEPCA_INIT_PASSWORD\.$'
+
+    - name: 'Run pki_stepca with the address of the initialization (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_init_environment: "{{ pki_stepca__test_init | combine({ 'DOCKER_STEPCA_INIT_ADDRESS': ':8443' }) }}"
+        pki_stepca__test_invalid:
+          message: 'the address of the initialization'
+          search: '^These variables are set by the role and must not be set in stepca_environment or stepca_init_environment: DOCKER_STEPCA_INIT_ADDRESS\.$'
+
+    - name: 'Run pki_stepca with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_init_environment: "{{ pki_stepca__test_init | combine({ 'DOCKER_STEPCA_INIT_ACME': 'yes' }) }}"
+        pki_stepca__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables are booleans, allowed are true and false: DOCKER_STEPCA_INIT_ACME\.$'
+
+    - name: 'Run pki_stepca with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_init_environment: "{{ pki_stepca__test_init | combine({ 'DOCKER_STEPCA_INIT_NAME': 'Molecule\nCA' }) }}"
+        pki_stepca__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: DOCKER_STEPCA_INIT_NAME\.$'
+
+    - name: 'Run pki_stepca with an unknown variable of the initialization (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_init_environment: "{{ pki_stepca__test_init | combine({ 'DOCKER_STEPCA_INIT_MOLECULE': 'true' }) }}"
+        pki_stepca__test_invalid:
+          message: 'an unknown variable of the initialization'
+          search: '^Unknown variables of the initialization: DOCKER_STEPCA_INIT_MOLECULE,'
+
+    - name: 'Run pki_stepca with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_environment: { 'STEPDEBUG': '1' }
+        pki_stepca__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: STEPDEBUG,'
+
+    - name: 'Run pki_stepca with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_secrets: "{{ pki_stepca__test_secrets + [ { 'name': 'stepca_ssh_key', 'data': 'x', 'target': 'DOCKER_STEPCA_INIT_SSH_KEY' } ] }}"
+        pki_stepca__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: DOCKER_STEPCA_INIT_SSH_KEY,'
+
+    - name: 'Run pki_stepca with stepca_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_config: [ 'logger' ]
+        pki_stepca__test_invalid:
+          message: 'stepca_config not a dictionary'
+          search: '^stepca_config has to be a dictionary of the keys of ca\.json\.$'
+
+    - name: 'Run pki_stepca with the root in stepca_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_config: "{{ pki_stepca__test_config | combine({ 'root': '/home/step/certs/other.crt' }) }}"
+        pki_stepca__test_invalid:
+          message: 'the root in stepca_config'
+          search: '^These keys of ca\.json must not be set in stepca_config: root,'
+
+    - name: 'Run pki_stepca with provisioners in stepca_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        stepca_config: "{{ pki_stepca__test_config | combine({ 'authority': { 'provisioners': [] } }, recursive=true) }}"
+        pki_stepca__test_invalid:
+          message: 'provisioners in stepca_config'
+          search: '^These keys of authority must not be set in stepca_config: provisioners,'
+
+    - name: 'Change the configuration'
+      when: pki_stepca__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service and the root before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'stepca' ]
+          register: 'pki_stepca__test_started_before'
+          changed_when: false
+
+        - name: 'Read the checksum of the root before the change'
+          ansible.builtin.stat:
+            path: "{{ pki_stepca__test_root }}"
+            checksum_algorithm: 'md5'
+          register: 'pki_stepca__test_root_before'
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            stepca_config: "{{ pki_stepca__test_case.side_effect.config }}"
+
+        - name: 'Run pki_stepca with the changed values'
+          ansible.builtin.include_role:
+            name: 'pki_stepca'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'stepca' ]
+          register: 'pki_stepca__test_started_after'
+          changed_when: false
+
+        - name: 'Read the checksum of the root after the change'
+          ansible.builtin.stat:
+            path: "{{ pki_stepca__test_root }}"
+            checksum_algorithm: 'md5'
+          register: 'pki_stepca__test_root_after'
+
+        # The initialization is skipped with an existing ca.json, the root stays the same
+        - name: 'Assert the restart without a new initialization'
+          ansible.builtin.assert:
+            that:
+              - pki_stepca__config_result is changed
+              - pki_stepca__quadlet_result is not changed
+              - pki_stepca__test_started_after.stdout | int > pki_stepca__test_started_before.stdout | int
+              - pki_stepca__test_root_before.stat.checksum == pki_stepca__test_root_after.stat.checksum
+            fail_msg: >-
+              configuration changed: {{ pki_stepca__config_result is changed }}, quadlet changed: {{ pki_stepca__quadlet_result is changed }},
+              start before {{ pki_stepca__test_started_before.stdout }}, after {{ pki_stepca__test_started_after.stdout }},
+              root before {{ pki_stepca__test_root_before.stat.checksum | default('') }}, after {{ pki_stepca__test_root_after.stat.checksum | default('') }}

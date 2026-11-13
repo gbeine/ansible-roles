@@ -1,32 +1,265 @@
 ---
 
 - name: 'Install step-ca'
-  tags: [ 'pki_stepca' ]
+  tags: [ 'pki', 'pki_stepca' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or stepca_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - pki_stepca__container | length > 0
+          - pki_stepca__init_environment_container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ pki_stepca__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        pki_stepca__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = pki_stepca__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('stepca_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('stepca_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of stepca_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The name, the DNS names and the password are needed by the initialization
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ pki_stepca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_stepca__targets: "{{ pki_stepca__secrets | map(attribute='target') | list }}"
+        pki_stepca__init_set: >-
+          {{ pki_stepca__init_environment | dict2items | rejectattr('value', 'in', ['', none, []]) | map(attribute='key') | list }}
+        pki_stepca__init_missing: "{{ pki_stepca__init_environment_required | reject('in', pki_stepca__init_set) | list }}"
+        pki_stepca__secrets_missing: "{{ pki_stepca__secrets_required | reject('in', pki_stepca__targets) | list }}"
+        pki_stepca__all_keys: "{{ pki_stepca__environment.keys() | list + pki_stepca__init_environment.keys() | list }}"
+        pki_stepca__secrets_in_environment: >-
+          {{ (pki_stepca__targets + pki_stepca__secret_variables + pki_stepca__secret_files.values() | list)
+             | select('in', pki_stepca__all_keys) | unique | list }}
+        pki_stepca__role_in_environment: >-
+          {{ pki_stepca__init_environment_role.keys() | select('in', pki_stepca__all_keys) | list }}
+        pki_stepca__errors: >-
+          {%- set errors = [] -%}
+          {%- if pki_stepca__init_missing | length > 0 -%}
+          {%-   set _ = errors.append('The initialization of step-ca needs ' ~ (pki_stepca__init_environment_required | join(', ')) ~ ' in stepca_init_environment, missing or empty: ' ~ (pki_stepca__init_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if pki_stepca__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('The initialization of step-ca needs the secrets ' ~ (pki_stepca__secrets_required | join(', ')) ~ ', missing: ' ~ (pki_stepca__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if pki_stepca__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in stepca_environment or stepca_init_environment: ' ~ (pki_stepca__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if pki_stepca__role_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('These variables are set by the role and must not be set in stepca_environment or stepca_init_environment: ' ~ (pki_stepca__role_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ pki_stepca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_stepca__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in (pki_stepca__environment | combine(pki_stepca__init_environment)).items() if value is not none -%}
+          {%-   set values = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-   if key in pki_stepca__init_environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif values | map('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The keys, the certificates, the address and the provisioners are created by the initialization
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ pki_stepca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_stepca__input: "{{ stepca_config | default({}) }}"
+        pki_stepca__errors: >-
+          {%- set errors = [] -%}
+          {%- if pki_stepca__input is not mapping -%}
+          {%-   set _ = errors.append('stepca_config has to be a dictionary of the keys of ca.json.') -%}
+          {%- else -%}
+          {%-   set unknown = pki_stepca__input.keys() | reject('in', pki_stepca__config_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('These keys of ca.json must not be set in stepca_config: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (pki_stepca__config_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if pki_stepca__input.authority is defined -%}
+          {%-     if pki_stepca__input.authority is not mapping -%}
+          {%-       set _ = errors.append('stepca_config.authority has to be a dictionary.') -%}
+          {%-     else -%}
+          {%-       set unknown = pki_stepca__input.authority.keys() | reject('in', pki_stepca__config_authority_keys) | list -%}
+          {%-       if unknown | length > 0 -%}
+          {%-         set _ = errors.append('These keys of authority must not be set in stepca_config: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (pki_stepca__config_authority_keys | join(', ')) ~ ', the provisioners are managed with the step CLI.') -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%-   if pki_stepca__input.dnsNames is defined
+                   and (pki_stepca__input.dnsNames is string or pki_stepca__input.dnsNames is not sequence or pki_stepca__input.dnsNames | length == 0) -%}
+          {%-     set _ = errors.append('stepca_config.dnsNames has to be a list of names, step-ca needs at least one.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environments of the container and of the initialization,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ pki_stepca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_stepca__environment_unknown: >-
+          {{ (pki_stepca__container.environment | default({})).keys() | reject('in', pki_stepca__environment_allowed) | list }}
+        pki_stepca__init_unknown: >-
+          {{ pki_stepca__init_environment.keys() | reject('in', pki_stepca__init_environment_allowed + pki_stepca__environment_allowed) | list }}
+        pki_stepca__secrets_unknown: >-
+          {{ pki_stepca__secrets | map(attribute='target') | reject('in', pki_stepca__secret_variables) | unique | list }}
+        pki_stepca__errors: >-
+          {%- set errors = [] -%}
+          {%- if pki_stepca__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (pki_stepca__environment_unknown | join(', ')) ~ ', step-ca only reads ' ~ (pki_stepca__environment_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if pki_stepca__init_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown variables of the initialization: ' ~ (pki_stepca__init_unknown | join(', ')) ~ ', allowed are the variables of the entrypoint (pki_stepca__init_environment_allowed).') -%}
+          {%- endif -%}
+          {%- if pki_stepca__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (pki_stepca__secrets_unknown | join(', ')) ~ ', allowed are ' ~ (pki_stepca__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs step-ca as step (1000)
+    - name: 'Create the directory of step-ca'
       ansible.builtin.file:
-        dest: "{{ item }}"
+        path: "{{ pki_stepca__podman_home }}"
         owner: "{{ pki_stepca__uid }}"
         group: "{{ pki_stepca__gid }}"
         mode: '0750'
         state: 'directory'
-      with_items:
-        - "{{ pki_stepca__podman_home }}"
 
+    # The secrets are only needed by the initialization
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        skip_existing: true
-        name: 'stepca_init_password'
-        data: "{{ pki_stepca__init_password }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ pki_stepca__secrets }}"
 
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ pki_stepca__container.image }}"
-        force: true
-      when: 'podman___update_mode'
+    - name: 'Find the configuration of an initialized step-ca'
+      ansible.builtin.stat:
+        path: "{{ pki_stepca__config_file }}"
+      register: 'pki_stepca__initialized'
+
+    # The entrypoint only initializes without ca.json: it runs step ca init, writes the password of the CA to secrets/password,
+    # shows the password of the administrator once and starts step-ca. The container of the initialization runs once without network.
+    - name: 'Initialize step-ca'
+      when:
+        - not ansible_check_mode
+        - not pki_stepca__initialized.stat.exists
+      block:
+
+        - name: 'Run the initialization'
+          containers.podman.podman_container:
+            name: "{{ pki_stepca__podman_init_name }}"
+            image: "{{ pki_stepca__container.image }}"
+            network: 'none'
+            env: "{{ pki_stepca__init_environment_container }}"
+            secrets: "{{ pki_stepca__podman_init_secrets }}"
+            volume: "{{ pki_stepca__container.volumes }}"
+            detach: true
+            state: 'started'
+
+        - name: 'Wait for the end of the initialization'
+          ansible.builtin.command:
+            argv: [ 'podman', 'logs', "{{ pki_stepca__podman_init_name }}" ]
+          register: 'pki_stepca__init_log'
+          changed_when: false
+          failed_when: false
+          until: pki_stepca__init_message in (pki_stepca__init_log.stdout ~ pki_stepca__init_log.stderr)
+          retries: 60
+          delay: 2
+
+        - name: 'Find the configuration after the initialization'
+          ansible.builtin.stat:
+            path: "{{ pki_stepca__config_file }}"
+          register: 'pki_stepca__init_config'
+
+        - name: 'Assert the initialization'
+          ansible.builtin.assert:
+            that:
+              - pki_stepca__init_message in (pki_stepca__init_log.stdout ~ pki_stepca__init_log.stderr)
+              - pki_stepca__init_config.stat.exists
+            fail_msg: >-
+              The initialization of step-ca failed, remove the content of {{ pki_stepca__podman_home }} before the next run,
+              the initialization only runs without config/ca.json.
+              {{ ((pki_stepca__init_log.stdout_lines | default([]) + pki_stepca__init_log.stderr_lines | default([]))
+                  | reject('search', 'password', ignorecase=true) | list)[-30:] }}
+            quiet: true
+
+      always:
+
+        - name: 'Remove the container of the initialization'
+          containers.podman.podman_container:
+            name: "{{ pki_stepca__podman_init_name }}"
+            state: 'absent'
+
+    - name: 'Read the configuration of step-ca'
+      when: 'not ansible_check_mode or pki_stepca__initialized.stat.exists'
+      ansible.builtin.slurp:
+        src: "{{ pki_stepca__config_file }}"
+      register: 'pki_stepca__config_read'
+
+    # stepca_config is merged into the ca.json created by the initialization
+    - name: 'Write the configuration of step-ca'
+      when: 'not ansible_check_mode or pki_stepca__initialized.stat.exists'
+      ansible.builtin.copy:
+        content: "{{ pki_stepca__config | to_nice_json }}\n"
+        dest: "{{ pki_stepca__config_file }}"
+        owner: "{{ pki_stepca__uid }}"
+        group: "{{ pki_stepca__gid }}"
+        mode: '0600'
+      register: 'pki_stepca__config_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -42,24 +275,87 @@
         expose: "{{ pki_stepca__container.expose | default(omit) }}"
         label: "{{ pki_stepca__container.labels | default(omit) }}"
         publish: "{{ pki_stepca__container.publish | default(omit) }}"
-        secrets: "{{ pki_stepca__container.secrets | default(omit) }}"
         volume: "{{ pki_stepca__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if pki_stepca__container.requires is defined %}
+          Requires={{ pki_stepca__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'pki_stepca__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ pki_stepca__container.name }}"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start step-ca'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ pki_stepca__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if pki_stepca__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            pki_stepca__running: >-
+              {{ (ansible_facts.services[pki_stepca__container.name + '.service'].state | default('')) == 'running' }}
+            pki_stepca__restart: >-
+              {{ pki_stepca__running | bool and (pki_stepca__quadlet_result is changed or pki_stepca__config_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ pki_stepca__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'pki_stepca__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ pki_stepca__container.name ~ ' did not start' ] + pki_stepca__start_journal.stdout_lines }}"
+
+    # The root of the CA is self-signed, the health check is read without validating the certificate
+    - name: 'Wait for step-ca'
+      ansible.builtin.uri:
+        url: "https://{{ pki_stepca__ip }}:{{ pki_stepca__port }}/health"
+        validate_certs: false
+        return_content: true
+      register: 'pki_stepca__ready'
+      until: (pki_stepca__ready.json | default({})).status | default('') == 'ok'
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of step-ca'
+      when:
+        - not ansible_check_mode
+        - (pki_stepca__ready.json | default({})).status | default('') != 'ok'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ pki_stepca__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'pki_stepca__journal'
+      changed_when: false
+
+    - name: 'Assert that step-ca answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__journal is skipped
+        fail_msg: "{{ pki_stepca__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'pki_stepca__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ pki_stepca__container.name }}"
+        container_image: "{{ pki_stepca__container.image }}"
+        container_schedule: "{{ pki_stepca__autoupdate_schedule }}"

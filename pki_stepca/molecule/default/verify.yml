@@ -1,0 +1,148 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_stepca__test_case: "{{ pki_stepca__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_stepca__expect: "{{ pki_stepca__test_case.expect }}"
+    pki_stepca__test_url: "https://{{ pki_stepca__expect.ip }}:9000"
+    # Certificates issued with the JWK provisioner admin: the password, a wrong one, the allowed and the refused durations
+    pki_stepca__test_certificates: >-
+      {%- set certificates = [
+            { 'name': 'password', 'password': pki_stepca__expect.password, 'not_after': '', 'issued': true },
+            { 'name': 'wrong password', 'password': 'molecule-wrong-password', 'not_after': '', 'issued': false } ] -%}
+      {%- for duration in pki_stepca__expect.durations_allowed -%}
+      {%-   set _ = certificates.append({ 'name': 'allowed duration', 'password': pki_stepca__expect.password, 'not_after': duration, 'issued': true }) -%}
+      {%- endfor -%}
+      {%- for duration in pki_stepca__expect.durations_refused -%}
+      {%-   set _ = certificates.append({ 'name': 'refused duration', 'password': pki_stepca__expect.password, 'not_after': duration, 'issued': false }) -%}
+      {%- endfor -%}
+      {{ certificates }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ pki_stepca__test_quadlet_path }}"
+      register: 'pki_stepca__test_quadlet'
+
+    # The variables and the secrets of the initialization are not part of the quadlet unit
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + pki_stepca__test_image) in pki_stepca__test_quadlet_lines
+          - ('IP=' + pki_stepca__expect.ip) in pki_stepca__test_quadlet_lines
+          - pki_stepca__expect.ip6 is none or ('IP6=' + pki_stepca__expect.ip6) in pki_stepca__test_quadlet_lines
+          - pki_stepca__expect.ip6 is not none or pki_stepca__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - pki_stepca__expect.quadlet | reject('in', pki_stepca__test_quadlet_lines) | list | length == 0
+          - pki_stepca__test_quadlet_lines | select('search', 'DOCKER_STEPCA_INIT|Secret=') | list | length == 0
+          - pki_stepca__expect.password not in (pki_stepca__test_quadlet.content | b64decode)
+        fail_msg: "{{ pki_stepca__test_quadlet_lines | to_json }}"
+      vars:
+        pki_stepca__test_quadlet_lines: "{{ (pki_stepca__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the stepca service'
+      ansible.builtin.command: 'systemctl is-active stepca'
+      register: 'pki_stepca__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the stepca container'
+      ansible.builtin.command: 'podman inspect stepca'
+      register: 'pki_stepca__test_inspect'
+      changed_when: false
+
+    - name: 'Check the container of the initialization'
+      ansible.builtin.command: 'podman container exists stepca-init'
+      register: 'pki_stepca__test_init_container'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service, the container addresses, the environment and the removed initialization'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__test_service.stdout == 'active'
+          - pki_stepca__test_net.IPAddress == pki_stepca__expect.ip
+          - pki_stepca__expect.ip6 is none or pki_stepca__test_net.GlobalIPv6Address == pki_stepca__expect.ip6
+          - pki_stepca__expect.env | reject('in', pki_stepca__test_env) | list | length == 0
+          - pki_stepca__test_env | select('match', 'DOCKER_STEPCA_INIT') | list | length == 0
+          - pki_stepca__test_init_container.rc == 1
+        fail_msg: >-
+          service {{ pki_stepca__test_service.stdout }},
+          IPv4 {{ pki_stepca__test_net.IPAddress }}, IPv6 {{ pki_stepca__test_net.GlobalIPv6Address }},
+          environment {{ pki_stepca__test_env | join(', ') }}, stepca-init exists {{ pki_stepca__test_init_container.rc == 0 }}
+      vars:
+        pki_stepca__test_container: "{{ (pki_stepca__test_inspect.stdout | from_json)[0] }}"
+        pki_stepca__test_net: "{{ pki_stepca__test_container.NetworkSettings.Networks[pki_stepca__test_case.role_vars.stepca_network] }}"
+        pki_stepca__test_env: "{{ pki_stepca__test_container.Config.Env }}"
+
+    - name: 'Read the files of step-ca'
+      ansible.builtin.stat:
+        path: "{{ pki_stepca__test_home }}/{{ item }}"
+      loop: [ 'config/ca.json', 'secrets/password', 'certs/root_ca.crt' ]
+      register: 'pki_stepca__test_files'
+
+    - name: 'Read the configuration of step-ca'
+      ansible.builtin.slurp:
+        src: "{{ pki_stepca__test_home }}/config/ca.json"
+      register: 'pki_stepca__test_config'
+
+    # The configuration contains the values of stepca_config and the address set by the role
+    - name: 'Assert the files and the configuration'
+      ansible.builtin.assert:
+        that:
+          - pki_stepca__test_files.results | map(attribute='stat.exists') | list == [ true, true, true ]
+          - pki_stepca__test_files.results | map(attribute='stat.uid') | unique | list == [ 1000 ]
+          - pki_stepca__test_files.results[0].stat.mode == '0600'
+          - pki_stepca__test_config_json.address == ':9000'
+          - pki_stepca__test_config_json | combine(pki_stepca__expect.config, recursive=true) == pki_stepca__test_config_json
+        fail_msg: >-
+          files {{ pki_stepca__test_files.results | map(attribute='stat') | map('dict2items')
+                   | map('selectattr', 'key', 'in', [ 'path', 'exists', 'uid', 'mode' ]) | map('items2dict') | list | to_json }},
+          logger {{ pki_stepca__test_config_json.logger | default({}) | to_json }},
+          claims {{ (pki_stepca__test_config_json.authority | default({})).claims | default({}) | to_json }}
+      vars:
+        pki_stepca__test_config_json: "{{ pki_stepca__test_config.content | b64decode | from_json }}"
+
+    - name: 'Read the health check and the directory of ACME'
+      ansible.builtin.uri:
+        url: "{{ pki_stepca__test_url }}{{ item }}"
+        validate_certs: false
+        return_content: true
+      loop: "{{ [ '/health' ] + ([ '/acme/acme/directory' ] if pki_stepca__expect.acme else []) }}"
+      register: 'pki_stepca__test_api'
+
+    # The provisioner admin is a JWK provisioner with the password of the initialization, step reads it on stdin
+    - name: 'Issue certificates with the provisioner admin'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'podman', 'exec', '-i', 'stepca', 'step', 'ca', 'certificate', 'molecule.test', '/tmp/molecule.crt', '/tmp/molecule.key',
+               '--provisioner', 'admin', '--provisioner-password-file', '/dev/stdin',
+               '--ca-url', 'https://localhost:9000', '--root', '/home/step/certs/root_ca.crt', '--force' ]
+             + ([ '--not-after', item.not_after ] if item.not_after | length > 0 else []) }}
+        stdin: "{{ item.password }}"
+        stdin_add_newline: false
+      loop: "{{ pki_stepca__test_certificates }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.not_after }}"
+      register: 'pki_stepca__test_issue'
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 'Assert the health check, ACME and the certificates'
+      ansible.builtin.assert:
+        that:
+          - (pki_stepca__test_api.results[0].json | default({})).status | default('') == 'ok'
+          - not pki_stepca__expect.acme or 'newNonce' in (pki_stepca__test_api.results[1].json | default({}))
+          - pki_stepca__test_issued == pki_stepca__test_certificates | map(attribute='issued') | list
+        fail_msg: >-
+          health {{ pki_stepca__test_api.results[0].json | default({}) | to_json }},
+          certificates {{ pki_stepca__test_certificates | map(attribute='name') | zip(pki_stepca__test_issued,
+                          pki_stepca__test_issue.results | map(attribute='stderr') | map('truncate', 200)) | list | to_json }}
+      vars:
+        pki_stepca__test_issued: "{{ pki_stepca__test_issue.results | map(attribute='rc') | map('int') | map('ternary', false, true) | list }}"
