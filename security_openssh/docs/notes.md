@@ -86,7 +86,7 @@ The role checks before any change:
 - `PUBLIC_KEY` is set, no secret or file variable is set in `openssh_environment`, no secret contains a line break
 - `SUDO_ACCESS`, `PASSWORD_ACCESS` and `LOG_STDOUT` are `true` or `false`, `PUID`, `PGID` and `LISTEN_PORT` are numbers,
   `USER_NAME` is a name of a user and not `root`, `UMASK` is an octal umask and no value contains a line break
-- `openssh_config` is a dictionary of options named by letters, without the options of the image and the role,
+- `openssh_config` is a dictionary of options named by letters and digits, without the options of the image and the role,
   with strings, numbers, booleans, `null` or lists of them without line breaks
 - only allowed environment variables are set in the container
 - sshd accepts the options of `openssh_config`, `sshd -t` checks the file in a container of the image without network before it is replaced
