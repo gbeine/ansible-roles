@@ -1,37 +1,213 @@
 ---
 
-- name: 'Deploy OAuth2 Proxy container'
-  tags: [ 'security_oauth2_proxy' ]
+- name: 'Deploy OAuth2 Proxy'
+  tags: [ 'security', 'security_oauth2_proxy' ]
   block:
 
-    - name: 'Create directories'
-      ansible.builtin.file:
-        dest: "{{ item }}"
-        state: 'directory'
-      with_items:
-        - "{{ security_oauth2_proxy__podman_home }}"
+    # A failing template in the variables (e.g. an unknown filter or oauth2_proxy_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - security_oauth2_proxy__container | length > 0
+        quiet: true
 
-    - name: 'Generate simple configuration'
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_oauth2_proxy__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_oauth2_proxy__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = security_oauth2_proxy__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('oauth2_proxy_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('oauth2_proxy_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of oauth2_proxy_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The default of the configuration is empty, combine does not fail on every version of Ansible
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_oauth2_proxy__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_oauth2_proxy__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = security_oauth2_proxy__config_custom -%}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('oauth2_proxy_config has to be a dictionary of the options of OAuth2 Proxy.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(unknown=[], secrets=[], role=[], values=[], lines=[]) -%}
+          {%-   for key, value in config.items() -%}
+          {%-     if key in security_oauth2_proxy__secret_options -%}
+          {%-       set ns.secrets = ns.secrets + [ key ] -%}
+          {%-     elif key in security_oauth2_proxy__config_role -%}
+          {%-       set ns.role = ns.role + [ key ] -%}
+          {%-     elif key not in security_oauth2_proxy__config_allowed -%}
+          {%-       set ns.unknown = ns.unknown + [ key | string ] -%}
+          {%-     endif -%}
+          {%-     set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-     if value is mapping or items | select('mapping') | list | length > 0
+                     or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+          {%-       set ns.values = ns.values + [ key | string ] -%}
+          {%-     elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-       set ns.lines = ns.lines + [ key | string ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in oauth2_proxy_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of OAuth2 Proxy (security_oauth2_proxy__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   if ns.secrets | length > 0 -%}
+          {%-     set _ = errors.append('Secrets are set with oauth2_proxy_secrets, not in oauth2_proxy_config: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.role | length > 0 -%}
+          {%-     set _ = errors.append('These options are set by the role and must not be set in oauth2_proxy_config: ' ~ (ns.role | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.values | length > 0 -%}
+          {%-     set _ = errors.append('The values of oauth2_proxy_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of oauth2_proxy_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if config.client_id | default('', true) | string | length == 0 -%}
+          {%-     set _ = errors.append('oauth2_proxy_config needs client_id.') -%}
+          {%-   endif -%}
+          {%-   if [ 'email_domains', 'authenticated_emails_file', 'htpasswd_file' ] | select('in', config) | reject('in', config | dict2items | selectattr('value', 'in', [ none, '', [] ]) | map(attribute='key') | list) | list | length == 0 -%}
+          {%-     set _ = errors.append('oauth2_proxy_config needs email_domains, authenticated_emails_file or htpasswd_file, use email_domains: [ \'*\' ] to allow all email addresses.') -%}
+          {%-   endif -%}
+          {%-   if config.provider | default('') == 'oidc' and config.oidc_issuer_url | default('', true) | string | length == 0 -%}
+          {%-     set _ = errors.append('The provider oidc needs oidc_issuer_url in oauth2_proxy_config.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The cookie secret and the client secret are mandatory
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_oauth2_proxy__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_oauth2_proxy__targets: "{{ security_oauth2_proxy__secrets | map(attribute='target') | list }}"
+        security_oauth2_proxy__secrets_missing: "{{ security_oauth2_proxy__secrets_required | reject('in', security_oauth2_proxy__targets) | list }}"
+        security_oauth2_proxy__secrets_in_environment: >-
+          {{ (security_oauth2_proxy__targets + security_oauth2_proxy__secret_variables + security_oauth2_proxy__secret_files.values() | list)
+             | select('in', security_oauth2_proxy__environment.keys() | list) | unique | list }}
+        security_oauth2_proxy__secrets_lines: >-
+          {{ security_oauth2_proxy__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        # OAuth2 Proxy uses the URL-safe base64 decoded value if it has 16, 24 or 32 bytes, otherwise the value
+        security_oauth2_proxy__cookie_secret_invalid: >-
+          {%- set names = [] -%}
+          {%- for secret in security_oauth2_proxy__secrets | selectattr('target', 'eq', 'OAUTH2_PROXY_COOKIE_SECRET') -%}
+          {%-   set data = secret.data | string -%}
+          {%-   set length = data | regex_replace('=+$', '') | length -%}
+          {%-   set encoded = data is match('^[A-Za-z0-9_-]+=*$') and length % 4 != 1 and (length * 3 // 4) in [ 16, 24, 32 ] -%}
+          {%-   if (data | length) not in [ 16, 24, 32 ] and not encoded -%}
+          {%-     set _ = names.append(secret.name) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ names }}
+        security_oauth2_proxy__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_oauth2_proxy__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('OAuth2 Proxy needs the secrets ' ~ (security_oauth2_proxy__secrets_required | join(', ')) ~ ', missing: ' ~ (security_oauth2_proxy__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_oauth2_proxy__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in oauth2_proxy_environment: ' ~ (security_oauth2_proxy__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_oauth2_proxy__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (security_oauth2_proxy__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_oauth2_proxy__cookie_secret_invalid | length > 0 -%}
+          {%-   set _ = errors.append('The cookie secret needs 16, 24 or 32 characters or their URL-safe base64 encoding: ' ~ (security_oauth2_proxy__cookie_secret_invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__lines | length == 0
+        fail_msg: "Values must not contain line breaks: {{ security_oauth2_proxy__lines | join(', ') }}."
+        quiet: true
+      vars:
+        security_oauth2_proxy__lines: >-
+          {{ security_oauth2_proxy__environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+
+    # Checks the environment and the secrets of the container after merging oauth2_proxy_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_oauth2_proxy__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_oauth2_proxy__environment_unknown: >-
+          {{ (security_oauth2_proxy__container.environment | default({})).keys()
+             | reject('in', security_oauth2_proxy__environment_allowed) | list }}
+        security_oauth2_proxy__secrets_unknown: >-
+          {{ security_oauth2_proxy__secrets | map(attribute='target') | reject('in', security_oauth2_proxy__secret_variables) | list }}
+        security_oauth2_proxy__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_oauth2_proxy__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (security_oauth2_proxy__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_oauth2_proxy__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (security_oauth2_proxy__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (security_oauth2_proxy__environment_allowed | join(', ')) ~ ' and the secrets '
+                                    ~ (security_oauth2_proxy__secret_variables | join(', ')) ~ ', the options are set with oauth2_proxy_config.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of OAuth2 Proxy'
+      ansible.builtin.file:
+        path: "{{ security_oauth2_proxy__home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+
+    # The configuration contains no secrets, the container runs as nonroot and reads it
+    - name: 'Generate the configuration'
       ansible.builtin.template:
         src: 'oauth2-proxy.cfg.j2'
-        dest: "{{ security_oauth2_proxy__podman_config_file }}"
-      when: 'not podman___update_mode | bool'
-      notify: 'Restart oauth2-proxy container'
+        dest: "{{ security_oauth2_proxy__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'security_oauth2_proxy__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ security_oauth2_proxy__secrets }}"
+      register: 'security_oauth2_proxy__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ security_oauth2_proxy__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[security_oauth2_proxy__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ security_oauth2_proxy__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -51,21 +227,86 @@
         secrets: "{{ security_oauth2_proxy__container.secrets | default(omit) }}"
         volume: "{{ security_oauth2_proxy__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if security_oauth2_proxy__container.requires is defined %}
+          Requires={{ security_oauth2_proxy__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'security_oauth2_proxy__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ security_oauth2_proxy__container.name }}"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start OAuth2 Proxy'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ security_oauth2_proxy__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if security_oauth2_proxy__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            security_oauth2_proxy__running: >-
+              {{ (ansible_facts.services[security_oauth2_proxy__container.name + '.service'].state | default('')) == 'running' }}
+            security_oauth2_proxy__restart: >-
+              {{ security_oauth2_proxy__running | bool
+                 and (security_oauth2_proxy__secrets_result is changed
+                      or security_oauth2_proxy__config_result is changed
+                      or security_oauth2_proxy__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ security_oauth2_proxy__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'security_oauth2_proxy__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ security_oauth2_proxy__container.name ~ ' did not start' ] + security_oauth2_proxy__start_journal.stdout_lines }}"
+
+    # OAuth2 Proxy exits if the configuration is invalid, the ping path answers after the setup of the provider
+    - name: 'Wait for OAuth2 Proxy'
+      ansible.builtin.uri:
+        url: "http://{{ security_oauth2_proxy__container.ip }}:{{ security_oauth2_proxy__port }}{{ security_oauth2_proxy__config.ping_path | default('/ping') }}"
+      register: 'security_oauth2_proxy__ready'
+      until: security_oauth2_proxy__ready.status | default(-1) == 200
+      retries: 30
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of OAuth2 Proxy'
+      when:
+        - not ansible_check_mode
+        - security_oauth2_proxy__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ security_oauth2_proxy__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'security_oauth2_proxy__journal'
+      changed_when: false
+
+    - name: 'Assert that OAuth2 Proxy answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__journal is skipped
+        fail_msg: "{{ security_oauth2_proxy__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'security_oauth2_proxy__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ security_oauth2_proxy__container.name }}"
+        container_image: "{{ security_oauth2_proxy__container.image }}"
+        container_schedule: "{{ security_oauth2_proxy__autoupdate_schedule }}"

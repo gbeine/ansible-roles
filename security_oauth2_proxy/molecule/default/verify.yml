@@ -1,0 +1,104 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_oauth2_proxy__test_case: "{{ security_oauth2_proxy__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_oauth2_proxy__expect: "{{ security_oauth2_proxy__test_case.expect }}"
+    security_oauth2_proxy__test_url: "http://{{ security_oauth2_proxy__expect.ip }}:4180"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ security_oauth2_proxy__test_quadlet_path }}"
+      register: 'security_oauth2_proxy__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + security_oauth2_proxy__test_image) in security_oauth2_proxy__test_quadlet_lines
+          - ('IP=' + security_oauth2_proxy__expect.ip) in security_oauth2_proxy__test_quadlet_lines
+          - security_oauth2_proxy__expect.ip6 is none or ('IP6=' + security_oauth2_proxy__expect.ip6) in security_oauth2_proxy__test_quadlet_lines
+          - security_oauth2_proxy__expect.ip6 is not none or security_oauth2_proxy__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Environment=TZ=' + security_oauth2_proxy__test_case.role_vars.oauth2_proxy_timezone) in security_oauth2_proxy__test_quadlet_lines
+          - security_oauth2_proxy__expect.quadlet | reject('in', security_oauth2_proxy__test_quadlet_lines) | list | length == 0
+          # The time zone is set with TZ, /etc/localtime is not mounted
+          - security_oauth2_proxy__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          - security_oauth2_proxy__test_exec is search('--config=/etc/oauth2-proxy/oauth2-proxy\.cfg')
+        fail_msg: "{{ security_oauth2_proxy__test_quadlet_lines | to_json }}"
+      vars:
+        security_oauth2_proxy__test_quadlet_lines: >-
+          {{ (security_oauth2_proxy__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}
+        security_oauth2_proxy__test_exec: "{{ security_oauth2_proxy__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'oauth2-proxy' ]
+      register: 'security_oauth2_proxy__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'oauth2-proxy' ]
+      register: 'security_oauth2_proxy__test_env'
+      changed_when: false
+
+    - name: 'Read the configuration'
+      ansible.builtin.slurp:
+        src: "{{ security_oauth2_proxy__test_config_path }}"
+      register: 'security_oauth2_proxy__test_config'
+
+    # The client secret and the cookie secret are files, only their file variables are part of the environment of the container
+    - name: 'Assert the service, the environment and the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__test_service.stdout == 'active'
+          - ('TZ=' + security_oauth2_proxy__test_case.role_vars.oauth2_proxy_timezone) in security_oauth2_proxy__test_environment
+          - security_oauth2_proxy__test_environment | select('match', 'OAUTH2_PROXY_(CLIENT|COOKIE)_SECRET=') | list | length == 0
+          - security_oauth2_proxy__test_environment | select('match', 'OAUTH2_PROXY_(CLIENT|COOKIE)_SECRET_FILE=/run/secrets/') | list | length == 2
+          - security_oauth2_proxy__expect.config | reject('in', security_oauth2_proxy__test_config_lines) | list | length == 0
+          - security_oauth2_proxy__test_config_lines | select('search', 'secret') | list | length == 0
+        fail_msg: >-
+          service {{ security_oauth2_proxy__test_service.stdout }}, environment {{ security_oauth2_proxy__test_environment }},
+          configuration {{ security_oauth2_proxy__test_config_lines }}
+      vars:
+        security_oauth2_proxy__test_environment: "{{ security_oauth2_proxy__test_env.stdout | from_json }}"
+        security_oauth2_proxy__test_config_lines: "{{ (security_oauth2_proxy__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Wait until OAuth2 Proxy answers'
+      ansible.builtin.uri:
+        url: "{{ security_oauth2_proxy__test_url }}/ping"
+      register: 'security_oauth2_proxy__test_ping'
+      until: security_oauth2_proxy__test_ping.status == 200
+      retries: 15
+      delay: 2
+
+    # The login redirects to the provider with the client ID, without the client secret and the cookie secret
+    # read from their files OAuth2 Proxy does not start
+    - name: 'Start the login'
+      ansible.builtin.command:
+        argv: [ 'curl', '-s', '-o', '/dev/null', '-w', '%{http_code} %{redirect_url}', "{{ security_oauth2_proxy__test_url }}/oauth2/start?rd=/" ]
+      register: 'security_oauth2_proxy__test_start'
+      changed_when: false
+
+    # The endpoint of the forward authentication of nginx and Traefik, without session the request is unauthorized
+    - name: 'Request the authentication without session'
+      ansible.builtin.command:
+        argv: [ 'curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', "{{ security_oauth2_proxy__test_url }}/oauth2/auth" ]
+      register: 'security_oauth2_proxy__test_auth'
+      changed_when: false
+
+    - name: 'Assert the redirect to the login of the provider and the unauthorized request'
+      ansible.builtin.assert:
+        that:
+          - security_oauth2_proxy__test_start.stdout is match('^302 ' ~ (security_oauth2_proxy__expect.login | regex_escape))
+          - security_oauth2_proxy__test_start.stdout is search('client_id=' ~ security_oauth2_proxy__expect.client_id ~ '(&|$)')
+          - security_oauth2_proxy__test_auth.stdout == '401'
+        fail_msg: "start {{ security_oauth2_proxy__test_start.stdout }}, auth {{ security_oauth2_proxy__test_auth.stdout }}"

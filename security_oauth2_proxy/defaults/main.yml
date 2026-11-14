@@ -11,53 +11,279 @@ security_oauth2_proxy__ipv6: "{{ oauth2_proxy_ipv6 }}"
 security_oauth2_proxy__network: "{{ oauth2_proxy_network | mandatory }}"
 security_oauth2_proxy__hostname: "{{ oauth2_proxy_hostname | mandatory }}"
 security_oauth2_proxy__timezone: "{{ oauth2_proxy_timezone | mandatory }}"
-security_oauth2_proxy__labels: "{{ oauth2_proxy_labels | default({}) }}"
+security_oauth2_proxy__labels: "{{ oauth2_proxy_labels }}"
 
 security_oauth2_proxy__version: "{{ oauth2_proxy_version | default('latest') }}"
 
 security_oauth2_proxy__container: "{{ security_oauth2_proxy__podman_container_default | combine(oauth2_proxy_container | default({})) }}"
 
-security_oauth2_proxy__http_address: "{{ oauth2_proxy_http_address | default('0.0.0.0') }}"
-security_oauth2_proxy__http_port: "{{ oauth2_proxy_http_port | default(4180) }}"
-security_oauth2_proxy__cookie_secret: "{{ oauth2_proxy_cookie_secret | mandatory }}"
-security_oauth2_proxy__email_domains: "{{ oauth2_proxy_email_domains | mandatory }}"
-security_oauth2_proxy__cookie_secure: "{{ oauth2_proxy_cookie_secure | default(true) }}"
-security_oauth2_proxy__upstreams: "{{ oauth2_proxy_upstreams | mandatory }}"
-security_oauth2_proxy__cookie_domains: "{{ oauth2_proxy_cookie_domains | mandatory }}"
-security_oauth2_proxy__whitelist_domains: "{{ oauth2_proxy_whitelist_domains | mandatory }}"
-security_oauth2_proxy__client_secret: "{{ oauth2_proxy_client_secret | mandatory }}"
+# The configuration of OAuth2 Proxy, the options of the configuration file, e.g. provider, client_id, email_domains and upstreams
+security_oauth2_proxy__config: "{{ security_oauth2_proxy__config_default | combine(oauth2_proxy_config | default({})) }}"
 
-security_oauth2_proxy__client_id: "{{ oauth2_proxy_client_id | mandatory }}"
-security_oauth2_proxy__redirect_url: "{{ oauth2_proxy_redirect_url | mandatory }}"
-security_oauth2_proxy__oidc_issuer_url: "{{ oauth2_proxy_oidc_issuer_url | mandatory }}"
-security_oauth2_proxy__provider: "{{ oauth2_proxy_provider | mandatory }}"
-security_oauth2_proxy__provider_display_name: "{{ oauth2_proxy_provider_display_name | mandatory }}"
-security_oauth2_proxy__skip_provider_button: "{{ oauth2_proxy_skip_provider_button | default(false) }}"
-security_oauth2_proxy__code_challenge_method: "{{ oauth2_proxy_code_challenge_method | mandatory }}"
-security_oauth2_proxy__scope: "{{ oauth2_proxy_scope | mandatory }}"
+security_oauth2_proxy__environment: "{{ security_oauth2_proxy__environment_default | combine(oauth2_proxy_environment | default({})) }}"
 
-security_oauth2_proxy__set_xauthrequest: "{{ oauth2_proxy_set_xauthrequest | default(false) }}"
-security_oauth2_proxy__set_authorization_header: "{{ oauth2_proxy_set_authorization_header | default(false) }}"
-security_oauth2_proxy__pass_access_token: "{{ oauth2_proxy_pass_access_token | default(false) }}"
-security_oauth2_proxy__pass_authorization_header: "{{ oauth2_proxy_pass_authorization_header | default(false) }}"
-security_oauth2_proxy__pass_user_headers: "{{ oauth2_proxy_pass_access_token | default(true) }}"
+# Secrets with name, data and target, OAUTH2_PROXY_COOKIE_SECRET and OAUTH2_PROXY_CLIENT_SECRET are mandatory
+security_oauth2_proxy__secrets: "{{ oauth2_proxy_secrets | default([]) }}"
 
-security_oauth2_proxy__reverse_proxy: "{{ oauth2_proxy_reverse_proxy | default(false) }}"
-security_oauth2_proxy__cookie_path: "{{ oauth2_proxy_cookie_path | default('/') }}"
-security_oauth2_proxy__cookie_name: "{{ oauth2_proxy_cookie_name | default('_oauth2_proxy') }}"
-security_oauth2_proxy__cookie_httponly: "{{ oauth2_proxy_cookie_httponly | default(true) }}"
-security_oauth2_proxy__cookie_samesite: "{{ oauth2_proxy_cookie_samesite | default('') }}"
+security_oauth2_proxy__autoupdate_enabled: "{{ oauth2_proxy_autoupdate_enabled | default(false) }}"
+security_oauth2_proxy__autoupdate_schedule: "{{ oauth2_proxy_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+security_oauth2_proxy__config_default: {}
+
+# The options of oauth2_proxy_config, the default is empty, so the role checks that it is a dictionary
+security_oauth2_proxy__config_custom: "{{ oauth2_proxy_config | default({}) }}"
+
+# Set by the role, OAuth2 Proxy listens on 127.0.0.1:4180 by default, :4180 listens on IPv4 and IPv6
+security_oauth2_proxy__config_role:
+  http_address: ':4180'
+
+security_oauth2_proxy__port: 4180
+
+security_oauth2_proxy__environment_default:
+  TZ: "{{ security_oauth2_proxy__timezone }}"
+
+security_oauth2_proxy__secrets_dir: '/run/secrets'
+
+# The secrets mounted as files, OAuth2 Proxy reads the target from the file variable (client-secret-file, cookie-secret-file, jwt-key-file)
+security_oauth2_proxy__secret_files:
+  OAUTH2_PROXY_CLIENT_SECRET: 'OAUTH2_PROXY_CLIENT_SECRET_FILE'
+  OAUTH2_PROXY_COOKIE_SECRET: 'OAUTH2_PROXY_COOKIE_SECRET_FILE'
+  OAUTH2_PROXY_JWT_KEY: 'OAUTH2_PROXY_JWT_KEY_FILE'
+
+# The secrets passed in the environment, OAuth2 Proxy has no file variable for them
+security_oauth2_proxy__secrets_env:
+  - 'OAUTH2_PROXY_REDIS_PASSWORD'
+  - 'OAUTH2_PROXY_REDIS_SENTINEL_PASSWORD'
+  - 'OAUTH2_PROXY_BASIC_AUTH_PASSWORD'
+  - 'OAUTH2_PROXY_GITHUB_TOKEN'
+  - 'OAUTH2_PROXY_SIGNATURE_KEY'
+
+# The targets of the secrets, they must not be set in oauth2_proxy_environment
+security_oauth2_proxy__secret_variables: "{{ security_oauth2_proxy__secret_files.keys() | list + security_oauth2_proxy__secrets_env }}"
+
+# The options of the secrets and their files, they must not be set in oauth2_proxy_config
+security_oauth2_proxy__secret_options:
+  - 'basic_auth_password'
+  - 'client_secret'
+  - 'client_secret_file'
+  - 'cookie_secret'
+  - 'cookie_secret_file'
+  - 'github_token'
+  - 'jwt_key'
+  - 'jwt_key_file'
+  - 'redis_password'
+  - 'redis_sentinel_password'
+  - 'signature_key'
+
+# The cookie secret encrypts the sessions, OAuth2 Proxy does not start without the cookie secret and the client secret,
+# the providers login.gov and entra-id with entra_id_federated_token_auth need no client secret
+security_oauth2_proxy__secrets_required: >-
+  {{ [ 'OAUTH2_PROXY_COOKIE_SECRET' ]
+     + ([] if (security_oauth2_proxy__config.provider | default('') == 'login.gov'
+               or (security_oauth2_proxy__config.provider | default('') == 'entra-id'
+                   and security_oauth2_proxy__config.entra_id_federated_token_auth | default(false) | bool))
+           else [ 'OAUTH2_PROXY_CLIENT_SECRET' ]) }}
+
+# OAuth2 Proxy reads the options of the configuration file, the environment only carries the time zone and the file variables
+security_oauth2_proxy__environment_allowed: "{{ [ 'TZ' ] + security_oauth2_proxy__secret_files.values() | list }}"
+
+# Generated from the cfg tags of the options with flags of pkg/apis/options/*.go of OAuth2 Proxy v7.15.6
+# without the secrets, their files and http_address set by the role, update with new versions of the image
+security_oauth2_proxy__config_allowed:
+  - 'acr_values'
+  - 'allow_query_semicolons'
+  - 'allowed_groups'
+  - 'allowed_roles'
+  - 'api_routes'
+  - 'approval_prompt'
+  - 'auth_logging'
+  - 'auth_logging_format'
+  - 'auth_request_response_mode'
+  - 'authenticated_emails_file'
+  - 'azure_graph_group_field'
+  - 'azure_tenant'
+  - 'backend_logout_url'
+  - 'banner'
+  - 'bearer_token_login_fallback'
+  - 'bitbucket_repository'
+  - 'bitbucket_team'
+  - 'bitbucket_workspace'
+  - 'client_id'
+  - 'code_challenge_method'
+  - 'cookie_csrf_expire'
+  - 'cookie_csrf_per_request'
+  - 'cookie_csrf_per_request_limit'
+  - 'cookie_csrf_samesite'
+  - 'cookie_domains'
+  - 'cookie_expire'
+  - 'cookie_httponly'
+  - 'cookie_name'
+  - 'cookie_path'
+  - 'cookie_refresh'
+  - 'cookie_samesite'
+  - 'cookie_secure'
+  - 'custom_sign_in_logo'
+  - 'custom_templates_dir'
+  - 'disable_keep_alives'
+  - 'display_htpasswd_form'
+  - 'email_domains'
+  - 'encode_state'
+  - 'entra_id_allowed_tenants'
+  - 'entra_id_federated_token_auth'
+  - 'errors_to_info_log'
+  - 'exclude_logging_paths'
+  - 'extra_jwt_issuers'
+  - 'flush_interval'
+  - 'footer'
+  - 'force_code_challenge_method'
+  - 'force_https'
+  - 'force_json_errors'
+  - 'gcp_healthchecks'
+  - 'github_org'
+  - 'github_repo'
+  - 'github_team'
+  - 'github_users'
+  - 'gitlab_groups'
+  - 'gitlab_projects'
+  - 'google_admin_api_user_scope'
+  - 'google_admin_email'
+  - 'google_group'
+  - 'google_groups'
+  - 'google_service_account_json'
+  - 'google_target_principal'
+  - 'google_use_application_default_credentials'
+  - 'google_use_organization_id'
+  - 'htpasswd_file'
+  - 'htpasswd_user_groups'
+  - 'https_address'
+  - 'insecure_oidc_allow_unverified_email'
+  - 'insecure_oidc_skip_issuer_verification'
+  - 'insecure_oidc_skip_nonce'
+  - 'keycloak_groups'
+  - 'logging_compress'
+  - 'logging_filename'
+  - 'logging_local_time'
+  - 'logging_max_age'
+  - 'logging_max_backups'
+  - 'logging_max_size'
+  - 'login_url'
+  - 'metrics_address'
+  - 'metrics_secure_address'
+  - 'metrics_tls_cert_file'
+  - 'metrics_tls_key_file'
+  - 'oidc_audience_claims'
+  - 'oidc_email_claim'
+  - 'oidc_enabled_signing_algs'
+  - 'oidc_extra_audiences'
+  - 'oidc_groups_claim'
+  - 'oidc_issuer_url'
+  - 'oidc_jwks_url'
+  - 'oidc_public_key_files'
+  - 'pass_access_token'
+  - 'pass_authorization_header'
+  - 'pass_basic_auth'
+  - 'pass_host_header'
+  - 'pass_user_headers'
+  - 'ping_path'
+  - 'ping_user_agent'
+  - 'prefer_email_to_user'
+  - 'profile_url'
+  - 'prompt'
+  - 'provider'
+  - 'provider_ca_files'
+  - 'provider_display_name'
+  - 'proxy_prefix'
+  - 'proxy_websockets'
+  - 'pubjwk_url'
+  - 'ready_path'
+  - 'real_client_ip_header'
+  - 'redeem_url'
+  - 'redirect_url'
+  - 'redis_ca_path'
+  - 'redis_cluster_connection_urls'
+  - 'redis_connection_idle_timeout'
+  - 'redis_connection_url'
+  - 'redis_insecure_skip_tls_verify'
+  - 'redis_sentinel_connection_urls'
+  - 'redis_sentinel_master_name'
+  - 'redis_use_cluster'
+  - 'redis_use_sentinel'
+  - 'redis_username'
+  - 'relative_redirect_url'
+  - 'request_id_header'
+  - 'request_logging'
+  - 'request_logging_format'
+  - 'resource'
+  - 'reverse_proxy'
+  - 'scope'
+  - 'session_cookie_minimal'
+  - 'session_store_type'
+  - 'set_authorization_header'
+  - 'set_basic_auth'
+  - 'set_xauthrequest'
+  - 'show_debug_on_error'
+  - 'silence_ping_logging'
+  - 'skip_auth_preflight'
+  - 'skip_auth_regex'
+  - 'skip_auth_routes'
+  - 'skip_auth_strip_headers'
+  - 'skip_claims_from_profile_url'
+  - 'skip_jwt_bearer_tokens'
+  - 'skip_oidc_discovery'
+  - 'skip_provider_button'
+  - 'ssl_insecure_skip_verify'
+  - 'ssl_upstream_insecure_skip_verify'
+  - 'standard_logging'
+  - 'standard_logging_format'
+  - 'tls_cert_file'
+  - 'tls_cipher_suites'
+  - 'tls_key_file'
+  - 'tls_min_version'
+  - 'trusted_ips'
+  - 'trusted_proxy_ips'
+  - 'upstream_timeout'
+  - 'upstreams'
+  - 'use_system_trust_store'
+  - 'user_id_claim'
+  - 'validate_url'
+  - 'whitelist_domains'
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+security_oauth2_proxy__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if security_oauth2_proxy__secrets is sequence and security_oauth2_proxy__secrets is not string and security_oauth2_proxy__secrets is not mapping -%}
+  {%-   for secret in security_oauth2_proxy__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in security_oauth2_proxy__secret_files -%}
+  {%-     set _ = environment.update({ security_oauth2_proxy__secret_files[secret.target]: security_oauth2_proxy__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The podman secrets of oauth2_proxy_secrets, the secrets of security_oauth2_proxy__secrets_env are passed in the environment,
+# the others are mounted, entries without name or target are left out, the validation of the secrets reports them
+security_oauth2_proxy__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- if security_oauth2_proxy__secrets is sequence and security_oauth2_proxy__secrets is not string and security_oauth2_proxy__secrets is not mapping -%}
+  {%-   for secret in security_oauth2_proxy__secrets if secret is mapping and secret.name is defined and secret.target is defined -%}
+  {%-     if secret.target in security_oauth2_proxy__secrets_env -%}
+  {%-       set _ = secrets.append(secret.name ~ ',type=env,target=' ~ secret.target) -%}
+  {%-     else -%}
+  {%-       set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ security_oauth2_proxy__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-     endif -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ secrets }}
+
+security_oauth2_proxy__etc_dir: '/etc/oauth2-proxy'
+security_oauth2_proxy__config_file: "{{ security_oauth2_proxy__home }}/oauth2-proxy.cfg"
+
 security_oauth2_proxy__podman_name: 'oauth2-proxy'
 security_oauth2_proxy__podman_image: 'quay.io/oauth2-proxy/oauth2-proxy'
 security_oauth2_proxy__podman_tag: "{{ security_oauth2_proxy__version }}"
-
-security_oauth2_proxy__podman_home: "{{ security_oauth2_proxy__home }}"
-security_oauth2_proxy__podman_config_file: "{{ security_oauth2_proxy__podman_home }}/oauth2-proxy.cfg"
 
 security_oauth2_proxy__podman_container_default:
   name: "{{ security_oauth2_proxy__podman_name }}"
@@ -67,9 +293,12 @@ security_oauth2_proxy__podman_container_default:
   ipv6: "{{ security_oauth2_proxy__ipv6 | default(omit) }}"
   network: "{{ security_oauth2_proxy__network }}"
   timezone: "{{ security_oauth2_proxy__timezone }}"
-  labels: "{{ security_oauth2_proxy__labels }}"
-  command: '--config /oauth2-proxy.cfg'
+  # Set with oauth2_proxy_environment and oauth2_proxy_secrets, merged over the default
+  environment: "{{ security_oauth2_proxy__environment | combine(security_oauth2_proxy__environment_secrets_files) }}"
+  labels: "{{ security_oauth2_proxy__labels | default(omit) }}"
+  secrets: "{{ security_oauth2_proxy__podman_secrets if security_oauth2_proxy__podman_secrets | length > 0 else omit }}"
+  # oauth2_proxy_container.command replaces the list completely
+  command: [ "--config={{ security_oauth2_proxy__etc_dir }}/oauth2-proxy.cfg" ]
+  # oauth2_proxy_container.volumes replaces the list completely
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ security_oauth2_proxy__podman_config_file }}:/oauth2-proxy.cfg:ro"
+    - "{{ security_oauth2_proxy__config_file }}:{{ security_oauth2_proxy__etc_dir }}/oauth2-proxy.cfg:ro"

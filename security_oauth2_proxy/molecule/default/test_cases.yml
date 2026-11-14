@@ -1,0 +1,113 @@
+---
+# Network created by container_podman in prepare.yml
+security_oauth2_proxy__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+security_oauth2_proxy__test_image: 'quay.io/oauth2-proxy/oauth2-proxy:latest'
+security_oauth2_proxy__test_quadlet_path: '/etc/containers/systemd/oauth2-proxy.container'
+security_oauth2_proxy__test_config_path: '/opt/oauth2-proxy/oauth2-proxy.cfg'
+
+security_oauth2_proxy__test_cases:
+
+  # Only the mandatory variables, the default provider google with a cookie secret of 32 characters
+  - name: 'molecule-oauth2-proxy-default'
+    role_vars:
+      oauth2_proxy_home: '/opt/oauth2-proxy'
+      oauth2_proxy_ip: '10.89.0.110'
+      oauth2_proxy_network: 'podman-molecule'
+      oauth2_proxy_hostname: 'oauth2-proxy-default'
+      oauth2_proxy_timezone: 'Europe/Berlin'
+      oauth2_proxy_config:
+        client_id: 'molecule-google-client'
+        email_domains: [ '*' ]
+      oauth2_proxy_secrets:
+        - name: 'oauth2_proxy_cookie_secret'
+          data: 'molecule-cookie-secret-32-bytes!'
+          target: 'OAUTH2_PROXY_COOKIE_SECRET'
+        - name: 'oauth2_proxy_client_secret'
+          data: 'molecule-google-client-secret'
+          target: 'OAUTH2_PROXY_CLIENT_SECRET'
+    expect:
+      ip: '10.89.0.110'
+      ip6: ~
+      login: 'https://accounts.google.com/o/oauth2/auth?'
+      client_id: 'molecule-google-client'
+      config:
+        - 'client_id = "molecule-google-client"'
+        - 'email_domains = ["*"]'
+        - 'http_address = ":4180"'
+      quadlet:
+        - 'Volume=/opt/oauth2-proxy/oauth2-proxy.cfg:/etc/oauth2-proxy/oauth2-proxy.cfg:ro'
+        - 'Secret=oauth2_proxy_cookie_secret,type=mount,target=/run/secrets/oauth2_proxy_cookie_secret'
+        - 'Secret=oauth2_proxy_client_secret,type=mount,target=/run/secrets/oauth2_proxy_client_secret'
+        - 'Environment=OAUTH2_PROXY_COOKIE_SECRET_FILE=/run/secrets/oauth2_proxy_cookie_secret'
+        - 'Environment=OAUTH2_PROXY_CLIENT_SECRET_FILE=/run/secrets/oauth2_proxy_client_secret'
+
+  # IPv6, labels, OpenID Connect without discovery, an upstream and the signature key passed in the environment
+  - name: 'molecule-oauth2-proxy'
+    role_vars:
+      oauth2_proxy_home: '/opt/oauth2-proxy'
+      oauth2_proxy_ip: '10.89.0.111'
+      oauth2_proxy_ipv6: 'fd00:89::111'
+      oauth2_proxy_network: 'podman-molecule'
+      oauth2_proxy_hostname: 'oauth2-proxy-molecule'
+      oauth2_proxy_timezone: 'Europe/Berlin'
+      oauth2_proxy_labels:
+        traefik.enable: 'false'
+      oauth2_proxy_config:
+        provider: 'oidc'
+        provider_display_name: 'Molecule'
+        client_id: 'molecule-oidc-client'
+        oidc_issuer_url: 'https://sso.example.org'
+        skip_oidc_discovery: true
+        login_url: 'https://sso.example.org/authorize'
+        redeem_url: 'https://sso.example.org/token'
+        oidc_jwks_url: 'https://sso.example.org/jwks'
+        code_challenge_method: 'S256'
+        scope: 'openid email profile'
+        email_domains: [ 'example.org' ]
+        upstreams: [ 'static://202' ]
+        reverse_proxy: true
+        set_xauthrequest: true
+        cookie_name: '_molecule'
+        cookie_expire: '12h'
+      oauth2_proxy_secrets:
+        - name: 'oauth2_proxy_cookie_secret'
+          # URL-safe base64 of 32 bytes
+          data: 'bW9sZWN1bGUtY29va2llLXNlY3JldC0zMi1ieXRlcyE='
+          target: 'OAUTH2_PROXY_COOKIE_SECRET'
+        - name: 'oauth2_proxy_client_secret'
+          data: 'molecule-oidc-client-secret'
+          target: 'OAUTH2_PROXY_CLIENT_SECRET'
+        - name: 'oauth2_proxy_signature_key'
+          data: 'sha256:molecule-signature-key'
+          target: 'OAUTH2_PROXY_SIGNATURE_KEY'
+    # side_effect changes the name of the cookie, the configuration changes and OAuth2 Proxy has to restart
+    side_effect:
+      config:
+        cookie_name: '_molecule_changed'
+    expect:
+      ip: '10.89.0.111'
+      ip6: 'fd00:89::111'
+      login: 'https://sso.example.org/authorize?'
+      client_id: 'molecule-oidc-client'
+      config:
+        - 'client_id = "molecule-oidc-client"'
+        - 'cookie_name = "_molecule_changed"'
+        - 'email_domains = ["example.org"]'
+        - 'http_address = ":4180"'
+        - 'reverse_proxy = true'
+        - 'skip_oidc_discovery = true'
+        - 'upstreams = ["static://202"]'
+      quadlet:
+        - 'Volume=/opt/oauth2-proxy/oauth2-proxy.cfg:/etc/oauth2-proxy/oauth2-proxy.cfg:ro'
+        - 'Secret=oauth2_proxy_cookie_secret,type=mount,target=/run/secrets/oauth2_proxy_cookie_secret'
+        - 'Secret=oauth2_proxy_client_secret,type=mount,target=/run/secrets/oauth2_proxy_client_secret'
+        - 'Secret=oauth2_proxy_signature_key,type=env,target=OAUTH2_PROXY_SIGNATURE_KEY'
+        - 'Label=traefik.enable=false'
