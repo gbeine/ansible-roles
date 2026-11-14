@@ -30,6 +30,7 @@ monitoring_plugins:
 | `pass_alive` | `check_pass_alive` | `pass-alive` | yes |
 | `pgactivity` | `check_pgactivity.pl` | `pgactivity` | |
 | `phpfpm` | `check_phpfpm_status.pl` | `php-fpm-status` | |
+| `printer_snmp` | `check_printer_snmp.py` | `printer_snmp` | |
 | `pushover` | `pushover.sh` | `push-host-notification`, `push-service-notification` | |
 | `raid` | link to `check_raid` | `raid` | `dmsetup` |
 | `reboot` | `check_reboot` | `reboot` | |
@@ -41,6 +42,40 @@ monitoring_plugins:
 
 The role fails before it changes anything if `monitoring_plugins` contains an unknown plugin.
 The plugins, their files, configurations and sudoers entries are listed in `vars/main.yml`, the packages in `vars/Debian-13.yml`.
+
+### Printer
+
+`printer_snmp` checks the toner levels or the status of a printer with `snmpwalk` of the package `snmp`,
+it reads the Printer-MIB (RFC 3805) and the Host-Resources-MIB (RFC 2790) with SNMP v1 or v2c.
+The `CheckCommand` `printer_snmp` uses the address of the host and these variables:
+
+- `printer_check` is mandatory, `toner` checks the toner levels, `status` the error flags of the printer
+- `printer_toner` is `all` (default, the worst level wins) or a part of the name of a toner, e.g. `black`
+- `printer_warning` and `printer_critical` are the levels of the toner in percent (default 10 and 5)
+- `printer_status_critical` is a comma separated list of error flags causing CRITICAL, other flags cause WARNING
+- `printer_status_ignore` is a comma separated list of error flags that are ignored
+- `printer_community` (default `public`), `printer_snmp_version` (`1` or `2c`, default `2c`) and `printer_timeout` (default 5 seconds)
+- `printer_address` overrides the address of the host
+
+The error flags are `lowPaper`, `noPaper`, `lowToner`, `noToner`, `doorOpen`, `jammed`, `offline`, `serviceRequested`,
+`inputTrayMissing`, `outputTrayMissing`, `markerSupplyMissing`, `outputNearFull`, `outputFull`, `inputTrayEmpty`
+and `overduePreventMaintenance`. The toner levels are written as performance data in percent.
+
+```
+apply Service "printer-toner" {
+  check_command = "printer_snmp"
+  vars.printer_check = "toner"
+  assign where host.vars.printer
+}
+
+apply Service "printer-status" {
+  check_command = "printer_snmp"
+  vars.printer_check = "status"
+  vars.printer_status_critical = "noToner,jammed"
+  vars.printer_status_ignore = "lowPaper"
+  assign where host.vars.printer
+}
+```
 
 ### Credentials
 
@@ -100,7 +135,9 @@ The molecule scenario `default` uses tart with two VMs, both with Icinga 2 insta
 
 `verify` checks that exactly the expected files, links, configurations and sudoers entries exist, the credential files, `visudo -c`,
 the sudo commands of the Icinga user, the syntax and dependencies of the plugins (`perl -c`, `bash -n`, `--help`),
-runs `check_mem.pl` and `check_systemd` as the Icinga user and validates the Icinga configuration with `icinga2 daemon -C`.
+runs `check_mem.pl` and `check_systemd` as the Icinga user,
+runs `check_printer_snmp.py` as the Icinga user against `127.0.0.1` without SNMP agent, it has to return UNKNOWN with an SNMP error,
+which shows that `snmpwalk` is installed, and validates the Icinga configuration with `icinga2 daemon -C`.
 
 ```
 cd monitoring_plugins
