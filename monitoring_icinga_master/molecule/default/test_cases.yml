@@ -1,0 +1,132 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_icinga_master__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_icinga_master__test_image: 'docker.io/icinga/icinga2:latest'
+monitoring_icinga_master__test_quadlet_path: '/etc/containers/systemd/icinga-master.container'
+
+# Redis for the feature icingadb, started in prepare.yml on molecule-icinga-master
+monitoring_icinga_master__test_redis:
+  name: 'redis-molecule'
+  image: 'docker.io/library/redis:7'
+  ip: '10.89.0.92'
+  password: 'molecule-redis-password'
+
+monitoring_icinga_master__test_cases:
+
+  # Only the mandatory variables, the features of the default and no secrets
+  - name: 'molecule-icinga-master-default'
+    role_vars:
+      icinga_master_home: '/opt/icinga-master'
+      icinga_master_ip: '10.89.0.90'
+      icinga_master_network: 'podman-molecule'
+      icinga_master_hostname: 'icinga-master-default'
+      icinga_master_timezone: 'Europe/Berlin'
+      icinga_master_node_name: 'icinga-master-default.molecule'
+      icinga_master_zone_name: 'master'
+      icinga_cert_source_dir: '/etc/molecule-certs'
+    expect:
+      ip: '10.89.0.90'
+      home: '/opt/icinga-master'
+      api_user: ~
+      features: [ 'api', 'checker', 'mainlog', 'notification' ]
+      quadlet:
+        - 'Volume=/opt/icinga-master/data:/data'
+        - 'Volume=/opt/icinga-master/tmp:/tmp'
+        - 'Volume=/opt/icinga-master/plugins:/usr/local/lib/nagios/plugins:ro'
+        - 'ExecStartPre=cp -uL /etc/molecule-certs/icinga-master-default.molecule/chain.pem /opt/icinga-master/data/var/lib/icinga2/certs/ca.crt'
+      quadlet_absent: [ 'Secret=', 'Environment=', 'ICINGA_MASTER', '/etc/timezone', 'Wants=', 'After=' ]
+      config: {}
+      secrets: []
+
+  # IPv6, an API user, the ticket salt and the password of icingadb as secrets, the feature icingadb with Redis,
+  # perfdata, a host and a service, an environment variable and dependencies of the quadlet unit
+  - name: 'molecule-icinga-master'
+    role_vars:
+      icinga_master_home: '/srv/icinga-master'
+      icinga_master_ip: '10.89.0.91'
+      icinga_master_ipv6: 'fd00:89::91'
+      icinga_master_network: 'podman-molecule'
+      icinga_master_hostname: 'icinga-master'
+      icinga_master_timezone: 'Europe/Berlin'
+      icinga_master_node_name: 'icinga-master.molecule'
+      icinga_master_zone_name: 'master'
+      icinga_cert_source_dir: '/etc/molecule-certs'
+      icinga_master_environment:
+        ICINGA_LOG_LEVEL: 'information'
+      icinga_master_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+      icinga_master_secrets:
+        - name: 'icinga_api_molecule'
+          data: 'molecule-api-password'
+          target: 'api_users.molecule.password'
+        - name: 'icinga_ticket_salt'
+          data: 'molecule-ticket-salt'
+          target: 'api.ticket_salt'
+        - name: 'icinga_icingadb'
+          data: 'molecule-redis-password'
+          target: 'icingadb.password'
+      icinga_master_config:
+        mainlog:
+          severity: 'warning'
+        icingadb:
+          host: '10.89.0.92'
+          port: 6379
+        perfdata: {}
+        debuglog: null
+      icinga_master_api_users:
+        - name: 'molecule'
+          permissions: [ '*' ]
+      icinga_master_hosts:
+        - name: 'molecule-host'
+          address: '127.0.0.1'
+          check_command: 'dummy'
+      icinga_master_services:
+        - name: 'molecule-service'
+          check_command: 'dummy'
+          assign: [ 'host.name == "molecule-host"' ]
+    # side_effect changes the severity of the main log, mainlog.conf changes and Icinga has to restart
+    side_effect:
+      config:
+        mainlog:
+          severity: 'notice'
+    expect:
+      ip: '10.89.0.91'
+      home: '/srv/icinga-master'
+      api_user: 'molecule'
+      api_password: 'molecule-api-password'
+      features: [ 'api', 'checker', 'icingadb', 'mainlog', 'notification', 'perfdata' ]
+      quadlet:
+        - 'IP6=fd00:89::91'
+        - 'Secret=icinga-master-config,type=mount,target=/run/secrets/icinga-master-config,uid=5665,gid=5665,mode=0400'
+        - 'Environment=ICINGA_LOG_LEVEL=information'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      quadlet_absent: [ 'ICINGA_MASTER', '/etc/timezone' ]
+      config:
+        icinga2.conf:
+          - 'include "/run/secrets/icinga-master-config"'
+        features-enabled/api.conf:
+          - 'object ApiListener "api" {'
+          - '  accept_config = false'
+          - '  bind_port = 5665'
+          - '  ticket_salt = Secret_icinga_ticket_salt'
+        features-enabled/icingadb.conf:
+          - 'object IcingaDB "icingadb" {'
+          - '  host = "10.89.0.92"'
+          - '  port = 6379'
+          - '  password = Secret_icinga_icingadb'
+        features-enabled/mainlog.conf:
+          - 'object FileLogger "main-log" {'
+          - '  severity = "notice"'
+        conf.d/api-users.conf:
+          - '  password = Secret_icinga_api_molecule'
+      secrets: [ 'molecule-api-password', 'molecule-ticket-salt', 'molecule-redis-password' ]

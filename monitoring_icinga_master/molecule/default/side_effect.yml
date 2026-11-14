@@ -1,0 +1,207 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icinga_master__test_case: "{{ monitoring_icinga_master__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icinga_master__test_vars: "{{ monitoring_icinga_master__test_case.role_vars }}"
+    monitoring_icinga_master__test_config: "{{ monitoring_icinga_master__test_vars.icinga_master_config | default({}) }}"
+    monitoring_icinga_master__test_checked_files:
+      - "{{ monitoring_icinga_master__test_quadlet_path }}"
+      - "{{ monitoring_icinga_master__test_vars.icinga_master_home }}/data/etc/icinga2/features-enabled/mainlog.conf"
+      - "{{ monitoring_icinga_master__test_vars.icinga_master_home }}/data/etc/icinga2/conf.d/api-users.conf"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_icinga_master__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_icinga_master__test_checked_files }}"
+      register: 'monitoring_icinga_master__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_icinga_master with icinga_master_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_container: [ 'environment' ]
+        monitoring_icinga_master__test_invalid:
+          message: 'icinga_master_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_icinga_master with icinga_master_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_config: [ 'api' ]
+        monitoring_icinga_master__test_invalid:
+          message: 'icinga_master_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_icinga_master with an unknown feature (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_config: "{{ monitoring_icinga_master__test_config | combine({ 'ido-mysql': {} }) }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'an unknown feature'
+          search: '^Unknown features in icinga_master_config: ido-mysql, allowed are '
+
+    - name: 'Run monitoring_icinga_master with a feature that is no dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_config: "{{ monitoring_icinga_master__test_config | combine({ 'perfdata': 'enabled' }) }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'a feature that is no dictionary'
+          search: '^The features of icinga_master_config are dictionaries of attributes, null or false: perfdata\.$'
+
+    - name: 'Run monitoring_icinga_master with an unknown attribute (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_config: "{{ monitoring_icinga_master__test_config | combine({ 'mainlog': { 'level': 'debug' } }, recursive=true) }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'an unknown attribute'
+          search: '^Unknown attributes in icinga_master_config: mainlog\.level, '
+
+    - name: 'Run monitoring_icinga_master with a boolean attribute that is no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_config: "{{ monitoring_icinga_master__test_config | combine({ 'api': { 'accept_config': 'yes' } }, recursive=true) }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'a boolean attribute that is no boolean'
+          search: '^These attributes are booleans, allowed are true and false: api\.accept_config\.$'
+
+    - name: 'Run monitoring_icinga_master with a password in icinga_master_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_config: "{{ monitoring_icinga_master__test_config | combine({ 'icingadb': { 'password': 'molecule' } }, recursive=true) }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'a password in icinga_master_config'
+          search: '^Passwords are set with icinga_master_secrets, not in icinga_master_config: icingadb\.password\.$'
+
+    - name: 'Run monitoring_icinga_master with a password in icinga_master_api_users (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_api_users:
+          - name: 'molecule'
+            password: 'molecule'
+            permissions: [ '*' ]
+        monitoring_icinga_master__test_invalid:
+          message: 'a password in icinga_master_api_users'
+          search: '^The passwords of the API users are set with icinga_master_secrets \(target api_users\.<name>\.password\): molecule\.$'
+
+    - name: 'Run monitoring_icinga_master with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_secrets:
+          - name: 'icinga_ticket_salt'
+            data: 'molecule-ticket-salt'
+        monitoring_icinga_master__test_invalid:
+          message: 'a secret without target'
+          search: '^icinga_master_secrets entries need name, data and target$'
+
+    - name: 'Run monitoring_icinga_master with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_secrets: "{{ (monitoring_icinga_master__test_vars.icinga_master_secrets | default([])) + [{ 'name': 'icinga_mainlog', 'data': 'x', 'target': 'mainlog.password' }] }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: mainlog\.password, allowed are '
+
+    - name: 'Run monitoring_icinga_master with the secret of a missing API user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_secrets: "{{ (monitoring_icinga_master__test_vars.icinga_master_secrets | default([])) + [{ 'name': 'icinga_api_nobody', 'data': 'x', 'target': 'api_users.nobody.password' }] }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'the secret of a missing API user'
+          search: '^The API users of these secrets are not part of icinga_master_api_users: api_users\.nobody\.password\.$'
+
+    - name: 'Run monitoring_icinga_master with the secret of a disabled feature (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_secrets: "{{ (monitoring_icinga_master__test_vars.icinga_master_secrets | default([])) + [{ 'name': 'icinga_influxdb2', 'data': 'x', 'target': 'influxdb2.auth_token' }] }}"
+        monitoring_icinga_master__test_invalid:
+          message: 'the secret of a disabled feature'
+          search: '^The features of these secrets are not enabled in icinga_master_config: influxdb2\.auth_token\.$'
+
+    - name: 'Run monitoring_icinga_master with a secret name that is no constant (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_secrets:
+          - name: 'icinga-ticket-salt'
+            data: 'molecule-ticket-salt'
+            target: 'api.ticket_salt'
+        monitoring_icinga_master__test_invalid:
+          message: 'a secret name that is no constant'
+          search: '^The names of icinga_master_secrets are names of constants of Icinga, .*: icinga-ticket-salt\.$'
+
+    - name: 'Run monitoring_icinga_master with a former variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_api_bind_port: 5666
+        monitoring_icinga_master__test_invalid:
+          message: 'a former variable'
+          search: '^The features are set with icinga_master_config now: icinga_master_api_bind_port \(api\.bind_port\)\.$'
+
+    - name: 'Run monitoring_icinga_master with icinga_master_hosts not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_hosts:
+          name: 'molecule-host'
+        monitoring_icinga_master__test_invalid:
+          message: 'icinga_master_hosts not a list'
+          search: '^These variables have to be lists of dictionaries: icinga_master_hosts\.$'
+
+    - name: 'Run monitoring_icinga_master with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icinga_master_environment:
+          MSMTPRC: 'password secret'
+        monitoring_icinga_master__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: MSMTPRC\.'
+
+    - name: 'Run monitoring_icinga_master with the changed configuration'
+      when: monitoring_icinga_master__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+          register: 'monitoring_icinga_master__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            icinga_master_config: "{{ monitoring_icinga_master__test_config | combine(monitoring_icinga_master__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run monitoring_icinga_master with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'monitoring_icinga_master'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+          register: 'monitoring_icinga_master__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed feature and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - monitoring_icinga_master__features_result is changed
+              - monitoring_icinga_master__quadlet_result is not changed
+              - monitoring_icinga_master__test_started_after.stdout | int > monitoring_icinga_master__test_started_before.stdout | int
+            fail_msg: >-
+              features changed: {{ monitoring_icinga_master__features_result is changed }},
+              quadlet changed: {{ monitoring_icinga_master__quadlet_result is changed }},
+              start before {{ monitoring_icinga_master__test_started_before.stdout }}, after {{ monitoring_icinga_master__test_started_after.stdout }}

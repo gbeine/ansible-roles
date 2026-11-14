@@ -1,28 +1,268 @@
 ---
 
-- name: 'Install and configure Icinga 2 master'
-  tags: [ 'monitoring_icinga_master' ]
+- name: 'Install Icinga 2 master'
+  tags: [ 'monitoring', 'monitoring_icinga_master' ]
   block:
 
-    - name: 'Create Icinga directory'
+    # A failing template in the variables (e.g. icinga_master_container or icinga_master_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_icinga_master__container | length > 0
+          - monitoring_icinga_master__config | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_master__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_master__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_icinga_master__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('icinga_master_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('icinga_master_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of icinga_master_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The features are objects of Icinga, Icinga itself checks the values of the attributes at the start
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_master__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_master__former: >-
+          {{ query('ansible.builtin.varnames', '^(' ~ (monitoring_icinga_master__former_variables.keys() | join('|')) ~ ')$') | sort }}
+        monitoring_icinga_master__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(unknown=[], values=[], attributes=[], secrets=[], booleans=[], lines=[]) -%}
+          {%- for feature, attributes in monitoring_icinga_master__config.items() -%}
+          {%-   if feature not in monitoring_icinga_master__features -%}
+          {%-     set ns.unknown = ns.unknown + [ feature | string ] -%}
+          {%-   elif attributes is mapping -%}
+          {%-     for key, value in attributes.items() -%}
+          {%-       set path = feature ~ '.' ~ key -%}
+          {%-       set items = (value.values() | list) if value is mapping else (value if (value is sequence and value is not string) else [ value ]) -%}
+          {%-       if path in monitoring_icinga_master__secrets_allowed -%}
+          {%-         set ns.secrets = ns.secrets + [ path ] -%}
+          {%-       elif key not in monitoring_icinga_master__config_allowed[feature] -%}
+          {%-         set ns.attributes = ns.attributes + [ path ] -%}
+          {%-       elif key in monitoring_icinga_master__config_booleans[feature] | default([]) and value is not none and value is not boolean -%}
+          {%-         set ns.booleans = ns.booleans + [ path ] -%}
+          {%-       elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-         set ns.lines = ns.lines + [ path ] -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   elif attributes is not none and attributes is not false -%}
+          {%-     set ns.values = ns.values + [ feature ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown features in icinga_master_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are ' ~ (monitoring_icinga_master__features.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('The features of icinga_master_config are dictionaries of attributes, null or false: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.attributes | length > 0 -%}
+          {%-   set _ = errors.append('Unknown attributes in icinga_master_config: ' ~ (ns.attributes | join(', ')) ~ ', allowed are the attributes of monitoring_icinga_master__config_allowed.') -%}
+          {%- endif -%}
+          {%- if ns.secrets | length > 0 -%}
+          {%-   set _ = errors.append('Passwords are set with icinga_master_secrets, not in icinga_master_config: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These attributes are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of icinga_master_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_icinga_master__former | length > 0 -%}
+          {%-   set names = [] -%}
+          {%-   for name in monitoring_icinga_master__former -%}
+          {%-     set _ = names.append(name ~ ' (' ~ monitoring_icinga_master__former_variables[name] ~ ')') -%}
+          {%-   endfor -%}
+          {%-   set _ = errors.append('The features are set with icinga_master_config now: ' ~ (names | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_master__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_master__targets: "{{ monitoring_icinga_master__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_icinga_master__api_user_names: >-
+          {{ (monitoring_icinga_master__api_users | select('mapping') | map(attribute='name', default='') | map('string') | list)
+             if (monitoring_icinga_master__api_users is sequence and monitoring_icinga_master__api_users is not string) else [] }}
+        monitoring_icinga_master__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(unknown=[], disabled=[], users=[]) -%}
+          {%- for target in monitoring_icinga_master__targets -%}
+          {%-   if target is match('^api_users\..+\.password$') -%}
+          {%-     if target | regex_replace('^api_users\.(.+)\.password$', '\\1') not in monitoring_icinga_master__api_user_names -%}
+          {%-       set ns.users = ns.users + [ target ] -%}
+          {%-     endif -%}
+          {%-   elif target not in monitoring_icinga_master__secrets_allowed -%}
+          {%-     set ns.unknown = ns.unknown + [ target ] -%}
+          {%-   elif target.split('.')[0] not in monitoring_icinga_master__features_enabled -%}
+          {%-     set ns.disabled = ns.disabled + [ target ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set duplicates = monitoring_icinga_master__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%- set names = monitoring_icinga_master__secrets | map(attribute='name') | map('string') | reject('match', monitoring_icinga_master__name_pattern) | list -%}
+          {%- set data = monitoring_icinga_master__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+                         + monitoring_icinga_master__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (ns.unknown | join(', ')) ~ ', allowed are ' ~ (monitoring_icinga_master__secrets_allowed | join(', ')) ~ ' and api_users.<name>.password.') -%}
+          {%- endif -%}
+          {%- if ns.disabled | length > 0 -%}
+          {%-   set _ = errors.append('The features of these secrets are not enabled in icinga_master_config: ' ~ (ns.disabled | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.users | length > 0 -%}
+          {%-   set _ = errors.append('The API users of these secrets are not part of icinga_master_api_users: ' ~ (ns.users | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('Every target of icinga_master_secrets is set once: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if names | length > 0 -%}
+          {%-   set _ = errors.append('The names of icinga_master_secrets are names of constants of Icinga, they start with a letter or _, followed by letters, digits and _: ' ~ (names | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The objects are written as they are, Icinga checks them at the start
+    - name: 'Validate the objects'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_master__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_master__lists:
+          api_users: "{{ monitoring_icinga_master__api_users }}"
+          commands: "{{ monitoring_icinga_master__commands }}"
+          host_dependencies: "{{ monitoring_icinga_master__host_dependencies }}"
+          host_groups: "{{ monitoring_icinga_master__host_groups }}"
+          hosts: "{{ monitoring_icinga_master__hosts }}"
+          notifications: "{{ monitoring_icinga_master__notifications }}"
+          service_dependencies: "{{ monitoring_icinga_master__service_dependencies }}"
+          service_groups: "{{ monitoring_icinga_master__service_groups }}"
+          services: "{{ monitoring_icinga_master__services }}"
+          templates: "{{ monitoring_icinga_master__templates }}"
+          timeperiods: "{{ monitoring_icinga_master__timeperiods }}"
+          user_groups: "{{ monitoring_icinga_master__user_groups }}"
+          users: "{{ monitoring_icinga_master__users }}"
+          zones: "{{ monitoring_icinga_master__zones }}"
+        # Dependencies, notifications, services and templates may share their names
+        monitoring_icinga_master__named: [ 'api_users', 'commands', 'host_groups', 'hosts', 'service_groups', 'timeperiods', 'user_groups', 'users', 'zones' ]
+        monitoring_icinga_master__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(lists=[], names=[], duplicates=[]) -%}
+          {%- for key, objects in monitoring_icinga_master__lists.items() -%}
+          {%-   if objects is not sequence or objects is string or objects is mapping or objects | reject('mapping') | list | length > 0 -%}
+          {%-     set ns.lists = ns.lists + [ 'icinga_master_' ~ key ] -%}
+          {%-   elif key in monitoring_icinga_master__named -%}
+          {%-     if objects | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-       set ns.names = ns.names + [ 'icinga_master_' ~ key ] -%}
+          {%-     elif objects | map(attribute='name') | unique | list | length != objects | length -%}
+          {%-       set ns.duplicates = ns.duplicates + [ 'icinga_master_' ~ key ] -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set zones = [] -%}
+          {%- for key in [ 'zone_hosts', 'zone_services' ] -%}
+          {%-   set value = monitoring_icinga_master__zone_hosts if key == 'zone_hosts' else monitoring_icinga_master__zone_services -%}
+          {%-   if value is not mapping or value.values() | reject('sequence') | list | length > 0 or value.values() | select('string') | list | length > 0 -%}
+          {%-     set _ = zones.append('icinga_master_' ~ key) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set passwords = (monitoring_icinga_master__api_users | select('mapping') | selectattr('password', 'defined') | map(attribute='name', default='') | list)
+                              if 'icinga_master_api_users' not in ns.lists else [] -%}
+          {%- if ns.lists | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be lists of dictionaries: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.names | length > 0 -%}
+          {%-   set _ = errors.append('The entries of these variables need a name: ' ~ (ns.names | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.duplicates | length > 0 -%}
+          {%-   set _ = errors.append('The names of these variables have to be unique: ' ~ (ns.duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if zones | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be dictionaries of lists by zone: ' ~ (zones | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if passwords | length > 0 -%}
+          {%-   set _ = errors.append('The passwords of the API users are set with icinga_master_secrets (target api_users.<name>.password): ' ~ (passwords | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_icinga_master__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_master__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_master__errors: >-
+          {%- set errors = [] -%}
+          {%- set environment = monitoring_icinga_master__environment -%}
+          {%- if environment is not mapping -%}
+          {%-   set _ = errors.append('icinga_master_environment has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging icinga_master_container,
+    # unknown variables would change the behavior unexpectedly, e.g. ICINGA_* of the node setup or MSMTPRC with a password
+    - name: 'Validate the allowed environment variables'
+      when: monitoring_icinga_master__container.environment is mapping
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ monitoring_icinga_master__unknown | join(', ') }}.
+          Allowed are the variables {{ monitoring_icinga_master__environment_allowed | join(', ') }},
+          the features are set with icinga_master_config and the passwords with icinga_master_secrets.
+        quiet: true
+      vars:
+        monitoring_icinga_master__unknown: >-
+          {{ monitoring_icinga_master__container.environment.keys() | reject('in', monitoring_icinga_master__environment_allowed) | list }}
+
+    - name: 'Create directories'
       ansible.builtin.file:
         path: "{{ item }}"
         owner: "{{ monitoring_icinga_master__uid }}"
         group: "{{ monitoring_icinga_master__gid }}"
-        mode: '750'
+        mode: '0750'
         state: 'directory'
-      with_items:
-        - "{{ monitoring_icinga_master__data_dir }}"
-        - "{{ monitoring_icinga_master__cert_dir }}"
-        - "{{ monitoring_icinga_master__etc_dir }}"
-        - "{{ monitoring_icinga_master__etc_dir }}/features-available"
-        - "{{ monitoring_icinga_master__etc_dir }}/features-enabled"
-        - "{{ monitoring_icinga_master__etc_dir }}/conf.d"
-        - "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands"
-        - "{{ monitoring_icinga_master__etc_dir }}/zones.d"
-        - "{{ monitoring_icinga_master__plugins_dir }}"
+      loop: "{{ monitoring_icinga_master__data_dirs + [ monitoring_icinga_master__plugins_dir ] }}"
 
-    - name: 'Create Icinga tmp directory'
+    - name: 'Create tmp directory'
       ansible.builtin.file:
         path: "{{ monitoring_icinga_master__tmp_dir }}"
         owner: 'root'
@@ -30,171 +270,106 @@
         mode: '1777'
         state: 'directory'
 
-    - name: 'Generate Icinga configuration'
+    - name: 'Generate the configuration'
       ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
+        src: "{{ item | regex_replace('^conf\\.d/commands/', 'commands/') | regex_replace('^conf\\.d/', 'conf-') }}.j2"
+        dest: "{{ monitoring_icinga_master__etc_dir }}/{{ item }}"
         owner: "{{ monitoring_icinga_master__uid }}"
-        group: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__gid }}"
         mode: '0400'
-      with_items:
-        - src: 'constants.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/constants.conf"
-        - src: 'endpoints.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/endpoints.conf"
-        - src: 'icinga2.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/icinga2.conf"
-        - src: 'zones.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/zones.conf"
-        - src: 'features-api.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/api.conf"
-        - src: 'features-checker.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/checker.conf"
-        - src: 'features-debuglog.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/debuglog.conf"
-        - src: 'features-icingadb.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/icingadb.conf"
-        - src: 'features-influxdb2.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/influxdb2.conf"
-        - src: 'features-mainlog.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/mainlog.conf"
-        - src: 'features-notification.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/notification.conf"
-        - src: 'features-perfdata.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/features-available/perfdata.conf"
-        - src: 'conf-api-users.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/api-users.conf"
-        - src: 'conf-app.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/app.conf"
-        - src: 'conf-commands.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands.conf"
-        - src: 'conf-host_dependencies.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/host_dependencies.conf"
-        - src: 'conf-host_groups.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/host_groups.conf"
-        - src: 'conf-hosts.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/hosts.conf"
-        - src: 'conf-notifications.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/notifications.conf"
-        - src: 'conf-service_dependencies.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/service_dependencies.conf"
-        - src: 'conf-service_groups.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/service_groups.conf"
-        - src: 'conf-services.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/services.conf"
-        - src: 'conf-templates.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/templates.conf"
-        - src: 'conf-timeperiods.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/timeperiods.conf"
-        - src: 'conf-user_groups.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/user_groups.conf"
-        - src: 'conf-users.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/users.conf"
-        - src: 'commands/check_certexp.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_certexp.conf"
-        - src: 'commands/check_container_stats_docker.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_container_stats_docker.conf"
-        - src: 'commands/check_container_stats_podman.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_container_stats_podman.conf"
-        - src: 'commands/check_ide_smart.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_ide_smart.conf"
-        - src: 'commands/check_smartpl.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_smartpl.conf"
-        - src: 'commands/check_nginx_status.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_nginx_status.conf"
-        - src: 'commands/check_pass_alive.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_pass_alive.conf"
-        - src: 'commands/check_pgactivity.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_pgactivity.conf"
-        - src: 'commands/check_phpfpm_status.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_phpfpm_status.conf"
-        - src: 'commands/check_raid.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_raid.conf"
-        - src: 'commands/check_reboot.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/check_reboot.conf"
-        - src: 'commands/pushover.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/pushover.conf"
-        - src: 'commands/rocketchat.conf.j2'
-          dest: "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands/rocketchat.conf"
-      notify:
-        - 'Restart Icinga'
+      loop: "{{ monitoring_icinga_master__config_files }}"
+      register: 'monitoring_icinga_master__config_result'
+
+    - name: 'Generate the features'
+      ansible.builtin.template:
+        src: 'feature.conf.j2'
+        dest: "{{ monitoring_icinga_master__etc_dir }}/features-enabled/{{ monitoring_icinga_master__feature }}.conf"
+        owner: "{{ monitoring_icinga_master__uid }}"
+        group: "{{ monitoring_icinga_master__gid }}"
+        mode: '0400'
+      loop: "{{ monitoring_icinga_master__features_enabled }}"
+      loop_control:
+        loop_var: 'monitoring_icinga_master__feature'
+      register: 'monitoring_icinga_master__features_result'
+
+    # Former versions linked the features from features-available
+    - name: 'Find the files of the features'
+      ansible.builtin.find:
+        paths: "{{ monitoring_icinga_master__etc_dir }}/features-enabled"
+        patterns: [ '*' ]
+        file_type: 'any'
+      register: 'monitoring_icinga_master__features_files'
+
+    - name: 'Remove disabled features'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ monitoring_icinga_master__features_files.files | map(attribute='path')
+           | reject('in', monitoring_icinga_master__features_enabled | map('regex_replace', '^(.*)$', monitoring_icinga_master__etc_dir ~ '/features-enabled/\1.conf') | list)
+           | list
+           + [ monitoring_icinga_master__etc_dir ~ '/features-available' ] }}
+      register: 'monitoring_icinga_master__features_removed'
 
     - name: 'Create directories for zones'
       ansible.builtin.file:
-        dest: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item.key }}"
+        path: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item }}"
         owner: "{{ monitoring_icinga_master__uid }}"
-        group: "{{ monitoring_icinga_master__uid }}"
-        mode: '755'
+        group: "{{ monitoring_icinga_master__gid }}"
+        mode: '0750'
         state: 'directory'
-      with_dict: "{{ monitoring_icinga_master__zone_hosts }}"
+      loop: "{{ (monitoring_icinga_master__zone_hosts.keys() | list + monitoring_icinga_master__zone_services.keys() | list) | unique }}"
 
     - name: 'Create host configuration for zones'
       ansible.builtin.template:
         src: 'conf-hosts.conf.j2'
         dest: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item.key }}/hosts.conf"
         owner: "{{ monitoring_icinga_master__uid }}"
-        group: "{{ monitoring_icinga_master__uid }}"
-        mode: '400'
-      with_dict: "{{ monitoring_icinga_master__zone_hosts }}"
+        group: "{{ monitoring_icinga_master__gid }}"
+        mode: '0400'
+      loop: "{{ monitoring_icinga_master__zone_hosts | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
       vars:
         monitoring_icinga_master__hosts: "{{ item.value }}"
-      notify:
-        - 'Restart Icinga'
+      register: 'monitoring_icinga_master__zone_hosts_result'
 
     - name: 'Create service configuration for zones'
       ansible.builtin.template:
         src: 'conf-services.conf.j2'
         dest: "{{ monitoring_icinga_master__etc_dir }}/zones.d/{{ item.key }}/services.conf"
         owner: "{{ monitoring_icinga_master__uid }}"
-        group: "{{ monitoring_icinga_master__uid }}"
-        mode: '400'
-      with_dict: "{{ monitoring_icinga_master__zone_services }}"
+        group: "{{ monitoring_icinga_master__gid }}"
+        mode: '0400'
+      loop: "{{ monitoring_icinga_master__zone_services | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
       vars:
         monitoring_icinga_master__services: "{{ item.value }}"
-      notify:
-        - 'Restart Icinga'
+      register: 'monitoring_icinga_master__zone_services_result'
 
     - name: 'Copy plugins to host'
       ansible.builtin.copy:
         src: "{{ item }}"
         dest: "{{ monitoring_icinga_master__plugins_dir }}/{{ item }}"
-        mode: '755'
-      with_items:
+        mode: '0755'
+      loop:
         - 'pushover.sh'
 
-    - name: 'Disable features'
-      ansible.builtin.file:
-        path: "{{ monitoring_icinga_master__etc_dir }}/features-enabled/{{ item }}"
-        state: 'absent'
-      with_items: "{{ monitoring_icinga_master__features_disabled }}"
-      notify:
-        - 'Restart Icinga'
-
-    - name: 'Enable features'
-      ansible.builtin.file:
-        path: "{{ monitoring_icinga_master__etc_dir }}/features-enabled/{{ item }}"
-        src: "../features-available/{{ item }}"
-        state: 'link'
-      with_items: "{{ monitoring_icinga_master__features_enabled }}"
-      notify:
-        - 'Restart Icinga'
+    # The secrets are constants of Icinga in one file, the DSL of Icinga cannot read files
+    - name: 'Create the secret of the constants'
+      when: monitoring_icinga_master__secrets | length > 0
+      no_log: true
+      containers.podman.podman_secret:
+        name: "{{ monitoring_icinga_master__config_secret }}"
+        data: "{{ lookup('ansible.builtin.template', 'secrets.conf.j2') }}"
+        state: 'present'
+      register: 'monitoring_icinga_master__secret_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ monitoring_icinga_master__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[monitoring_icinga_master__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ monitoring_icinga_master__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Install Icinga container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ monitoring_icinga_master__container.name }}"
         hostname: "{{ monitoring_icinga_master__container.hostname }}"
@@ -202,26 +377,26 @@
         ip: "{{ monitoring_icinga_master__container.ip }}"
         ip6: "{{ monitoring_icinga_master__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_icinga_master__container.network }}"
-        etc_hosts: "{{ monitoring_icinga_master__container.etc_hosts | default(omit) }}"
-        expose: "{{ monitoring_icinga_master__container.expose | default(omit) }}"
-        publish: "{{ monitoring_icinga_master__container.publish | default(omit) }}"
         timezone: "{{ monitoring_icinga_master__container.timezone }}"
         cap_add: "{{ monitoring_icinga_master__container.cap_add | default(omit) }}"
-        env: "{{ monitoring_icinga_master__container.env | default(omit) }}"
+        command: "{{ monitoring_icinga_master__container.command | default(omit) }}"
+        env: "{{ monitoring_icinga_master__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_icinga_master__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_icinga_master__container.expose | default(omit) }}"
         label: "{{ monitoring_icinga_master__container.labels | default(omit) }}"
-        secrets: "{{ monitoring_icinga_master__container.secrets | default(omit) }}"
+        publish: "{{ monitoring_icinga_master__container.publish | default(omit) }}"
+        secrets: >-
+          {{ [ monitoring_icinga_master__config_secret ~ ',' ~ monitoring_icinga_master__config_secret_mount ]
+             if monitoring_icinga_master__secrets | length > 0 else omit }}
         volume: "{{ monitoring_icinga_master__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
-          {% if monitoring_icinga_master__container.exec_start_pre is defined %}
-          {% for command in monitoring_icinga_master__container.exec_start_pre %}
+          {% for command in monitoring_icinga_master__container.exec_start_pre | default([]) %}
           ExecStartPre={{ command }}
           {% endfor %}
-          {% endif %}
           RestartSec=5
           Restart=always
 
@@ -229,13 +404,103 @@
           {% if monitoring_icinga_master__container.requires is defined %}
           Requires={{ monitoring_icinga_master__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_icinga_master__container.wants is defined %}
+          Wants={{ monitoring_icinga_master__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_icinga_master__container.after is defined %}
+          After={{ monitoring_icinga_master__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_icinga_master__container.part_of is defined %}
+          PartOf={{ monitoring_icinga_master__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_icinga_master__container.binds_to is defined %}
+          BindsTo={{ monitoring_icinga_master__container.binds_to | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'monitoring_icinga_master__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ monitoring_icinga_master__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Icinga'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_icinga_master__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_icinga_master__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_icinga_master__running: >-
+              {{ (ansible_facts.services[monitoring_icinga_master__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_icinga_master__restart: >-
+              {{ monitoring_icinga_master__running | bool
+                 and (monitoring_icinga_master__config_result is changed
+                      or monitoring_icinga_master__features_result is changed
+                      or monitoring_icinga_master__features_removed is changed
+                      or monitoring_icinga_master__zone_hosts_result is changed
+                      or monitoring_icinga_master__zone_services_result is changed
+                      or monitoring_icinga_master__secret_result is changed
+                      or monitoring_icinga_master__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_icinga_master__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_icinga_master__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ monitoring_icinga_master__container.name ~ ' did not start' ] + monitoring_icinga_master__start_journal.stdout_lines }}"
+
+    # Icinga exits if the configuration is invalid, the API answers without login with 401
+    - name: 'Wait for the API of Icinga'
+      when:
+        - not ansible_check_mode
+        - "'api' in monitoring_icinga_master__features_enabled"
+      ansible.builtin.uri:
+        url: "https://{{ monitoring_icinga_master__container.ip }}:{{ monitoring_icinga_master__config.api.bind_port | default(5665) }}/v1"
+        validate_certs: false
+        status_code: [ 200, 401 ]
+      register: 'monitoring_icinga_master__ready'
+      until: monitoring_icinga_master__ready.status | default(-1) in [ 200, 401 ]
+      retries: 40
+      delay: 3
+      failed_when: false
+
+    - name: 'Read the log of Icinga'
+      when:
+        - not ansible_check_mode
+        - "'api' in monitoring_icinga_master__features_enabled"
+        - monitoring_icinga_master__ready.status | default(-1) not in [ 200, 401 ]
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_icinga_master__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'monitoring_icinga_master__journal'
+      changed_when: false
+
+    - name: 'Assert that Icinga answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__journal is skipped
+        fail_msg: "{{ monitoring_icinga_master__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # Removed after the start, the running container does not use it anymore
+    - name: 'Remove the secret of the constants'
+      when: monitoring_icinga_master__secrets | length == 0
+      containers.podman.podman_secret:
+        name: "{{ monitoring_icinga_master__config_secret }}"
+        state: 'absent'
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_icinga_master__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_icinga_master__container.name }}"
+        container_image: "{{ monitoring_icinga_master__container.image }}"
+        container_schedule: "{{ monitoring_icinga_master__autoupdate_schedule }}"

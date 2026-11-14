@@ -1,0 +1,176 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icinga_master__test_case: "{{ monitoring_icinga_master__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icinga_master__test_vars: "{{ monitoring_icinga_master__test_case.role_vars }}"
+    monitoring_icinga_master__test_expect: "{{ monitoring_icinga_master__test_case.expect }}"
+    monitoring_icinga_master__test_etc: "{{ monitoring_icinga_master__test_expect.home }}/data/etc/icinga2"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_icinga_master__test_quadlet_path }}"
+      register: 'monitoring_icinga_master__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + monitoring_icinga_master__test_expect.ip) in monitoring_icinga_master__test_lines
+          - monitoring_icinga_master__test_expect.quadlet | reject('in', monitoring_icinga_master__test_lines) | list | length == 0
+          - >-
+            monitoring_icinga_master__test_lines
+            | select('search', monitoring_icinga_master__test_expect.quadlet_absent | map('regex_escape') | join('|')) | list | length == 0
+          # The passwords are neither part of the quadlet unit nor of the environment
+          - >-
+            monitoring_icinga_master__test_expect.secrets | length == 0
+            or monitoring_icinga_master__test_lines | select('search', monitoring_icinga_master__test_expect.secrets | join('|')) | list | length == 0
+        fail_msg: "Quadlet: {{ monitoring_icinga_master__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_icinga_master__test_lines: "{{ (monitoring_icinga_master__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Find the enabled features'
+      ansible.builtin.find:
+        paths: "{{ monitoring_icinga_master__test_etc }}/features-enabled"
+        patterns: [ '*' ]
+        file_type: 'any'
+      register: 'monitoring_icinga_master__test_features'
+
+    - name: 'Read the state of features-available'
+      ansible.builtin.stat:
+        path: "{{ monitoring_icinga_master__test_etc }}/features-available"
+      register: 'monitoring_icinga_master__test_available'
+
+    - name: 'Assert the enabled features are files of the role'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__test_names == monitoring_icinga_master__test_expect.features
+          - monitoring_icinga_master__test_features.files | rejectattr('isreg') | list | length == 0
+          - monitoring_icinga_master__test_features.files | rejectattr('uid', 'eq', 5665) | list | length == 0
+          - monitoring_icinga_master__test_features.files | rejectattr('mode', 'eq', '0400') | list | length == 0
+          - not monitoring_icinga_master__test_available.stat.exists
+        fail_msg: >-
+          features {{ monitoring_icinga_master__test_names }},
+          files {{ monitoring_icinga_master__test_features.files | map(attribute='path') | list }}
+      vars:
+        monitoring_icinga_master__test_names: >-
+          {{ monitoring_icinga_master__test_features.files | map(attribute='path') | map('basename') | map('regex_replace', '\.conf$', '') | sort }}
+
+    - name: 'Read the files of the configuration'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_icinga_master__test_etc }}/{{ item }}"
+      loop: "{{ monitoring_icinga_master__test_expect.config.keys() | list }}"
+      register: 'monitoring_icinga_master__test_files'
+
+    - name: 'Assert the lines of the configuration'
+      ansible.builtin.assert:
+        that:
+          - item.item in monitoring_icinga_master__test_expect.config
+          - monitoring_icinga_master__test_missing | length == 0
+        fail_msg: "{{ item.item }}: missing {{ monitoring_icinga_master__test_missing }} in {{ item.content | b64decode }}"
+      loop: "{{ monitoring_icinga_master__test_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      vars:
+        monitoring_icinga_master__test_missing: >-
+          {{ monitoring_icinga_master__test_expect.config[item.item] | reject('in', (item.content | b64decode).splitlines()) | list }}
+
+    # The secrets are only part of the podman secret, the configuration on the host references the constants
+    - name: 'Search the passwords in the files of the role'
+      when: monitoring_icinga_master__test_expect.secrets | length > 0
+      ansible.builtin.command:
+        argv: [ 'grep', '-rlE', "{{ monitoring_icinga_master__test_expect.secrets | join('|') }}", "{{ monitoring_icinga_master__test_expect.home }}/data/etc" ]
+      register: 'monitoring_icinga_master__test_grep'
+      changed_when: false
+      failed_when: monitoring_icinga_master__test_grep.rc != 1
+
+    - name: 'Read the state of the Icinga service'
+      ansible.builtin.command: 'systemctl is-active icinga-master'
+      register: 'monitoring_icinga_master__test_service'
+      changed_when: false
+      failed_when: false
+      until: monitoring_icinga_master__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the Icinga service is active'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__test_service.stdout == 'active'
+        fail_msg: "Service: {{ monitoring_icinga_master__test_service.stdout }}"
+
+    - name: 'Validate the configuration with Icinga'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'icinga-master', 'icinga2', 'daemon', '-C' ]
+      register: 'monitoring_icinga_master__test_check'
+      changed_when: false
+      failed_when: monitoring_icinga_master__test_check.rc != 0
+
+    - name: 'Read the secret of the constants and the environment in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'icinga-master', 'sh', '-c',
+                'stat -c "%a %u" /run/secrets/icinga-master-config 2>/dev/null || echo missing; env' ]
+      register: 'monitoring_icinga_master__test_container'
+      changed_when: false
+
+    - name: 'Assert the secret of the constants and the environment'
+      ansible.builtin.assert:
+        that:
+          - >-
+            monitoring_icinga_master__test_container.stdout_lines[0]
+            == ('400 5665' if monitoring_icinga_master__test_expect.secrets | length > 0 else 'missing')
+          - >-
+            monitoring_icinga_master__test_expect.secrets | length == 0
+            or monitoring_icinga_master__test_container.stdout is not search(monitoring_icinga_master__test_expect.secrets | join('|'))
+          - monitoring_icinga_master__test_container.stdout is not search('ICINGA_MASTER')
+        fail_msg: "Secret: {{ monitoring_icinga_master__test_container.stdout_lines[0] }}, the environment contains a password or ICINGA_MASTER"
+
+    - name: 'Request the API without login'
+      ansible.builtin.uri:
+        url: "https://{{ monitoring_icinga_master__test_expect.ip }}:5665/v1/status"
+        validate_certs: false
+        status_code: [ 401 ]
+
+    - name: 'Request the hosts with the API user'
+      when: monitoring_icinga_master__test_expect.api_user is not none
+      ansible.builtin.uri:
+        url: "https://{{ monitoring_icinga_master__test_expect.ip }}:5665/v1/objects/hosts"
+        url_username: "{{ monitoring_icinga_master__test_expect.api_user }}"
+        url_password: "{{ monitoring_icinga_master__test_expect.api_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: 'monitoring_icinga_master__test_hosts'
+
+    - name: 'Assert the API returns the host of the test case'
+      when: monitoring_icinga_master__test_expect.api_user is not none
+      ansible.builtin.assert:
+        that:
+          - "'molecule-host' in (monitoring_icinga_master__test_hosts.json.results | map(attribute='name') | list)"
+        fail_msg: "Hosts: {{ monitoring_icinga_master__test_hosts.json.results | map(attribute='name') | list }}"
+
+    # Icinga writes the objects to Redis after the login with the password of the secret
+    - name: 'Read the objects of Icinga in Redis'
+      when: "'icingadb' in monitoring_icinga_master__test_expect.features"
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '-e', "REDISCLI_AUTH={{ monitoring_icinga_master__test_redis.password }}",
+                "{{ monitoring_icinga_master__test_redis.name }}", 'redis-cli', 'HKEYS', 'icinga:host' ]
+      register: 'monitoring_icinga_master__test_redis_hosts'
+      changed_when: false
+      until: monitoring_icinga_master__test_redis_hosts.stdout_lines | length > 0
+      retries: 20
+      delay: 3
+      failed_when: false
+
+    - name: 'Assert Icinga writes to Redis'
+      when: "'icingadb' in monitoring_icinga_master__test_expect.features"
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__test_redis_hosts.stdout_lines | length > 0
+        fail_msg: "Redis: {{ monitoring_icinga_master__test_redis_hosts.stdout }} {{ monitoring_icinga_master__test_redis_hosts.stderr }}"

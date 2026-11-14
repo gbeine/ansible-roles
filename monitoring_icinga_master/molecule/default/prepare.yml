@@ -1,0 +1,65 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ monitoring_icinga_master__test_network }}"
+    podman_default_network: "{{ monitoring_icinga_master__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    monitoring_icinga_master__test_case: "{{ monitoring_icinga_master__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icinga_master__test_node: "{{ monitoring_icinga_master__test_case.role_vars.icinga_master_node_name }}"
+    monitoring_icinga_master__test_certs: "{{ monitoring_icinga_master__test_case.role_vars.icinga_cert_source_dir }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the Icinga image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ monitoring_icinga_master__test_image }}"
+
+    - name: 'Install openssl for the certificates'
+      ansible.builtin.apt:
+        name: 'openssl'
+        state: 'present'
+        update_cache: true
+        cache_valid_time: 3600
+
+    # The role copies chain.pem, fullchain.pem and privkey.pem of <icinga_cert_source_dir>/<node name>
+    - name: 'Create the directory of the certificates'
+      ansible.builtin.file:
+        path: "{{ monitoring_icinga_master__test_certs }}/{{ monitoring_icinga_master__test_node }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0700'
+        state: 'directory'
+
+    - name: 'Create a CA and the certificate of the node'
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj '/CN=Molecule CA' -keyout ca.key -out chain.pem
+          openssl req -newkey rsa:2048 -nodes -subj '/CN={{ monitoring_icinga_master__test_node }}' -keyout privkey.pem -out node.csr
+          openssl x509 -req -in node.csr -CA chain.pem -CAkey ca.key -CAcreateserial -days 30 -out cert.pem
+          cat cert.pem chain.pem > fullchain.pem
+          chmod 0600 ca.key privkey.pem
+        chdir: "{{ monitoring_icinga_master__test_certs }}/{{ monitoring_icinga_master__test_node }}"
+        creates: "{{ monitoring_icinga_master__test_certs }}/{{ monitoring_icinga_master__test_node }}/fullchain.pem"
+
+    - name: 'Start Redis with a password for the feature icingadb'
+      when: inventory_hostname == 'molecule-icinga-master'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icinga_master__test_redis.name }}"
+        image: "{{ monitoring_icinga_master__test_redis.image }}"
+        network: "{{ monitoring_icinga_master__test_network.name }}"
+        ip: "{{ monitoring_icinga_master__test_redis.ip }}"
+        command: [ 'redis-server', '--requirepass', "{{ monitoring_icinga_master__test_redis.password }}" ]
+        state: 'started'
