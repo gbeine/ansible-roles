@@ -1,0 +1,137 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    bootstrap_debian__test_case: "{{ bootstrap_debian__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    bootstrap_debian__test_checked_files:
+      - '/etc/ssh/sshd_config.d/00-ansible.conf'
+      - '/etc/ssh/ssh_config.d/00-ansible.conf'
+
+  roles:
+    - role: 'common_filters'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ bootstrap_debian__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the public key of the SSH test'
+      ansible.builtin.slurp:
+        src: "{{ bootstrap_debian__test_ssh_key }}.pub"
+      register: 'bootstrap_debian__test_ssh_public_key'
+      when: debian_sshd is defined and debian_sshd.authorized_keys is defined
+
+    - name: 'Set the public key of the SSH test'
+      ansible.builtin.set_fact:
+        debian_sshd: >-
+          {{ debian_sshd | to_json
+             | replace(bootstrap_debian__test_ssh_key_placeholder, bootstrap_debian__test_ssh_public_key.content | b64decode | trim)
+             | from_json }}
+      when: debian_sshd is defined and debian_sshd.authorized_keys is defined
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ bootstrap_debian__test_checked_files }}"
+      register: 'bootstrap_debian__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run bootstrap_debian with an unknown key in debian_sshd (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_sshd:
+          listen: [ '0.0.0.0' ]
+        bootstrap_debian__test_invalid:
+          message: 'an unknown key in debian_sshd'
+          search: '^Unknown keys in debian_sshd: listen, allowed are config, client, authorized_keys\.$'
+
+    - name: 'Run bootstrap_debian with debian_sshd.config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_sshd:
+          config: [ 'X11Forwarding no' ]
+        bootstrap_debian__test_invalid:
+          message: 'debian_sshd.config not a dictionary'
+          search: '^debian_sshd\.config has to be a dictionary of options\.$'
+
+    - name: 'Run bootstrap_debian with Match in the options of sshd and Host in the options of the client (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_sshd:
+          config:
+            Match: 'User molecule'
+          client:
+            Host: '*.example.org'
+        bootstrap_debian__test_invalid:
+          message: 'Match in the options of sshd and Host in the options of the client'
+          search: >-
+            ^These options must not be set in debian_sshd\.config, they change the meaning of the following options: Match\.
+            These options must not be set in debian_sshd\.client, they change the meaning of the following options: Host\.$
+
+    - name: 'Run bootstrap_debian with invalid options of sshd (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_sshd:
+          config:
+            'Client-Alive': 30
+            Banner: { 'file': '/etc/issue' }
+            Subsystem: "sftp\ninternal-sftp"
+        bootstrap_debian__test_invalid:
+          message: 'invalid options of sshd'
+          search: >-
+            ^The options of debian_sshd\.config are names of letters and digits: Client-Alive\.
+            The values of debian_sshd\.config have to be strings, numbers, booleans, null or lists of them: Banner\.
+            The values of debian_sshd\.config must not contain line breaks: Subsystem\.$
+
+    - name: 'Run bootstrap_debian with authorized keys of an unknown user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_sshd:
+          authorized_keys:
+            molecule-unknown: [ 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMolecule unknown' ]
+            root: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMolecule root'
+        bootstrap_debian__test_invalid:
+          message: 'authorized keys of an unknown user'
+          search: >-
+            ^The users of debian_sshd\.authorized_keys do not exist: molecule-unknown\.
+            The authorized keys have to be lists of keys without line breaks: root\.$
+
+    # The options are valid for the role, sshd rejects the unknown option before the file is replaced
+    - name: 'Run bootstrap_debian with an option unknown to sshd (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_sshd:
+          config:
+            MoleculeUnknown: 'yes'
+        bootstrap_debian__test_invalid:
+          message: 'an option unknown to sshd'
+          search: 'failed to validate|Bad configuration option'
+
+    - name: 'Change an option of sshd'
+      when: bootstrap_debian__test_case.side_effect is defined
+      block:
+
+        - name: 'Set the changed options of sshd'
+          ansible.builtin.set_fact:
+            debian_sshd: "{{ debian_sshd | combine({ 'config': bootstrap_debian__test_case.side_effect.config }, recursive=true) }}"
+
+        - name: 'Run bootstrap_debian with the changed options of sshd'
+          ansible.builtin.include_role:
+            name: 'bootstrap_debian'
+
+        - name: 'Assert the changed options of sshd and the reload'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__sshd_config_result is changed
+            fail_msg: "options of sshd changed: {{ bootstrap_debian__sshd_config_result is changed }}"

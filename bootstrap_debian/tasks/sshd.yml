@@ -1,0 +1,171 @@
+---
+
+# The users of the authorized keys, their home and primary group, read before anything changes
+- name: 'Read the users'
+  ansible.builtin.getent:
+    database: 'passwd'
+
+- name: 'Validate the SSH configuration'
+  ansible.builtin.assert:
+    that:
+      - bootstrap_debian__sshd_errors | length == 0
+    # Only the failing checks are reported
+    fail_msg: "{{ bootstrap_debian__sshd_errors | join(' ') }}"
+    quiet: true
+  vars:
+    bootstrap_debian__sshd_errors: >-
+      {%- set errors = [] -%}
+      {%- set sshd = bootstrap_debian__sshd -%}
+      {%- set unknown = sshd.keys() | reject('in', bootstrap_debian__sshd_keys) | list -%}
+      {%- if unknown | length > 0 -%}
+      {%-   set _ = errors.append('Unknown keys in debian_sshd: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (bootstrap_debian__sshd_keys | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- for part, blocked in [ ('config', bootstrap_debian__sshd_config_blocked), ('client', bootstrap_debian__sshd_client_blocked) ] -%}
+      {%-   set options = sshd[part] -%}
+      {%-   if options is not mapping -%}
+      {%-     set _ = errors.append('debian_sshd.' ~ part ~ ' has to be a dictionary of options.') -%}
+      {%-   else -%}
+      {%-     set ns = namespace(names=[], blocked=[], values=[], lines=[]) -%}
+      {%-     for key, value in options.items() -%}
+      {%-       if key is not string or key is not match(bootstrap_debian__sshd_option_pattern) -%}
+      {%-         set ns.names = ns.names + [ key | string ] -%}
+      {%-       elif key | lower in blocked -%}
+      {%-         set ns.blocked = ns.blocked + [ key ] -%}
+      {%-       endif -%}
+      {%-       set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+      {%-       if value is mapping or items | select('mapping') | list | length > 0
+                   or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+      {%-         set ns.values = ns.values + [ key | string ] -%}
+      {%-       elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+      {%-         set ns.lines = ns.lines + [ key | string ] -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-     if ns.names | length > 0 -%}
+      {%-       set _ = errors.append('The options of debian_sshd.' ~ part ~ ' are names of letters and digits: ' ~ (ns.names | join(', ')) ~ '.') -%}
+      {%-     endif -%}
+      {%-     if ns.blocked | length > 0 -%}
+      {%-       set _ = errors.append('These options must not be set in debian_sshd.' ~ part ~ ', they change the meaning of the following options: ' ~ (ns.blocked | join(', ')) ~ '.') -%}
+      {%-     endif -%}
+      {%-     if ns.values | length > 0 -%}
+      {%-       set _ = errors.append('The values of debian_sshd.' ~ part ~ ' have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+      {%-     endif -%}
+      {%-     if ns.lines | length > 0 -%}
+      {%-       set _ = errors.append('The values of debian_sshd.' ~ part ~ ' must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set keys = sshd.authorized_keys -%}
+      {%- if keys is not mapping -%}
+      {%-   set _ = errors.append('debian_sshd.authorized_keys has to be a dictionary of lists of keys by user.') -%}
+      {%- else -%}
+      {%-   set ns = namespace(users=[], keys=[]) -%}
+      {%-   for user, list in keys.items() -%}
+      {%-     if user not in ansible_facts.getent_passwd -%}
+      {%-       set ns.users = ns.users + [ user | string ] -%}
+      {%-     endif -%}
+      {%-     if list is string or list is mapping or list is not sequence
+                 or list | reject('string') | list | length > 0
+                 or list | select('match', '^\s*$') | list | length > 0
+                 or list | select('search', '[\r\n]') | list | length > 0 -%}
+      {%-       set ns.keys = ns.keys + [ user | string ] -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if ns.users | length > 0 -%}
+      {%-     set _ = errors.append('The users of debian_sshd.authorized_keys do not exist: ' ~ (ns.users | join(', ')) ~ '.') -%}
+      {%-   endif -%}
+      {%-   if ns.keys | length > 0 -%}
+      {%-     set _ = errors.append('The authorized keys have to be lists of keys without line breaks: ' ~ (ns.keys | join(', ')) ~ '.') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ errors }}
+
+- name: 'Install the SSH packages'
+  ansible.builtin.apt:
+    cache_valid_time: "{{ bootstrap_debian__apt_cache_valid_time }}"
+    install_recommends: false
+    pkg: "{{ bootstrap_debian__sshd_packages }}"
+
+# sshd and ssh check the options before the file is replaced
+- name: 'Generate the options of sshd'
+  ansible.builtin.template:
+    src: 'sshd_config.d.j2'
+    dest: "{{ bootstrap_debian__sshd_config_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+    validate: '/usr/sbin/sshd -t -f %s'
+  register: 'bootstrap_debian__sshd_config_result'
+
+- name: 'Generate the options of the ssh client'
+  ansible.builtin.template:
+    src: 'ssh_config.d.j2'
+    dest: "{{ bootstrap_debian__sshd_client_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+    validate: '/usr/bin/ssh -G -F %s localhost'
+
+- name: 'Remove the files of the former role security_ssh'
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: 'absent'
+  loop:
+    - "{{ bootstrap_debian__sshd_legacy_config_file }}"
+    - "{{ bootstrap_debian__sshd_legacy_client_file }}"
+  register: 'bootstrap_debian__sshd_legacy_result'
+
+# The keys of the listed users, an empty list removes the file, users that are not listed keep their keys
+- name: 'Configure the authorized keys'
+  vars:
+    bootstrap_debian__sshd_authorized: >-
+      {%- set result = [] -%}
+      {%- for user, keys in bootstrap_debian__sshd.authorized_keys.items() -%}
+      {%-   set entry = ansible_facts.getent_passwd[user] -%}
+      {%-   set _ = result.append({ 'user': user, 'uid': entry[1], 'gid': entry[2], 'dir': entry[4] ~ '/.ssh',
+                                    'authorized': keys | map('trim') | list }) -%}
+      {%- endfor -%}
+      {{ result }}
+  block:
+
+    - name: 'Create the .ssh directories of the users'
+      ansible.builtin.file:
+        path: "{{ item.dir }}"
+        owner: "{{ item.uid }}"
+        group: "{{ item.gid }}"
+        mode: '0700'
+        state: 'directory'
+      loop: "{{ bootstrap_debian__sshd_authorized | selectattr('authorized') | list }}"
+      loop_control:
+        label: "{{ item.user }}"
+
+    - name: 'Write the authorized keys'
+      ansible.builtin.copy:
+        content: "{{ item.authorized | join('\n') }}\n"
+        dest: "{{ item.dir }}/authorized_keys"
+        owner: "{{ item.uid }}"
+        group: "{{ item.gid }}"
+        mode: '0600'
+      loop: "{{ bootstrap_debian__sshd_authorized | selectattr('authorized') | list }}"
+      loop_control:
+        label: "{{ item.user }}"
+
+    - name: 'Remove the authorized keys of users without keys'
+      ansible.builtin.file:
+        path: "{{ item.dir }}/authorized_keys"
+        state: 'absent'
+      loop: "{{ bootstrap_debian__sshd_authorized | rejectattr('authorized') | list }}"
+      loop_control:
+        label: "{{ item.user }}"
+
+- name: 'Enable and start sshd'
+  ansible.builtin.systemd_service:
+    name: "{{ bootstrap_debian__sshd_service }}"
+    enabled: true
+    state: 'started'
+
+# A reload keeps the running sessions, also the one of Ansible
+- name: 'Reload sshd'
+  ansible.builtin.systemd_service:
+    name: "{{ bootstrap_debian__sshd_service }}"
+    state: 'reloaded'
+  when: bootstrap_debian__sshd_config_result is changed or bootstrap_debian__sshd_legacy_result is changed

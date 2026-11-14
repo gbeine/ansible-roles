@@ -10,7 +10,7 @@
 ```
 
 - The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by the repositories and storage, so packages can rely on mounted directories.
-- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, PKI, NTP, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_ntp_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files or replace installed services.
+- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, PKI, NTP, SSH, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_ntp_enable`, `debian_sshd_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files or replace installed services.
 - With `debian_cloud_manage_etc_hosts: true` (default `false`) cloud-init manages `/etc/hosts` (`manage_etc_hosts: True` in `/etc/cloud/cloud.cfg.d/99-manage_etc_hosts.cfg`) and the role does not generate it.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
@@ -48,6 +48,7 @@ debian_repositories:
 | `bootstrap_users` | `debian_users` |
 | `logrotate_files` | `debian_logrotate_files` |
 | `unattended_upgrades_*` | `debian_unattended_upgrades_*` |
+| `security_sshd_listen` (role `security_ssh`) | `debian_sshd.config.ListenAddress`, see SSH |
 | `timesyncd_ntp` (role `systemd_timesyncd`), `ntp_server` (role `ntp_common`) | `site_ntp_sources` of `common_globals` with `type: 'server'`, `debian_ntp_sources` overrides it for a host |
 | `timesyncd_fallback_ntp`, `ntp_pool` | entries with `type: 'pool'` in `site_ntp_sources` or `debian_ntp_sources` |
 | `timesyncd_root_distance_max_sec`, `timesyncd_poll_interval_min_sec`, `timesyncd_poll_interval_max_sec`, `timesyncd_connection_retry_sec`, `timesyncd_save_interval_sec` | `debian_ntp_root_distance_max_sec`, `debian_ntp_poll_interval_min_sec`, `debian_ntp_poll_interval_max_sec`, `debian_ntp_connection_retry_sec`, `debian_ntp_save_interval_sec` |
@@ -99,6 +100,43 @@ debian_ntp_poll_interval_min_sec: 64
 - The role validates the sources and the seconds before any change, `debian_ntp_poll_interval_min_sec` must not be greater than `debian_ntp_poll_interval_max_sec`.
 - `systemd-timesyncd` is restarted if the drop-in changed.
 
+### SSH
+
+With `debian_sshd_enable` the role installs `openssh-server` and `openssh-client`, writes the options of sshd and of the ssh client to drop-ins
+and the authorized keys of users. `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config` of the package stay unchanged.
+
+```yaml
+debian_sshd_enable: true
+debian_sshd:
+  config:
+    PermitRootLogin: 'prohibit-password'
+    PasswordAuthentication: false
+    ClientAliveInterval: 30
+    ListenAddress: [ '192.168.99.10', '2001:db8::10' ]
+  client:
+    ServerAliveInterval: 60
+  authorized_keys:
+    admin:
+      - 'ssh-ed25519 AAAAC3Nza... admin@example.org'
+    backup: []
+```
+
+- `debian_sshd` is merged recursively into the default (`config`, `client` and `authorized_keys` empty), so only the parts in use have to be written.
+- `config` holds options of sshd, written to `/etc/ssh/sshd_config.d/00-ansible.conf`, `client` options of ssh, written to `/etc/ssh/ssh_config.d/00-ansible.conf`.
+  `sshd_config` and `ssh_config` of Debian include these directories before their own options and sshd and ssh use the first value of an option,
+  `00-` sorts before the drop-ins of other packages (e.g. `50-cloud-init.conf`), so the options of the role take precedence.
+- The values are written by type: a string or number writes `Option value`, a list one line per element, `true` and `false` write `yes` and `no`,
+  `null` removes the option. Without options the files are empty, the role writes no defaults.
+- `Include` and `Match` (and `Host` for the client) are not allowed, they change the meaning of the following options of the file.
+- `authorized_keys` maps users to their keys, written to `~/.ssh/authorized_keys` of the home in `/etc/passwd`, owned by the user with mode `0600` (`.ssh` with `0700`).
+  An empty list removes the file, users that are not listed are not changed. The users have to exist, e.g. created with `debian_users`.
+- The role checks the options and the keys before it changes anything, sshd (`sshd -t`) and ssh (`ssh -G`) check the files before they are replaced.
+- sshd is reloaded if its options changed, running sessions are kept.
+- This replaces the former role `security_ssh`: `security_sshd_listen` is now `ListenAddress` of `debian_sshd.config`,
+  its default `0.0.0.0` and `::` is not written anymore, sshd listens on all addresses without `ListenAddress`.
+  The files `/etc/ssh/sshd_config.d/sshd_config.conf` and `/etc/ssh/ssh_config.d/ssh_config.conf` of the former role are removed,
+  sshd is reloaded instead of restarted.
+
 ### Mail
 
 With `debian_mail_enable` the role installs [msmtp](https://marlam.de/msmtp/) as sendmail replacement (`msmtp`, `msmtp-mta`, `bsd-mailx`), writes `/etc/msmtprc` and `/etc/aliases`,
@@ -143,8 +181,8 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 
 | Platform | Tested |
 |---|---|
-| `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults, no NTP drop-in without `debian_ntp_enable` |
-| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults, no NTP drop-in without `debian_ntp_enable`, SSH without options (empty drop-ins, sshd listens on all addresses) |
+| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 
@@ -158,6 +196,14 @@ Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/ssh
 cd bootstrap_debian
 MOLECULE_TART_IMAGE='debian' molecule test
 ```
+
+For SSH, `prepare` stores the checksums of `sshd_config` and `ssh_config`, creates the file of the former role `security_ssh`,
+on `molecule-bootstrap-debian-full` a key pair and a user `stale` with authorized keys, `converge` adds the public key to `debian_sshd.authorized_keys`.
+`side_effect` runs the role with an unknown key in `debian_sshd`, `config` not a dictionary, `Match` and `Host`, invalid options, authorized keys of an unknown user
+and an option unknown to sshd and checks that it fails with the expected message and the drop-ins are unchanged (tasks marked `expect ERROR`),
+then it changes an option of sshd on `molecule-bootstrap-debian-full`.
+`verify` checks the drop-ins (empty without options), that `sshd_config` and `ssh_config` are unchanged, that the file of `security_ssh` is removed,
+the effective options of sshd (`sshd -T`) and of the client (`ssh -G`), the authorized keys and logs in with the key.
 
 For mail, `prepare` starts an SMTP sink (`python3-aiosmtpd`) on `127.0.0.1:2525` as transient unit `molecule-smtp-sink`, `verify` sends a mail to `root` with `mail` and checks in the journal of the sink that it was delivered, then sends a mail with `msmtp -v` and checks in the SMTP dialog that the alias of `root` is used as recipient.
 

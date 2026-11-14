@@ -5,12 +5,31 @@ bootstrap_debian__test_stale_sources:
   - '/etc/apt/sources.list.d/molecule-stale.list'
   - '/etc/apt/sources.list'
 
+# The key pair of the SSH test created in prepare.yml, converge.yml replaces the placeholder with the public key
+bootstrap_debian__test_ssh_key: '/root/.ssh/molecule_ed25519'
+bootstrap_debian__test_ssh_key_placeholder: 'MOLECULE_PUBLIC_KEY'
+# Checksums of sshd_config and ssh_config before the role, written by prepare.yml
+bootstrap_debian__test_ssh_checksums: '/root/molecule-ssh-checksums'
+# A file of the former role security_ssh created in prepare.yml, the role removes it
+bootstrap_debian__test_ssh_legacy_file: '/etc/ssh/sshd_config.d/sshd_config.conf'
+
 bootstrap_debian__test_cases:
 
   - name: 'molecule-bootstrap-debian-minimal'
     role_vars:
       debian_hostname: 'molecule-minimal.example.org'
+      # Without options the files of sshd_config.d and ssh_config.d are empty
+      debian_sshd_enable: true
     expect:
+      ssh:
+        config: []
+        client: []
+        effective:
+          - 'listenaddress 0.0.0.0:22'
+          - 'listenaddress [::]:22'
+        client_effective: []
+        login: ~
+        keys_removed: []
       hostname: 'molecule-minimal.example.org'
       hostname_short: 'molecule-minimal'
       etc_hosts_managed: true
@@ -82,10 +101,32 @@ bootstrap_debian__test_cases:
       debian_groups:
         - group: 'molecule'
           gid: 2500
+        - group: 'molecule-ssh'
+          gid: 2501
       debian_users:
         - user: 'molecule'
           uid: 2500
           comment: 'molecule test user'
+        # The user of the SSH test with a home and a shell
+        - user: 'molecule-ssh'
+          uid: 2501
+          comment: 'molecule SSH test user'
+          create_home: true
+          home: '/home/molecule-ssh'
+          shell: '/bin/bash'
+      debian_sshd_enable: true
+      debian_sshd:
+        config:
+          ClientAliveInterval: 30
+          X11Forwarding: false
+          AllowAgentForwarding: false
+        client:
+          ServerAliveInterval: 60
+          HashKnownHosts: true
+        authorized_keys:
+          molecule-ssh: [ 'MOLECULE_PUBLIC_KEY' ]
+          # Created with keys in prepare.yml, the empty list removes the file
+          stale: []
       debian_logrotate_enable: true
       debian_logrotate_files:
         - name: 'molecule'
@@ -118,7 +159,31 @@ bootstrap_debian__test_cases:
           password: 'molecule-smtp-password'
       debian_mail_aliases:
         root: 'molecule@example.test'
+    # side_effect changes an option of sshd, the file of sshd_config.d changes and sshd is reloaded
+    side_effect:
+      config:
+        ClientAliveInterval: 60
     expect:
+      ssh:
+        config:
+          - 'AllowAgentForwarding no'
+          - 'ClientAliveInterval 60'
+          - 'X11Forwarding no'
+        client:
+          - 'HashKnownHosts yes'
+          - 'ServerAliveInterval 60'
+        effective:
+          - 'clientaliveinterval 60'
+          - 'x11forwarding no'
+          - 'allowagentforwarding no'
+          - 'listenaddress 0.0.0.0:22'
+          - 'listenaddress [::]:22'
+        client_effective:
+          - 'serveraliveinterval 60'
+          - 'hashknownhosts yes'
+        login: 'molecule-ssh'
+        login_home: '/home/molecule-ssh'
+        keys_removed: [ '/home/stale/.ssh/authorized_keys' ]
       hostname: 'molecule-full.example.org'
       hostname_short: 'molecule-full'
       etc_hosts_managed: false

@@ -431,3 +431,108 @@
                 ('RCPT TO:<' + bootstrap_debian__expect.mail.alias_root + '>')
                 in (bootstrap_debian__test_msmtp_verbose.stdout + bootstrap_debian__test_msmtp_verbose.stderr)
             fail_msg: "{{ (bootstrap_debian__test_msmtp_verbose.stdout_lines + bootstrap_debian__test_msmtp_verbose.stderr_lines)[-30:] }}"
+
+    - name: 'Verify SSH'
+      block:
+
+        - name: 'Read the options of sshd and of the ssh client'
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop:
+            - '/etc/ssh/sshd_config.d/00-ansible.conf'
+            - '/etc/ssh/ssh_config.d/00-ansible.conf'
+          register: 'bootstrap_debian__test_ssh_files'
+
+        - name: 'Compare sshd_config and ssh_config with the checksums of prepare'
+          ansible.builtin.command:
+            argv: [ 'md5sum', '-c', "{{ bootstrap_debian__test_ssh_checksums }}" ]
+          register: 'bootstrap_debian__test_ssh_checksum'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Read the file of the former role security_ssh and the removed authorized keys'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ [ bootstrap_debian__test_ssh_legacy_file ] + bootstrap_debian__expect.ssh.keys_removed }}"
+          register: 'bootstrap_debian__test_ssh_removed'
+
+        # sshd -T and ssh -G print the effective options in lower case
+        - name: 'Read the effective options of sshd'
+          ansible.builtin.command:
+            argv: [ '/usr/sbin/sshd', '-T' ]
+          register: 'bootstrap_debian__test_sshd_effective'
+          changed_when: false
+
+        - name: 'Read the effective options of the ssh client'
+          ansible.builtin.command:
+            argv: [ 'ssh', '-G', 'localhost' ]
+          register: 'bootstrap_debian__test_ssh_effective'
+          changed_when: false
+
+        - name: 'Assert the options, the unchanged files of the package and the removed files'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_ssh_lines[0] == bootstrap_debian__expect.ssh.config
+              - bootstrap_debian__test_ssh_lines[1] == bootstrap_debian__expect.ssh.client
+              # Without options the files are empty
+              - bootstrap_debian__expect.ssh.config | length > 0 or (bootstrap_debian__test_ssh_files.results[0].content | b64decode) == ''
+              - bootstrap_debian__expect.ssh.client | length > 0 or (bootstrap_debian__test_ssh_files.results[1].content | b64decode) == ''
+              - bootstrap_debian__test_ssh_checksum.rc == 0
+              - bootstrap_debian__test_ssh_removed.results | selectattr('stat.exists') | list | length == 0
+              - bootstrap_debian__expect.ssh.effective | reject('in', bootstrap_debian__test_sshd_effective.stdout_lines) | list | length == 0
+              - bootstrap_debian__expect.ssh.client_effective | reject('in', bootstrap_debian__test_ssh_effective.stdout_lines) | list | length == 0
+            fail_msg: >-
+              options {{ bootstrap_debian__test_ssh_lines }}, checksums {{ bootstrap_debian__test_ssh_checksum.stdout_lines }},
+              not removed {{ bootstrap_debian__test_ssh_removed.results | selectattr('stat.exists') | map(attribute='item') | list }},
+              missing sshd {{ bootstrap_debian__expect.ssh.effective | reject('in', bootstrap_debian__test_sshd_effective.stdout_lines) | list }},
+              missing client {{ bootstrap_debian__expect.ssh.client_effective | reject('in', bootstrap_debian__test_ssh_effective.stdout_lines) | list }}
+          vars:
+            # One list of lines per file, nested generators of map('reject') evaluate empty
+            bootstrap_debian__test_ssh_lines: >-
+              {%- set result = [] -%}
+              {%- for file in bootstrap_debian__test_ssh_files.results -%}
+              {%-   set _ = result.append(file.content | b64decode | split('\n') | reject('match', '#') | reject('equalto', '') | list) -%}
+              {%- endfor -%}
+              {{ result }}
+
+        - name: 'Read the authorized keys of the user of the SSH test'
+          when: bootstrap_debian__expect.ssh.login is not none
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ bootstrap_debian__expect.ssh.login_home }}/.ssh"
+            - "{{ bootstrap_debian__expect.ssh.login_home }}/.ssh/authorized_keys"
+          register: 'bootstrap_debian__test_ssh_keys'
+
+        - name: 'Log in with the key of the SSH test'
+          when: bootstrap_debian__expect.ssh.login is not none
+          ansible.builtin.command:
+            argv:
+              - 'ssh'
+              - '-i'
+              - "{{ bootstrap_debian__test_ssh_key }}"
+              - '-o'
+              - 'StrictHostKeyChecking=no'
+              - '-o'
+              - 'UserKnownHostsFile=/dev/null'
+              - '-o'
+              - 'BatchMode=yes'
+              - "{{ bootstrap_debian__expect.ssh.login }}@localhost"
+              - 'id'
+              - '-un'
+          register: 'bootstrap_debian__test_ssh_login'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the authorized keys and the login'
+          when: bootstrap_debian__expect.ssh.login is not none
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_ssh_keys.results | map(attribute='stat.pw_name') | unique | list == [ bootstrap_debian__expect.ssh.login ]
+              - bootstrap_debian__test_ssh_keys.results | map(attribute='stat.mode') | list == [ '0700', '0600' ]
+              - bootstrap_debian__test_ssh_login.rc == 0
+              - bootstrap_debian__test_ssh_login.stdout == bootstrap_debian__expect.ssh.login
+            fail_msg: >-
+              owners {{ bootstrap_debian__test_ssh_keys.results | map(attribute='stat.pw_name') | list }},
+              modes {{ bootstrap_debian__test_ssh_keys.results | map(attribute='stat.mode') | list }},
+              login {{ bootstrap_debian__test_ssh_login.rc }} {{ bootstrap_debian__test_ssh_login.stdout }} {{ bootstrap_debian__test_ssh_login.stderr }}

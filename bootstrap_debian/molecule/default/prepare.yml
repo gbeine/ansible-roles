@@ -91,3 +91,50 @@
             host: '127.0.0.1'
             port: "{{ bootstrap_debian__test_case.expect.mail.sink_port }}"
             timeout: 30
+
+    # The role must not change sshd_config and ssh_config of the package
+    - name: 'Store the checksums of sshd_config and ssh_config'
+      ansible.builtin.shell: "md5sum /etc/ssh/sshd_config /etc/ssh/ssh_config > {{ bootstrap_debian__test_ssh_checksums }}"
+      args:
+        creates: "{{ bootstrap_debian__test_ssh_checksums }}"
+
+    - name: 'Create a file of the former role security_ssh'
+      ansible.builtin.copy:
+        dest: "{{ bootstrap_debian__test_ssh_legacy_file }}"
+        content: |
+          ListenAddress 0.0.0.0
+          ListenAddress ::
+        mode: '0644'
+
+    - name: 'Prepare the SSH test'
+      when: bootstrap_debian__test_case.expect.ssh.login is not none
+      block:
+
+        - name: 'Create the key pair of the SSH test'
+          ansible.builtin.command:
+            argv: [ 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'molecule', '-f', "{{ bootstrap_debian__test_ssh_key }}" ]
+            creates: "{{ bootstrap_debian__test_ssh_key }}"
+
+        # The role removes the authorized keys of a user with an empty list
+        - name: 'Create a user with authorized keys'
+          ansible.builtin.user:
+            name: 'stale'
+            create_home: true
+            shell: '/bin/bash'
+
+        - name: 'Create the .ssh directory of the user'
+          ansible.builtin.file:
+            path: '/home/stale/.ssh'
+            owner: 'stale'
+            group: 'stale'
+            mode: '0700'
+            state: 'directory'
+
+        - name: 'Write the authorized keys of the user'
+          ansible.builtin.copy:
+            dest: '/home/stale/.ssh/authorized_keys'
+            content: |
+              ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoleculeStaleKeyMoleculeStaleKeyMolecule stale
+            owner: 'stale'
+            group: 'stale'
+            mode: '0600'
