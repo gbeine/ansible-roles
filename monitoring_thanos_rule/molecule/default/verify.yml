@@ -1,0 +1,137 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_rule__test_case: "{{ monitoring_thanos_rule__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_thanos_rule__expect: "{{ monitoring_thanos_rule__test_case.expect }}"
+    monitoring_thanos_rule__test_url: "http://{{ monitoring_thanos_rule__expect.ip }}:10902"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/thanos-rule.container'
+      register: 'monitoring_thanos_rule__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_thanos_rule__test_image) in monitoring_thanos_rule__test_quadlet_lines
+          - ('IP=' + monitoring_thanos_rule__expect.ip) in monitoring_thanos_rule__test_quadlet_lines
+          - monitoring_thanos_rule__expect.ip6 is none or ('IP6=' + monitoring_thanos_rule__expect.ip6) in monitoring_thanos_rule__test_quadlet_lines
+          - monitoring_thanos_rule__expect.ip6 is not none or monitoring_thanos_rule__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          # podman_container splits user 65534:65534 into User= and Group=
+          - ('User=65534' in monitoring_thanos_rule__test_quadlet_lines)
+          - ('Group=65534' in monitoring_thanos_rule__test_quadlet_lines)
+          - monitoring_thanos_rule__expect.quadlet | reject('in', monitoring_thanos_rule__test_quadlet_lines) | list | length == 0
+          # The time zone is set with TZ, /etc/localtime is not mounted
+          - monitoring_thanos_rule__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          - monitoring_thanos_rule__test_exec is search('^Exec=rule ')
+          - monitoring_thanos_rule__test_exec is search('--data-dir=/var/thanos/rule')
+          - monitoring_thanos_rule__test_exec is search('--rule-file=/etc/thanos/rules/\\*.yml')
+          - monitoring_thanos_rule__test_exec is search('--query=' + monitoring_thanos_rule__test_case.role_vars.thanos_rule_query_url)
+          - (monitoring_thanos_rule__test_exec is search('--objstore.config-file=/etc/thanos/bucket.yml')) == monitoring_thanos_rule__expect.objstore
+          - ('Secret=thanos-rule-objstore,type=mount,target=/etc/thanos/bucket.yml' in monitoring_thanos_rule__test_quadlet_lines)
+            == monitoring_thanos_rule__expect.objstore
+        fail_msg: "{{ monitoring_thanos_rule__test_quadlet_lines | to_json }}"
+      vars:
+        monitoring_thanos_rule__test_quadlet_lines: "{{ (monitoring_thanos_rule__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+        monitoring_thanos_rule__test_exec: "{{ monitoring_thanos_rule__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'thanos-rule' ]
+      register: 'monitoring_thanos_rule__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'thanos-rule' ]
+      register: 'monitoring_thanos_rule__test_env'
+      changed_when: false
+
+    - name: 'Read the secret of the object storage'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'thanos-rule-objstore' ]
+      register: 'monitoring_thanos_rule__test_secret'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service, the environment and the secret'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_rule__test_service.stdout == 'active'
+          - ('TZ=' + monitoring_thanos_rule__test_case.role_vars.thanos_rule_timezone) in (monitoring_thanos_rule__test_env.stdout | from_json)
+          - (monitoring_thanos_rule__test_secret.rc == 0) == monitoring_thanos_rule__expect.objstore
+        fail_msg: >-
+          service {{ monitoring_thanos_rule__test_service.stdout }}, environment {{ monitoring_thanos_rule__test_env.stdout }},
+          secret exists {{ monitoring_thanos_rule__test_secret.rc == 0 }}
+
+    - name: 'Read the command of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Cmd {{ "}}" }}', 'thanos-rule' ]
+      register: 'monitoring_thanos_rule__test_cmd'
+      changed_when: false
+
+    - name: 'Find the rule files'
+      ansible.builtin.find:
+        paths: "{{ monitoring_thanos_rule__test_case.role_vars.thanos_rule_home }}/rules"
+        file_type: 'any'
+        hidden: true
+      register: 'monitoring_thanos_rule__test_rule_files'
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ monitoring_thanos_rule__test_case.role_vars.thanos_rule_home }}/data"
+      register: 'monitoring_thanos_rule__test_data_dir'
+
+    # The label reaches Thanos with its double quotes, only the declared rule files exist, the file of prepare is removed
+    - name: 'Assert the external label, the rule files and the data directory owned by nobody'
+      ansible.builtin.assert:
+        that:
+          - ('--label=rule_replica="' + monitoring_thanos_rule__test_case.role_vars.thanos_rule_hostname + '"')
+            in (monitoring_thanos_rule__test_cmd.stdout | from_json)
+          - monitoring_thanos_rule__test_rule_names == monitoring_thanos_rule__expect.rules | sort
+          - monitoring_thanos_rule__test_data_dir.stat.isdir | default(false)
+          - monitoring_thanos_rule__test_data_dir.stat.uid == 65534
+          - monitoring_thanos_rule__test_data_dir.stat.gid == 65534
+        fail_msg: >-
+          command {{ monitoring_thanos_rule__test_cmd.stdout }}, rule files {{ monitoring_thanos_rule__test_rule_names }},
+          directory {{ monitoring_thanos_rule__test_data_dir.stat.isdir | default(false) }},
+          uid {{ monitoring_thanos_rule__test_data_dir.stat.uid | default('') }}, gid {{ monitoring_thanos_rule__test_data_dir.stat.gid | default('') }}
+      vars:
+        monitoring_thanos_rule__test_rule_names: >-
+          {{ monitoring_thanos_rule__test_rule_files.files | map(attribute='path') | map('basename')
+             | map('splitext') | map('first') | sort }}
+
+    - name: 'Wait until rule is ready'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_rule__test_url }}/-/ready"
+      register: 'monitoring_thanos_rule__test_ready'
+      until: monitoring_thanos_rule__test_ready.status == 200
+      retries: 15
+      delay: 2
+
+    - name: 'Read the metrics of rule'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_rule__test_url }}/metrics"
+        return_content: true
+      register: 'monitoring_thanos_rule__test_metrics'
+
+    # Every declared rule file is loaded with its rules, rule loads them from a copy, only the name of the file is compared
+    - name: 'Assert the loaded rules'
+      ansible.builtin.assert:
+        that:
+          - >-
+            monitoring_thanos_rule__expect.rules
+            | reject('in', monitoring_thanos_rule__test_metrics.content | regex_findall('thanos_rule_loaded_rules[{][^}]*file="[^"]*/([^"/]+)[.]yml"[^}]*[}] [1-9]'))
+            | list | length == 0
+        fail_msg: >-
+          {{ monitoring_thanos_rule__test_metrics.content.splitlines() | select('match', '^thanos_rule_loaded_rules') | list }}

@@ -1,0 +1,97 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_thanos_receive__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_thanos_receive__test_image: 'docker.io/thanosio/thanos:v0.42.5'
+monitoring_thanos_receive__test_prometheus_image: 'docker.io/prom/prometheus:latest'
+monitoring_thanos_receive__test_bucket_dir: '/opt/thanos-bucket'
+
+monitoring_thanos_receive__test_cases:
+
+  # Only the mandatory variables, receive stores the samples Prometheus sends with remote write without object storage
+  - name: 'molecule-thanos-receive-default'
+    # Prometheus started in prepare.yml with monitoring_prometheus
+    prometheus_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.54'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-default'
+      prometheus_timezone: 'Europe/Berlin'
+      prometheus_config:
+        global:
+          scrape_interval: '5s'
+          external_labels:
+            cluster: 'molecule'
+            replica: 'default'
+        remote_write:
+          - url: 'http://10.89.0.55:19291/api/v1/receive'
+    role_vars:
+      thanos_receive_version: 'v0.42.5'
+      thanos_receive_home: '/opt/thanos-receive'
+      thanos_receive_ip: '10.89.0.55'
+      thanos_receive_network: 'podman-molecule'
+      thanos_receive_hostname: 'thanos-receive-default'
+      thanos_receive_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.55'
+      ip6: ~
+      objstore: false
+      quadlet:
+        - 'Volume=/opt/thanos-receive/data:/var/thanos/receive'
+
+  # IPv6, labels and the upload to a bucket in the file system, the volume of the bucket is added with thanos_receive_container
+  - name: 'molecule-thanos-receive'
+    prometheus_vars:
+      prometheus_home: '/opt/prometheus-molecule'
+      prometheus_ip: '10.89.0.56'
+      prometheus_network: 'podman-molecule'
+      prometheus_hostname: 'prometheus-molecule'
+      prometheus_timezone: 'Europe/Berlin'
+      prometheus_config:
+        global:
+          scrape_interval: '5s'
+          external_labels:
+            cluster: 'molecule'
+            replica: 'molecule'
+        remote_write:
+          - url: 'http://10.89.0.57:19291/api/v1/receive'
+    role_vars:
+      thanos_receive_version: 'v0.42.5'
+      thanos_receive_home: '/opt/thanos-receive'
+      thanos_receive_ip: '10.89.0.57'
+      thanos_receive_ipv6: 'fd00:89::57'
+      thanos_receive_network: 'podman-molecule'
+      thanos_receive_hostname: 'thanos-receive-molecule'
+      thanos_receive_timezone: 'Europe/Berlin'
+      thanos_receive_labels:
+        traefik.enable: 'false'
+      thanos_receive_objstore:
+        type: 'FILESYSTEM'
+        config:
+          directory: '/bucket'
+      thanos_receive_container:
+        volumes:
+          - '/opt/thanos-receive/data:/var/thanos/receive'
+          - '/opt/thanos-bucket:/bucket'
+    # side_effect changes the object storage, the secret changes and receive has to restart
+    side_effect:
+      role_vars:
+        thanos_receive_objstore:
+          type: 'FILESYSTEM'
+          config:
+            directory: '/bucket/changed'
+    expect:
+      ip: '10.89.0.57'
+      ip6: 'fd00:89::57'
+      objstore: true
+      quadlet:
+        - 'Volume=/opt/thanos-receive/data:/var/thanos/receive'
+        - 'Volume=/opt/thanos-bucket:/bucket'
+        - 'Label=traefik.enable=false'

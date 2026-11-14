@@ -1,0 +1,103 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_query__test_case: "{{ monitoring_thanos_query__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_thanos_query__expect: "{{ monitoring_thanos_query__test_case.expect }}"
+    monitoring_thanos_query__test_url: "http://{{ monitoring_thanos_query__expect.ip }}:10902"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/thanos-query.container'
+      register: 'monitoring_thanos_query__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_thanos_query__test_image) in monitoring_thanos_query__test_quadlet_lines
+          - ('IP=' + monitoring_thanos_query__expect.ip) in monitoring_thanos_query__test_quadlet_lines
+          - monitoring_thanos_query__expect.ip6 is none or ('IP6=' + monitoring_thanos_query__expect.ip6) in monitoring_thanos_query__test_quadlet_lines
+          - monitoring_thanos_query__expect.ip6 is not none or monitoring_thanos_query__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          # podman_container splits user 65534:65534 into User= and Group=
+          - ('User=65534' in monitoring_thanos_query__test_quadlet_lines)
+          - ('Group=65534' in monitoring_thanos_query__test_quadlet_lines)
+          - monitoring_thanos_query__expect.quadlet | reject('in', monitoring_thanos_query__test_quadlet_lines) | list | length == 0
+          # The time zone is set with TZ, nothing is mounted
+          - monitoring_thanos_query__test_quadlet_lines | select('match', 'Volume=') | list | length == 0
+          - monitoring_thanos_query__test_quadlet_lines | select('match', 'Secret=') | list | length == 0
+          - monitoring_thanos_query__test_exec is search('^Exec=query ')
+          - monitoring_thanos_query__test_exec is search('--query.replica-label=replica')
+          - monitoring_thanos_query__test_exec is search('--query.replica-label=receive_replica')
+          - monitoring_thanos_query__test_exec is search('--query.replica-label=rule_replica')
+        fail_msg: "{{ monitoring_thanos_query__test_quadlet_lines | to_json }}"
+      vars:
+        monitoring_thanos_query__test_quadlet_lines: "{{ (monitoring_thanos_query__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+        monitoring_thanos_query__test_exec: "{{ monitoring_thanos_query__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'thanos-query' ]
+      register: 'monitoring_thanos_query__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the environment and the command of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config {{ "}}" }}', 'thanos-query' ]
+      register: 'monitoring_thanos_query__test_config'
+      changed_when: false
+
+    # The configuration of the endpoints reaches Thanos with its double quotes and spaces as one argument
+    - name: 'Assert the service, the environment and the endpoints'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_query__test_service.stdout == 'active'
+          - ('TZ=' + monitoring_thanos_query__test_case.role_vars.thanos_query_timezone) in monitoring_thanos_query__test_container.Env
+          - ('--endpoint.sd-config=' + monitoring_thanos_query__test_endpoints) in monitoring_thanos_query__test_container.Cmd
+        fail_msg: >-
+          service {{ monitoring_thanos_query__test_service.stdout }}, environment {{ monitoring_thanos_query__test_container.Env }},
+          command {{ monitoring_thanos_query__test_container.Cmd }}, expected endpoints {{ monitoring_thanos_query__test_endpoints }}
+      vars:
+        monitoring_thanos_query__test_container: "{{ monitoring_thanos_query__test_config.stdout | from_json }}"
+        monitoring_thanos_query__test_endpoints: >-
+          {%- set endpoints = [] -%}
+          {%- for address in monitoring_thanos_query__expect.endpoints -%}
+          {%-   set _ = endpoints.append({'address': address}) -%}
+          {%- endfor -%}
+          {{ {'endpoints': endpoints} | to_json }}
+
+    - name: 'Wait until query is ready'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_query__test_url }}/-/ready"
+      register: 'monitoring_thanos_query__test_ready'
+      until: monitoring_thanos_query__test_ready.status == 200
+      retries: 15
+      delay: 2
+
+    - name: 'Wait until query is connected to the sidecar'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_query__test_url }}/api/v1/stores"
+        return_content: true
+      register: 'monitoring_thanos_query__test_stores'
+      until: >-
+        monitoring_thanos_query__expect.sidecar
+        in (monitoring_thanos_query__test_stores.json.data.sidecar | default([]) | map(attribute='name') | list)
+      retries: 30
+      delay: 2
+
+    - name: 'Wait until query returns the samples of Prometheus'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_query__test_url }}/api/v1/query?query=up"
+        return_content: true
+      register: 'monitoring_thanos_query__test_up'
+      until: monitoring_thanos_query__test_up.json.data.result | default([]) | length > 0
+      retries: 30
+      delay: 2

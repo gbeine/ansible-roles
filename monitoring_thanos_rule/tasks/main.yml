@@ -1,0 +1,239 @@
+---
+
+- name: 'Install Thanos Rule'
+  tags: [ 'monitoring', 'monitoring_thanos_rule' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or thanos_rule_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - (monitoring_thanos_rule__container | length) + (monitoring_thanos_rule__objstore | to_json | length)
+            + (monitoring_thanos_rule__rules | to_json | length) + (monitoring_thanos_rule__query_url | length) > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_rule__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_rule__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_thanos_rule__invalid: >-
+          {%- set errors = [] -%}
+          {%- set objstore = monitoring_thanos_rule__objstore -%}
+          {%- if objstore is not mapping -%}
+          {%-   set _ = errors.append('thanos_rule_objstore has to be a dictionary') -%}
+          {%- elif objstore | length > 0 and objstore.type is not defined -%}
+          {%-   set _ = errors.append('thanos_rule_objstore needs type') -%}
+          {%- endif -%}
+          {%- set rules = monitoring_thanos_rule__rules -%}
+          {%- if rules is not mapping -%}
+          {%-   set _ = errors.append('thanos_rule_rules has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set names = rules.keys() | map('string') | reject('match', monitoring_thanos_rule__name_pattern) | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('thanos_rule_rules has invalid names: ' ~ names | join(', ')) -%}
+          {%-   endif -%}
+          {%-   set values = rules | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
+          {%-   if values | length > 0 -%}
+          {%-     set _ = errors.append('thanos_rule_rules entries have to be dictionaries: ' ~ values | join(', ')) -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if monitoring_thanos_rule__query_url is not string or monitoring_thanos_rule__query_url is not match('^https?://[^\s]+$') -%}
+          {%-   set _ = errors.append('thanos_rule_query_url has to be the HTTP URL of query') -%}
+          {%- endif -%}
+          {%- set lines = monitoring_thanos_rule__environment | dict2items | selectattr('value', 'string')
+                          | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('Values of thanos_rule_environment must not contain line breaks: ' ~ lines | join(', ')) -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging thanos_rule_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_rule__environment_unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ monitoring_thanos_rule__environment_unknown | join(', ') }},
+          Thanos only reads {{ monitoring_thanos_rule__environment_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        monitoring_thanos_rule__environment_unknown: >-
+          {{ (monitoring_thanos_rule__container.environment | default({})).keys()
+             | reject('in', monitoring_thanos_rule__environment_allowed) | list }}
+
+    - name: 'Create the directories'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ monitoring_thanos_rule__uid }}"
+        group: "{{ monitoring_thanos_rule__gid }}"
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - "{{ monitoring_thanos_rule__podman_data_dir }}"
+        - "{{ monitoring_thanos_rule__podman_rules_dir }}"
+
+    # The thanos tool of the image checks the rule files in a throwaway container before they are replaced
+    - name: 'Generate the rule files'
+      ansible.builtin.copy:
+        content: |
+          #
+          # {{ lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') }}
+          #
+
+          {{ item.value | to_nice_yaml(indent=2, sort_keys=false) }}
+        dest: "{{ monitoring_thanos_rule__podman_rules_dir }}/{{ item.key }}.yml"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+        validate: >-
+          podman run --rm --network none --user 0
+          --volume %s:/tmp/rules.yml:ro {{ monitoring_thanos_rule__container.image }}
+          tools rules-check --rules=/tmp/rules.yml
+      loop: "{{ monitoring_thanos_rule__rules | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'monitoring_thanos_rule__rules_result'
+
+    - name: 'Find the rule files'
+      ansible.builtin.find:
+        paths: "{{ monitoring_thanos_rule__podman_rules_dir }}"
+        file_type: 'any'
+        hidden: true
+      register: 'monitoring_thanos_rule__rules_found'
+
+    - name: 'Remove the undeclared rule files'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ monitoring_thanos_rule__rules_found.files | map(attribute='path')
+           | reject('in', monitoring_thanos_rule__rules.keys()
+                          | map('regex_replace', '^(.*)$', monitoring_thanos_rule__podman_rules_dir ~ '/\1.yml') | list)
+           | list }}
+      register: 'monitoring_thanos_rule__rules_removed'
+
+    # The content of bucket.yml contains the credentials of the object storage,
+    # it is neither part of a file on the host nor of the quadlet unit
+    - name: 'Create or remove the secret of the object storage'
+      no_log: true
+      containers.podman.podman_secret:
+        name: "{{ monitoring_thanos_rule__podman_objstore_secret }}"
+        data: >-
+          {{ (monitoring_thanos_rule__objstore | to_nice_yaml(indent=2, sort_keys=false))
+             if monitoring_thanos_rule__objstore | length > 0 else omit }}
+        state: "{{ 'present' if monitoring_thanos_rule__objstore | length > 0 else 'absent' }}"
+      register: 'monitoring_thanos_rule__objstore_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_thanos_rule__container.name }}"
+        hostname: "{{ monitoring_thanos_rule__container.hostname }}"
+        image: "{{ monitoring_thanos_rule__container.image }}"
+        ip: "{{ monitoring_thanos_rule__container.ip }}"
+        ip6: "{{ monitoring_thanos_rule__container.ipv6 | default(omit) }}"
+        network: "{{ monitoring_thanos_rule__container.network }}"
+        timezone: "{{ monitoring_thanos_rule__container.timezone }}"
+        user: "{{ monitoring_thanos_rule__container.user | default(omit) }}"
+        command: "{{ monitoring_thanos_rule__container.command | default(omit) }}"
+        env: "{{ monitoring_thanos_rule__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_thanos_rule__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_thanos_rule__container.expose | default(omit) }}"
+        label: "{{ monitoring_thanos_rule__container.labels | default(omit) }}"
+        publish: "{{ monitoring_thanos_rule__container.publish | default(omit) }}"
+        secrets: "{{ monitoring_thanos_rule__container.secrets | default(omit) }}"
+        volume: "{{ monitoring_thanos_rule__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if monitoring_thanos_rule__container.requires is defined %}
+          Requires={{ monitoring_thanos_rule__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'monitoring_thanos_rule__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Thanos Rule'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_thanos_rule__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_thanos_rule__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_thanos_rule__running: >-
+              {{ (ansible_facts.services[monitoring_thanos_rule__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_thanos_rule__restart: >-
+              {{ monitoring_thanos_rule__running | bool
+                 and (monitoring_thanos_rule__objstore_result is changed
+                      or monitoring_thanos_rule__rules_result is changed
+                      or monitoring_thanos_rule__rules_removed is changed
+                      or monitoring_thanos_rule__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_thanos_rule__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_thanos_rule__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ monitoring_thanos_rule__container.name ~ ' did not start' ] + monitoring_thanos_rule__start_journal.stdout_lines }}"
+
+    - name: 'Wait for Thanos Rule'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_thanos_rule__container.ip }}:{{ monitoring_thanos_rule__http_port }}/-/ready"
+        status_code: [ 200, 503 ]
+      register: 'monitoring_thanos_rule__ready'
+      until: monitoring_thanos_rule__ready.status | default(-1) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Thanos Rule'
+      when:
+        - not ansible_check_mode
+        - monitoring_thanos_rule__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_thanos_rule__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'monitoring_thanos_rule__journal'
+      changed_when: false
+
+    - name: 'Assert that Thanos Rule is ready'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_rule__journal is skipped
+        fail_msg: "{{ monitoring_thanos_rule__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_thanos_rule__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_thanos_rule__container.name }}"
+        container_image: "{{ monitoring_thanos_rule__container.image }}"
+        container_schedule: "{{ monitoring_thanos_rule__autoupdate_schedule }}"

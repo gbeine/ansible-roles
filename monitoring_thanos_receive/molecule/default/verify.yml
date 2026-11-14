@@ -1,0 +1,118 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_receive__test_case: "{{ monitoring_thanos_receive__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_thanos_receive__expect: "{{ monitoring_thanos_receive__test_case.expect }}"
+    monitoring_thanos_receive__test_url: "http://{{ monitoring_thanos_receive__expect.ip }}:10902"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: '/etc/containers/systemd/thanos-receive.container'
+      register: 'monitoring_thanos_receive__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_thanos_receive__test_image) in monitoring_thanos_receive__test_quadlet_lines
+          - ('IP=' + monitoring_thanos_receive__expect.ip) in monitoring_thanos_receive__test_quadlet_lines
+          - monitoring_thanos_receive__expect.ip6 is none or ('IP6=' + monitoring_thanos_receive__expect.ip6) in monitoring_thanos_receive__test_quadlet_lines
+          - monitoring_thanos_receive__expect.ip6 is not none or monitoring_thanos_receive__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          # podman_container splits user 65534:65534 into User= and Group=
+          - ('User=65534' in monitoring_thanos_receive__test_quadlet_lines)
+          - ('Group=65534' in monitoring_thanos_receive__test_quadlet_lines)
+          - monitoring_thanos_receive__expect.quadlet | reject('in', monitoring_thanos_receive__test_quadlet_lines) | list | length == 0
+          # The time zone is set with TZ, /etc/localtime is not mounted
+          - monitoring_thanos_receive__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          - monitoring_thanos_receive__test_exec is search('^Exec=receive ')
+          - monitoring_thanos_receive__test_exec is search('--tsdb.path=/var/thanos/receive')
+          - (monitoring_thanos_receive__test_exec is search('--objstore.config-file=/etc/thanos/bucket.yml')) == monitoring_thanos_receive__expect.objstore
+          - ('Secret=thanos-receive-objstore,type=mount,target=/etc/thanos/bucket.yml' in monitoring_thanos_receive__test_quadlet_lines)
+            == monitoring_thanos_receive__expect.objstore
+        fail_msg: "{{ monitoring_thanos_receive__test_quadlet_lines | to_json }}"
+      vars:
+        monitoring_thanos_receive__test_quadlet_lines: "{{ (monitoring_thanos_receive__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+        monitoring_thanos_receive__test_exec: "{{ monitoring_thanos_receive__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'thanos-receive' ]
+      register: 'monitoring_thanos_receive__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'thanos-receive' ]
+      register: 'monitoring_thanos_receive__test_env'
+      changed_when: false
+
+    - name: 'Read the secret of the object storage'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'thanos-receive-objstore' ]
+      register: 'monitoring_thanos_receive__test_secret'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service, the environment and the secret'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_receive__test_service.stdout == 'active'
+          - ('TZ=' + monitoring_thanos_receive__test_case.role_vars.thanos_receive_timezone) in (monitoring_thanos_receive__test_env.stdout | from_json)
+          - (monitoring_thanos_receive__test_secret.rc == 0) == monitoring_thanos_receive__expect.objstore
+        fail_msg: >-
+          service {{ monitoring_thanos_receive__test_service.stdout }}, environment {{ monitoring_thanos_receive__test_env.stdout }},
+          secret exists {{ monitoring_thanos_receive__test_secret.rc == 0 }}
+
+    - name: 'Read the command of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Cmd {{ "}}" }}', 'thanos-receive' ]
+      register: 'monitoring_thanos_receive__test_cmd'
+      changed_when: false
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ monitoring_thanos_receive__test_case.role_vars.thanos_receive_home }}/data"
+      register: 'monitoring_thanos_receive__test_data_dir'
+
+    # The label reaches Thanos with its double quotes, otherwise receive refuses to start
+    - name: 'Assert the external label and the data directory owned by nobody'
+      ansible.builtin.assert:
+        that:
+          - ('--label=receive_replica="' + monitoring_thanos_receive__test_case.role_vars.thanos_receive_hostname + '"')
+            in (monitoring_thanos_receive__test_cmd.stdout | from_json)
+          - monitoring_thanos_receive__test_data_dir.stat.isdir | default(false)
+          - monitoring_thanos_receive__test_data_dir.stat.uid == 65534
+          - monitoring_thanos_receive__test_data_dir.stat.gid == 65534
+        fail_msg: >-
+          command {{ monitoring_thanos_receive__test_cmd.stdout }},
+          directory {{ monitoring_thanos_receive__test_data_dir.stat.isdir | default(false) }},
+          uid {{ monitoring_thanos_receive__test_data_dir.stat.uid | default('') }}, gid {{ monitoring_thanos_receive__test_data_dir.stat.gid | default('') }}
+
+    - name: 'Wait until receive is ready'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_receive__test_url }}/-/ready"
+      register: 'monitoring_thanos_receive__test_ready'
+      until: monitoring_thanos_receive__test_ready.status == 200
+      retries: 15
+      delay: 2
+
+    # Prometheus sends its samples with remote write, receive appends them to the TSDB of the default tenant
+    - name: 'Wait until receive stored samples of Prometheus'
+      ansible.builtin.uri:
+        url: "{{ monitoring_thanos_receive__test_url }}/metrics"
+        return_content: true
+      register: 'monitoring_thanos_receive__test_metrics'
+      until: >-
+        monitoring_thanos_receive__test_metrics.content is
+        search('^prometheus_tsdb_head_samples_appended_total\{[^}]*tenant="default-tenant"[^}]*\} [1-9]', multiline=true)
+      retries: 30
+      delay: 2

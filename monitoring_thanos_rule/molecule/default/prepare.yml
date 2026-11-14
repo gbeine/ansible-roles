@@ -1,0 +1,54 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_rule__test_case: "{{ monitoring_thanos_rule__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    podman_networks:
+      - "{{ monitoring_thanos_rule__test_network }}"
+    podman_default_network: "{{ monitoring_thanos_rule__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service and the check of the rules do not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_thanos_rule__test_image }}"
+      register: 'monitoring_thanos_rule__test_pull'
+      until: monitoring_thanos_rule__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    # The bucket of the object storage FILESYSTEM, written by rule as nobody
+    - name: 'Create the directory of the bucket'
+      ansible.builtin.file:
+        path: "{{ monitoring_thanos_rule__test_bucket_dir }}"
+        owner: '65534'
+        group: '65534'
+        mode: '0755'
+        state: 'directory'
+
+    # The role has to remove rule files that are not declared
+    - name: 'Create the directory of the rule files'
+      ansible.builtin.file:
+        path: "{{ monitoring_thanos_rule__test_stale_rule | dirname }}"
+        mode: '0755'
+        state: 'directory'
+
+    - name: 'Create a rule file that is not declared'
+      ansible.builtin.copy:
+        dest: "{{ monitoring_thanos_rule__test_stale_rule }}"
+        content: |
+          groups: []
+        mode: '0644'

@@ -1,0 +1,57 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_query__test_case: "{{ monitoring_thanos_query__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    podman_networks:
+      - "{{ monitoring_thanos_query__test_network }}"
+    podman_default_network: "{{ monitoring_thanos_query__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # monitoring_prometheus mounts /etc/timezone, the base VM has none
+    - name: 'Ensure /etc/timezone exists'
+      ansible.builtin.copy:
+        dest: '/etc/timezone'
+        content: |
+          Etc/UTC
+        force: false
+        mode: '0644'
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_thanos_query__test_prometheus_image }}"
+        - "{{ monitoring_thanos_query__test_image }}"
+      register: 'monitoring_thanos_query__test_pull'
+      until: monitoring_thanos_query__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Set the role variables of Prometheus and the sidecar'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_thanos_query__test_case.prepare_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_prometheus'
+      ansible.builtin.include_role:
+        name: 'monitoring_prometheus'
+
+    # The StoreAPI query connects to
+    - name: 'Run monitoring_thanos_sidecar'
+      ansible.builtin.include_role:
+        name: 'monitoring_thanos_sidecar'

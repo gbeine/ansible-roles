@@ -1,0 +1,66 @@
+---
+# Checks one service of the stack against monitoring_thanos_query__expect
+
+- name: "Read the quadlet unit of {{ monitoring_thanos_query__expect.name }}"
+  ansible.builtin.slurp:
+    src: "/etc/containers/systemd/{{ monitoring_thanos_query__expect.name }}.container"
+  register: 'monitoring_thanos_query__test_quadlet'
+
+# podman may quote values, the quotes are removed before the lines are compared
+- name: "Assert the quadlet unit of {{ monitoring_thanos_query__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - ('Image=' + monitoring_thanos_query__test_image) in monitoring_thanos_query__test_quadlet_lines
+      - ('IP=' + monitoring_thanos_query__expect.ip) in monitoring_thanos_query__test_quadlet_lines
+      - ('User=65534' in monitoring_thanos_query__test_quadlet_lines)
+      - ('Group=65534' in monitoring_thanos_query__test_quadlet_lines)
+      - monitoring_thanos_query__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+      - monitoring_thanos_query__test_exec is search('^Exec=' + monitoring_thanos_query__expect.component + ' ')
+    fail_msg: "{{ monitoring_thanos_query__test_quadlet_lines | to_json }}"
+  vars:
+    monitoring_thanos_query__test_quadlet_lines: "{{ (monitoring_thanos_query__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+    monitoring_thanos_query__test_exec: "{{ monitoring_thanos_query__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+
+- name: "Read the state of the service {{ monitoring_thanos_query__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'systemctl', 'is-active', "{{ monitoring_thanos_query__expect.name }}" ]
+  register: 'monitoring_thanos_query__test_service'
+  changed_when: false
+  failed_when: false
+
+- name: "Assert the service is active: {{ monitoring_thanos_query__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - monitoring_thanos_query__test_service.stdout == 'active'
+    fail_msg: "service {{ monitoring_thanos_query__test_service.stdout }}"
+
+- name: "Wait until {{ monitoring_thanos_query__expect.name }} is ready"
+  ansible.builtin.uri:
+    url: "http://{{ monitoring_thanos_query__expect.ip }}:10902/-/ready"
+  register: 'monitoring_thanos_query__test_ready'
+  until: monitoring_thanos_query__test_ready.status == 200
+  retries: 30
+  delay: 2
+
+- name: 'Check the rule file and the external label of rule'
+  when: monitoring_thanos_query__expect.component == 'rule'
+  block:
+
+    - name: 'Read the rule file'
+      ansible.builtin.stat:
+        path: "{{ monitoring_thanos_query__expect.home }}/rules/stack.yml"
+      register: 'monitoring_thanos_query__test_rule_file'
+
+    - name: 'Read the command of the rule container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Cmd {{ "}}" }}', "{{ monitoring_thanos_query__expect.name }}" ]
+      register: 'monitoring_thanos_query__test_cmd'
+      changed_when: false
+
+    # The label reaches Thanos with its double quotes, otherwise rule refuses it
+    - name: 'Assert the rule file and the external label'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_query__test_rule_file.stat.exists
+          - ('--label=rule_replica="' + monitoring_thanos_query__expect.hostname + '"') in (monitoring_thanos_query__test_cmd.stdout | from_json)
+        fail_msg: "rule file exists {{ monitoring_thanos_query__test_rule_file.stat.exists }}, command {{ monitoring_thanos_query__test_cmd.stdout }}"

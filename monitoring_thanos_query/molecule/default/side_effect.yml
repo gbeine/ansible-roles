@@ -1,0 +1,124 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_query__test_case: "{{ monitoring_thanos_query__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_thanos_query__test_files:
+      - '/etc/containers/systemd/thanos-query.container'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_thanos_query__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_thanos_query__test_files }}"
+      register: 'monitoring_thanos_query__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_thanos_query with thanos_query_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_container: [ 'command' ]
+        monitoring_thanos_query__test_invalid:
+          message: 'thanos_query_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_thanos_query with the endpoints not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_endpoints: '10.89.0.77:10901'
+        monitoring_thanos_query__test_invalid:
+          message: 'the endpoints not a list'
+          search: '^thanos_query_endpoints has to be a list of addresses$'
+
+    - name: 'Run monitoring_thanos_query without endpoints (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_endpoints: []
+        monitoring_thanos_query__test_invalid:
+          message: 'no endpoints'
+          search: '^thanos_query_endpoints has to be a list of addresses$'
+
+    - name: 'Run monitoring_thanos_query with an invalid address (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_endpoints: [ "10.89.0.77:10901'" ]
+        monitoring_thanos_query__test_invalid:
+          message: 'an invalid address'
+          search: "^thanos_query_endpoints has invalid addresses: 10.89.0.77:10901'$"
+
+    - name: 'Run monitoring_thanos_query with a duplicate address (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_endpoints: [ '10.89.0.77:10901', '10.89.0.77:10901' ]
+        monitoring_thanos_query__test_invalid:
+          message: 'a duplicate address'
+          search: '^thanos_query_endpoints has duplicate addresses: 10.89.0.77:10901$'
+
+    - name: 'Run monitoring_thanos_query with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_environment:
+          TZ: "Europe/Berlin\nUTC"
+        monitoring_thanos_query__test_invalid:
+          message: 'a line break in the environment'
+          search: '^Values of thanos_query_environment must not contain line breaks: TZ$'
+
+    - name: 'Run monitoring_thanos_query with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_query_environment:
+          MOLECULE_UNKNOWN: 'molecule'
+        monitoring_thanos_query__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: MOLECULE_UNKNOWN, Thanos only reads TZ.$'
+
+    - name: 'Run monitoring_thanos_query with the changed role variables'
+      when: monitoring_thanos_query__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'thanos-query' ]
+          register: 'monitoring_thanos_query__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ monitoring_thanos_query__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run monitoring_thanos_query with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'monitoring_thanos_query'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'thanos-query' ]
+          register: 'monitoring_thanos_query__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - monitoring_thanos_query__quadlet_result is changed
+              - monitoring_thanos_query__test_started_after.stdout | int > monitoring_thanos_query__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ monitoring_thanos_query__quadlet_result is changed }},
+              start before {{ monitoring_thanos_query__test_started_before.stdout }}, after {{ monitoring_thanos_query__test_started_after.stdout }}

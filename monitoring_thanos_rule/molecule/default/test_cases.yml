@@ -1,0 +1,103 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_thanos_rule__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_thanos_rule__test_image: 'docker.io/thanosio/thanos:v0.42.5'
+monitoring_thanos_rule__test_bucket_dir: '/opt/thanos-bucket'
+# A rule file in the directory of the rule files that is not declared, prepare creates it and the role has to remove it
+monitoring_thanos_rule__test_stale_rule: '/opt/thanos-rule/rules/stale.yml'
+
+monitoring_thanos_rule__test_cases:
+
+  # Only the mandatory variables, without query rule starts, serves the StoreAPI and fails the evaluations
+  - name: 'molecule-thanos-rule-default'
+    role_vars:
+      thanos_rule_version: 'v0.42.5'
+      thanos_rule_home: '/opt/thanos-rule'
+      thanos_rule_ip: '10.89.0.68'
+      thanos_rule_network: 'podman-molecule'
+      thanos_rule_hostname: 'thanos-rule-default'
+      thanos_rule_timezone: 'Europe/Berlin'
+      thanos_rule_query_url: 'http://10.89.0.1:10902'
+    expect:
+      ip: '10.89.0.68'
+      ip6: ~
+      objstore: false
+      rules: []
+      quadlet:
+        - 'Volume=/opt/thanos-rule/data:/var/thanos/rule'
+        - 'Volume=/opt/thanos-rule/rules:/etc/thanos/rules:ro'
+
+  # IPv6, labels, two rule files and the upload to a bucket in the file system,
+  # the volume of the bucket is added with thanos_rule_container
+  - name: 'molecule-thanos-rule'
+    role_vars:
+      thanos_rule_version: 'v0.42.5'
+      thanos_rule_home: '/opt/thanos-rule'
+      thanos_rule_ip: '10.89.0.69'
+      thanos_rule_ipv6: 'fd00:89::69'
+      thanos_rule_network: 'podman-molecule'
+      thanos_rule_hostname: 'thanos-rule-molecule'
+      thanos_rule_timezone: 'Europe/Berlin'
+      thanos_rule_labels:
+        traefik.enable: 'false'
+      thanos_rule_query_url: 'http://10.89.0.1:10902'
+      thanos_rule_rules:
+        molecule:
+          groups:
+            - name: 'molecule'
+              interval: '5s'
+              rules:
+                - record: 'molecule:up:count'
+                  expr: 'count(up)'
+        alerts:
+          groups:
+            - name: 'alerts'
+              rules:
+                - alert: 'MoleculeDown'
+                  expr: 'up == 0'
+                  for: '5m'
+      thanos_rule_objstore:
+        type: 'FILESYSTEM'
+        config:
+          directory: '/bucket'
+      thanos_rule_container:
+        volumes:
+          - '/opt/thanos-rule/data:/var/thanos/rule'
+          - '/opt/thanos-rule/rules:/etc/thanos/rules:ro'
+          - '/opt/thanos-bucket:/bucket'
+    # side_effect changes a rule, the rule file changes and rule has to restart
+    side_effect:
+      role_vars:
+        thanos_rule_rules:
+          molecule:
+            groups:
+              - name: 'molecule'
+                interval: '5s'
+                rules:
+                  - record: 'molecule:up:count'
+                    expr: 'count(up) or vector(0)'
+          alerts:
+            groups:
+              - name: 'alerts'
+                rules:
+                  - alert: 'MoleculeDown'
+                    expr: 'up == 0'
+                    for: '5m'
+    expect:
+      ip: '10.89.0.69'
+      ip6: 'fd00:89::69'
+      objstore: true
+      rules: [ 'alerts', 'molecule' ]
+      quadlet:
+        - 'Volume=/opt/thanos-rule/data:/var/thanos/rule'
+        - 'Volume=/opt/thanos-rule/rules:/etc/thanos/rules:ro'
+        - 'Volume=/opt/thanos-bucket:/bucket'
+        - 'Label=traefik.enable=false'

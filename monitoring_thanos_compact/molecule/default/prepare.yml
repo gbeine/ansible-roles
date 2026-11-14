@@ -1,0 +1,44 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_thanos_compact__test_case: "{{ monitoring_thanos_compact__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    podman_networks:
+      - "{{ monitoring_thanos_compact__test_network }}"
+    podman_default_network: "{{ monitoring_thanos_compact__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_thanos_compact__test_image }}"
+      register: 'monitoring_thanos_compact__test_pull'
+      until: monitoring_thanos_compact__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    # The bucket of the object storage FILESYSTEM, read by compact as nobody,
+    # side_effect changes it to the directory changed
+    - name: 'Create the directories of the bucket'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: '65534'
+        group: '65534'
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - "{{ monitoring_thanos_compact__test_bucket_dir }}"
+        - "{{ monitoring_thanos_compact__test_bucket_dir }}/changed"
