@@ -17,29 +17,46 @@
       ansible.builtin.assert:
         that:
           - ('IP=' + monitoring_diun__test_vars.diun_ip) in monitoring_diun__test_lines
-          # The password is mounted as file, it is neither part of the quadlet unit nor of the environment
+          # The secrets are mounted as files, they are neither part of the quadlet unit nor of the environment
           - "'Secret=diun_mail_password,type=mount,target=/run/secrets/diun_mail_password' in monitoring_diun__test_lines"
-          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_NOTIF_MAIL_PASSWORDFILE=/run/secrets/diun_mail_password') | list | length == 1
-          - monitoring_diun__test_lines | select('search', 'type=env') | list | length == 0
-          # The registry credentials of the key MOLECULE of diun_keys are mounted as files
-          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_REGOPTS_MOLECULE_USERNAMEFILE=/run/secrets/diun_registry_user') | list | length == 1
-          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_REGOPTS_MOLECULE_PASSWORDFILE=/run/secrets/diun_registry_password') | list | length == 1
-          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_REGOPTS_MOLECULE_NAME=registry.example.test') | list | length == 1
-          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_DEFAULTS_METADATA_TEAM=molecule') | list | length == 1
-          - monitoring_diun__test_lines | select('search', monitoring_diun__test_registry_password) | list | length == 0
-          - "'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro' in monitoring_diun__test_lines"
-          - monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_PROVIDERS_DOCKER=true') | list | length == 1
-          - >-
-            monitoring_diun__test_lines | select('match', 'Environment=.*DIUN_WATCH_WORKERS=' + monitoring_diun__test_side_effect_workers)
-            | list | length == 1
+          - "'Secret=diun_registry_user,type=mount,target=/run/secrets/diun_registry_user' in monitoring_diun__test_lines"
+          - "'Secret=diun_registry_password,type=mount,target=/run/secrets/diun_registry_password' in monitoring_diun__test_lines"
+          # The options are part of diun.yml, without diun_environment the quadlet unit has no environment
+          - monitoring_diun__test_lines | select('search', 'Environment=|DIUN_|type=env') | list | length == 0
           - monitoring_diun__test_lines | select('search', monitoring_diun__test_secret) | list | length == 0
-          - monitoring_diun__test_lines | select('search', '/etc/diun') | list | length == 0
+          - monitoring_diun__test_lines | select('search', monitoring_diun__test_registry_password) | list | length == 0
+          - ('Volume=' + monitoring_diun__test_vars.diun_home + '/diun.yml:/etc/diun/diun.yml:ro') in monitoring_diun__test_lines
           - ('Volume=' + monitoring_diun__test_vars.diun_home + '/data:/data') in monitoring_diun__test_lines
+          - "'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro' in monitoring_diun__test_lines"
           - monitoring_diun__test_lines | select('match', 'Label=') | list | length == 0
           - monitoring_diun__test_lines | select('match', 'IP6=') | list | length == 0
         fail_msg: "Quadlet: {{ monitoring_diun__test_quadlet.content | b64decode }}"
       vars:
-        monitoring_diun__test_lines: "{{ (monitoring_diun__test_quadlet.content | b64decode).splitlines() }}"
+        monitoring_diun__test_lines: "{{ (monitoring_diun__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read diun.yml'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_diun__test_vars.diun_home }}/diun.yml"
+      register: 'monitoring_diun__test_config_file'
+
+    - name: 'Read the state of diun.yml'
+      ansible.builtin.stat:
+        path: "{{ monitoring_diun__test_vars.diun_home }}/diun.yml"
+      register: 'monitoring_diun__test_config_stat'
+
+    # diun.yml contains the files of the secrets, not the secrets
+    - name: 'Assert diun.yml'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__test_config_lines | reject('in', monitoring_diun__test_lines) | list | length == 0
+          - monitoring_diun__test_lines | select('search', monitoring_diun__test_secret ~ '|' ~ monitoring_diun__test_registry_password) | list | length == 0
+          - monitoring_diun__test_config_stat.stat.uid == 0
+          - monitoring_diun__test_config_stat.stat.mode == '0644'
+        fail_msg: >-
+          missing {{ monitoring_diun__test_config_lines | reject('in', monitoring_diun__test_lines) | list }},
+          owner {{ monitoring_diun__test_config_stat.stat.uid }}, mode {{ monitoring_diun__test_config_stat.stat.mode }}
+      vars:
+        monitoring_diun__test_lines: "{{ (monitoring_diun__test_config_file.content | b64decode).splitlines() }}"
 
     - name: 'Read the state of the Diun service'
       ansible.builtin.command: 'systemctl is-active diun'
@@ -56,24 +73,34 @@
           - monitoring_diun__test_service.stdout == 'active'
         fail_msg: "Service: {{ monitoring_diun__test_service.stdout }}"
 
-    # diun validates the file of DIUN_NOTIF_MAIL_PASSWORDFILE at the start, the service would not be active without it
-    - name: 'Read the secret file and the environment in the container'
+    # diun reads the files of diun.yml, it is started with the configuration from the file
+    - name: 'Read the files of the secrets, the environment and the log in the container'
       ansible.builtin.command:
         argv: [ 'podman', 'exec', 'diun', 'sh', '-c',
-                'cat "$DIUN_NOTIF_MAIL_PASSWORDFILE"; echo; cat "$DIUN_REGOPTS_MOLECULE_USERNAMEFILE"; echo; cat "$DIUN_REGOPTS_MOLECULE_PASSWORDFILE"; echo;
-                 printenv DIUN_NOTIF_MAIL_PASSWORD DIUN_REGOPTS_MOLECULE_PASSWORD || echo unset' ]
+                'cat /run/secrets/diun_mail_password; echo; cat /run/secrets/diun_registry_user; echo; cat /run/secrets/diun_registry_password; echo;
+                 env | grep -c "^DIUN_" ; true' ]
       register: 'monitoring_diun__test_env'
       changed_when: false
       no_log: true
 
-    - name: 'Assert the secret is passed as file'
+    - name: 'Read the log of Diun'
+      ansible.builtin.command:
+        argv: [ 'podman', 'logs', 'diun' ]
+      register: 'monitoring_diun__test_log'
+      changed_when: false
+
+    # The image only sets DIUN_DB_PATH
+    - name: 'Assert the secrets are passed as files and diun.yml is loaded'
       ansible.builtin.assert:
         that:
           - monitoring_diun__test_env.stdout_lines[0] == monitoring_diun__test_secret
           - monitoring_diun__test_env.stdout_lines[1] == monitoring_diun__test_registry_user
           - monitoring_diun__test_env.stdout_lines[2] == monitoring_diun__test_registry_password
-          - monitoring_diun__test_env.stdout_lines[-1] == 'unset'
-        fail_msg: 'The files of the secrets have not the values of the secrets or a password is set in the environment'
+          - monitoring_diun__test_env.stdout_lines[-1] == '1'
+          - >-
+            (monitoring_diun__test_log.stdout ~ monitoring_diun__test_log.stderr)
+            is search('Configuration loaded from file: /etc/diun/diun.yml')
+        fail_msg: 'The files of the secrets have not the values of the secrets, DIUN_* are set or diun.yml was not loaded'
 
     - name: 'Read the journal of Diun until the watched container was found'
       ansible.builtin.command: 'journalctl -u diun --no-pager -n 200'

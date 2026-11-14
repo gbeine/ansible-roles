@@ -4,51 +4,16 @@
   tags: [ 'monitoring', 'monitoring_diun' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or diun_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, diun_container or diun_config not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - monitoring_diun__container | length > 0
+          - monitoring_diun__config | length > 0
+          - monitoring_diun__config_file | length > 0
         quiet: true
-
-    # The keys become part of the names of environment variables, the keys of regopts without '_'
-    - name: 'Validate the keys'
-      ansible.builtin.assert:
-        that:
-          - monitoring_diun__invalid | length == 0
-        # Only the failing checks are reported
-        fail_msg: "{{ monitoring_diun__invalid | join('. ') }}"
-        quiet: true
-      vars:
-        monitoring_diun__invalid: >-
-          {%- set errors = [] -%}
-          {%- set keys = monitoring_diun__keys -%}
-          {%- if keys is not mapping -%}
-          {%-   set _ = errors.append('diun_keys has to be a dictionary') -%}
-          {%- else -%}
-          {%-   set unknown = keys.keys() | reject('in', monitoring_diun__keys_families) | list -%}
-          {%-   if unknown | length > 0 -%}
-          {%-     set _ = errors.append('unknown entries in diun_keys: ' ~ unknown | join(', ')
-                                        ~ ', allowed are ' ~ monitoring_diun__keys_families | join(', ')) -%}
-          {%-   endif -%}
-          {%-   for family in monitoring_diun__keys_families if family in keys -%}
-          {%-     set values = keys[family] -%}
-          {%-     set pattern = '^[A-Z0-9]+$' if family == 'regopts' else '^[A-Z0-9_]+$' -%}
-          {%-     if values is not sequence or values is string or values is mapping -%}
-          {%-       set _ = errors.append('diun_keys.' ~ family ~ ' has to be a list') -%}
-          {%-     elif values | reject('string') | list | length > 0 or values | reject('match', pattern) | list | length > 0 -%}
-          {%-       set _ = errors.append('diun_keys.' ~ family ~ ' contains invalid keys, allowed are '
-                                          ~ ('uppercase letters and digits' if family == 'regopts' else 'uppercase letters, digits and _')
-                                          ~ ': ' ~ (values | select('string') | reject('match', pattern) | list
-                                                    + values | reject('string') | map('string') | list) | join(', ')) -%}
-          {%-     elif values | unique | list | length != values | length -%}
-          {%-       set _ = errors.append('diun_keys.' ~ family ~ ' contains duplicate keys') -%}
-          {%-     endif -%}
-          {%-   endfor -%}
-          {%- endif -%}
-          {{ errors }}
 
     - name: 'Validate the secrets'
       ansible.builtin.assert:
@@ -73,22 +38,140 @@
           {%- endif -%}
           {{ errors }}
 
-    - name: 'Validate environment and secrets'
+    # The options are written to diun.yml, diun itself checks their values at the start
+    - name: 'Validate the configuration'
       ansible.builtin.assert:
         that:
-          - monitoring_diun__secrets_in_environment | length == 0
-        fail_msg: >-
-          Secrets and their file variables must not be set in diun_environment:
-          {{ monitoring_diun__secrets_in_environment | join(', ') | default('none', true) }}.
+          - monitoring_diun__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_diun__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_diun__secrets_in_environment: >-
-          {{ (monitoring_diun__secrets | map(attribute='target') | list
-              + monitoring_diun__secret_variables + monitoring_diun__secret_files.values() | list)
-             | select('in', monitoring_diun__environment.keys() | list) | unique | list }}
+        monitoring_diun__errors: >-
+          {#- The macro writes <kind>|<option>; per failure, Ansible passes copies of lists and dictionaries to macros -#}
+          {%- macro check(value, schema, path, spath) -%}
+          {%-   for key, item in value.items() -%}
+          {%-     set name = path ~ key -%}
+          {%-     set sname = spath ~ key -%}
+          {%-     if key not in schema -%}
+          {{-       'unknown|' ~ name ~ ';' -}}
+          {%-     elif sname in monitoring_diun__secrets_allowed or (key is match('.*File$') and (spath ~ key[:-4]) in monitoring_diun__secrets_allowed) -%}
+          {{-       'secrets|' ~ name ~ ';' -}}
+          {%-     elif item is none -%}
+          {%-     elif schema[key] is mapping -%}
+          {%-       if item is mapping -%}
+          {{-         check(item, schema[key], name ~ '.', sname ~ '.') -}}
+          {%-       else -%}
+          {{-         'types|' ~ name ~ ';' -}}
+          {%-       endif -%}
+          {%-     elif schema[key] is sequence and schema[key] is not string -%}
+          {%-       if item is not sequence or item is string or item is mapping -%}
+          {{-         'types|' ~ name ~ ';' -}}
+          {%-       else -%}
+          {%-         for entry in item -%}
+          {%-           if entry is not mapping or entry.name | default('') is not string or entry.name | default('') | length == 0 -%}
+          {{-             'entries|' ~ name ~ '[' ~ loop.index0 ~ '];' -}}
+          {%-           else -%}
+          {{-             check(entry, schema[key][0], name ~ '.' ~ entry.name ~ '.', sname ~ '.<name>.') -}}
+          {%-           endif -%}
+          {%-         endfor -%}
+          {%-         if item | select('mapping') | map(attribute='name', default='') | list | unique | list | length != item | select('mapping') | list | length -%}
+          {{-           'entries|' ~ name ~ ';' -}}
+          {%-         endif -%}
+          {%-       endif -%}
+          {%-     elif (schema[key] == 'bool' and item is not boolean)
+                       or (schema[key] == 'int' and (item is not number or item is boolean))
+                       or (schema[key] == 'string' and item is not string and (item is not number or item is boolean))
+                       or (schema[key] == 'list' and (item is not sequence or item is string or item is mapping
+                                                       or item | select('mapping') | list | length > 0
+                                                       or item | reject('string') | select('sequence') | list | length > 0))
+                       or (schema[key] == 'map' and (item is not mapping
+                                                      or item.values() | select('mapping') | list | length > 0
+                                                      or item.values() | reject('string') | select('sequence') | list | length > 0)) -%}
+          {{-       'types|' ~ name ~ ';' -}}
+          {%-     elif (([ item ] if item is string else (item.values() | list if item is mapping else (item if item is sequence else [])))
+                        | select('string') | select('search', '[\r\n]') | list | length > 0) -%}
+          {{-       'lines|' ~ name ~ ';' -}}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endmacro -%}
+          {%- set errors = [] -%}
+          {%- if diun_keys is defined -%}
+          {%-   set _ = errors.append('diun_keys is not used anymore, options with keys are set in diun_config, e.g. regopts or defaults.metadata.') -%}
+          {%- endif -%}
+          {%- if monitoring_diun__config_custom is not mapping -%}
+          {%-   set _ = errors.append('diun_config has to be a dictionary of the options of diun.yml.') -%}
+          {%- else -%}
+          {%-   set result = { 'unknown': [], 'secrets': [], 'types': [], 'entries': [], 'lines': [] } -%}
+          {%-   for line in (check(monitoring_diun__config, monitoring_diun__config_schema, '', '') | string).split(';') | select -%}
+          {%-     set _ = result[line.split('|')[0]].append(line.split('|', 1)[1]) -%}
+          {%-   endfor -%}
+          {%-   if result.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in diun_config: ' ~ (result.unknown | join(', ')) ~ ', allowed are the options of diun.yml (monitoring_diun__config_schema).') -%}
+          {%-   endif -%}
+          {%-   if result.secrets | length > 0 -%}
+          {%-     set _ = errors.append('Secrets and their files are set with diun_secrets, not in diun_config: ' ~ (result.secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if result.types | length > 0 -%}
+          {%-     set _ = errors.append('These options of diun_config have the wrong type (monitoring_diun__config_schema): ' ~ (result.types | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if result.entries | length > 0 -%}
+          {%-     set _ = errors.append('The entries of regopts are dictionaries with a unique name: ' ~ (result.entries | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if result.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of diun_config must not contain line breaks: ' ~ (result.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The options of diun were set with DIUN_* by former versions of the role, without diun_environment there is nothing to check
+    - name: 'Validate the environment'
+      when: monitoring_diun__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_diun__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_diun__options_in_environment: >-
+          {#- The macro writes <variable>|<option>; per option -#}
+          {%- macro paths(schema, path) -%}
+          {%-   for key, item in schema.items() -%}
+          {%-     if item is mapping -%}
+          {{-       paths(item, path ~ key ~ '.') -}}
+          {%-     elif item is string -%}
+          {{-       ('DIUN_' ~ path ~ key) | upper | replace('.', '_') ~ '|' ~ path ~ key ~ ';' -}}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endmacro -%}
+          {%- set names = [] -%}
+          {%- set variables = monitoring_diun__environment.keys() | select('match', '^DIUN_') | list -%}
+          {%- if variables | length > 0 -%}
+          {%-   set known = {} -%}
+          {%-   for line in (paths(monitoring_diun__config_schema, '') | string).split(';') | select -%}
+          {%-     set _ = known.update({ line.split('|')[0]: line.split('|')[1] }) -%}
+          {%-   endfor -%}
+          {%-   for variable in variables -%}
+          {%-     set _ = names.append(variable ~ ((' (' ~ known[variable] | regex_replace('File$', '') ~ ')') if variable in known
+                                                 else (' (regopts)' if variable is match('^DIUN_REGOPTS_') else ''))) -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ names }}
+        monitoring_diun__environment_lines: >-
+          {{ monitoring_diun__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+        monitoring_diun__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_diun__options_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('The options of diun are set with diun_config now: ' ~ (monitoring_diun__options_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_diun__environment_lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (monitoring_diun__environment_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     # Checks the environment and the secrets of the container after merging diun_container,
-    # unknown variables would change the behavior unexpectedly
+    # unknown variables or secrets would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
@@ -97,12 +180,23 @@
         fail_msg: "{{ monitoring_diun__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without diun_environment and diun_container.environment the environment is omitted, there is nothing to check
         monitoring_diun__environment_unknown: >-
-          {{ (monitoring_diun__container.environment | default({})).keys()
-             | reject('in', monitoring_diun__environment_allowed) | list }}
+          {{ (monitoring_diun__container.environment.keys() | reject('in', monitoring_diun__environment_allowed) | list)
+             if monitoring_diun__container.environment is mapping else [] }}
+        monitoring_diun__targets: "{{ monitoring_diun__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_diun__regopts_names: >-
+          {{ monitoring_diun__config.regopts | default([]) | select('mapping') | map(attribute='name', default='') | map('string') | list }}
         monitoring_diun__secrets_unknown: >-
-          {{ monitoring_diun__secrets | map(attribute='target')
-             | reject('in', monitoring_diun__secret_files.keys() | list) | list }}
+          {{ monitoring_diun__targets | reject('in', monitoring_diun__secrets_allowed) | reject('match', '^regopts\.[^.]+\.(username|password)$') | list }}
+        monitoring_diun__secrets_regopts: >-
+          {{ monitoring_diun__targets | select('match', '^regopts\.[^.]+\.(username|password)$')
+             | reject('regex', '^regopts\.(' ~ (monitoring_diun__regopts_names | map('regex_escape') | join('|') | default('$^', true)) ~ ')\.') | list }}
+        monitoring_diun__secrets_duplicate: >-
+          {{ monitoring_diun__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list }}
+        monitoring_diun__secrets_lines: >-
+          {{ monitoring_diun__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+             + monitoring_diun__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
         monitoring_diun__errors: >-
           {%- set errors = [] -%}
           {%- if monitoring_diun__environment_unknown | length > 0 -%}
@@ -111,8 +205,18 @@
           {%- if monitoring_diun__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (monitoring_diun__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the options of diun in monitoring_diun__environment_allowed and the targets in monitoring_diun__secret_files, options with keys in their names need the keys in diun_keys.') -%}
+          {%- if (monitoring_diun__environment_unknown + monitoring_diun__secrets_unknown) | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (monitoring_diun__environment_allowed | join(', ')) ~ ' and the secrets with the targets of monitoring_diun__secrets_allowed'
+                                    ~ ' (the path of the option in diun.yml, e.g. notif.mail.password, regopts.<name>.password), the options of diun are set with diun_config.') -%}
+          {%- endif -%}
+          {%- if monitoring_diun__secrets_regopts | length > 0 -%}
+          {%-   set _ = errors.append('The secrets of a registry need its entry in diun_config.regopts: ' ~ (monitoring_diun__secrets_regopts | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_diun__secrets_duplicate | length > 0 -%}
+          {%-   set _ = errors.append('Every target of diun_secrets is set once: ' ~ (monitoring_diun__secrets_duplicate | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_diun__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings without line breaks: ' ~ (monitoring_diun__secrets_lines | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -122,7 +226,17 @@
         mode: '0750'
         state: 'directory'
 
-    # The configuration is passed with environment variables, the file of earlier versions of the role is not used anymore
+    # diun.yml contains the files of the secrets, not the secrets
+    - name: 'Generate diun.yml'
+      ansible.builtin.copy:
+        content: "{{ monitoring_diun__config_file | to_nice_yaml(indent=2) }}"
+        dest: "{{ monitoring_diun__config_path }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'monitoring_diun__config_result'
+
+    # diun.yml of earlier versions of the role was mounted from etc
     - name: 'Remove the configuration file of earlier versions'
       ansible.builtin.file:
         path: "{{ monitoring_diun__podman_etc_dir }}/diun.yml"
@@ -149,6 +263,7 @@
         ip6: "{{ monitoring_diun__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_diun__container.network }}"
         timezone: "{{ monitoring_diun__container.timezone }}"
+        command: "{{ monitoring_diun__container.command | default(omit) }}"
         env: "{{ monitoring_diun__container.environment | default(omit) }}"
         etc_hosts: "{{ monitoring_diun__container.etc_hosts | default(omit) }}"
         expose: "{{ monitoring_diun__container.expose | default(omit) }}"
@@ -157,7 +272,6 @@
         secrets: "{{ monitoring_diun__container.secrets | default(omit) }}"
         volume: "{{ monitoring_diun__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
@@ -169,23 +283,83 @@
           {% if monitoring_diun__container.requires is defined %}
           Requires={{ monitoring_diun__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_diun__container.wants is defined %}
+          Wants={{ monitoring_diun__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_diun__container.after is defined %}
+          After={{ monitoring_diun__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_diun__container.part_of is defined %}
+          PartOf={{ monitoring_diun__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_diun__container.binds_to is defined %}
+          BindsTo={{ monitoring_diun__container.binds_to | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_diun__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ monitoring_diun__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if monitoring_diun__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        monitoring_diun__running: >-
-          {{ (ansible_facts.services[monitoring_diun__container.name + '.service'].state | default('')) == 'running' }}
-        monitoring_diun__restart: >-
-          {{ monitoring_diun__running | bool
-             and (monitoring_diun__secrets_result is changed or monitoring_diun__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Diun'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_diun__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_diun__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_diun__running: >-
+              {{ (ansible_facts.services[monitoring_diun__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_diun__restart: >-
+              {{ monitoring_diun__running | bool
+                 and (monitoring_diun__config_result is changed
+                      or monitoring_diun__secrets_result is changed
+                      or monitoring_diun__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_diun__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_diun__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ monitoring_diun__container.name ~ ' did not start' ] + monitoring_diun__start_journal.stdout_lines }}"
+
+    # diun exits if diun.yml or a file of a secret is invalid, it reports the loaded file at the start,
+    # the quadlet unit creates a new container at every start, its log only contains the current start
+    - name: 'Wait for Diun'
+      when: 'not ansible_check_mode'
+      ansible.builtin.command:
+        argv: [ 'podman', 'logs', "{{ monitoring_diun__container.name }}" ]
+      register: 'monitoring_diun__log'
+      changed_when: false
+      failed_when: false
+      until: (monitoring_diun__log.stdout ~ monitoring_diun__log.stderr) is search('Configuration loaded from file')
+      retries: 20
+      delay: 3
+
+    - name: 'Read the journal of Diun'
+      when:
+        - not ansible_check_mode
+        - (monitoring_diun__log.stdout ~ monitoring_diun__log.stderr) is not search('Configuration loaded from file')
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_diun__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'monitoring_diun__journal'
+      changed_when: false
+
+    - name: 'Assert that Diun loaded diun.yml'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__journal is skipped
+        fail_msg: "{{ monitoring_diun__journal.stdout_lines | default([]) }}"
+        quiet: true
 
     - name: 'Enable autoupdate on container'
       when: 'monitoring_diun__autoupdate_enabled | bool'
