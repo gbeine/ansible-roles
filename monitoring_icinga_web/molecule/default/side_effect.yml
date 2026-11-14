@@ -1,0 +1,186 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icinga_web__test_case: "{{ monitoring_icinga_web__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icinga_web__test_vars: "{{ monitoring_icinga_web__test_case.role_vars }}"
+    monitoring_icinga_web__test_config: "{{ monitoring_icinga_web__test_vars.icingaweb_config }}"
+    monitoring_icinga_web__test_secrets: "{{ monitoring_icinga_web__test_vars.icingaweb_secrets }}"
+    monitoring_icinga_web__test_checked_files:
+      - "{{ monitoring_icinga_web__test_quadlet_path }}"
+      - "{{ monitoring_icinga_web__test_vars.icingaweb_home }}/data/etc/icingaweb2/config.ini"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_icinga_web__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_icinga_web__test_checked_files }}"
+      register: 'monitoring_icinga_web__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_icinga_web with icingaweb_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_container: [ 'environment' ]
+        monitoring_icinga_web__test_invalid:
+          message: 'icingaweb_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_icinga_web with icingaweb_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_config: [ 'resources' ]
+        monitoring_icinga_web__test_invalid:
+          message: 'icingaweb_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_icinga_web with an unknown file (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_config: "{{ monitoring_icinga_web__test_config | combine({ 'modules/monitoring/backends': { 'icinga': { 'type': 'ido' } } }) }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'an unknown file'
+          search: '^Unknown files in icingaweb_config: modules/monitoring/backends, allowed are '
+
+    - name: 'Run monitoring_icinga_web with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_config: "{{ monitoring_icinga_web__test_config | combine({ 'resources': { 'icingaweb_db': { 'hostname_db': 'db' } } }, recursive=true) }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown sections or options in icingaweb_config: resources\.icingaweb_db\.hostname_db, '
+
+    - name: 'Run monitoring_icinga_web with an unknown section of config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_config: "{{ monitoring_icinga_web__test_config | combine({ 'config': { 'preferences': { 'store': 'db' } } }, recursive=true) }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'an unknown section of config'
+          search: '^Unknown sections or options in icingaweb_config: config\.preferences, '
+
+    - name: 'Run monitoring_icinga_web with a password in icingaweb_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_config: "{{ monitoring_icinga_web__test_config | combine({ 'resources': { 'icingadb': { 'password': 'molecule' } } }, recursive=true) }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'a password in icingaweb_config'
+          search: '^Passwords are set with icingaweb_secrets, not in icingaweb_config: resources\.icingadb\.password\.$'
+
+    - name: 'Run monitoring_icinga_web without the host of Redis (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_config: "{{ monitoring_icinga_web__test_config | combine({ 'modules/icingadb/redis': { 'redis1': { 'host': none } } }, recursive=true) }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'no host of Redis'
+          search: '^Icinga Web needs the options .*, missing: modules/icingadb/redis\.redis1\.host\.$'
+
+    - name: 'Run monitoring_icinga_web with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_secrets:
+          - name: 'icingaweb_db_password'
+            data: 'molecule-database-password'
+        monitoring_icinga_web__test_invalid:
+          message: 'a secret without target'
+          search: '^icingaweb_secrets entries need name, data and target$'
+
+    - name: 'Run monitoring_icinga_web with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_secrets: "{{ monitoring_icinga_web__test_secrets + [{ 'name': 'icingaweb_x', 'data': 'x', 'target': 'config.global.password' }] }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: config\.global\.password, allowed are '
+
+    - name: 'Run monitoring_icinga_web with the secret of a missing section (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_secrets: "{{ monitoring_icinga_web__test_secrets + [{ 'name': 'icingaweb_ldap', 'data': 'x', 'target': 'resources.ldap.bind_pw' }] }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'the secret of a missing section'
+          search: '^The sections of these secrets are not part of icingaweb_config: resources\.ldap\.bind_pw\.$'
+
+    - name: 'Run monitoring_icinga_web without the password of the database of Icinga Web (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_secrets: "{{ monitoring_icinga_web__test_secrets | rejectattr('target', 'eq', 'resources.icingaweb_db.password') | list }}"
+        monitoring_icinga_web__test_invalid:
+          message: 'no password of the database of Icinga Web'
+          search: 'Icinga Web needs the secrets resources\.icingaweb_db\.password, resources\.icingadb\.password, missing: resources\.icingaweb_db\.password\.'
+
+    - name: 'Run monitoring_icinga_web with a former variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_db_host: '10.89.0.121'
+        monitoring_icinga_web__test_invalid:
+          message: 'a former variable'
+          search: '^The options of Icinga Web are set with icingaweb_config now: icingaweb_db_host \(resources\.icingaweb_db\.host\)\.$'
+
+    - name: 'Run monitoring_icinga_web with an option in icingaweb_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_environment:
+          icingaweb.config.logging.level: 'DEBUG'
+        monitoring_icinga_web__test_invalid:
+          message: 'an option in icingaweb_environment'
+          search: '^The options of Icinga Web are set with icingaweb_config, icingaweb_modules and icingaweb_secrets now: icingaweb\.config\.logging\.level\.$'
+
+    - name: 'Run monitoring_icinga_web with an unknown variable in icingaweb_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingaweb_container:
+          environment:
+            FOO: 'bar'
+        monitoring_icinga_web__test_invalid:
+          message: 'an unknown variable in icingaweb_container.environment'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run monitoring_icinga_web with the changed configuration'
+      when: monitoring_icinga_web__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icingaweb' ]
+          register: 'monitoring_icinga_web__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            icingaweb_config: "{{ monitoring_icinga_web__test_config | combine(monitoring_icinga_web__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run monitoring_icinga_web with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'monitoring_icinga_web'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icingaweb' ]
+          register: 'monitoring_icinga_web__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed config.ini and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - monitoring_icinga_web__config_result is changed
+              - monitoring_icinga_web__quadlet_result is not changed
+              - monitoring_icinga_web__test_started_after.stdout | int > monitoring_icinga_web__test_started_before.stdout | int
+            fail_msg: >-
+              config changed: {{ monitoring_icinga_web__config_result is changed }},
+              quadlet changed: {{ monitoring_icinga_web__quadlet_result is changed }},
+              start before {{ monitoring_icinga_web__test_started_before.stdout }}, after {{ monitoring_icinga_web__test_started_after.stdout }}

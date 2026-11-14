@@ -1,0 +1,165 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_icinga_web__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_icinga_web__test_image: 'docker.io/icinga/icingaweb2:latest'
+monitoring_icinga_web__test_quadlet_path: '/etc/containers/systemd/icingaweb.container'
+
+# MariaDB with the databases of Icinga Web and Icinga DB, started in prepare.yml
+monitoring_icinga_web__test_database:
+  name: 'mariadb-molecule'
+  image: 'docker.io/library/mariadb:11'
+  root_password: 'molecule-root-password'
+  password: 'molecule-database-password'
+
+monitoring_icinga_web__test_redis:
+  name: 'redis-molecule'
+  image: 'docker.io/library/redis:7'
+
+monitoring_icinga_web__test_admin_password: 'molecule-admin-password'
+
+monitoring_icinga_web__test_cases:
+
+  # Only the mandatory variables, Redis without password
+  - name: 'molecule-icingaweb-default'
+    database_ip: '10.89.0.121'
+    redis:
+      ip: '10.89.0.122'
+      command: [ 'redis-server' ]
+    role_vars:
+      icingaweb_home: '/opt/icingaweb'
+      icingaweb_ip: '10.89.0.120'
+      icingaweb_network: 'podman-molecule'
+      icingaweb_hostname: 'icingaweb-default'
+      icingaweb_timezone: 'Europe/Berlin'
+      icingaweb_config:
+        resources:
+          icingaweb_db:
+            host: '10.89.0.121'
+          icingadb:
+            host: '10.89.0.121'
+        modules/icingadb/redis:
+          redis1:
+            host: '10.89.0.122'
+        modules/icingadb/commandtransports:
+          icinga2:
+            host: 'icinga-master'
+            username: 'icingaweb'
+      icingaweb_secrets:
+        - name: 'icingaweb_db_password'
+          data: 'molecule-database-password'
+          target: 'resources.icingaweb_db.password'
+        - name: 'icingaweb_icingadb_password'
+          data: 'molecule-database-password'
+          target: 'resources.icingadb.password'
+        - name: 'icingaweb_admin_password'
+          data: 'molecule-admin-password'
+          target: 'passwords.icingaweb2.icingaadmin'
+    expect:
+      ip: '10.89.0.120'
+      home: '/opt/icingaweb'
+      quadlet:
+        - 'Volume=/opt/icingaweb/data:/data'
+        - 'Environment=icingaweb.enabledModules=icingadb'
+        - 'Secret=icingaweb-resources,type=mount,target=/data/etc/icingaweb2/resources.ini,uid=33,gid=33,mode=0400'
+        - 'Secret=icingaweb_admin_password,type=env,target=icingaweb.passwords.icingaweb2.icingaadmin'
+      quadlet_absent: [ 'icingaweb.resources', 'icingaweb.modules', '/etc/timezone', 'IP6=', 'Label=', 'Wants=', 'After=' ]
+      secret_files: [ 'resources' ]
+      files:
+        config: [ '[global]', 'config_resource = "icingaweb_db"', '[logging]', 'log = "php"' ]
+        roles: [ '[Administrators]', 'users = "icingaadmin"', 'permissions = "*"' ]
+        modules/icingadb/redis: [ '[redis1]', 'host = "10.89.0.122"', 'port = "6379"' ]
+        modules/icingadb/commandtransports: [ '[icinga2]', 'transport = "api"', 'host = "icinga-master"', 'username = "icingaweb"' ]
+      secrets: [ 'molecule-database-password', 'molecule-admin-password' ]
+
+  # IPv6, labels, Redis with password, the password of the API, a role, the logging,
+  # a variable of the entrypoint and dependencies of the quadlet unit
+  - name: 'molecule-icingaweb'
+    database_ip: '10.89.0.131'
+    redis:
+      ip: '10.89.0.132'
+      command: [ 'redis-server', '--requirepass', 'molecule-redis-password' ]
+    role_vars:
+      icingaweb_home: '/srv/icingaweb'
+      icingaweb_ip: '10.89.0.130'
+      icingaweb_ipv6: 'fd00:89::130'
+      icingaweb_network: 'podman-molecule'
+      icingaweb_hostname: 'icingaweb'
+      icingaweb_timezone: 'Europe/Berlin'
+      icingaweb_labels:
+        traefik.enable: 'true'
+      icingaweb_environment:
+        ICINGAWEB_SERIALIZER_COMPAT: '0'
+      icingaweb_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+      icingaweb_config:
+        config:
+          logging:
+            level: 'ERROR'
+        roles:
+          Viewers:
+            users: 'viewer'
+            permissions: 'module/icingadb'
+            icingadb/filter/objects: 'host.name=molecule*'
+        resources:
+          icingaweb_db:
+            host: '10.89.0.131'
+          icingadb:
+            host: '10.89.0.131'
+        modules/icingadb/redis:
+          redis1:
+            host: '10.89.0.132'
+        modules/icingadb/commandtransports:
+          icinga2:
+            host: 'icinga-master'
+            port: 5665
+            username: 'icingaweb'
+      icingaweb_secrets:
+        - name: 'icingaweb_db_password'
+          data: 'molecule-database-password'
+          target: 'resources.icingaweb_db.password'
+        - name: 'icingaweb_icingadb_password'
+          data: 'molecule-database-password'
+          target: 'resources.icingadb.password'
+        - name: 'icingaweb_redis_password'
+          data: 'molecule-redis-password'
+          target: 'modules/icingadb/redis.redis1.password'
+        - name: 'icingaweb_api_password'
+          data: 'molecule-api-password'
+          target: 'modules/icingadb/commandtransports.icinga2.password'
+        - name: 'icingaweb_admin_password'
+          data: 'molecule-admin-password'
+          target: 'passwords.icingaweb2.icingaadmin'
+    # side_effect changes the level of the log, config.ini changes and Icinga Web has to restart
+    side_effect:
+      config:
+        config:
+          logging:
+            level: 'WARNING'
+    expect:
+      ip: '10.89.0.130'
+      home: '/srv/icingaweb'
+      quadlet:
+        - 'IP6=fd00:89::130'
+        - 'Label=traefik.enable=true'
+        - 'Volume=/srv/icingaweb/data:/data'
+        - 'Environment=ICINGAWEB_SERIALIZER_COMPAT=0'
+        - 'Secret=icingaweb-resources,type=mount,target=/data/etc/icingaweb2/resources.ini,uid=33,gid=33,mode=0400'
+        - 'Secret=icingaweb-modules-icingadb-redis,type=mount,target=/data/etc/icingaweb2/modules/icingadb/redis.ini,uid=33,gid=33,mode=0400'
+        - 'Secret=icingaweb-modules-icingadb-commandtransports,type=mount,target=/data/etc/icingaweb2/modules/icingadb/commandtransports.ini,uid=33,gid=33,mode=0400'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      quadlet_absent: [ 'icingaweb.resources', 'icingaweb.modules', '/etc/timezone' ]
+      secret_files: [ 'resources', 'modules/icingadb/redis', 'modules/icingadb/commandtransports' ]
+      files:
+        config: [ '[logging]', 'log = "php"', 'level = "WARNING"' ]
+        roles: [ '[Viewers]', 'users = "viewer"', 'icingadb/filter/objects = "host.name=molecule*"' ]
+      secrets: [ 'molecule-database-password', 'molecule-admin-password', 'molecule-redis-password', 'molecule-api-password' ]
