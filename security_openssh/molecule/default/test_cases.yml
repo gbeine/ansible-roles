@@ -1,0 +1,97 @@
+---
+# Network created by container_podman in prepare.yml
+security_openssh__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+security_openssh__test_image: 'lscr.io/linuxserver/openssh-server:latest'
+security_openssh__test_quadlet_path: '/etc/containers/systemd/openssh.container'
+security_openssh__test_config_path: '/opt/openssh/config/sshd/sshd_config.d/ansible.conf'
+# The key pair created in prepare.yml, converge.yml adds the public key as PUBLIC_KEY to the environment
+security_openssh__test_key: '/root/.ssh/molecule_ed25519'
+
+security_openssh__test_cases:
+
+  # Only the mandatory variables, the user linuxserver.io on port 2222
+  - name: 'molecule-openssh-default'
+    role_vars:
+      openssh_home: '/opt/openssh'
+      openssh_ip: '10.89.0.120'
+      openssh_network: 'podman-molecule'
+      openssh_hostname: 'openssh-default'
+      openssh_timezone: 'Europe/Berlin'
+      openssh_environment: {}
+    expect:
+      ip: '10.89.0.120'
+      ip6: ~
+      user: 'linuxserver.io'
+      port: 2222
+      uid: 1000
+      sudo_password: ~
+      config: []
+      sshd:
+        - 'port 2222'
+        - 'passwordauthentication no'
+      quadlet:
+        - 'Volume=/opt/openssh/config:/config'
+        - 'PublishPort=2222:2222'
+
+  # IPv6, labels, another user and port, sudo with the password as file and options of sshd
+  - name: 'molecule-openssh'
+    role_vars:
+      openssh_home: '/opt/openssh'
+      openssh_ip: '10.89.0.121'
+      openssh_ipv6: 'fd00:89::121'
+      openssh_network: 'podman-molecule'
+      openssh_hostname: 'openssh-molecule'
+      openssh_timezone: 'Europe/Berlin'
+      openssh_labels:
+        traefik.enable: 'false'
+      openssh_environment:
+        USER_NAME: 'molecule'
+        LISTEN_PORT: 2022
+        SUDO_ACCESS: true
+        UMASK: '027'
+      openssh_secrets:
+        - name: 'openssh_user_password'
+          data: 'molecule-user-password'
+          target: 'USER_PASSWORD'
+      openssh_config:
+        ClientAliveInterval: 30
+        AllowTcpForwarding: false
+        AllowUsers: [ 'molecule' ]
+    # side_effect changes an option of sshd, the file of sshd_config.d changes and OpenSSH has to restart
+    side_effect:
+      config:
+        ClientAliveInterval: 60
+        AllowTcpForwarding: false
+        AllowUsers: [ 'molecule' ]
+    expect:
+      ip: '10.89.0.121'
+      ip6: 'fd00:89::121'
+      user: 'molecule'
+      port: 2022
+      uid: 1000
+      sudo_password: 'molecule-user-password'
+      config:
+        - 'AllowTcpForwarding no'
+        - 'AllowUsers molecule'
+        - 'ClientAliveInterval 60'
+      sshd:
+        - 'port 2022'
+        - 'passwordauthentication no'
+        - 'clientaliveinterval 60'
+        - 'allowtcpforwarding no'
+        - 'allowusers molecule'
+      quadlet:
+        - 'Volume=/opt/openssh/config:/config'
+        - 'PublishPort=2022:2022'
+        - 'Label=traefik.enable=false'
+        - 'Secret=openssh_user_password,type=mount,target=/run/secrets/openssh_user_password'
+        - 'Environment=USER_PASSWORD_FILE=/run/secrets/openssh_user_password'
+        - 'Environment=SUDO_ACCESS=true'

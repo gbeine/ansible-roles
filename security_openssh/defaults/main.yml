@@ -11,37 +11,126 @@ security_openssh__ipv6: "{{ openssh_ipv6 }}"
 security_openssh__network: "{{ openssh_network | mandatory }}"
 security_openssh__hostname: "{{ openssh_hostname | mandatory }}"
 security_openssh__timezone: "{{ openssh_timezone | mandatory }}"
+security_openssh__labels: "{{ openssh_labels }}"
 
-security_openssh__public_port: "{{ openssh_public_port | default(security_openssh__port) }}"
+security_openssh__version: "{{ openssh_version | default('latest') }}"
 
-security_openssh__public_key: "{{ openssh_public_key | mandatory }}"
-security_openssh__user_name: "{{ openssh_user_name | default('linuxserver.io') }}"
+security_openssh__container: "{{ security_openssh__podman_container_default | combine(openssh_container | default({})) }}"
 
-security_openssh__volumes: "{{ security_openssh__volumes_default + openssh_volumes | default([]) }}"
-security_openssh__container: "{{ security_openssh__podman_container_default }}"
+# The configuration of the image, PUBLIC_KEY is mandatory, e.g. USER_NAME, LISTEN_PORT, SUDO_ACCESS and PASSWORD_ACCESS
+security_openssh__environment: "{{ security_openssh__environment_default | combine(openssh_environment | default({})) }}"
+
+# Secrets with name, data and target, USER_PASSWORD is mounted as file
+security_openssh__secrets: "{{ openssh_secrets | default([]) }}"
+
+# Options of sshd written to a file of sshd_config.d
+security_openssh__config: "{{ security_openssh__config_default | combine(openssh_config | default({})) }}"
 
 security_openssh__autoupdate_enabled: "{{ openssh_autoupdate_enabled | default(false) }}"
+security_openssh__autoupdate_schedule: "{{ openssh_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-security_openssh__uid: 1000
-security_openssh__gid: "{{ security_openssh__uid }}"
+security_openssh__environment_default:
+  TZ: "{{ security_openssh__timezone }}"
+  PUID: 1000
+  PGID: 1000
 
-security_openssh__port: 2222
+security_openssh__config_default: {}
+
+# The options of openssh_config, the default is empty, so the role checks that it is a dictionary
+security_openssh__config_custom: "{{ openssh_config | default({}) }}"
+
+# The init scripts set the user USER_NAME to PUID and PGID and own /config by it
+security_openssh__uid: "{{ security_openssh__environment.PUID | default(1000) }}"
+security_openssh__gid: "{{ security_openssh__environment.PGID | default(1000) }}"
+security_openssh__user_name: "{{ security_openssh__environment.USER_NAME | default('linuxserver.io', true) }}"
+security_openssh__port: "{{ security_openssh__environment.LISTEN_PORT | default(2222, true) }}"
+
+security_openssh__environment_required: [ 'PUBLIC_KEY' ]
+
+# The image reads these values as booleans, only true enables them
+security_openssh__environment_booleans: [ 'SUDO_ACCESS', 'PASSWORD_ACCESS', 'LOG_STDOUT' ]
+security_openssh__environment_numbers: [ 'PUID', 'PGID', 'LISTEN_PORT' ]
+security_openssh__user_name_pattern: '^[a-z_][a-z0-9._-]*$'
+security_openssh__umask_pattern: '^0?[0-7]{3}$'
+
+security_openssh__secrets_dir: '/run/secrets'
+
+# The secrets mounted as files, the image reads the target from the file variable (init-openssh-server-config)
+security_openssh__secret_files:
+  USER_PASSWORD: 'USER_PASSWORD_FILE'
+
+# The targets of the secrets, they must not be set in openssh_environment
+security_openssh__secret_variables: "{{ security_openssh__secret_files.keys() | list }}"
+
+# Generated from root/etc/s6-overlay/s6-rc.d/*/run of docker-openssh-server (commit 3465807) and the base image
+# with the file variable of the secret, without DOCKER_MODS, it downloads code at the start of the container
+security_openssh__environment_allowed:
+  - 'TZ'
+  - 'PUID'
+  - 'PGID'
+  - 'UMASK'
+  - 'USER_NAME'
+  - 'PUBLIC_KEY'
+  - 'PUBLIC_KEY_FILE'
+  - 'PUBLIC_KEY_DIR'
+  - 'PUBLIC_KEY_URL'
+  - 'SUDO_ACCESS'
+  - 'PASSWORD_ACCESS'
+  - 'LOG_STDOUT'
+  - 'LISTEN_PORT'
+  # The file variable of the secret, set by the role
+  - 'USER_PASSWORD_FILE'
+
+# Options of sshd, the image sets the port and the password authentication from the environment,
+# the host keys and the PID file, Include and Match would break the file of sshd_config.d
+security_openssh__config_name_pattern: '^[A-Za-z]+$'
+security_openssh__config_role: [ 'port', 'passwordauthentication', 'pidfile', 'hostkey', 'include', 'match' ]
+
+security_openssh__config_dir: "{{ security_openssh__podman_data_dir }}/sshd"
+security_openssh__config_file: "{{ security_openssh__config_dir }}/sshd_config.d/ansible.conf"
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+security_openssh__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if security_openssh__secrets is sequence and security_openssh__secrets is not string and security_openssh__secrets is not mapping -%}
+  {%-   for secret in security_openssh__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in security_openssh__secret_files -%}
+  {%-     set _ = environment.update({ security_openssh__secret_files[secret.target]: security_openssh__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# The environment of the container, booleans in lower case, the image only accepts true
+security_openssh__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in security_openssh__environment.items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment | combine(security_openssh__environment_secrets_files) }}
+
+# The podman secrets of openssh_secrets, entries without name or target are left out, the validation of the secrets reports them
+security_openssh__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- if security_openssh__secrets is sequence and security_openssh__secrets is not string and security_openssh__secrets is not mapping -%}
+  {%-   for secret in security_openssh__secrets if secret is mapping and secret.name is defined and secret.target is defined -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ security_openssh__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ secrets }}
 
 security_openssh__podman_name: 'openssh'
 security_openssh__podman_image: 'lscr.io/linuxserver/openssh-server'
-security_openssh__podman_tag: 'latest'
+security_openssh__podman_tag: "{{ security_openssh__version }}"
 
 security_openssh__podman_home: "{{ security_openssh__home }}"
 security_openssh__podman_data_dir: "{{ security_openssh__podman_home }}/config"
 
-security_openssh__volumes_default:
-  - '/etc/localtime:/etc/localtime:ro'
-  - '/etc/timezone:/etc/timezone:ro'
-  - "{{ security_openssh__podman_data_dir }}:/config"
+# The image installs openssh-server-pam, sshd is /usr/sbin/sshd.pam
+security_openssh__sshd: '/usr/sbin/sshd.pam'
 
 security_openssh__podman_container_default:
   name: "{{ security_openssh__podman_name }}"
@@ -51,12 +140,13 @@ security_openssh__podman_container_default:
   ipv6: "{{ security_openssh__ipv6 | default(omit) }}"
   network: "{{ security_openssh__network }}"
   timezone: "{{ security_openssh__timezone }}"
-  environment:
-    PUID: "{{ security_openssh__uid }}"
-    PGID: "{{ security_openssh__gid }}"
-    TZ: "{{ security_openssh__timezone }}"
-    PUBLIC_KEY: "{{ security_openssh__public_key }}"
-    USER_NAME: "{{ security_openssh__user_name }}"
+  # Set with openssh_environment and openssh_secrets, merged over the default
+  environment: "{{ security_openssh__environment_container }}"
+  labels: "{{ security_openssh__labels | default(omit) }}"
+  secrets: "{{ security_openssh__podman_secrets if security_openssh__podman_secrets | length > 0 else omit }}"
+  # openssh_container.publish replaces the list completely
   publish:
-   - "{{ security_openssh__public_port }}:{{ security_openssh__port }}"
-  volumes: "{{ security_openssh__volumes }}"
+    - "{{ security_openssh__port }}:{{ security_openssh__port }}"
+  # openssh_container.volumes replaces the list completely
+  volumes:
+    - "{{ security_openssh__podman_data_dir }}:/config"

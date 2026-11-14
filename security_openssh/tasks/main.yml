@@ -1,33 +1,224 @@
 ---
 
-- name: 'Deploy OpenSSH container'
-  tags: [ 'security_openssh' ]
+- name: 'Deploy OpenSSH'
+  tags: [ 'security', 'security_openssh' ]
   block:
 
-    - name: 'Create OpenSSH directories'
+    # A failing template in the variables (e.g. an unknown filter or openssh_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - security_openssh__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_openssh__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_openssh__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = security_openssh__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('openssh_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('openssh_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of openssh_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The options are lines of a file of sshd_config.d, sshd itself checks them before the file is replaced
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_openssh__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_openssh__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = security_openssh__config_custom -%}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('openssh_config has to be a dictionary of the options of sshd.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(names=[], role=[], values=[], lines=[]) -%}
+          {%-   for key, value in config.items() -%}
+          {%-     if key is not string or key is not match(security_openssh__config_name_pattern) -%}
+          {%-       set ns.names = ns.names + [ key | string ] -%}
+          {%-     elif key | lower in security_openssh__config_role -%}
+          {%-       set ns.role = ns.role + [ key ] -%}
+          {%-     endif -%}
+          {%-     set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-     if value is mapping or items | select('mapping') | list | length > 0
+                     or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+          {%-       set ns.values = ns.values + [ key | string ] -%}
+          {%-     elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-       set ns.lines = ns.lines + [ key | string ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.names | length > 0 -%}
+          {%-     set _ = errors.append('The options of openssh_config are names of letters: ' ~ (ns.names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.role | length > 0 -%}
+          {%-     set _ = errors.append('These options are set by the image or the role and must not be set in openssh_config: ' ~ (ns.role | join(', '))
+                                        ~ ', the port is LISTEN_PORT and the password authentication PASSWORD_ACCESS of openssh_environment.') -%}
+          {%-   endif -%}
+          {%-   if ns.values | length > 0 -%}
+          {%-     set _ = errors.append('The values of openssh_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of openssh_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # PUBLIC_KEY is mandatory, the password is a secret
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_openssh__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_openssh__targets: "{{ security_openssh__secrets | map(attribute='target') | list }}"
+        security_openssh__environment_missing: >-
+          {{ security_openssh__environment_required
+             | reject('in', security_openssh__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
+        security_openssh__secrets_in_environment: >-
+          {{ (security_openssh__targets + security_openssh__secret_variables + security_openssh__secret_files.values() | list)
+             | select('in', security_openssh__environment.keys() | list) | unique | list }}
+        security_openssh__secrets_lines: >-
+          {{ security_openssh__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        security_openssh__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_openssh__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('OpenSSH needs the environment variables ' ~ (security_openssh__environment_required | join(', ')) ~ ', missing or empty: ' ~ (security_openssh__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_openssh__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in openssh_environment: ' ~ (security_openssh__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_openssh__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (security_openssh__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_openssh__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_openssh__errors: >-
+          {%- set errors = [] -%}
+          {%- set environment = security_openssh__environment -%}
+          {%- set ns = namespace(booleans=[], numbers=[], lines=[]) -%}
+          {%- for key, value in environment.items() if value is not none -%}
+          {%-   if key in security_openssh__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif key in security_openssh__environment_numbers and (value is boolean or (value | string) is not match('^[0-9]+$')) -%}
+          {%-     set ns.numbers = ns.numbers + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.numbers | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be numbers: ' ~ (ns.numbers | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_openssh__user_name is not match(security_openssh__user_name_pattern) or security_openssh__user_name == 'root' -%}
+          {%-   set _ = errors.append('USER_NAME has to be a name of a user of lower case letters, digits, ., _ and -, not root.') -%}
+          {%- endif -%}
+          {%- if environment.UMASK is defined and (environment.UMASK | string) is not match(security_openssh__umask_pattern) -%}
+          {%-   set _ = errors.append('UMASK has to be an octal umask, e.g. 022.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging openssh_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_openssh__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_openssh__environment_unknown: >-
+          {{ (security_openssh__container.environment | default({})).keys() | reject('in', security_openssh__environment_allowed) | list }}
+        security_openssh__secrets_unknown: >-
+          {{ security_openssh__secrets | map(attribute='target') | reject('in', security_openssh__secret_variables) | list }}
+        security_openssh__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_openssh__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (security_openssh__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_openssh__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (security_openssh__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (security_openssh__environment_allowed | join(', ')) ~ ' and the secrets '
+                                    ~ (security_openssh__secret_variables | join(', ')) ~ ', the options of sshd are set with openssh_config.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The owners and modes the init scripts of the image set at every start
+    - name: 'Create the directories of OpenSSH'
       ansible.builtin.file:
-        dest: "{{ item }}"
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ security_openssh__gid }}"
+        mode: "{{ item.mode }}"
         state: 'directory'
-        owner: "{{ security_openssh__uid }}"
-        group: "{{ security_openssh__uid }}"
-        mode: '700'
-      with_items:
-        - "{{ security_openssh__podman_data_dir }}"
+      loop:
+        - { path: "{{ security_openssh__podman_data_dir }}", owner: "{{ security_openssh__uid }}", mode: '0700' }
+        - { path: "{{ security_openssh__config_dir }}", owner: 'root', mode: '0750' }
+        - { path: "{{ security_openssh__config_dir }}/sshd_config.d", owner: 'root', mode: '0750' }
+      loop_control:
+        label: "{{ item.path }}"
+
+    # sshd checks the options in a container of the image without network before the file is replaced
+    - name: 'Generate the configuration of sshd'
+      ansible.builtin.template:
+        src: 'sshd_config.j2'
+        dest: "{{ security_openssh__config_file }}"
+        owner: 'root'
+        group: "{{ security_openssh__gid }}"
+        mode: '0640'
+        validate: >-
+          podman run --rm --network none --entrypoint /bin/sh --volume %s:/tmp/ansible.conf:ro {{ security_openssh__container.image }}
+          -c 'ssh-keygen -A >/dev/null && {{ security_openssh__sshd }} -t -f /tmp/ansible.conf'
+      register: 'security_openssh__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ security_openssh__secrets }}"
+      register: 'security_openssh__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ security_openssh__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[security_openssh__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ security_openssh__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -38,6 +229,7 @@
         ip6: "{{ security_openssh__container.ipv6 | default(omit) }}"
         network: "{{ security_openssh__container.network }}"
         timezone: "{{ security_openssh__container.timezone }}"
+        command: "{{ security_openssh__container.command | default(omit) }}"
         env: "{{ security_openssh__container.environment | default(omit) }}"
         etc_hosts: "{{ security_openssh__container.etc_hosts | default(omit) }}"
         expose: "{{ security_openssh__container.expose | default(omit) }}"
@@ -46,29 +238,87 @@
         secrets: "{{ security_openssh__container.secrets | default(omit) }}"
         volume: "{{ security_openssh__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if security_openssh__container.requires is defined %}
+          Requires={{ security_openssh__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'security_openssh__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ security_openssh__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start OpenSSH'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ security_openssh__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if security_openssh__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            security_openssh__running: >-
+              {{ (ansible_facts.services[security_openssh__container.name + '.service'].state | default('')) == 'running' }}
+            security_openssh__restart: >-
+              {{ security_openssh__running | bool
+                 and (security_openssh__secrets_result is changed
+                      or security_openssh__config_result is changed
+                      or security_openssh__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ security_openssh__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'security_openssh__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ security_openssh__container.name ~ ' did not start' ] + security_openssh__start_journal.stdout_lines }}"
+
+    # The init scripts create the user and the host keys before sshd sends its banner
+    - name: 'Wait for OpenSSH'
+      ansible.builtin.wait_for:
+        host: "{{ security_openssh__container.ip }}"
+        port: "{{ security_openssh__port | int }}"
+        search_regex: 'SSH-'
+        timeout: 120
+      register: 'security_openssh__ready'
+      failed_when: false
       when: 'not ansible_check_mode'
 
+    - name: 'Read the log of OpenSSH'
+      when:
+        - not ansible_check_mode
+        # failed_when: false keeps the message of the timeout
+        - (security_openssh__ready.msg | default('')) is search('Timeout')
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ security_openssh__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'security_openssh__journal'
+      changed_when: false
+
+    - name: 'Assert that OpenSSH answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__journal is skipped
+        fail_msg: "{{ security_openssh__journal.stdout_lines | default([]) }}"
+        quiet: true
+
     - name: 'Enable autoupdate on container'
-      when: 'security_openssh__autoupdate_enabled'
-      include_role:
+      when: 'security_openssh__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ security_openssh__container.name }}"
         container_image: "{{ security_openssh__container.image }}"
+        container_schedule: "{{ security_openssh__autoupdate_schedule }}"

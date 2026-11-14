@@ -1,0 +1,41 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ security_openssh__test_network }}"
+    podman_default_network: "{{ security_openssh__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify logs in with the ssh client of the VM
+    - name: 'Install the ssh client'
+      ansible.builtin.apt:
+        name: [ 'openssh-client' ]
+        state: 'present'
+        update_cache: true
+
+    - name: 'Create the key pair of the test'
+      ansible.builtin.command:
+        argv: [ 'ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'molecule', '-f', "{{ security_openssh__test_key }}" ]
+        creates: "{{ security_openssh__test_key }}"
+
+    # The role checks the configuration of sshd with the image
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ security_openssh__test_image }}"
+      register: 'security_openssh__test_pull'
+      until: security_openssh__test_pull is succeeded
+      retries: 5
+      delay: 30

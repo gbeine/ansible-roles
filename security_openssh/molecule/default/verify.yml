@@ -1,0 +1,156 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_openssh__test_case: "{{ security_openssh__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_openssh__expect: "{{ security_openssh__test_case.expect }}"
+    security_openssh__test_ssh:
+      - 'ssh'
+      - '-i'
+      - "{{ security_openssh__test_key }}"
+      - '-p'
+      - "{{ security_openssh__expect.port }}"
+      - '-o'
+      - 'StrictHostKeyChecking=no'
+      - '-o'
+      - 'UserKnownHostsFile=/dev/null'
+      - '-o'
+      - 'ConnectTimeout=10'
+      - "{{ security_openssh__expect.user }}@{{ security_openssh__expect.ip }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ security_openssh__test_quadlet_path }}"
+      register: 'security_openssh__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + security_openssh__test_image) in security_openssh__test_quadlet_lines
+          - ('IP=' + security_openssh__expect.ip) in security_openssh__test_quadlet_lines
+          - security_openssh__expect.ip6 is none or ('IP6=' + security_openssh__expect.ip6) in security_openssh__test_quadlet_lines
+          - security_openssh__expect.ip6 is not none or security_openssh__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Environment=TZ=' + security_openssh__test_case.role_vars.openssh_timezone) in security_openssh__test_quadlet_lines
+          - security_openssh__expect.quadlet | reject('in', security_openssh__test_quadlet_lines) | list | length == 0
+          # The time zone is set with TZ, /etc/localtime is not mounted
+          - security_openssh__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          # The password is a file, never part of the environment
+          - security_openssh__test_quadlet_lines | select('match', 'Environment=USER_PASSWORD=') | list | length == 0
+        fail_msg: "{{ security_openssh__test_quadlet_lines | to_json }}"
+      vars:
+        security_openssh__test_quadlet_lines: "{{ (security_openssh__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'openssh' ]
+      register: 'security_openssh__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'openssh' ]
+      register: 'security_openssh__test_env'
+      changed_when: false
+
+    - name: 'Read the directories and the configuration of sshd'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ security_openssh__test_case.role_vars.openssh_home }}/config"
+        - "{{ security_openssh__test_case.role_vars.openssh_home }}/config/sshd"
+        - "{{ security_openssh__test_case.role_vars.openssh_home }}/config/sshd/sshd_config.d"
+        - "{{ security_openssh__test_config_path }}"
+      register: 'security_openssh__test_files'
+
+    - name: 'Read the configuration of sshd'
+      ansible.builtin.slurp:
+        src: "{{ security_openssh__test_config_path }}"
+      register: 'security_openssh__test_config'
+
+    # The owners and modes the init scripts of the image set at every start
+    - name: 'Assert the service, the environment, the owners and the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__test_service.stdout == 'active'
+          - ('TZ=' + security_openssh__test_case.role_vars.openssh_timezone) in security_openssh__test_environment
+          - security_openssh__test_environment | select('match', 'USER_PASSWORD=') | list | length == 0
+          - security_openssh__test_owners == [ [ security_openssh__expect.uid, security_openssh__expect.uid, '0700' ],
+                                               [ 0, security_openssh__expect.uid, '0750' ],
+                                               [ 0, security_openssh__expect.uid, '0750' ],
+                                               [ 0, security_openssh__expect.uid, '0640' ] ]
+          - security_openssh__test_config_lines == security_openssh__expect.config
+        fail_msg: >-
+          service {{ security_openssh__test_service.stdout }}, environment {{ security_openssh__test_environment }},
+          owners {{ security_openssh__test_owners }}, configuration {{ security_openssh__test_config_lines }}
+      vars:
+        security_openssh__test_environment: "{{ security_openssh__test_env.stdout | from_json }}"
+        # [ uid, gid, mode ] of every directory and of the configuration
+        security_openssh__test_owners: >-
+          {{ security_openssh__test_files.results | map(attribute='stat') | map(attribute='uid')
+             | zip(security_openssh__test_files.results | map(attribute='stat') | map(attribute='gid'),
+                   security_openssh__test_files.results | map(attribute='stat') | map(attribute='mode'))
+             | map('list') | list }}
+        security_openssh__test_config_lines: >-
+          {{ (security_openssh__test_config.content | b64decode).splitlines() | reject('match', '#') | reject('equalto', '') | list }}
+
+    - name: 'Wait until sshd answers'
+      ansible.builtin.wait_for:
+        host: "{{ security_openssh__expect.ip }}"
+        port: "{{ security_openssh__expect.port }}"
+        search_regex: 'SSH-'
+        timeout: 60
+
+    # The effective configuration, sshd needs a host key to print it
+    - name: 'Read the effective configuration of sshd'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'openssh', '/usr/sbin/sshd.pam', '-T', '-f', '/config/sshd/sshd_config', '-h', '/config/ssh_host_keys/ssh_host_ed25519_key' ]
+      register: 'security_openssh__test_sshd'
+      changed_when: false
+
+    - name: 'Log in with the key'
+      ansible.builtin.command:
+        argv: "{{ security_openssh__test_ssh + [ '-o', 'BatchMode=yes', 'id', '-un' ] }}"
+      register: 'security_openssh__test_login'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Log in with a password'
+      ansible.builtin.command:
+        argv: "{{ security_openssh__test_ssh + [ '-o', 'BatchMode=yes', '-o', 'PubkeyAuthentication=no', '-o', 'PreferredAuthentications=password', 'true' ] }}"
+      register: 'security_openssh__test_password_login'
+      changed_when: false
+      failed_when: false
+
+    # sudo asks for the password read from the file of the secret, it is passed on stdin
+    - name: 'Run sudo with the password of the user'
+      when: security_openssh__expect.sudo_password is not none
+      ansible.builtin.command:
+        argv: "{{ security_openssh__test_ssh + [ \"sudo -S -p '' id -u\" ] }}"
+        stdin: "{{ security_openssh__expect.sudo_password }}"
+      register: 'security_openssh__test_sudo'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the effective configuration, the login with the key and sudo'
+      ansible.builtin.assert:
+        that:
+          - security_openssh__expect.sshd | reject('in', security_openssh__test_sshd.stdout_lines) | list | length == 0
+          - security_openssh__test_login.rc == 0
+          - security_openssh__test_login.stdout == security_openssh__expect.user
+          - security_openssh__test_password_login.rc != 0
+          - security_openssh__test_password_login.stderr is search('Permission denied')
+          - security_openssh__expect.sudo_password is none or (security_openssh__test_sudo.rc == 0 and security_openssh__test_sudo.stdout == '0')
+        fail_msg: >-
+          sshd {{ security_openssh__expect.sshd | reject('in', security_openssh__test_sshd.stdout_lines) | list }},
+          login {{ security_openssh__test_login.rc }} {{ security_openssh__test_login.stdout }} {{ security_openssh__test_login.stderr }},
+          password login {{ security_openssh__test_password_login.rc }} {{ security_openssh__test_password_login.stderr }},
+          sudo {{ security_openssh__test_sudo.rc | default('') }} {{ security_openssh__test_sudo.stdout | default('') }} {{ security_openssh__test_sudo.stderr | default('') }}
