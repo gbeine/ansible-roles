@@ -8,9 +8,9 @@
 
   vars:
     bootstrap_debian__test_case: "{{ bootstrap_debian__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
-    bootstrap_debian__test_checked_files:
-      - '/etc/ssh/sshd_config.d/00-ansible.conf'
-      - '/etc/ssh/ssh_config.d/00-ansible.conf'
+    bootstrap_debian__test_checked_files: >-
+      {{ [ '/etc/ssh/sshd_config.d/00-ansible.conf', '/etc/ssh/ssh_config.d/00-ansible.conf' ]
+         + ([ bootstrap_debian__test_case.expect.udev.checked_file ] if bootstrap_debian__test_case.expect.udev is defined else []) }}
 
   roles:
     - role: 'common_filters'
@@ -118,20 +118,57 @@
           message: 'an option unknown to sshd'
           search: 'failed to validate|Bad configuration option'
 
-    - name: 'Change an option of sshd'
+    - name: 'Run bootstrap_debian with debian_udev_rules not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_udev_rules: [ 'SUBSYSTEM=="net", NAME="molecule1"' ]
+        bootstrap_debian__test_invalid:
+          message: 'debian_udev_rules not a dictionary'
+          search: '^debian_udev_rules has to be a dictionary of files and their rules\.$'
+
+    - name: 'Run bootstrap_debian with invalid files and rules in debian_udev_rules (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_udev_rules:
+          molecule-net.rules: [ 'SUBSYSTEM=="net", NAME="molecule1"' ]
+          90-molecule-string: 'SUBSYSTEM=="net", NAME="molecule1"'
+          90-molecule-lines: [ "SUBSYSTEM==\"net\",\nNAME=\"molecule1\"" ]
+        bootstrap_debian__test_invalid:
+          message: 'invalid files and rules in debian_udev_rules'
+          search: >-
+            ^The files of debian_udev_rules are names without \.rules, starting with two digits and a dash: molecule-net\.rules\.
+            The rules of debian_udev_rules have to be lists of rules, one line each: 90-molecule-string, 90-molecule-lines\.$
+
+    # The rules are valid for the role, udevadm verify rejects the rule before the file is replaced
+    - name: 'Run bootstrap_debian with a rule udev rejects (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_udev_rules:
+          90-molecule-net: [ 'SUBSYSTEM=="net", NAME' ]
+        bootstrap_debian__test_invalid:
+          message: 'a rule udev rejects'
+          search: 'Invalid key/value pair'
+
+    - name: 'Change an option of sshd and a udev rule'
       when: bootstrap_debian__test_case.side_effect is defined
       block:
 
-        - name: 'Set the changed options of sshd'
+        - name: 'Set the changed options of sshd and the changed udev rules'
           ansible.builtin.set_fact:
             debian_sshd: "{{ debian_sshd | combine({ 'config': bootstrap_debian__test_case.side_effect.config }, recursive=true) }}"
+            debian_udev_rules: "{{ debian_udev_rules | combine(bootstrap_debian__test_case.side_effect.udev_rules) }}"
 
-        - name: 'Run bootstrap_debian with the changed options of sshd'
+        - name: 'Run bootstrap_debian with the changed options of sshd and the changed udev rules'
           ansible.builtin.include_role:
             name: 'bootstrap_debian'
 
-        - name: 'Assert the changed options of sshd and the reload'
+        - name: 'Assert the changed options of sshd and udev rules and the reloads'
           ansible.builtin.assert:
             that:
               - bootstrap_debian__sshd_config_result is changed
-            fail_msg: "options of sshd changed: {{ bootstrap_debian__sshd_config_result is changed }}"
+              - bootstrap_debian__udev_write_result is changed
+              - bootstrap_debian__udev_reload_result is changed
+            fail_msg: >-
+              options of sshd changed: {{ bootstrap_debian__sshd_config_result is changed }},
+              udev rules changed: {{ bootstrap_debian__udev_write_result is changed }},
+              udev reloaded: {{ bootstrap_debian__udev_reload_result is changed }}

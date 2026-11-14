@@ -10,7 +10,7 @@
 ```
 
 - The role starts with `apt-get update` and the installation of the packages required by the apt modules, followed by the repositories and storage, so packages can rely on mounted directories.
-- Repositories, packages, timezone and hostname/hosts are always configured. Storage and accounts run when their lists are not empty. Networking, PKI, NTP, SSH, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_ntp_enable`, `debian_sshd_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files or replace installed services.
+- Repositories, packages, timezone and hostname/hosts are always configured. Storage, udev rules and accounts run when their lists are not empty. Networking, PKI, NTP, SSH, logrotate, unattended upgrades and mail have to be enabled with `debian_networking_enable`, `debian_pki_enable`, `debian_ntp_enable`, `debian_sshd_enable`, `debian_logrotate_enable`, `debian_unattended_upgrades_enable` and `debian_mail_enable`, because they overwrite system configuration files or replace installed services.
 - With `debian_cloud_manage_etc_hosts: true` (default `false`) cloud-init manages `/etc/hosts` (`manage_etc_hosts: True` in `/etc/cloud/cloud.cfg.d/99-manage_etc_hosts.cfg`) and the role does not generate it.
 - `debian_hostname` is mandatory.
 - `debian_repositories` replaces the default Debian repositories completely. The entries are written as deb822 files to `/etc/apt/sources.list.d/<name>.sources`:
@@ -173,6 +173,30 @@ debian_mail_aliases:
 - This replaces the client part of the former role `mail_msmtp`: `msmtp_accounts` is now `debian_mail_accounts` with the same keys,
   `msmtp_aliases` is now `debian_mail_aliases` (a mapping, written to `/etc/aliases`), `msmtp_auto_from`, `msmtp_maildomain` and `msmtp_syslog` are now `debian_mail_auto_from`, `debian_mail_maildomain` and `debian_mail_syslog`.
 
+### udev rules
+
+`debian_udev_rules` maps files of `/etc/udev/rules.d` (without `.rules`) to their rules, one line per rule:
+
+```yaml
+debian_udev_rules:
+  # Mounts the storage when the LUKS device is opened
+  99-md0-crypt-automount:
+    - 'SUBSYSTEM=="block", ENV{DM_NAME}=="md0_crypt", TAG+="systemd", ENV{SYSTEMD_WANTS}+="mnt-storage.mount"'
+  # A fixed name of the interface with this address
+  70-persistent-net:
+    - 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="96:00:00:8a:e8:db", NAME="eth0"'
+  # Removes /etc/udev/rules.d/80-old.rules
+  80-old: []
+```
+
+- The names start with two digits and a dash, udev reads the files in this order. The rules are written as they are, with `# Ansible managed` as first line.
+- An empty list removes the file, files that are not listed are not changed.
+- The role checks the names and that the rules are lists of strings without line breaks before any change,
+  on Debian 13 `udevadm verify` checks the rules before the file is replaced (Debian 12 has no `udevadm verify`).
+- If a file changed or was removed, the role reloads the rules with `udevadm control --reload`.
+  The rules apply to the next events of the devices, e.g. when the LUKS device is opened or at the next boot,
+  devices that already exist are not changed, a renamed interface gets its name at the next boot.
+
 ### Tests
 
 The molecule scenario `default` runs the role in [tart](https://tart.run) VMs on a macOS controller.
@@ -182,7 +206,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Tested |
 |---|---|
 | `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults, no NTP drop-in without `debian_ntp_enable`, SSH without options (empty drop-ins, sshd listens on all addresses) |
-| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), udev rules (renaming an interface by its address, removal of a file with an empty list), logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 
@@ -199,11 +223,16 @@ MOLECULE_TART_IMAGE='debian' molecule test
 
 For SSH, `prepare` stores the checksums of `sshd_config` and `ssh_config`, creates the file of the former role `security_ssh`,
 on `molecule-bootstrap-debian-full` a key pair and a user `stale` with authorized keys, `converge` adds the public key to `debian_sshd.authorized_keys`.
-`side_effect` runs the role with an unknown key in `debian_sshd`, `config` not a dictionary, `Match` and `Host`, invalid options, authorized keys of an unknown user
-and an option unknown to sshd and checks that it fails with the expected message and the drop-ins are unchanged (tasks marked `expect ERROR`),
-then it changes an option of sshd on `molecule-bootstrap-debian-full`.
+`side_effect` runs the role with an unknown key in `debian_sshd`, `config` not a dictionary, `Match` and `Host`, invalid options, authorized keys of an unknown user,
+an option unknown to sshd, `debian_udev_rules` not a dictionary, invalid file names and rules and a rule `udevadm verify` rejects
+and checks that it fails with the expected message and the drop-ins and the udev rule are unchanged (tasks marked `expect ERROR`),
+then it changes an option of sshd and a udev rule on `molecule-bootstrap-debian-full`, both files change, sshd and udev are reloaded.
 `verify` checks the drop-ins (empty without options), that `sshd_config` and `ssh_config` are unchanged, that the file of `security_ssh` is removed,
 the effective options of sshd (`sshd -T`) and of the client (`ssh -G`), the authorized keys and logs in with the key.
+
+For udev, `prepare` creates `90-molecule-stale.rules`, the role removes it with an empty list.
+`verify` checks the content and the mode of the files, the removed file and the rules with `udevadm verify`,
+then it creates a dummy interface with the address of the rule `90-molecule-net`, the kernel names it `dummyN`, udev renames it to `molecule1`.
 
 For mail, `prepare` starts an SMTP sink (`python3-aiosmtpd`) on `127.0.0.1:2525` as transient unit `molecule-smtp-sink`, `verify` sends a mail to `root` with `mail` and checks in the journal of the sink that it was delivered, then sends a mail with `msmtp -v` and checks in the SMTP dialog that the alias of `root` is used as recipient.
 

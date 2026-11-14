@@ -331,6 +331,89 @@
           ansible.builtin.command: 'logrotate -d /etc/logrotate.conf'
           changed_when: false
 
+    - name: 'Verify udev rules'
+      when: bootstrap_debian__expect.udev is defined
+      block:
+
+        - name: 'Read the udev rules'
+          ansible.builtin.slurp:
+            src: "/etc/udev/rules.d/{{ item }}.rules"
+          loop: "{{ bootstrap_debian__expect.udev.files.keys() | list }}"
+          register: 'bootstrap_debian__test_udev_files'
+
+        - name: 'Assert the udev rules'
+          ansible.builtin.assert:
+            that:
+              - (item.content | b64decode).splitlines() == [ '# Ansible managed' ] + bootstrap_debian__expect.udev.files[item.item]
+            fail_msg: "{{ item.item }}: {{ item.content | b64decode }}"
+          loop: "{{ bootstrap_debian__test_udev_files.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: 'Read the state of the udev rules and of the removed files'
+          ansible.builtin.stat:
+            path: "/etc/udev/rules.d/{{ item }}.rules"
+          loop: "{{ bootstrap_debian__expect.udev.files.keys() | list + bootstrap_debian__expect.udev.removed }}"
+          register: 'bootstrap_debian__test_udev_stat'
+
+        - name: 'Assert the modes of the udev rules and the removed files'
+          ansible.builtin.assert:
+            that:
+              - bootstrap_debian__test_udev_present | map(attribute='stat.mode', default='') | reject('eq', '0644') | list | length == 0
+              - bootstrap_debian__test_udev_absent | selectattr('stat.exists') | list | length == 0
+            fail_msg: >-
+              {{ bootstrap_debian__test_udev_stat.results | map(attribute='item')
+                 | zip(bootstrap_debian__test_udev_stat.results | map(attribute='stat') | map(attribute='mode', default='absent'))
+                 | map('join', ': ') | join(', ') }}
+          vars:
+            bootstrap_debian__test_udev_present: >-
+              {{ bootstrap_debian__test_udev_stat.results | selectattr('item', 'in', bootstrap_debian__expect.udev.files.keys() | list) | list }}
+            bootstrap_debian__test_udev_absent: >-
+              {{ bootstrap_debian__test_udev_stat.results | selectattr('item', 'in', bootstrap_debian__expect.udev.removed) | list }}
+
+        - name: 'Check the udev rules with udev'
+          ansible.builtin.command:
+            argv: "{{ [ 'udevadm', 'verify', '--no-style' ] + bootstrap_debian__test_udev_files.results | map(attribute='source') | list }}"
+          changed_when: false
+
+        # The kernel names the interface dummyN, the rule renames it by its address
+        - name: 'Rename an interface with the udev rule'
+          block:
+
+            - name: 'Create an interface with the address of the udev rule'
+              ansible.builtin.command:
+                argv: [ 'ip', 'link', 'add', 'address', "{{ bootstrap_debian__expect.udev.interface.address }}", 'type', 'dummy' ]
+              changed_when: true
+
+            - name: 'Wait for udev'
+              ansible.builtin.command: 'udevadm settle'
+              changed_when: false
+
+            - name: 'Read the interfaces'
+              ansible.builtin.command:
+                argv: [ 'ip', '-o', 'link', 'show' ]
+              register: 'bootstrap_debian__test_udev_links'
+              changed_when: false
+
+            - name: 'Assert the interface is renamed by the udev rule'
+              ansible.builtin.assert:
+                that:
+                  - bootstrap_debian__test_udev_link | length == 1
+                  - >-
+                    bootstrap_debian__test_udev_link[0] is search('^[0-9]+: ' ~ bootstrap_debian__expect.udev.interface.name ~ ':')
+                fail_msg: "{{ bootstrap_debian__test_udev_links.stdout }}"
+              vars:
+                bootstrap_debian__test_udev_link: >-
+                  {{ bootstrap_debian__test_udev_links.stdout_lines | select('search', bootstrap_debian__expect.udev.interface.address) | list }}
+
+          always:
+
+            - name: 'Remove the interface with the address of the udev rule'
+              ansible.builtin.shell: >-
+                ip -o link show | grep -F '{{ bootstrap_debian__expect.udev.interface.address }}' | cut -d: -f2 | tr -d ' ' | cut -d@ -f1
+                | xargs -r -n1 ip link del
+              changed_when: true
+
     - name: 'Verify unattended upgrades'
       when: bootstrap_debian__expect.unattended_upgrades is defined
       block:

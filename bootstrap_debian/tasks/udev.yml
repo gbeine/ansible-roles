@@ -1,0 +1,64 @@
+---
+
+- name: 'Validate the udev rules'
+  ansible.builtin.assert:
+    that:
+      - bootstrap_debian__udev_errors | length == 0
+    # Only the failing checks are reported
+    fail_msg: "{{ bootstrap_debian__udev_errors | join(' ') }}"
+    quiet: true
+  vars:
+    bootstrap_debian__udev_errors: >-
+      {%- set errors = [] -%}
+      {%- set rules = bootstrap_debian__udev_rules -%}
+      {%- if rules is not mapping -%}
+      {%-   set _ = errors.append('debian_udev_rules has to be a dictionary of files and their rules.') -%}
+      {%- else -%}
+      {%-   set names = rules.keys() | map('string') | reject('match', bootstrap_debian__udev_name_pattern) | list -%}
+      {%-   if names | length > 0 -%}
+      {%-     set _ = errors.append('The files of debian_udev_rules are names without .rules, starting with two digits and a dash: ' ~ (names | join(', ')) ~ '.') -%}
+      {%-   endif -%}
+      {%-   set invalid = [] -%}
+      {%-   for name, lines in rules.items() -%}
+      {%-     if lines is string or lines is mapping or lines is not iterable
+                 or lines | reject('string') | list | length > 0
+                 or lines | select('search', '\n|\r') | list | length > 0
+                 or lines | map('trim') | select('eq', '') | list | length > 0 -%}
+      {%-       set _ = invalid.append(name) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if invalid | length > 0 -%}
+      {%-     set _ = errors.append('The rules of debian_udev_rules have to be lists of rules, one line each: ' ~ (invalid | join(', ')) ~ '.') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ errors }}
+
+# udevadm verify checks the rules before the file is replaced (Debian 13 and later)
+- name: 'Write the udev rules'
+  ansible.builtin.copy:
+    dest: "{{ bootstrap_debian__udev_rules_dir }}/{{ item.key }}.rules"
+    content: "{{ ([ '# Ansible managed' ] + item.value) | join('\n') }}\n"
+    owner: 'root'
+    group: 'root'
+    mode: '644'
+    validate: "{{ bootstrap_debian__udev_validate | default(omit) }}"
+  loop: "{{ bootstrap_debian__udev_rules | dict2items | rejectattr('value', 'eq', []) | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: 'bootstrap_debian__udev_write_result'
+
+- name: 'Remove the udev rules with an empty list'
+  ansible.builtin.file:
+    path: "{{ bootstrap_debian__udev_rules_dir }}/{{ item.key }}.rules"
+    state: 'absent'
+  loop: "{{ bootstrap_debian__udev_rules | dict2items | selectattr('value', 'eq', []) | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: 'bootstrap_debian__udev_remove_result'
+
+# The rules apply to the next events of the devices, e.g. at the next boot, running devices are not changed
+- name: 'Reload the udev rules'
+  ansible.builtin.command: 'udevadm control --reload'
+  when: bootstrap_debian__udev_write_result is changed or bootstrap_debian__udev_remove_result is changed
+  register: 'bootstrap_debian__udev_reload_result'
+  changed_when: true
