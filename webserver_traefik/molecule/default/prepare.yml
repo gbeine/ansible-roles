@@ -7,10 +7,12 @@
     - 'test_cases.yml'
 
   vars:
+    webserver_traefik__test_case: "{{ webserver_traefik__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     podman_networks:
       - "{{ webserver_traefik__test_network }}"
     podman_default_network: "{{ webserver_traefik__test_network.name }}"
-    podman_socket_enabled: false
+    # The docker provider of Traefik uses the podman socket
+    podman_socket_enabled: true
     podman_cleanup_enabled: false
 
   roles:
@@ -19,14 +21,37 @@
 
   tasks:
 
-    - name: 'Ensure /etc/timezone exists'
-      ansible.builtin.copy:
-        dest: '/etc/timezone'
-        content: |
-          Etc/UTC
-        force: false
-        mode: '644'
-
-    - name: 'Pull the traefik image, so the first start of the service does not time out'
+    - name: 'Pull the images, so the first start of the services does not time out'
       containers.podman.podman_image:
-        name: "{{ webserver_traefik__test_image }}"
+        name: "{{ item }}"
+      loop:
+        - "{{ webserver_traefik__test_image }}"
+        - "{{ webserver_traefik__test_whoami.image }}"
+      register: 'webserver_traefik__test_pull'
+      until: webserver_traefik__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Start the backend of the routes'
+      containers.podman.podman_container:
+        name: "{{ webserver_traefik__test_whoami.name }}"
+        image: "{{ webserver_traefik__test_whoami.image }}"
+        network: "{{ webserver_traefik__test_network.name }}"
+        ip: "{{ webserver_traefik__test_whoami.ip }}"
+        label: "{{ webserver_traefik__test_whoami.labels }}"
+        state: 'started'
+
+    # The role removes the file with null in traefik_dynamic
+    - name: 'Create the directory of the dynamic configuration'
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__test_case.expect.home }}/dynamic"
+        mode: '0755'
+        state: 'directory'
+
+    - name: 'Create a dynamic configuration that is removed'
+      ansible.builtin.copy:
+        dest: "{{ webserver_traefik__test_case.expect.home }}/dynamic/{{ item }}.yml"
+        content: |
+          http: {}
+        mode: '0644'
+      loop: "{{ webserver_traefik__test_case.expect.dynamic_absent }}"

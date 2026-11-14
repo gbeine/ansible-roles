@@ -1,22 +1,167 @@
 ---
 
 - name: 'Install Traefik'
-  tags: [ 'webserver_traefik' ]
+  tags: [ 'webserver', 'webserver_traefik' ]
   block:
+
+    # A failing template in the variables (e.g. traefik_container or traefik_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - webserver_traefik__container | length > 0
+          - webserver_traefik__config | length > 0
+          - webserver_traefik__config_file | length > 0
+        quiet: true
+
+    # The options are written to traefik.yml, Traefik itself checks their values at the start
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_traefik__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_traefik__former: >-
+          {{ webserver_traefik__former_variables | dict2items
+             | selectattr('key', 'in', query('ansible.builtin.varnames', '^(' ~ (webserver_traefik__former_variables.keys() | join('|')) ~ ')$')) | list }}
+        webserver_traefik__errors: >-
+          {#- The macro writes <kind>|<option>; per failure -#}
+          {%- macro check(value, schema, path) -%}
+          {%-   for key, item in value.items() -%}
+          {%-     set name = path ~ key -%}
+          {%-     set type = schema[key] if key in schema else schema['*'] | default(none) -%}
+          {%-     if type is none -%}
+          {{-       'unknown|' ~ name ~ ';' -}}
+          {%-     elif item is none or type == 'any' -%}
+          {%-     elif type is mapping -%}
+          {%-       if item is mapping -%}
+          {{-         check(item, type, name ~ '.') -}}
+          {%-       else -%}
+          {{-         'types|' ~ name ~ ';' -}}
+          {%-       endif -%}
+          {%-     elif type is sequence and type is not string -%}
+          {%-       if item is not sequence or item is string or item is mapping or item | reject('mapping') | list | length > 0 -%}
+          {{-         'types|' ~ name ~ ';' -}}
+          {%-       else -%}
+          {%-         for entry in item -%}
+          {{-           check(entry, type[0], name ~ '[' ~ loop.index0 ~ '].') -}}
+          {%-         endfor -%}
+          {%-       endif -%}
+          {%-     elif (type == 'bool' and item is not boolean)
+                       or (type == 'int' and (item is not number or item is boolean))
+                       or (type in [ 'string', 'duration' ] and item is not string and (item is not number or item is boolean))
+                       or (type == 'list' and (item is not sequence or item is string or item is mapping
+                                               or item | select('mapping') | list | length > 0
+                                               or item | reject('string') | select('sequence') | list | length > 0))
+                       or (type == 'map' and (item is not mapping
+                                              or item.values() | select('mapping') | list | length > 0
+                                              or item.values() | reject('string') | select('sequence') | list | length > 0)) -%}
+          {{-       'types|' ~ name ~ ';' -}}
+          {%-     elif (([ item ] if item is string else (item.values() | list if item is mapping else (item if item is sequence else [])))
+                        | select('string') | select('search', '[\r\n]') | list | length > 0) -%}
+          {{-       'lines|' ~ name ~ ';' -}}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endmacro -%}
+          {%- set errors = [] -%}
+          {%- if webserver_traefik__former | length > 0 -%}
+          {%-   set _ = errors.append(webserver_traefik__former | map(attribute='value') | first ~ ': '
+                                      ~ (webserver_traefik__former | map(attribute='key') | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if webserver_traefik__config_custom is not mapping -%}
+          {%-   set _ = errors.append('traefik_config has to be a dictionary of the options of traefik.yml.') -%}
+          {%- else -%}
+          {%-   set result = { 'unknown': [], 'types': [], 'lines': [] } -%}
+          {%-   for line in (check(webserver_traefik__config, webserver_traefik__config_schema, '') | string).split(';') | select -%}
+          {%-     set _ = result[line.split('|')[0]].append(line.split('|', 1)[1]) -%}
+          {%-   endfor -%}
+          {%-   if result.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in traefik_config: ' ~ (result.unknown | join(', ')) ~ ', allowed are the options of traefik.yml (webserver_traefik__config_schema).') -%}
+          {%-   endif -%}
+          {%-   if result.types | length > 0 -%}
+          {%-     set _ = errors.append('These options of traefik_config have the wrong type (webserver_traefik__config_schema): ' ~ (result.types | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if result.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of traefik_config must not contain line breaks: ' ~ (result.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set dynamic = webserver_traefik__dynamic -%}
+          {%- if dynamic is not mapping -%}
+          {%-   set _ = errors.append('traefik_dynamic has to be a dictionary of files and their content.') -%}
+          {%- else -%}
+          {%-   set names = dynamic.keys() | map('string') | reject('match', webserver_traefik__dynamic_name_pattern) | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The files of traefik_dynamic are names without .yml of letters, digits, _, . and -: ' ~ (names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set contents = dynamic | dict2items | rejectattr('value', 'none') | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
+          {%-   if contents | length > 0 -%}
+          {%-     set _ = errors.append('The content of a file of traefik_dynamic is a dictionary or null: ' ~ (contents | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The options of Traefik could be set with TRAEFIK_*, Traefik ignores them if traefik.yml exists,
+    # without traefik_environment there is nothing to check
+    - name: 'Validate the environment'
+      when: webserver_traefik__environment is defined
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_traefik__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_traefik__errors: >-
+          {%- set errors = [] -%}
+          {%- set environment = webserver_traefik__environment -%}
+          {%- if environment is not mapping -%}
+          {%-   set _ = errors.append('traefik_environment has to be a dictionary of variables.') -%}
+          {%- else -%}
+          {%-   set options = environment.keys() | map('string') | select('match', '^TRAEFIK_') | list -%}
+          {%-   if options | length > 0 -%}
+          {%-     set _ = errors.append('The options of Traefik are set with traefik_config now: ' ~ (options | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set lines = environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging traefik_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      when: webserver_traefik__container.environment | default(none) is mapping
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ webserver_traefik__unknown | join(', ') }}.
+          Allowed are the variables {{ webserver_traefik__environment_allowed | join(', ') }}, the options of Traefik are set with traefik_config.
+        quiet: true
+      vars:
+        webserver_traefik__unknown: >-
+          {{ webserver_traefik__container.environment.keys() | map('string') | reject('in', webserver_traefik__environment_allowed) | list }}
 
     - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ item }}"
+        path: "{{ item }}"
+        mode: '0755'
         state: 'directory'
-      with_items:
+      loop:
         - "{{ webserver_traefik__podman_home }}"
         - "{{ webserver_traefik__podman_config_dir }}"
 
-    - name: 'Generate configuration'
+    - name: 'Generate traefik.yml'
       ansible.builtin.copy:
-        content: "{{ webserver_traefik__config | to_nice_yaml(indent=2) }}"
+        content: "{{ webserver_traefik__config_file | to_nice_yaml(indent=2) }}"
         dest: "{{ webserver_traefik__podman_config_file }}"
-      when: 'not podman___update_mode | bool and webserver_traefik__config | length > 0'
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
       register: 'webserver_traefik__config_result'
 
     - name: 'Ensure acme.json exists with correct permissions'
@@ -26,35 +171,28 @@
         force: false
         mode: '0600'
 
-    - name: 'Generate dynamic configuration'
+    # Traefik watches the directory with providers.file.watch, the files need no restart
+    - name: 'Generate the dynamic configuration'
       ansible.builtin.copy:
         content: "{{ item.value | to_nice_yaml(indent=2) }}"
         dest: "{{ webserver_traefik__podman_config_dir }}/{{ item.key }}.yml"
-      when: 'not podman___update_mode | bool and webserver_traefik__dynamic | length > 0'
-      with_dict: "{{ webserver_traefik__dynamic }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      loop: "{{ webserver_traefik__dynamic | dict2items | rejectattr('value', 'none') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-    - name: 'Create secrets'
-      no_log: true
-      containers.podman.podman_secret:
-        state: 'present'
-        name: "{{ item.name }}"
-        data: "{{ item.data }}"
-      with_items: "{{ webserver_traefik__secrets }}"
+    - name: 'Remove the dynamic configuration set to null'
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__podman_config_dir }}/{{ item.key }}.yml"
+        state: 'absent'
+      loop: "{{ webserver_traefik__dynamic | dict2items | selectattr('value', 'none') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ webserver_traefik__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[webserver_traefik__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ webserver_traefik__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -65,44 +203,82 @@
         ip6: "{{ webserver_traefik__container.ipv6 | default(omit) }}"
         network: "{{ webserver_traefik__container.network }}"
         timezone: "{{ webserver_traefik__container.timezone }}"
-        etc_hosts: "{{ webserver_traefik__container.etc_hosts | default(omit) }}"
+        command: "{{ webserver_traefik__container.command | default(omit) }}"
         env: "{{ webserver_traefik__container.environment | default(omit) }}"
+        etc_hosts: "{{ webserver_traefik__container.etc_hosts | default(omit) }}"
         expose: "{{ webserver_traefik__container.expose | default(omit) }}"
         label: "{{ webserver_traefik__container.labels | default(omit) }}"
         publish: "{{ webserver_traefik__container.publish | default(omit) }}"
-        secrets: "{{ webserver_traefik__container.secrets | default(omit) }}"
         volume: "{{ webserver_traefik__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if webserver_traefik__container.requires is defined %}
+          Requires={{ webserver_traefik__container.requires | join(' ') }}
+          {% endif %}
+          {% if webserver_traefik__container.wants is defined %}
+          Wants={{ webserver_traefik__container.wants | join(' ') }}
+          {% endif %}
+          {% if webserver_traefik__container.after is defined %}
+          After={{ webserver_traefik__container.after | join(' ') }}
+          {% endif %}
+          {% if webserver_traefik__container.part_of is defined %}
+          PartOf={{ webserver_traefik__container.part_of | join(' ') }}
+          {% endif %}
+          {% if webserver_traefik__container.binds_to is defined %}
+          BindsTo={{ webserver_traefik__container.binds_to | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
       register: 'webserver_traefik__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ webserver_traefik__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if webserver_traefik__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        webserver_traefik__running: >-
-          {{ (ansible_facts.services[webserver_traefik__container.name + '.service'].state | default('')) == 'running' }}
-        webserver_traefik__restart: >-
-          {{ podman___update_mode | bool
-             or (webserver_traefik__running | bool
-                 and (webserver_traefik__config_result is changed or webserver_traefik__quadlet_result is changed)) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal,
+    # Traefik opens the entry points only with a valid traefik.yml (it logs nothing below the level of log.level)
+    - name: 'Start Traefik'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ webserver_traefik__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if webserver_traefik__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            webserver_traefik__running: >-
+              {{ (ansible_facts.services[webserver_traefik__container.name + '.service'].state | default('')) == 'running' }}
+            webserver_traefik__restart: >-
+              {{ webserver_traefik__running | bool
+                 and (webserver_traefik__config_result is changed or webserver_traefik__quadlet_result is changed) }}
+
+        - name: 'Wait for the entry points of Traefik'
+          ansible.builtin.wait_for:
+            host: "{{ webserver_traefik__container.ip }}"
+            port: "{{ item }}"
+            timeout: 60
+          loop: "{{ webserver_traefik__entrypoint_ports }}"
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ webserver_traefik__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'webserver_traefik__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ webserver_traefik__container.name ~ ' did not start' ] + webserver_traefik__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
-      when: 'webserver_traefik__autoupdate_enabled'
-      include_role:
+      when: 'webserver_traefik__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ webserver_traefik__container.name }}"

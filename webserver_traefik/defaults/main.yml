@@ -13,9 +13,20 @@ webserver_traefik__hostname: "{{ traefik_hostname | mandatory }}"
 webserver_traefik__timezone: "{{ traefik_timezone | mandatory }}"
 webserver_traefik__labels: "{{ traefik_labels }}"
 
-webserver_traefik__config: "{{ traefik_config | default(webserver_traefik__config_default) }}"
-webserver_traefik__secrets: "{{ traefik_secrets | default([]) }}"
+# Route to the containers of the host with the docker provider through the podman socket
+webserver_traefik__provider_podman: "{{ traefik_provider_podman | default(true) }}"
+
+# Options of traefik.yml, merged recursively over the default, null removes an option or a section
+webserver_traefik__config: >-
+  {{ webserver_traefik__config_default
+     | combine(webserver_traefik__config_provider_podman if webserver_traefik__provider_podman | bool else {}, recursive=true)
+     | combine(traefik_config | default({}), recursive=true) }}
+
+# Files of the dynamic configuration in <traefik_home>/dynamic, name without .yml and content, null removes the file
 webserver_traefik__dynamic: "{{ traefik_dynamic | default({}) }}"
+
+# Variables of the image that are no options of Traefik, the options are set with traefik_config
+webserver_traefik__environment: "{{ traefik_environment }}"
 
 webserver_traefik__container: "{{ webserver_traefik__podman_container_default | combine(traefik_container | default({})) }}"
 
@@ -23,8 +34,81 @@ webserver_traefik__autoupdate_enabled: "{{ traefik_autoupdate_enabled | default(
 webserver_traefik__autoupdate_schedule: "{{ traefik_autoupdate_schedule | default('*-*-* 00/4:00:00') }}"
 
 #
-# podman defaults
+# Defaults - do not change
 #
+
+webserver_traefik__config_default:
+  api:
+    dashboard: false
+    insecure: false
+    debug: false
+  entryPoints:
+    web:
+      address: ':80'
+      http:
+        redirections:
+          entryPoint:
+            to: 'websecure'
+            scheme: 'https'
+    websecure:
+      address: ':443'
+  serversTransport:
+    insecureSkipVerify: false
+  log:
+    level: 'WARN'
+
+webserver_traefik__config_provider_podman:
+  providers:
+    docker:
+      endpoint: 'unix:///var/run/docker.sock'
+      exposedByDefault: false
+
+# The options of traefik_config, the role checks that it is a dictionary
+webserver_traefik__config_custom: "{{ traefik_config | default({}) }}"
+
+# The content of traefik.yml: the configuration without the options and sections set to null
+webserver_traefik__config_file: >-
+  {%- macro clean(value) -%}
+  {%-   if value is mapping -%}
+  {{-     '{' -}}
+  {%-     for key, item in value.items() if item is not none -%}
+  {{-       key | string | to_json }}: {{ clean(item) }}{{ ', ' if not loop.last -}}
+  {%-     endfor -%}
+  {{-     '}' -}}
+  {%-   elif value is sequence and value is not string -%}
+  {{-     '[' -}}
+  {%-     for item in value if item is not none -%}
+  {{-       clean(item) }}{{ ', ' if not loop.last -}}
+  {%-     endfor -%}
+  {{-     ']' -}}
+  {%-   else -%}
+  {{-     value | to_json -}}
+  {%-   endif -%}
+  {%- endmacro -%}
+  {{ clean(webserver_traefik__config) | from_json }}
+
+# The TCP ports of the entry points on all addresses (':80' or ':8080/tcp'), Traefik opens them after loading traefik.yml
+webserver_traefik__entrypoint_ports: >-
+  {{ webserver_traefik__config_file.entryPoints | default({}) | dict2items | map(attribute='value') | select('mapping')
+     | map(attribute='address', default='') | map('string') | select('match', '^:[0-9]+(/tcp)?$')
+     | map('regex_replace', '^[^:]*:([0-9]+).*$', '\1') | map('int') | list }}
+
+webserver_traefik__former_variables:
+  traefik_secrets: 'Traefik has no secrets, the options are set in traefik_config'
+
+webserver_traefik__dynamic_name_pattern: '^[A-Za-z0-9_.-]+$'
+
+# The variables of lego v5.6.0 (the ACME client of Traefik v3.7.19) read by the library, the options of Traefik are set with traefik_config
+webserver_traefik__environment_allowed:
+  - 'LEGO_CA_CERTIFICATES'
+  - 'LEGO_CA_SERVER_NAME'
+  - 'LEGO_CA_SYSTEM_CERT_POOL'
+  - 'LEGO_DISABLE_CNAME_SUPPORT'
+  - 'LEGO_EXPERIMENTAL_DNS_TCP_ONLY'
+  - 'LEGO_DEBUG_CLIENT_VERBOSE_ERROR'
+  - 'LEGO_DEBUG_DNS_API_HTTP_CLIENT'
+
+webserver_traefik__podman_socket: '/run/podman/podman.sock'
 
 webserver_traefik__podman_name: 'traefik'
 webserver_traefik__podman_image: 'docker.io/traefik'
@@ -43,43 +127,562 @@ webserver_traefik__podman_container_default:
   ipv6: "{{ webserver_traefik__ipv6 | default(omit) }}"
   network: "{{ webserver_traefik__network }}"
   timezone: "{{ webserver_traefik__timezone }}"
+  environment: "{{ webserver_traefik__environment | default(omit) }}"
   labels: "{{ webserver_traefik__labels | default(omit) }}"
   publish:
     - '80:80'
     - '[::]:80:80'
     - '443:443'
     - '[::]:443:443'
-  secrets: >-
-    {{ (webserver_traefik__secrets | map(attribute='name') | zip(webserver_traefik__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
-      if (webserver_traefik__secrets | default([]) | length > 0)
-      else omit }}
-  volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
-    - "{{ webserver_traefik__podman_config_dir }}:/etc/traefik/dynamic:ro"
-    - "{{ webserver_traefik__podman_config_file }}:/etc/traefik/traefik.yml:ro"
-    - "{{ webserver_traefik__podman_acme_file }}:/etc/traefik/acme.json"
+  # traefik_container.volumes replaces the list completely
+  volumes: >-
+    {{ [ webserver_traefik__podman_config_dir + ':/etc/traefik/dynamic:ro',
+         webserver_traefik__podman_config_file + ':/etc/traefik/traefik.yml:ro',
+         webserver_traefik__podman_acme_file + ':/etc/traefik/acme.json' ]
+       + ([ webserver_traefik__podman_socket + ':/var/run/docker.sock:ro' ] if webserver_traefik__provider_podman | bool else []) }}
 
-webserver_traefik__config_default:
-  api:
-    dashboard: false
-    insecure: false
-    debug: false
+# Generated from docs/content/reference/static-configuration/file.yaml of Traefik v3.7.19, update with new versions of Traefik:
+# the options of traefik.yml with their types, bool, int (a number), duration (a string like 10s or a number of seconds),
+# string (also a number), list (a list of strings or numbers), map (free keys with strings, numbers or booleans), any (not checked),
+# '*' stands for the free names of entry points, certificate resolvers and plugins, a list with one entry is a list of dictionaries
+webserver_traefik__config_schema:
+  global:
+    checkNewVersion: 'bool'
+    sendAnonymousUsage: 'bool'
+  core:
+    defaultRuleSyntax: 'string'
+  serversTransport:
+    insecureSkipVerify: 'bool'
+    rootCAs: 'list'
+    maxIdleConnsPerHost: 'int'
+    forwardingTimeouts:
+      dialTimeout: 'duration'
+      responseHeaderTimeout: 'duration'
+      idleConnTimeout: 'duration'
+    spiffe:
+      ids: 'list'
+      trustDomain: 'string'
+  tcpServersTransport:
+    dialKeepAlive: 'duration'
+    dialTimeout: 'duration'
+    terminationDelay: 'duration'
+    tls:
+      insecureSkipVerify: 'bool'
+      rootCAs: 'list'
+      spiffe:
+        ids: 'list'
+        trustDomain: 'string'
   entryPoints:
-    web:
-      address: ":80"
+    '*':
+      address: 'string'
+      allowACMEByPass: 'bool'
+      reusePort: 'bool'
+      asDefault: 'bool'
+      transport:
+        lifeCycle:
+          requestAcceptGraceTimeout: 'duration'
+          graceTimeOut: 'duration'
+        respondingTimeouts:
+          readTimeout: 'duration'
+          writeTimeout: 'duration'
+          idleTimeout: 'duration'
+        keepAliveMaxTime: 'duration'
+        keepAliveMaxRequests: 'int'
+      proxyProtocol:
+        insecure: 'bool'
+        trustedIPs: 'list'
+      forwardedHeaders:
+        insecure: 'bool'
+        trustedIPs: 'list'
+        connection: 'list'
       http:
         redirections:
           entryPoint:
-            to: "websecure"
-            scheme: "https"
-    websecure:
-      address: ":443"
-  serversTransport:
-    insecureSkipVerify: false
-  log:
-    level: 'WARN'
+            to: 'string'
+            scheme: 'string'
+            permanent: 'bool'
+            priority: 'int'
+        middlewares: 'list'
+        tls:
+          options: 'string'
+          certResolver: 'string'
+          domains:
+          - main: 'string'
+            sans: 'list'
+        encodedCharacters:
+          allowEncodedSlash: 'bool'
+          allowEncodedBackSlash: 'bool'
+          allowEncodedNullCharacter: 'bool'
+          allowEncodedSemicolon: 'bool'
+          allowEncodedPercent: 'bool'
+          allowEncodedQuestionMark: 'bool'
+          allowEncodedHash: 'bool'
+        encodeQuerySemicolons: 'bool'
+        sanitizePath: 'bool'
+        maxHeaderBytes: 'int'
+        maxHeaderValueCount: 'int'
+        aliasHeadersStrategy: 'string'
+        underscoreHeadersStrategy: 'string'
+      http2:
+        maxConcurrentStreams: 'int'
+      http3:
+        advertisedPort: 'int'
+      udp:
+        timeout: 'duration'
+      observability:
+        accessLogs: 'bool'
+        metrics: 'bool'
+        tracing: 'bool'
+        traceVerbosity: 'string'
   providers:
+    providersThrottleDuration: 'duration'
     docker:
-      endpoint: "unix:///var/run/docker.sock"
-      exposedByDefault: false
+      exposedByDefault: 'bool'
+      constraints: 'string'
+      allowEmptyServices: 'bool'
+      network: 'string'
+      useBindPortIP: 'bool'
+      watch: 'bool'
+      defaultRule: 'string'
+      username: 'string'
+      password: 'string'
+      endpoint: 'string'
+      tls:
+        ca: 'string'
+        cert: 'string'
+        key: 'string'
+        insecureSkipVerify: 'bool'
+      httpClientTimeout: 'duration'
+    swarm:
+      exposedByDefault: 'bool'
+      constraints: 'string'
+      allowEmptyServices: 'bool'
+      network: 'string'
+      useBindPortIP: 'bool'
+      watch: 'bool'
+      defaultRule: 'string'
+      username: 'string'
+      password: 'string'
+      endpoint: 'string'
+      tls:
+        ca: 'string'
+        cert: 'string'
+        key: 'string'
+        insecureSkipVerify: 'bool'
+      httpClientTimeout: 'duration'
+      refreshSeconds: 'duration'
+    file:
+      directory: 'string'
+      watch: 'bool'
+      filename: 'string'
+      debugLogGeneratedTemplate: 'bool'
+    kubernetesIngress:
+      endpoint: 'string'
+      token: 'string'
+      certAuthFilePath: 'string'
+      namespaces: 'list'
+      labelSelector: 'string'
+      ingressClass: 'string'
+      ingressEndpoint:
+        ip: 'string'
+        hostname: 'string'
+        publishedService: 'string'
+      throttleDuration: 'duration'
+      allowEmptyServices: 'bool'
+      allowExternalNameServices: 'bool'
+      disableIngressClassLookup: 'bool'
+      disableClusterScopeResources: 'bool'
+      nativeLBByDefault: 'bool'
+      strictPrefixMatching: 'bool'
+    kubernetesIngressNGINX:
+      endpoint: 'string'
+      token: 'string'
+      certAuthFilePath: 'string'
+      throttleDuration: 'duration'
+      watchNamespace: 'string'
+      watchNamespaceSelector: 'string'
+      ingressClass: 'string'
+      controllerClass: 'string'
+      watchIngressWithoutClass: 'bool'
+      ingressClassByName: 'bool'
+      publishService: 'string'
+      publishStatusAddress: 'list'
+      defaultBackendService: 'string'
+      disableSvcExternalName: 'bool'
+    kubernetesCRD:
+      endpoint: 'string'
+      token: 'string'
+      certAuthFilePath: 'string'
+      namespaces: 'list'
+      allowCrossNamespace: 'bool'
+      allowExternalNameServices: 'bool'
+      labelSelector: 'string'
+      ingressClass: 'string'
+      throttleDuration: 'duration'
+      allowEmptyServices: 'bool'
+      nativeLBByDefault: 'bool'
+      disableClusterScopeResources: 'bool'
+      defaultTLSResourcesNamespace: 'string'
+      safeNaming: 'bool'
+    kubernetesGateway:
+      endpoint: 'string'
+      token: 'string'
+      certAuthFilePath: 'string'
+      namespaces: 'list'
+      labelSelector: 'string'
+      throttleDuration: 'duration'
+      experimentalChannel: 'bool'
+      statusAddress:
+        ip: 'string'
+        hostname: 'string'
+        service:
+          name: 'string'
+          namespace: 'string'
+      nativeLBByDefault: 'bool'
+    rest:
+      insecure: 'bool'
+    consulCatalog:
+      constraints: 'string'
+      endpoint:
+        address: 'string'
+        scheme: 'string'
+        datacenter: 'string'
+        token: 'string'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        httpAuth:
+          username: 'string'
+          password: 'string'
+        endpointWaitTime: 'duration'
+      prefix: 'string'
+      refreshInterval: 'duration'
+      requireConsistent: 'bool'
+      stale: 'bool'
+      cache: 'bool'
+      exposedByDefault: 'bool'
+      defaultRule: 'string'
+      connectAware: 'bool'
+      connectByDefault: 'bool'
+      serviceName: 'string'
+      watch: 'bool'
+      strictChecks: 'list'
+      namespaces: 'list'
+    nomad:
+      defaultRule: 'string'
+      constraints: 'string'
+      endpoint:
+        address: 'string'
+        region: 'string'
+        token: 'string'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        endpointWaitTime: 'duration'
+      prefix: 'string'
+      stale: 'bool'
+      exposedByDefault: 'bool'
+      refreshInterval: 'duration'
+      allowEmptyServices: 'bool'
+      watch: 'bool'
+      throttleDuration: 'duration'
+      namespaces: 'list'
+    ecs:
+      constraints: 'string'
+      exposedByDefault: 'bool'
+      refreshSeconds: 'int'
+      defaultRule: 'string'
+      clusters: 'list'
+      autoDiscoverClusters: 'bool'
+      healthyTasksOnly: 'bool'
+      ecsAnywhere: 'bool'
+      region: 'string'
+      accessKeyID: 'string'
+      secretAccessKey: 'string'
+    consul:
+      rootKey: 'string'
+      endpoints: 'list'
+      token: 'string'
+      tls:
+        ca: 'string'
+        cert: 'string'
+        key: 'string'
+        insecureSkipVerify: 'bool'
+      namespaces: 'list'
+    etcd:
+      rootKey: 'string'
+      endpoints: 'list'
+      tls:
+        ca: 'string'
+        cert: 'string'
+        key: 'string'
+        insecureSkipVerify: 'bool'
+      username: 'string'
+      password: 'string'
+    zooKeeper:
+      rootKey: 'string'
+      endpoints: 'list'
+      username: 'string'
+      password: 'string'
+    redis:
+      rootKey: 'string'
+      endpoints: 'list'
+      tls:
+        ca: 'string'
+        cert: 'string'
+        key: 'string'
+        insecureSkipVerify: 'bool'
+      username: 'string'
+      password: 'string'
+      db: 'int'
+      sentinel:
+        masterName: 'string'
+        username: 'string'
+        password: 'string'
+        latencyStrategy: 'bool'
+        randomStrategy: 'bool'
+        replicaStrategy: 'bool'
+        useDisconnectedReplicas: 'bool'
+    http:
+      endpoint: 'string'
+      pollInterval: 'duration'
+      pollTimeout: 'duration'
+      headers: 'map'
+      tls:
+        ca: 'string'
+        cert: 'string'
+        key: 'string'
+        insecureSkipVerify: 'bool'
+      maxResponseBodySize: 'int'
+    plugin:
+      '*': 'any'
+  api:
+    basePath: 'string'
+    insecure: 'bool'
+    dashboard: 'bool'
+    debug: 'bool'
+    disableDashboardAd: 'bool'
+  metrics:
+    addInternals: 'bool'
+    prometheus:
+      buckets: 'list'
+      addEntryPointsLabels: 'bool'
+      addRoutersLabels: 'bool'
+      addServicesLabels: 'bool'
+      entryPoint: 'string'
+      manualRouting: 'bool'
+      headerLabels: 'map'
+    datadog:
+      address: 'string'
+      pushInterval: 'duration'
+      addEntryPointsLabels: 'bool'
+      addRoutersLabels: 'bool'
+      addServicesLabels: 'bool'
+      prefix: 'string'
+    statsD:
+      address: 'string'
+      pushInterval: 'duration'
+      addEntryPointsLabels: 'bool'
+      addRoutersLabels: 'bool'
+      addServicesLabels: 'bool'
+      prefix: 'string'
+    influxDB2:
+      address: 'string'
+      token: 'string'
+      pushInterval: 'duration'
+      org: 'string'
+      bucket: 'string'
+      addEntryPointsLabels: 'bool'
+      addRoutersLabels: 'bool'
+      addServicesLabels: 'bool'
+      additionalLabels: 'map'
+    otlp:
+      grpc:
+        endpoint: 'string'
+        insecure: 'bool'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+      http:
+        endpoint: 'string'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+      addEntryPointsLabels: 'bool'
+      addRoutersLabels: 'bool'
+      addServicesLabels: 'bool'
+      explicitBoundaries: 'list'
+      pushInterval: 'duration'
+      serviceName: 'string'
+      resourceAttributes: 'map'
+  ping:
+    entryPoint: 'string'
+    manualRouting: 'bool'
+    terminatingStatusCode: 'int'
+  log:
+    level: 'string'
+    format: 'string'
+    noColor: 'bool'
+    filePath: 'string'
+    maxSize: 'int'
+    maxAge: 'int'
+    maxBackups: 'int'
+    compress: 'bool'
+    otlp:
+      serviceName: 'string'
+      resourceAttributes: 'map'
+      grpc:
+        endpoint: 'string'
+        insecure: 'bool'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+      http:
+        endpoint: 'string'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+  accessLog:
+    filePath: 'string'
+    format: 'string'
+    filters:
+      statusCodes: 'list'
+      retryAttempts: 'bool'
+      minDuration: 'duration'
+    fields:
+      defaultMode: 'string'
+      names: 'map'
+      headers:
+        defaultMode: 'string'
+        names: 'map'
+    bufferingSize: 'int'
+    addInternals: 'bool'
+    otlp:
+      serviceName: 'string'
+      resourceAttributes: 'map'
+      grpc:
+        endpoint: 'string'
+        insecure: 'bool'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+      http:
+        endpoint: 'string'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+  tracing:
+    serviceName: 'string'
+    resourceAttributes: 'map'
+    capturedRequestHeaders: 'list'
+    capturedResponseHeaders: 'list'
+    safeQueryParams: 'list'
+    sampleRate: 'int'
+    addInternals: 'bool'
+    otlp:
+      grpc:
+        endpoint: 'string'
+        insecure: 'bool'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+      http:
+        endpoint: 'string'
+        tls:
+          ca: 'string'
+          cert: 'string'
+          key: 'string'
+          insecureSkipVerify: 'bool'
+        headers: 'map'
+    globalAttributes: 'map'
+  hostResolver:
+    cnameFlattening: 'bool'
+    resolvConfig: 'string'
+    resolvDepth: 'int'
+  certificatesResolvers:
+    '*':
+      acme:
+        email: 'string'
+        caServer: 'string'
+        preferredChain: 'string'
+        profile: 'string'
+        emailAddresses: 'list'
+        disableCommonName: 'bool'
+        storage: 'string'
+        keyType: 'string'
+        eab:
+          kid: 'string'
+          hmacEncoded: 'string'
+        certificatesDuration: 'int'
+        clientTimeout: 'duration'
+        clientResponseHeaderTimeout: 'duration'
+        caCertificates: 'list'
+        caSystemCertPool: 'bool'
+        caServerName: 'string'
+        dnsChallenge:
+          provider: 'string'
+          resolvers: 'list'
+          propagation:
+            disableChecks: 'bool'
+            disableANSChecks: 'bool'
+            requireAllRNS: 'bool'
+            delayBeforeChecks: 'duration'
+          delayBeforeCheck: 'duration'
+          disablePropagationCheck: 'bool'
+        httpChallenge:
+          entryPoint: 'string'
+          delay: 'duration'
+        tlsChallenge:
+          delay: 'duration'
+      tailscale: {}
+  experimental:
+    plugins:
+      '*':
+        moduleName: 'string'
+        version: 'string'
+        settings:
+          envs: 'list'
+          mounts: 'list'
+          useUnsafe: 'bool'
+    localPlugins:
+      '*':
+        moduleName: 'string'
+        settings:
+          envs: 'list'
+          mounts: 'list'
+          useUnsafe: 'bool'
+    abortOnPluginFailure: 'bool'
+    fastProxy:
+      debug: 'bool'
+    otlplogs: 'bool'
+    kubernetesIngressNGINX: 'bool'
+    kubernetesGateway: 'bool'
+  spiffe:
+    workloadAPIAddr: 'string'
+  ocsp:
+    responderOverrides: 'map'

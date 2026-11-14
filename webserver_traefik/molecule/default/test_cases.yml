@@ -10,10 +10,24 @@ webserver_traefik__test_network:
   ipv6_prefixlength: 64
 
 webserver_traefik__test_image: 'docker.io/traefik:v3'
+webserver_traefik__test_quadlet_path: '/etc/containers/systemd/traefik.container'
+
+# The backend of the routes, started in prepare.yml with the labels of the docker provider
+webserver_traefik__test_whoami:
+  name: 'molecule-whoami'
+  image: 'docker.io/traefik/whoami:latest'
+  ip: '10.89.0.20'
+  labels:
+    traefik.enable: 'true'
+    traefik.http.routers.whoami.rule: 'Host(`whoami.molecule`)'
+    traefik.http.routers.whoami.entrypoints: 'websecure'
+    traefik.http.routers.whoami.tls: 'true'
+    traefik.http.services.whoami.loadbalancer.server.port: '80'
 
 webserver_traefik__test_cases:
 
-  - name: 'molecule-traefik-ipv4-only'
+  # The mandatory values only, the docker provider routes to the labeled container through the podman socket
+  - name: 'molecule-traefik-default'
     role_vars:
       traefik_home: '/opt/traefik-molecule'
       traefik_ip: '10.89.0.10'
@@ -21,17 +35,108 @@ webserver_traefik__test_cases:
       traefik_hostname: 'traefik-molecule'
       traefik_timezone: 'Europe/Berlin'
     expect:
+      home: '/opt/traefik-molecule'
       ip: '10.89.0.10'
       ip6: ~
+      quadlet:
+        - 'Volume=/opt/traefik-molecule/dynamic:/etc/traefik/dynamic:ro'
+        - 'Volume=/opt/traefik-molecule/traefik.yml:/etc/traefik/traefik.yml:ro'
+        - 'Volume=/opt/traefik-molecule/acme.json:/etc/traefik/acme.json'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro'
+      quadlet_absent:
+        - '/etc/localtime'
+        - '/etc/timezone'
+        - 'Environment='
+        - 'Wants='
+      config:
+        log:
+          level: 'WARN'
+        serversTransport:
+          insecureSkipVerify: false
+        providers:
+          docker:
+            endpoint: 'unix:///var/run/docker.sock'
+            exposedByDefault: false
+      config_absent: []
+      dynamic: []
+      dynamic_absent: []
+      # Host header and the expected status of the requests on port 443
+      routes:
+        whoami.molecule: 200
+        unknown.molecule: 404
 
-  - name: 'molecule-traefik-ipv6'
+  # IPv6, the dynamic configuration instead of the docker provider, a removed section, environment and dependencies
+  - name: 'molecule-traefik'
     role_vars:
-      traefik_home: '/opt/traefik-molecule'
-      traefik_ip: '10.89.0.10'
-      traefik_ipv6: 'fd00:89::10'
+      traefik_home: '/srv/traefik-molecule'
+      traefik_ip: '10.89.0.11'
+      traefik_ipv6: 'fd00:89::11'
       traefik_network: 'podman-molecule'
       traefik_hostname: 'traefik-molecule'
       traefik_timezone: 'Europe/Berlin'
+      traefik_provider_podman: false
+      traefik_config:
+        serversTransport: ~
+        log:
+          level: 'DEBUG'
+        providers:
+          file:
+            directory: '/etc/traefik/dynamic'
+            watch: true
+      traefik_dynamic:
+        molecule:
+          http:
+            routers:
+              dynamic:
+                rule: 'Host(`dynamic.molecule`)'
+                entryPoints: [ 'websecure' ]
+                service: 'dynamic'
+                tls: {}
+            services:
+              dynamic:
+                loadBalancer:
+                  servers:
+                    - url: 'http://10.89.0.20:80'
+        # Created in prepare.yml, null removes the file
+        stale: ~
+      traefik_environment:
+        LEGO_DISABLE_CNAME_SUPPORT: 'true'
+      traefik_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+    # side_effect changes the log level, traefik.yml changes and Traefik is restarted
+    side_effect:
+      config:
+        log:
+          level: 'INFO'
     expect:
-      ip: '10.89.0.10'
-      ip6: 'fd00:89::10'
+      home: '/srv/traefik-molecule'
+      ip: '10.89.0.11'
+      ip6: 'fd00:89::11'
+      quadlet:
+        - 'Volume=/srv/traefik-molecule/dynamic:/etc/traefik/dynamic:ro'
+        - 'Volume=/srv/traefik-molecule/traefik.yml:/etc/traefik/traefik.yml:ro'
+        - 'Volume=/srv/traefik-molecule/acme.json:/etc/traefik/acme.json'
+        - 'Environment=LEGO_DISABLE_CNAME_SUPPORT=true'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      quadlet_absent:
+        - '/etc/localtime'
+        - '/etc/timezone'
+        - 'podman.sock'
+      # traefik.yml after side_effect
+      config:
+        log:
+          level: 'INFO'
+        providers:
+          file:
+            directory: '/etc/traefik/dynamic'
+            watch: true
+      config_absent:
+        - 'serversTransport'
+        - 'docker'
+      dynamic: [ 'molecule' ]
+      dynamic_absent: [ 'stale' ]
+      routes:
+        dynamic.molecule: 200
+        whoami.molecule: 404

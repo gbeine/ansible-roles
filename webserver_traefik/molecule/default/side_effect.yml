@@ -1,0 +1,157 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    webserver_traefik__test_case: "{{ webserver_traefik__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_traefik__test_vars: "{{ webserver_traefik__test_case.role_vars }}"
+    webserver_traefik__test_config: "{{ webserver_traefik__test_vars.traefik_config | default({}) }}"
+    webserver_traefik__test_checked_files:
+      - "{{ webserver_traefik__test_quadlet_path }}"
+      - "{{ webserver_traefik__test_case.expect.home }}/traefik.yml"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ webserver_traefik__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ webserver_traefik__test_checked_files }}"
+      register: 'webserver_traefik__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run webserver_traefik with traefik_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_container: [ 'environment' ]
+        webserver_traefik__test_invalid:
+          message: 'traefik_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run webserver_traefik with traefik_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_config: [ 'log' ]
+        webserver_traefik__test_invalid:
+          message: 'traefik_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run webserver_traefik with unknown options and sections (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_config: "{{ webserver_traefik__test_config | combine({ 'entryPoints': { 'web': { 'adress': ':8080' } }, 'pilot': { 'token': 'x' } }, recursive=true) }}"
+        webserver_traefik__test_invalid:
+          message: 'unknown options and sections'
+          search: '^Unknown options in traefik_config: entryPoints\.web\.adress, pilot, allowed are '
+
+    - name: 'Run webserver_traefik with options of the wrong type and line breaks (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_config: >-
+          {{ webserver_traefik__test_config
+             | combine({ 'api': { 'dashboard': 'yes' }, 'entryPoints': { 'websecure': { 'http': { 'tls': { 'domains': 'example.org' } } } },
+                         'log': { 'format': webserver_traefik__test_format } }, recursive=true) }}
+        # Double quotes, so \n is a line break
+        webserver_traefik__test_format: "json\ncommon"
+        webserver_traefik__test_invalid:
+          message: 'options of the wrong type and line breaks'
+          search: >-
+            These options of traefik_config have the wrong type \(webserver_traefik__config_schema\): api\.dashboard, entryPoints\.websecure\.http\.tls\.domains\.
+            The values of traefik_config must not contain line breaks: log\.format\.$
+
+    - name: 'Run webserver_traefik with an invalid dynamic configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_dynamic:
+          'bad name': {}
+          routers: [ 'http' ]
+        webserver_traefik__test_invalid:
+          message: 'an invalid dynamic configuration'
+          search: >-
+            The files of traefik_dynamic are names without \.yml of letters, digits, _, \. and -: bad name\.
+            The content of a file of traefik_dynamic is a dictionary or null: routers\.$
+
+    - name: 'Run webserver_traefik with traefik_dynamic not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_dynamic: [ 'molecule' ]
+        webserver_traefik__test_invalid:
+          message: 'traefik_dynamic is not a dictionary'
+          search: '^traefik_dynamic has to be a dictionary of files and their content\.$'
+
+    - name: 'Run webserver_traefik with a former variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_secrets:
+          - name: 'traefik_token'
+            data: 'molecule'
+            target: 'CF_DNS_API_TOKEN'
+        webserver_traefik__test_invalid:
+          message: 'a former variable'
+          search: '^Traefik has no secrets, the options are set in traefik_config: traefik_secrets\.$'
+
+    - name: 'Run webserver_traefik with an option in traefik_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_environment:
+          TRAEFIK_LOG_LEVEL: 'DEBUG'
+        webserver_traefik__test_invalid:
+          message: 'an option in traefik_environment'
+          search: '^The options of Traefik are set with traefik_config now: TRAEFIK_LOG_LEVEL\.$'
+
+    - name: 'Run webserver_traefik with an unknown variable in traefik_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_container:
+          environment:
+            FOO: 'bar'
+        webserver_traefik__test_invalid:
+          message: 'an unknown variable in traefik_container.environment'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run webserver_traefik with the changed configuration'
+      when: webserver_traefik__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the main PID of Traefik before the change'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value traefik'
+          register: 'webserver_traefik__test_pid_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            traefik_config: "{{ webserver_traefik__test_config | combine(webserver_traefik__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run webserver_traefik with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'webserver_traefik'
+
+        - name: 'Read the main PID of Traefik after the change'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value traefik'
+          register: 'webserver_traefik__test_pid_after'
+          changed_when: false
+
+        - name: 'Assert the changed traefik.yml and the restart of Traefik'
+          ansible.builtin.assert:
+            that:
+              - webserver_traefik__config_result is changed
+              - webserver_traefik__quadlet_result is not changed
+              - webserver_traefik__test_pid_after.stdout != '0'
+              - webserver_traefik__test_pid_after.stdout != webserver_traefik__test_pid_before.stdout
+            fail_msg: >-
+              traefik.yml changed: {{ webserver_traefik__config_result is changed }},
+              quadlet changed: {{ webserver_traefik__quadlet_result is changed }},
+              PID {{ webserver_traefik__test_pid_before.stdout }} -> {{ webserver_traefik__test_pid_after.stdout }}
