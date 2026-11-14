@@ -31,6 +31,20 @@ debian_repositories:
 
 - Repositories that are not configured are removed: `*.sources` in `/etc/apt/sources.list.d` without an entry in `debian_repositories` (including keys stored by the role for them), all `*.list` files in `/etc/apt/sources.list.d` and `/etc/apt/sources.list`. Additional repositories therefore belong to `debian_repositories`. With `debian_repositories_prune: false` the role keeps them.
 - Bind mounts in `debian_mounts` default to `fs: none` and `options: rw,bind`.
+- Entries of `debian_storage` with `noauto` in `options` are only written to `/etc/fstab` and not mounted, their device may not exist yet,
+  e.g. a LUKS device opened later with `cryptsetup`. The role reloads systemd if `/etc/fstab` changed, so the mount unit exists
+  (e.g. `mnt-storage.mount` for `/mnt/storage`) and a udev rule can start it when the device appears, see udev rules:
+
+```yaml
+debian_storage:
+  - disk: 'UUID=75c39e65-80ac-4d60-ad2c-bcda3d50c094'
+    path: '/mnt/storage'
+    fs: 'ext4'
+    options: 'rw,noauto,noatime'
+debian_udev_rules:
+  99-md0-crypt-automount:
+    - 'SUBSYSTEM=="block", ENV{DM_NAME}=="md0_crypt", TAG+="systemd", ENV{SYSTEMD_WANTS}+="mnt-storage.mount"'
+```
 - This role replaces the former roles `bootstrap_hosts`, `bootstrap_logrotate`, `bootstrap_networking`, `bootstrap_packages`, `bootstrap_repositories`, `bootstrap_storage`, `bootstrap_timezone`, `bootstrap_accounts`, `apt_common`, `apt_unattended_upgrades`, `ntp_common`, `ntp_timesyncd` and `systemd_timesyncd`. The inventory variables were renamed:
 
 | Former variable | New variable |
@@ -206,7 +220,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Tested |
 |---|---|
 | `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults, no NTP drop-in without `debian_ntp_enable`, SSH without options (empty drop-ins, sshd listens on all addresses) |
-| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), udev rules (renaming an interface by its address, removal of a file with an empty list), logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`, a missing device with `noauto` only in `/etc/fstab`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), udev rules (renaming an interface by its address, removal of a file with an empty list), logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 

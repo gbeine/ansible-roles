@@ -1,15 +1,24 @@
 ---
 
+# Devices with noauto are mounted later, e.g. by systemd after cryptsetup opened them,
+# the device may not exist yet, so they are only written to /etc/fstab
 - name: Mount storage devices
   ansible.posix.mount:
     src: "{{ item.disk }}"
     path: "{{ item.path }}"
     opts: "{{ item.options }}"
     fstype: "{{ item.fs }}"
-    state: mounted
+    state: "{{ 'present' if 'noauto' in (item.options | split(',')) else 'mounted' }}"
   loop: "{{ bootstrap_debian__storage }}"
   loop_control:
     label: "{{ item.path }}"
+  register: bootstrap_debian__storage_result
+
+# The fstab generator of systemd creates the mount units (e.g. mnt-storage.mount) only after a reload
+- name: Reload systemd for the mount units of /etc/fstab
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: bootstrap_debian__storage_result is changed
 
 - name: Create bind mount source directories
   ansible.builtin.file:
