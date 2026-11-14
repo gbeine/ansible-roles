@@ -8,8 +8,10 @@
 
   vars:
     app_grafana__test_case: "{{ app_grafana__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_grafana__test_config: "{{ app_grafana__test_case.role_vars.grafana_config | default({}) }}"
     app_grafana__test_checked_files:
       - "{{ app_grafana__test_quadlet_path }}"
+      - "{{ app_grafana__test_case.expect.home }}/grafana.ini"
 
   tasks:
 
@@ -20,7 +22,7 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+    - name: 'Read the checksums of the checked files before the invalid runs'
       ansible.builtin.stat:
         path: "{{ item }}"
         checksum_algorithm: 'md5'
@@ -28,13 +30,21 @@
       register: 'app_grafana__test_md5_before'
 
     # Include parameters take precedence over set_fact and only exist inside the include
+
     - name: 'Run app_grafana with grafana_container not a dictionary (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         grafana_container: [ 'environment' ]
         app_grafana__test_invalid:
           message: 'grafana_container is not a dictionary'
-          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_grafana with grafana_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_config: [ 'server' ]
+        app_grafana__test_invalid:
+          message: 'grafana_config is not a dictionary'
           search: 'failed to combine variables, expected dicts'
 
     - name: 'Run app_grafana with a secret without target (expect ERROR)'
@@ -47,32 +57,38 @@
           message: 'a secret without target'
           search: '^grafana_secrets entries need name, data and target$'
 
-    - name: 'Run app_grafana with the admin password in the environment (expect ERROR)'
+    - name: 'Run app_grafana with an unknown section, an unknown option and a plugin section without key (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        grafana_environment:
-          GF_SECURITY_ADMIN_PASSWORD: 'molecule'
+        grafana_config: "{{ app_grafana__test_config | combine({ 'molecule': { 'a': 1 }, 'plugin.molecule-other': { 'enabled': true }, 'server': { 'molecule_unknown': 1 } }, recursive=true) }}"
         app_grafana__test_invalid:
-          message: 'the admin password in the environment'
-          search: 'must not be set in grafana_environment:\s+GF_SECURITY_ADMIN_PASSWORD\.'
+          message: 'an unknown section, an unknown option and a plugin section without key'
+          search: >-
+            ^Unknown sections in grafana_config: molecule, plugin\.molecule-other, allowed are the sections of grafana\.ini \(app_grafana__config_allowed\),
+            the sections plugin\.<id> need the id in grafana_keys\.
+            Unknown options in grafana_config: server\.molecule_unknown, allowed are the options of grafana\.ini \(app_grafana__config_allowed\),
+            the section paths is set by the image\.$
 
-    - name: 'Run app_grafana with the file variable of the admin password in the environment (expect ERROR)'
+    - name: 'Run app_grafana with the admin password in the configuration, a dictionary and a line break as values (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_config: "{{ app_grafana__test_config | combine({ 'security': { 'admin_password': 'plain' }, 'log': { 'level': { 'a': 1 }, 'mode': 'console\nfile' } }, recursive=true) }}"
+        app_grafana__test_invalid:
+          message: 'the admin password in the configuration, a dictionary and a line break as values'
+          search: >-
+            ^Passwords are set with grafana_secrets, not in grafana_config: security\.admin_password\.
+            The values of grafana_config have to be strings, numbers, booleans, null or lists of them: log\.level\.
+            The values of grafana_config must contain neither line breaks nor """: log\.mode\.$
+
+    - name: 'Run app_grafana with options of Grafana in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         grafana_environment:
+          GF_LOG_LEVEL: 'warn'
           GF_SECURITY_ADMIN_PASSWORD__FILE: '/run/secrets/grafana_admin_password'
         app_grafana__test_invalid:
-          message: 'the file variable of the admin password in the environment'
-          search: 'must not be set in grafana_environment:\s+GF_SECURITY_ADMIN_PASSWORD__FILE\.'
-
-    - name: 'Run app_grafana with an unknown environment variable (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        grafana_environment:
-          GF_FOO: 'bar'
-        app_grafana__test_invalid:
-          message: 'an unknown environment variable'
-          search: 'Unknown environment variables: GF_FOO\.'
+          message: 'options of Grafana in the environment'
+          search: '^The options of Grafana are set with grafana_config now: GF_LOG_LEVEL \(log\.level\), GF_SECURITY_ADMIN_PASSWORD__FILE \(security\.admin_password\)\.$'
 
     - name: 'Run app_grafana with an unknown environment variable in grafana_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -90,12 +106,12 @@
         grafana_secrets:
           - name: 'grafana_unknown'
             data: 'secret'
-            target: 'GF_SECURITY_ADMIN_EMAIL'
+            target: 'security.admin_email'
         app_grafana__test_invalid:
           message: 'an unknown secret'
-          search: 'Unknown secrets: GF_SECURITY_ADMIN_EMAIL\.'
+          search: 'Unknown secrets: security\.admin_email\.'
 
-    - name: 'Run app_grafana with the changed role variables'
+    - name: 'Change the configuration'
       when: app_grafana__test_case.side_effect is defined
       block:
 
@@ -105,14 +121,11 @@
           register: 'app_grafana__test_started_before'
           changed_when: false
 
-        - name: 'Set the changed role variables'
+        - name: 'Set the changed configuration'
           ansible.builtin.set_fact:
-            "{{ item.key }}": "{{ item.value }}"
-          loop: "{{ app_grafana__test_case.side_effect.role_vars | dict2items }}"
-          loop_control:
-            label: "{{ item.key }}"
+            grafana_config: "{{ app_grafana__test_config | combine(app_grafana__test_case.side_effect.config, recursive=true) }}"
 
-        - name: 'Run app_grafana with the changed role variables'
+        - name: 'Run app_grafana with the changed configuration'
           ansible.builtin.include_role:
             name: 'app_grafana'
 
@@ -122,11 +135,15 @@
           register: 'app_grafana__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed quadlet unit and the restart of the service'
+        - name: 'Assert the changed configuration and the restart of the service'
           ansible.builtin.assert:
             that:
-              - app_grafana__quadlet_result is changed
+              - app_grafana__config_result is changed
+              - app_grafana__quadlet_result is not changed
+              - app_grafana__secrets_result is not changed
               - app_grafana__test_started_after.stdout | int > app_grafana__test_started_before.stdout | int
             fail_msg: >-
+              grafana.ini changed: {{ app_grafana__config_result is changed }},
               quadlet changed: {{ app_grafana__quadlet_result is changed }},
+              secrets changed: {{ app_grafana__secrets_result is changed }},
               start before {{ app_grafana__test_started_before.stdout }}, after {{ app_grafana__test_started_after.stdout }}

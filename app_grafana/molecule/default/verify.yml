@@ -27,8 +27,10 @@
           - app_grafana__expect.ip6 is none or ('IP6=' + app_grafana__expect.ip6) in app_grafana__test_quadlet_lines
           - app_grafana__expect.ip6 is not none or app_grafana__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - app_grafana__expect.quadlet | reject('in', app_grafana__test_quadlet_lines) | list | length == 0
-          # The configuration of the image is used, /etc/grafana is not mounted
-          - app_grafana__test_quadlet_lines | select('search', ':/etc/grafana$') | list | length == 0
+          # The time zone is set with timezone of the container, /etc/localtime is not mounted
+          - app_grafana__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          # The options are part of grafana.ini, neither options, passwords nor an empty environment are part of the quadlet unit
+          - app_grafana__test_quadlet_lines | select('search', 'GF_|molecule-password|Environment=') | list | length == 0
         fail_msg: "{{ app_grafana__test_quadlet.content | b64decode }}"
       vars:
         app_grafana__test_quadlet_lines: "{{ (app_grafana__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -57,6 +59,30 @@
           owners {{ app_grafana__test_dirs.results | map(attribute='stat') | map(attribute='uid') | join(', ') }}
           modes {{ app_grafana__test_dirs.results | map(attribute='stat') | map(attribute='mode') | join(', ') }}
 
+    - name: 'Read grafana.ini'
+      ansible.builtin.slurp:
+        src: "{{ app_grafana__expect.home }}/grafana.ini"
+      register: 'app_grafana__test_ini'
+
+    - name: 'Read the state of grafana.ini'
+      ansible.builtin.stat:
+        path: "{{ app_grafana__expect.home }}/grafana.ini"
+      register: 'app_grafana__test_ini_stat'
+
+    # grafana.ini contains the reference to the file of the secret, not the password
+    - name: 'Assert grafana.ini'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__expect.ini | reject('in', app_grafana__test_ini_lines) | list | length == 0
+          - app_grafana__test_ini_lines | select('search', 'molecule-password') | list | length == 0
+          - app_grafana__test_ini_stat.stat.uid == 0
+          - app_grafana__test_ini_stat.stat.mode == '0644'
+        fail_msg: >-
+          missing {{ app_grafana__expect.ini | reject('in', app_grafana__test_ini_lines) | list }},
+          owner {{ app_grafana__test_ini_stat.stat.uid }}, mode {{ app_grafana__test_ini_stat.stat.mode }}
+      vars:
+        app_grafana__test_ini_lines: "{{ (app_grafana__test_ini.content | b64decode).splitlines() }}"
+
     - name: 'Inspect the grafana container'
       ansible.builtin.command: 'podman inspect grafana'
       register: 'app_grafana__test_inspect'
@@ -67,9 +93,8 @@
         that:
           - app_grafana__test_net.IPAddress == app_grafana__expect.ip
           - app_grafana__expect.ip6 is none or app_grafana__test_net.GlobalIPv6Address == app_grafana__expect.ip6
-          - app_grafana__expect.env | reject('in', app_grafana__test_env) | list | length == 0
-          # The password is read by the image from GF_SECURITY_ADMIN_PASSWORD__FILE, it is not part of the environment
-          - app_grafana__test_env | select('match', 'GF_SECURITY_ADMIN_PASSWORD=') | list | length == 0
+          # The password is read by Grafana from the file of the secret, it is not part of the environment
+          - app_grafana__test_env | select('search', 'molecule-password|GF_SECURITY') | list | length == 0
         fail_msg: >-
           IPv4 {{ app_grafana__test_net.IPAddress }}, IPv6 {{ app_grafana__test_net.GlobalIPv6Address }},
           environment {{ app_grafana__test_env | join(', ') }}
@@ -88,6 +113,7 @@
       retries: 30
       delay: 5
 
+    # Grafana adds the headers of the section server.custom_response_headers to every response
     - name: 'Request the organization without credentials'
       ansible.builtin.uri:
         url: "{{ app_grafana__test_url }}/api/org"
@@ -108,6 +134,8 @@
         that:
           - app_grafana__test_anonymous.status == app_grafana__expect.anonymous_status
           - app_grafana__test_admin.status == 200
+          - app_grafana__expect.header is none or app_grafana__test_admin.x_molecule | default('') == app_grafana__expect.header
         fail_msg: >-
           without credentials {{ app_grafana__test_anonymous.status }} (expected {{ app_grafana__expect.anonymous_status }}),
-          admin {{ app_grafana__expect.username }} {{ app_grafana__test_admin.status }}
+          admin {{ app_grafana__expect.username }} {{ app_grafana__test_admin.status }},
+          header X-Molecule {{ app_grafana__test_admin.x_molecule | default('missing') }}

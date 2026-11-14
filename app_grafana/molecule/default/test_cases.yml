@@ -29,13 +29,17 @@ app_grafana__test_cases:
       username: 'admin'
       password: 'admin'
       anonymous_status: 401
+      header: ~
       quadlet:
+        - 'Volume=/opt/grafana/grafana.ini:/etc/grafana/grafana.ini:ro'
         - 'Volume=/opt/grafana/data:/var/lib/grafana'
         - 'Volume=/opt/grafana/log:/var/log/grafana'
-      env:
-        - 'GF_SERVER_DOMAIN=grafana-default'
+      ini:
+        - '[server]'
+        - 'domain = grafana-default'
 
-  # IPv6, labels, a key without section and the password of the admin from a secret, the role sets GF_SECURITY_ADMIN_PASSWORD__FILE
+  # IPv6, labels, an option of the default section, a free section, a plugin section with grafana_keys
+  # and the password of the admin from a secret referenced with $__file{} in grafana.ini
   - name: 'molecule-grafana'
     role_vars:
       grafana_home: '/srv/grafana'
@@ -46,25 +50,30 @@ app_grafana__test_cases:
       grafana_timezone: 'Europe/Berlin'
       grafana_labels:
         traefik.enable: 'true'
+      grafana_keys:
+        plugin: [ 'molecule-panel' ]
       grafana_secrets:
         - name: 'grafana_admin_password'
           data: 'molecule-password'
-          target: 'GF_SECURITY_ADMIN_PASSWORD'
-      grafana_environment:
-        GF_DEFAULT_INSTANCE_NAME: 'molecule'
-        GF_SERVER_DOMAIN: 'grafana.example.org'
-        GF_LOG_LEVEL: 'warn'
-        GF_SECURITY_ADMIN_USER: 'molecule'
-    # side_effect enables the anonymous access, the quadlet unit changes and Grafana has to restart
+          target: 'security.admin_password'
+      grafana_config:
+        instance_name: 'molecule'
+        server:
+          domain: 'grafana.example.org'
+        log:
+          level: 'warn'
+        security:
+          admin_user: 'molecule'
+        server.custom_response_headers:
+          X-Molecule: 'grafana'
+        plugin.molecule-panel:
+          enabled: true
+    # side_effect enables the anonymous access, grafana.ini changes and Grafana has to restart
     side_effect:
-      role_vars:
-        grafana_environment:
-          GF_DEFAULT_INSTANCE_NAME: 'molecule'
-          GF_SERVER_DOMAIN: 'grafana.example.org'
-          GF_LOG_LEVEL: 'warn'
-          GF_SECURITY_ADMIN_USER: 'molecule'
-          GF_AUTH_ANONYMOUS_ENABLED: 'true'
-          GF_AUTH_ANONYMOUS_ORG_ROLE: 'Viewer'
+      config:
+        auth.anonymous:
+          enabled: true
+          org_role: 'Viewer'
     expect:
       ip: '10.89.0.81'
       ip6: 'fd00:89::81'
@@ -72,15 +81,24 @@ app_grafana__test_cases:
       username: 'molecule'
       password: 'molecule-password'
       anonymous_status: 200
+      header: 'grafana'
       quadlet:
+        - 'Volume=/srv/grafana/grafana.ini:/etc/grafana/grafana.ini:ro'
         - 'Volume=/srv/grafana/data:/var/lib/grafana'
         - 'Secret=grafana_admin_password,type=mount,target=/run/secrets/grafana_admin_password'
         - 'Label=traefik.enable=true'
-      env:
-        - 'GF_DEFAULT_INSTANCE_NAME=molecule'
-        - 'GF_SERVER_DOMAIN=grafana.example.org'
-        - 'GF_LOG_LEVEL=warn'
-        - 'GF_SECURITY_ADMIN_USER=molecule'
-        - 'GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password'
-        - 'GF_AUTH_ANONYMOUS_ENABLED=true'
-        - 'GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer'
+      ini:
+        - 'instance_name = molecule'
+        - '[auth.anonymous]'
+        - 'enabled = true'
+        - 'org_role = Viewer'
+        - '[log]'
+        - 'level = warn'
+        - '[plugin.molecule-panel]'
+        - '[security]'
+        - 'admin_password = $__file{/run/secrets/grafana_admin_password}'
+        - 'admin_user = molecule'
+        - '[server]'
+        - 'domain = grafana.example.org'
+        - '[server.custom_response_headers]'
+        - 'X-Molecule = grafana'

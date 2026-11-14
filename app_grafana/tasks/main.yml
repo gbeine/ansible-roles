@@ -4,14 +4,59 @@
   tags: [ 'app', 'app_grafana' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or grafana_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, grafana_container or grafana_config not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - app_grafana__container | length > 0
+          - app_grafana__config | length > 0
         quiet: true
+
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_grafana__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_grafana__errors: >-
+          {%- set errors = [] -%}
+          {%- set keys = app_grafana__keys -%}
+          {%- set families = app_grafana__keys_families.keys() | list -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('grafana_keys has to be a dictionary of lists of keys by family, allowed are the families ' ~ (families | join(', ')) ~ '.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(unknown=[], lists=[], invalid=[], duplicates=[]) -%}
+          {%-   for family, list in keys.items() -%}
+          {%-     if family not in families -%}
+          {%-       set ns.unknown = ns.unknown + [ family | string ] -%}
+          {%-     elif list is not sequence or list is string or list is mapping -%}
+          {%-       set ns.lists = ns.lists + [ family ] -%}
+          {%-     else -%}
+          {%-       set ns.invalid = ns.invalid + (list | reject('string') | map('string') | list)
+                                     + (list | select('string') | reject('match', app_grafana__key_pattern) | list) -%}
+          {%-       if list | unique | list | length != list | length -%}
+          {%-         set ns.duplicates = ns.duplicates + [ family ] -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown families in grafana_keys: ' ~ (ns.unknown | join(', ')) ~ ', allowed are ' ~ (families | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lists | length > 0 -%}
+          {%-     set _ = errors.append('The families of grafana_keys have to be lists of keys: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.invalid | length > 0 -%}
+          {%-     set _ = errors.append('The keys of grafana_keys start with a letter or digit, followed by letters, digits, ., _ and -: ' ~ (ns.invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.duplicates | length > 0 -%}
+          {%-     set _ = errors.append('The keys of grafana_keys have to be unique: ' ~ (ns.duplicates | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Validate the secrets'
       ansible.builtin.assert:
@@ -36,7 +81,8 @@
           {%- endif -%}
           {{ errors }}
 
-    - name: 'Validate environment and secrets'
+    # The options are lines of grafana.ini, Grafana itself checks their values at the start
+    - name: 'Validate the configuration'
       ansible.builtin.assert:
         that:
           - app_grafana__errors | length == 0
@@ -44,21 +90,107 @@
         fail_msg: "{{ app_grafana__errors | join(' ') }}"
         quiet: true
       vars:
-        app_grafana__environment_missing: >-
-          {{ app_grafana__environment_required
-             | reject('in', app_grafana__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
-             | list }}
-        app_grafana__secrets_in_environment: >-
-          {{ (app_grafana__secrets | map(attribute='target') | list
-              + app_grafana__secret_variables + app_grafana__secret_files.values() | list)
-             | select('in', app_grafana__environment.keys() | list) | unique | list }}
         app_grafana__errors: >-
           {%- set errors = [] -%}
-          {%- if app_grafana__environment_missing | length > 0 -%}
-          {%-   set _ = errors.append('Grafana needs the environment variables ' ~ (app_grafana__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_grafana__environment_missing | join(', ')) ~ '.') -%}
+          {%- if app_grafana__config_custom is not mapping -%}
+          {%-   set _ = errors.append('grafana_config has to be a dictionary of the options and sections of grafana.ini.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(sections=[], unknown=[], free=[], secrets=[], values=[], lines=[]) -%}
+          {%-   set secret_paths = app_grafana__secrets_allowed.keys() | list -%}
+          {%-   for name, item in app_grafana__config.items() -%}
+          {%-     if item is mapping -%}
+          {%-       set options = item.items() | list -%}
+          {%-       if name in app_grafana__config_free -%}
+          {%-         set ns.free = ns.free + (item.keys() | map('string') | reject('match', app_grafana__key_pattern) | map('regex_replace', '^', name ~ '.') | list) -%}
+          {%-       elif name not in app_grafana__config_allowed and (name ~ '.') not in (secret_paths | map('regex_replace', '[^.]*$', '') | list) -%}
+          {%-         set ns.sections = ns.sections + [ name | string ] -%}
+          {%-         set options = [] -%}
+          {%-       endif -%}
+          {%-       set prefix = name ~ '.' -%}
+          {%-     else -%}
+          {%-       set options = [ (name, item) ] -%}
+          {%-       set prefix = '' -%}
+          {%-     endif -%}
+          {%-     for key, value in options -%}
+          {%-       set path = prefix ~ key -%}
+          {%-       if path in secret_paths -%}
+          {%-         set ns.secrets = ns.secrets + [ path ] -%}
+          {%-       elif item is mapping and name not in app_grafana__config_free and key not in app_grafana__config_allowed[name] | default([]) -%}
+          {%-         set ns.unknown = ns.unknown + [ path | string ] -%}
+          {%-       elif item is not mapping and key not in app_grafana__config_allowed['DEFAULT'] -%}
+          {%-         set ns.unknown = ns.unknown + [ path | string ] -%}
+          {%-       endif -%}
+          {%-       set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-       if value is mapping or items | select('mapping') | list | length > 0
+                       or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+          {%-         set ns.values = ns.values + [ path | string ] -%}
+          {%-       elif items | select('string') | select('search', '[\r\n]|"""') | list | length > 0 -%}
+          {%-         set ns.lines = ns.lines + [ path | string ] -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endfor -%}
+          {%-   if ns.sections | length > 0 -%}
+          {%-     set _ = errors.append('Unknown sections in grafana_config: ' ~ (ns.sections | join(', ')) ~ ', allowed are the sections of grafana.ini (app_grafana__config_allowed),'
+                                      ~ ' the sections plugin.<id> need the id in grafana_keys.') -%}
+          {%-   endif -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in grafana_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of grafana.ini (app_grafana__config_allowed),'
+                                      ~ ' the section paths is set by the image.') -%}
+          {%-   endif -%}
+          {%-   if ns.free | length > 0 -%}
+          {%-     set _ = errors.append('The keys of the sections with free keys start with a letter or digit, followed by letters, digits, ., _ and -: ' ~ (ns.free | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.secrets | length > 0 -%}
+          {%-     set _ = errors.append('Passwords are set with grafana_secrets, not in grafana_config: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.values | length > 0 -%}
+          {%-     set _ = errors.append('The values of grafana_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of grafana_config must contain neither line breaks nor """: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
-          {%- if app_grafana__secrets_in_environment | length > 0 -%}
-          {%-   set _ = errors.append('Secrets and their file variables must not be set in grafana_environment: ' ~ (app_grafana__secrets_in_environment | join(', ')) ~ '.') -%}
+          {{ errors }}
+
+    # The options of Grafana were set with GF_<SECTION>_<KEY> by former versions of the role,
+    # without grafana_environment there is nothing to check
+    - name: 'Validate the environment'
+      when: app_grafana__environment is defined
+      ansible.builtin.assert:
+        that:
+          - app_grafana__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_grafana__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_grafana__options_in_environment: >-
+          {%- set names = [] -%}
+          {%- set variables = app_grafana__environment.keys() | select('match', '^GF_') | list -%}
+          {%- if variables | length > 0 -%}
+          {%-   set paths = {} -%}
+          {%-   for section, keys in app_grafana__config_allowed.items() -%}
+          {%-     for key in keys -%}
+          {%-       set _ = paths.update({ ('GF_' ~ section ~ '_' ~ key) | upper | replace('.', '_') | replace('-', '_'): (key if section == 'DEFAULT' else section ~ '.' ~ key) }) -%}
+          {%-     endfor -%}
+          {%-   endfor -%}
+          {%-   for path in app_grafana__secrets_allowed.keys() -%}
+          {%-     set _ = paths.update({ ('GF_' ~ path) | upper | replace('.', '_') | replace('-', '_'): path }) -%}
+          {%-   endfor -%}
+          {%-   for variable in variables -%}
+          {%-     set name = variable | regex_replace('__FILE$', '') -%}
+          {%-     set _ = names.append(variable ~ ((' (' ~ paths[name] ~ ')') if name in paths else '')) -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ names }}
+        app_grafana__environment_lines: >-
+          {{ app_grafana__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+        app_grafana__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_grafana__options_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('The options of Grafana are set with grafana_config now: ' ~ (app_grafana__options_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_grafana__environment_lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (app_grafana__environment_lines | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -72,10 +204,17 @@
         fail_msg: "{{ app_grafana__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without grafana_environment and grafana_container.environment the environment is omitted, there is nothing to check
         app_grafana__environment_unknown: >-
-          {{ (app_grafana__container.environment | default({})).keys() | reject('in', app_grafana__environment_allowed) | list }}
+          {{ (app_grafana__container.environment.keys() | reject('in', app_grafana__environment_allowed) | list)
+             if app_grafana__container.environment is mapping else [] }}
         app_grafana__secrets_unknown: >-
-          {{ app_grafana__secrets | map(attribute='target') | reject('in', app_grafana__secret_files.keys() | list) | list }}
+          {{ app_grafana__secrets | map(attribute='target') | map('string') | reject('in', app_grafana__secrets_allowed.keys() | list) | list }}
+        app_grafana__secrets_lines: >-
+          {{ app_grafana__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+             + app_grafana__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_grafana__secrets_duplicate: >-
+          {{ app_grafana__secrets | map(attribute='target') | list | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list }}
         app_grafana__errors: >-
           {%- set errors = [] -%}
           {%- if app_grafana__environment_unknown | length > 0 -%}
@@ -84,8 +223,15 @@
           {%- if app_grafana__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (app_grafana__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the options of grafana.ini as GF_<SECTION>_<KEY> (app_grafana__environment_allowed) and the secrets in app_grafana__secret_files.') -%}
+          {%- if app_grafana__secrets_duplicate | length > 0 -%}
+          {%-   set _ = errors.append('Every target of grafana_secrets is set once: ' ~ (app_grafana__secrets_duplicate | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_grafana__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings without line breaks: ' ~ (app_grafana__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if (app_grafana__environment_unknown + app_grafana__secrets_unknown) | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (app_grafana__environment_allowed | join(', ')) ~ ' and the secrets with the targets of app_grafana__secrets_allowed'
+                                    ~ ' (section.key of grafana.ini, e.g. security.admin_password), the options of Grafana are set with grafana_config.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -98,6 +244,16 @@
       loop:
         - "{{ app_grafana__podman_data_dir }}"
         - "{{ app_grafana__podman_log_dir }}"
+
+    # grafana.ini contains the references to the files of the secrets, not the secrets
+    - name: 'Generate grafana.ini'
+      ansible.builtin.template:
+        src: 'grafana.ini.j2'
+        dest: "{{ app_grafana__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'app_grafana__config_result'
 
     - name: 'Create secrets'
       no_log: true
@@ -140,24 +296,81 @@
           {% if app_grafana__container.requires is defined %}
           Requires={{ app_grafana__container.requires | join(' ') }}
           {% endif %}
+          {% if app_grafana__container.wants is defined %}
+          Wants={{ app_grafana__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_grafana__container.after is defined %}
+          After={{ app_grafana__container.after | join(' ') }}
+          {% endif %}
+          {% if app_grafana__container.part_of is defined %}
+          PartOf={{ app_grafana__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_grafana__container.binds_to is defined %}
+          BindsTo={{ app_grafana__container.binds_to | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_grafana__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_grafana__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_grafana__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_grafana__running: >-
-          {{ (ansible_facts.services[app_grafana__container.name + '.service'].state | default('')) == 'running' }}
-        app_grafana__restart: >-
-          {{ app_grafana__running | bool
-             and (app_grafana__secrets_result is changed
-                  or app_grafana__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Grafana'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_grafana__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_grafana__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_grafana__running: >-
+              {{ (ansible_facts.services[app_grafana__container.name + '.service'].state | default('')) == 'running' }}
+            app_grafana__restart: >-
+              {{ app_grafana__running | bool
+                 and (app_grafana__config_result is changed
+                      or app_grafana__secrets_result is changed
+                      or app_grafana__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_grafana__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_grafana__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_grafana__container.name ~ ' did not start' ] + app_grafana__start_journal.stdout_lines }}"
+
+    # Grafana exits if grafana.ini or a file of a secret is invalid, the first start migrates the database
+    - name: 'Wait for Grafana'
+      ansible.builtin.uri:
+        url: "http://{{ app_grafana__container.ip }}:{{ app_grafana__config.server.http_port | default(3000) }}/api/health"
+      register: 'app_grafana__ready'
+      until: app_grafana__ready.status | default(-1) == 200
+      retries: 60
+      delay: 3
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Grafana'
+      when:
+        - not ansible_check_mode
+        - app_grafana__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_grafana__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'app_grafana__journal'
+      changed_when: false
+
+    - name: 'Assert that Grafana answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__journal is skipped
+        fail_msg: "{{ app_grafana__journal.stdout_lines | default([]) }}"
+        quiet: true
 
     - name: 'Enable autoupdate on container'
       when: 'app_grafana__autoupdate_enabled | bool'
