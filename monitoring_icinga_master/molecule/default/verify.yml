@@ -10,7 +10,7 @@
     monitoring_icinga_master__test_case: "{{ monitoring_icinga_master__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     monitoring_icinga_master__test_vars: "{{ monitoring_icinga_master__test_case.role_vars }}"
     monitoring_icinga_master__test_expect: "{{ monitoring_icinga_master__test_case.expect }}"
-    monitoring_icinga_master__test_etc: "{{ monitoring_icinga_master__test_expect.home }}/data/etc/icinga2"
+    monitoring_icinga_master__test_etc: "{{ monitoring_icinga_master__test_expect.home }}/etc/icinga2"
 
   tasks:
 
@@ -42,11 +42,6 @@
         file_type: 'any'
       register: 'monitoring_icinga_master__test_features'
 
-    - name: 'Read the state of features-available'
-      ansible.builtin.stat:
-        path: "{{ monitoring_icinga_master__test_etc }}/features-available"
-      register: 'monitoring_icinga_master__test_available'
-
     - name: 'Assert the enabled features are files of the role'
       ansible.builtin.assert:
         that:
@@ -54,7 +49,6 @@
           - monitoring_icinga_master__test_features.files | rejectattr('isreg') | list | length == 0
           - monitoring_icinga_master__test_features.files | rejectattr('uid', 'eq', 5665) | list | length == 0
           - monitoring_icinga_master__test_features.files | rejectattr('mode', 'eq', '0400') | list | length == 0
-          - not monitoring_icinga_master__test_available.stat.exists
         fail_msg: >-
           features {{ monitoring_icinga_master__test_names }},
           files {{ monitoring_icinga_master__test_features.files | map(attribute='path') | list }}
@@ -85,7 +79,7 @@
     - name: 'Search the passwords in the files of the role'
       when: monitoring_icinga_master__test_expect.secrets | length > 0
       ansible.builtin.command:
-        argv: [ 'grep', '-rlE', "{{ monitoring_icinga_master__test_expect.secrets | join('|') }}", "{{ monitoring_icinga_master__test_expect.home }}/data/etc" ]
+        argv: [ 'grep', '-rlE', "{{ monitoring_icinga_master__test_expect.secrets | join('|') }}", "{{ monitoring_icinga_master__test_expect.home }}/etc" ]
       register: 'monitoring_icinga_master__test_grep'
       changed_when: false
       failed_when: monitoring_icinga_master__test_grep.rc != 1
@@ -130,6 +124,24 @@
             or monitoring_icinga_master__test_container.stdout is not search(monitoring_icinga_master__test_expect.secrets | join('|'))
           - monitoring_icinga_master__test_container.stdout is not search('ICINGA_MASTER')
         fail_msg: "Secret: {{ monitoring_icinga_master__test_container.stdout_lines[0] }}, the environment contains a password or ICINGA_MASTER"
+
+    # /data comes from the image, the role mounts its configuration and the state only
+    - name: 'Read the files of the image and the enabled features in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'icinga-master', 'sh', '-c',
+                'test -x /etc/icinga2/scripts/mail-host-notification.sh && test -x /etc/icinga2/scripts/mail-service-notification.sh && echo scripts;
+                 command -v mail >/dev/null && echo mail;
+                 test -f /etc/icinga2/features-available/checker.conf && echo available;
+                 ls /etc/icinga2/features-enabled | sed "s/\\.conf$//" | sort | tr "\\n" " "' ]
+      register: 'monitoring_icinga_master__test_image'
+      changed_when: false
+
+    - name: 'Assert the files of the image and the enabled features in the container'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__test_image.stdout_lines[:3] == [ 'scripts', 'mail', 'available' ]
+          - monitoring_icinga_master__test_image.stdout_lines[3] | trim == monitoring_icinga_master__test_expect.features | join(' ')
+        fail_msg: "Container: {{ monitoring_icinga_master__test_image.stdout_lines }}"
 
     - name: 'Request the API without login'
       ansible.builtin.uri:

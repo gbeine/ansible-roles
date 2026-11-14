@@ -12,8 +12,8 @@
     monitoring_icinga_master__test_config: "{{ monitoring_icinga_master__test_vars.icinga_master_config | default({}) }}"
     monitoring_icinga_master__test_checked_files:
       - "{{ monitoring_icinga_master__test_quadlet_path }}"
-      - "{{ monitoring_icinga_master__test_vars.icinga_master_home }}/data/etc/icinga2/features-enabled/mainlog.conf"
-      - "{{ monitoring_icinga_master__test_vars.icinga_master_home }}/data/etc/icinga2/conf.d/api-users.conf"
+      - "{{ monitoring_icinga_master__test_vars.icinga_master_home }}/etc/icinga2/features-enabled/mainlog.conf"
+      - "{{ monitoring_icinga_master__test_vars.icinga_master_home }}/etc/icinga2/conf.d/api-users.conf"
 
   tasks:
 
@@ -195,13 +195,22 @@
           register: 'monitoring_icinga_master__test_started_after'
           changed_when: false
 
+        # The files are mounted, the new container mounts the new file
+        - name: 'Read the main log feature in the container'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'icinga-master', 'cat', '/etc/icinga2/features-enabled/mainlog.conf' ]
+          register: 'monitoring_icinga_master__test_mainlog'
+          changed_when: false
+
         - name: 'Assert the changed feature and the restart of the service'
           ansible.builtin.assert:
             that:
               - monitoring_icinga_master__features_result is changed
               - monitoring_icinga_master__quadlet_result is not changed
               - monitoring_icinga_master__test_started_after.stdout | int > monitoring_icinga_master__test_started_before.stdout | int
+              - monitoring_icinga_master__test_mainlog.stdout is search('severity = "' ~ monitoring_icinga_master__test_case.side_effect.config.mainlog.severity ~ '"')
             fail_msg: >-
+              mainlog.conf in the container: {{ monitoring_icinga_master__test_mainlog.stdout }},
               features changed: {{ monitoring_icinga_master__features_result is changed }},
               quadlet changed: {{ monitoring_icinga_master__quadlet_result is changed }},
               start before {{ monitoring_icinga_master__test_started_before.stdout }}, after {{ monitoring_icinga_master__test_started_after.stdout }}

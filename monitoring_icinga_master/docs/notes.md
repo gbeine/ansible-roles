@@ -1,6 +1,16 @@
 Icinga 2 runs as master in the official container image [icinga/icinga2](https://hub.docker.com/r/icinga/icinga2) as podman quadlet.
-The role writes the configuration to `<icinga_master_home>/data/etc/icinga2` and mounts `<icinga_master_home>/data` to `/data`,
-the image links `/etc/icinga2`, `/var/lib/icinga2`, `/var/cache/icinga2`, `/var/log/icinga2` and `/var/spool/icinga2` to `/data`.
+The image links `/etc/icinga2`, `/var/lib/icinga2`, `/var/cache/icinga2`, `/var/log/icinga2` and `/var/spool/icinga2` to `/data`,
+`/data` is a volume of the image with its files, e.g. the scripts of the mail notifications and `features-available`.
+The role mounts only its configuration and the state of Icinga, everything else of `/data` comes from the image:
+
+| Host | Container |
+|---|---|
+| `<icinga_master_home>/lib` | `/data/var/lib/icinga2` (certificates, API, state) |
+| `<icinga_master_home>/log` | `/data/var/log/icinga2` |
+| `<icinga_master_home>/spool` | `/data/var/spool/icinga2` |
+| `<icinga_master_home>/etc/icinga2/<file>` | `/data/etc/icinga2/<file>`, read-only, for `icinga2.conf`, `constants.conf`, `zones.conf`, `endpoints.conf`, `conf.d`, `features-enabled` and `zones.d` |
+| `<icinga_master_home>/tmp` | `/tmp` |
+| `<icinga_master_home>/plugins` | `/usr/local/lib/nagios/plugins`, read-only |
 
 ### Configuration
 
@@ -145,7 +155,7 @@ The plugins of `<icinga_master_home>/plugins` are mounted read-only to `/usr/loc
 ### Certificates
 
 The certificates come from `icinga_cert_source_dir`: `<node name>/chain.pem` (or `icinga_cert_ca_file`), `<node name>/fullchain.pem` and `<node name>/privkey.pem`.
-`ExecStartPre` of the quadlet unit copies them on every start to `data/var/lib/icinga2/certs` as `ca.crt`, `<node name>.crt` and `<node name>.key`
+`ExecStartPre` of the quadlet unit copies them on every start to `<icinga_master_home>/lib/certs` (`/var/lib/icinga2/certs`) as `ca.crt`, `<node name>.crt` and `<node name>.key`
 for the user of Icinga (5665), a renewed certificate is used after the next restart.
 The image runs its node setup only without `ca.crt`, so it never runs, the role configures the node itself.
 
@@ -204,7 +214,15 @@ Changed behavior:
 - `TicketSalt` of `constants.conf` is removed, `ticket_salt` of `api` is only set with the secret `api.ticket_salt`
 - `ICINGA_MASTER=1` is removed from the environment, the node setup of the image never ran because `ExecStartPre` copies `ca.crt` before the start
 - `/etc/localtime` and `/etc/timezone` are not mounted anymore, the time zone is set with `icinga_master_timezone`
-- the files are written for the user 5665 with `0400`, the directories with `0750`, the role creates all directories of `/data`
+- the files are written for the user 5665 with `0400`, the directories with `0750`
+- `<icinga_master_home>/data` is not mounted to `/data` anymore, it hid the files of the image, e.g. the scripts of the mail notifications
+  `mail-host-notification` and `mail-service-notification` of `icinga_master_commands`. The directories on the host are
+  `lib`, `log`, `spool` and `etc/icinga2` now, the role does not move the files of former versions.
+  Move the state before the first run and remove `<icinga_master_home>/data` afterwards:
+  `mv <icinga_master_home>/data/var/lib/icinga2 <icinga_master_home>/lib`, `mv <icinga_master_home>/data/var/log/icinga2 <icinga_master_home>/log`,
+  `mv <icinga_master_home>/data/var/spool/icinga2 <icinga_master_home>/spool`
+- the mail notifications use `mail` of the image (msmtp), they need `/var/lib/icinga2/.msmtprc` (`<icinga_master_home>/lib/.msmtprc`),
+  the role does not manage it yet
 - Icinga is restarted if the configuration changed, the handler is removed, the tags are `monitoring` and `monitoring_icinga_master`
 
 Fixed bugs:
@@ -221,10 +239,10 @@ an unknown attribute, a boolean that is no boolean, a password in `icinga_master
 an unknown secret, the secret of a missing API user and of a disabled feature, a secret name that is no constant, a former variable,
 `icinga_master_hosts` not a list and an unknown environment variable and checks that it fails with the expected message
 and the quadlet unit, `mainlog.conf` and `api-users.conf` are unchanged (tasks marked `expect ERROR`),
-then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes and Icinga has to restart.
+then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes, Icinga has to restart and the container has to mount the new file.
 `verify` checks the quadlet unit, the enabled features and their files, the lines of the configuration with the constants of the secrets,
 that no password is part of the files, the quadlet unit or the environment, the mounted podman secret, the service,
-`icinga2 daemon -C` in the container, the API without login (401), the hosts of the API with the API user and the secret password
+`icinga2 daemon -C` in the container, the scripts of the mail notifications and `features-available` of the image in the container, the API without login (401), the hosts of the API with the API user and the secret password
 and the objects that Icinga writes to Redis with the password of `icingadb`.
 
 ```shell

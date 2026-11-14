@@ -78,31 +78,36 @@ monitoring_icinga_master__gid: "{{ monitoring_icinga_master__uid }}"
 monitoring_icinga_master__podman_name: 'icinga-master'
 monitoring_icinga_master__podman_image: 'docker.io/icinga/icinga2'
 
-monitoring_icinga_master__data_dir: "{{ monitoring_icinga_master__home }}/data"
+monitoring_icinga_master__lib_dir: "{{ monitoring_icinga_master__home }}/lib"
+monitoring_icinga_master__log_dir: "{{ monitoring_icinga_master__home }}/log"
+monitoring_icinga_master__spool_dir: "{{ monitoring_icinga_master__home }}/spool"
 monitoring_icinga_master__tmp_dir: "{{ monitoring_icinga_master__home }}/tmp"
-monitoring_icinga_master__cert_dir: "{{ monitoring_icinga_master__data_dir }}/var/lib/icinga2/certs"
-monitoring_icinga_master__etc_dir: "{{ monitoring_icinga_master__data_dir }}/etc/icinga2"
+monitoring_icinga_master__cert_dir: "{{ monitoring_icinga_master__lib_dir }}/certs"
+monitoring_icinga_master__etc_dir: "{{ monitoring_icinga_master__home }}/etc/icinga2"
 monitoring_icinga_master__plugins_dir: "{{ monitoring_icinga_master__home }}/plugins"
 
-# The directories of Icinga below /data, the image links /etc/icinga2, /var/cache/icinga2 etc. to them
+# The directories of the role, /data of the container comes from the image (e.g. the scripts of the notifications)
 monitoring_icinga_master__data_dirs:
-  - "{{ monitoring_icinga_master__data_dir }}"
-  - "{{ monitoring_icinga_master__data_dir }}/etc"
+  - "{{ monitoring_icinga_master__lib_dir }}"
+  - "{{ monitoring_icinga_master__cert_dir }}"
+  - "{{ monitoring_icinga_master__log_dir }}"
+  - "{{ monitoring_icinga_master__spool_dir }}"
+  - "{{ monitoring_icinga_master__home }}/etc"
   - "{{ monitoring_icinga_master__etc_dir }}"
   - "{{ monitoring_icinga_master__etc_dir }}/features-enabled"
   - "{{ monitoring_icinga_master__etc_dir }}/conf.d"
   - "{{ monitoring_icinga_master__etc_dir }}/conf.d/commands"
   - "{{ monitoring_icinga_master__etc_dir }}/zones.d"
-  - "{{ monitoring_icinga_master__data_dir }}/var"
-  - "{{ monitoring_icinga_master__data_dir }}/var/cache"
-  - "{{ monitoring_icinga_master__data_dir }}/var/cache/icinga2"
-  - "{{ monitoring_icinga_master__data_dir }}/var/lib"
-  - "{{ monitoring_icinga_master__data_dir }}/var/lib/icinga2"
-  - "{{ monitoring_icinga_master__cert_dir }}"
-  - "{{ monitoring_icinga_master__data_dir }}/var/log"
-  - "{{ monitoring_icinga_master__data_dir }}/var/log/icinga2"
-  - "{{ monitoring_icinga_master__data_dir }}/var/spool"
-  - "{{ monitoring_icinga_master__data_dir }}/var/spool/icinga2"
+
+# The files and directories of the configuration of the role, mounted read-only to /etc/icinga2 (/data/etc/icinga2) of the container
+monitoring_icinga_master__etc_mounts:
+  - 'icinga2.conf'
+  - 'constants.conf'
+  - 'zones.conf'
+  - 'endpoints.conf'
+  - 'conf.d'
+  - 'features-enabled'
+  - 'zones.d'
 
 # The files of the configuration in etc/icinga2, the features are written to features-enabled
 monitoring_icinga_master__config_files:
@@ -215,10 +220,13 @@ monitoring_icinga_master__podman_container_default:
   cap_add:
     - 'NET_RAW'
   # icinga_master_container.volumes replaces the list completely
-  volumes:
-    - "{{ monitoring_icinga_master__data_dir }}:/data"
-    - "{{ monitoring_icinga_master__tmp_dir }}:/tmp"
-    - "{{ monitoring_icinga_master__plugins_dir }}:/usr/local/lib/nagios/plugins:ro"
+  volumes: >-
+    {{ [ monitoring_icinga_master__lib_dir ~ ':/data/var/lib/icinga2',
+         monitoring_icinga_master__log_dir ~ ':/data/var/log/icinga2',
+         monitoring_icinga_master__spool_dir ~ ':/data/var/spool/icinga2' ]
+       + (monitoring_icinga_master__etc_mounts | map('regex_replace', '^(.*)$', monitoring_icinga_master__etc_dir ~ '/\1:/data/etc/icinga2/\1:ro') | list)
+       + [ monitoring_icinga_master__tmp_dir ~ ':/tmp',
+           monitoring_icinga_master__plugins_dir ~ ':/usr/local/lib/nagios/plugins:ro' ] }}
   # Copies the certificates on every start, a renewed certificate is used after the next restart.
   # The image runs the node setup only without ca.crt, the role configures the node itself.
   exec_start_pre:
