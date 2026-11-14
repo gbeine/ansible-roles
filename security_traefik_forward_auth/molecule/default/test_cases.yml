@@ -1,0 +1,101 @@
+---
+# Network created by container_podman in prepare.yml
+security_traefik_forward_auth__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+# The image is not multi-arch, the role chooses the tag by the architecture
+security_traefik_forward_auth__test_image: >-
+  docker.io/thomseddon/traefik-forward-auth:2{{ { 'x86_64': '', 'aarch64': '-arm64', 'armv7l': '-arm' }[ansible_facts['architecture']] }}
+security_traefik_forward_auth__test_quadlet_path: '/etc/containers/systemd/traefik-forward-auth.container'
+security_traefik_forward_auth__test_rules_path: '/opt/forward-auth/rules.ini'
+
+security_traefik_forward_auth__test_cases:
+
+  # Only the mandatory variables, the default provider google with its client ID and secret
+  - name: 'molecule-forward-auth-default'
+    role_vars:
+      forward_auth_home: '/opt/forward-auth'
+      forward_auth_ip: '10.89.0.100'
+      forward_auth_network: 'podman-molecule'
+      forward_auth_hostname: 'forward-auth-default'
+      forward_auth_timezone: 'Europe/Berlin'
+      forward_auth_environment:
+        PROVIDERS_GOOGLE_CLIENT_ID: 'molecule-google-client'
+      forward_auth_secrets:
+        - name: 'forward_auth_secret'
+          data: 'molecule-secret-signing-the-cookies'
+          target: 'SECRET'
+        - name: 'forward_auth_google_client_secret'
+          data: 'molecule-google-client-secret'
+          target: 'PROVIDERS_GOOGLE_CLIENT_SECRET'
+    expect:
+      ip: '10.89.0.100'
+      ip6: ~
+      login: 'https://accounts.google.com/o/oauth2/auth?'
+      client_id: 'molecule-google-client'
+      rules: []
+      allowed: []
+      protected: [ '/', '/public' ]
+      quadlet:
+        - 'Volume=/opt/forward-auth/rules.ini:/etc/traefik-forward-auth/rules.ini:ro'
+        - 'Secret=forward_auth_secret,type=mount,target=/run/secrets/forward_auth_secret'
+        - 'Secret=forward_auth_google_client_secret,type=mount,target=/run/secrets/forward_auth_google_client_secret'
+
+  # IPv6, labels, the generic OAuth provider and a rule allowing a path without login
+  - name: 'molecule-forward-auth'
+    role_vars:
+      forward_auth_home: '/opt/forward-auth'
+      forward_auth_ip: '10.89.0.101'
+      forward_auth_ipv6: 'fd00:89::101'
+      forward_auth_network: 'podman-molecule'
+      forward_auth_hostname: 'forward-auth-molecule'
+      forward_auth_timezone: 'Europe/Berlin'
+      forward_auth_labels:
+        traefik.enable: 'false'
+      forward_auth_environment:
+        DEFAULT_PROVIDER: 'generic-oauth'
+        LOG_LEVEL: 'info'
+        INSECURE_COOKIE: true
+        PROVIDERS_GENERIC_OAUTH_AUTH_URL: 'https://sso.example.org/authorize'
+        PROVIDERS_GENERIC_OAUTH_TOKEN_URL: 'https://sso.example.org/token'
+        PROVIDERS_GENERIC_OAUTH_USER_URL: 'https://sso.example.org/userinfo'
+        PROVIDERS_GENERIC_OAUTH_CLIENT_ID: 'molecule-generic-client'
+      forward_auth_secrets:
+        - name: 'forward_auth_secret'
+          data: 'molecule-secret-signing-the-cookies'
+          target: 'SECRET'
+        - name: 'forward_auth_generic_client_secret'
+          data: 'molecule-generic-client-secret'
+          target: 'PROVIDERS_GENERIC_OAUTH_CLIENT_SECRET'
+      forward_auth_rules:
+        public:
+          action: 'allow'
+          rule: 'PathPrefix(`/public`)'
+    # side_effect changes the rule, rules.ini changes and Traefik Forward Auth has to restart
+    side_effect:
+      rules:
+        public:
+          action: 'allow'
+          rule: 'PathPrefix(`/open`)'
+    expect:
+      ip: '10.89.0.101'
+      ip6: 'fd00:89::101'
+      login: 'https://sso.example.org/authorize?'
+      client_id: 'molecule-generic-client'
+      rules:
+        - 'rule.public.action = allow'
+        - 'rule.public.rule = PathPrefix(`/open`)'
+      allowed: [ '/open' ]
+      protected: [ '/', '/public' ]
+      quadlet:
+        - 'Volume=/opt/forward-auth/rules.ini:/etc/traefik-forward-auth/rules.ini:ro'
+        - 'Secret=forward_auth_secret,type=mount,target=/run/secrets/forward_auth_secret'
+        - 'Secret=forward_auth_generic_client_secret,type=mount,target=/run/secrets/forward_auth_generic_client_secret'
+        - 'Label=traefik.enable=false'
+        - 'Environment=INSECURE_COOKIE=true'

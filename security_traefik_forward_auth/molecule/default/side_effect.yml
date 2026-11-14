@@ -1,0 +1,223 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_traefik_forward_auth__test_case: "{{ security_traefik_forward_auth__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_traefik_forward_auth__test_vars: "{{ security_traefik_forward_auth__test_case.role_vars }}"
+    security_traefik_forward_auth__test_environment: "{{ security_traefik_forward_auth__test_vars.forward_auth_environment | default({}) }}"
+    security_traefik_forward_auth__test_secrets: "{{ security_traefik_forward_auth__test_vars.forward_auth_secrets | default([]) }}"
+    security_traefik_forward_auth__test_checked_files:
+      - "{{ security_traefik_forward_auth__test_quadlet_path }}"
+      - "{{ security_traefik_forward_auth__test_rules_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ security_traefik_forward_auth__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ security_traefik_forward_auth__test_checked_files }}"
+      register: 'security_traefik_forward_auth__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run security_traefik_forward_auth with forward_auth_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_container: [ 'environment' ]
+        security_traefik_forward_auth__test_invalid:
+          message: 'forward_auth_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run security_traefik_forward_auth with forward_auth_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_secrets: { 'name': 'forward_auth_secret', 'data': 'x', 'target': 'SECRET' }
+        security_traefik_forward_auth__test_invalid:
+          message: 'forward_auth_secrets not a list'
+          search: '^forward_auth_secrets has to be a list$'
+
+    - name: 'Run security_traefik_forward_auth with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_secrets: "{{ security_traefik_forward_auth__test_secrets + [ { 'name': 'forward_auth_other', 'data': 'x' } ] }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'a secret without target'
+          search: '^forward_auth_secrets entries need name, data and target$'
+
+    - name: 'Run security_traefik_forward_auth with duplicate names of secrets (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_secrets: "{{ security_traefik_forward_auth__test_secrets + [ security_traefik_forward_auth__test_secrets | first ] }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'duplicate names of secrets'
+          search: '^the names of forward_auth_secrets have to be unique$'
+
+    - name: 'Run security_traefik_forward_auth with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_secrets: "{{ security_traefik_forward_auth__test_secrets + [ { 'name': 'forward_auth_other', 'data': 'x', 'target': 'MOLECULE_SECRET' } ] }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: MOLECULE_SECRET\.'
+
+    - name: 'Run security_traefik_forward_auth without SECRET (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_secrets: "{{ security_traefik_forward_auth__test_secrets | rejectattr('target', 'eq', 'SECRET') | list }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'without SECRET'
+          search: '^Traefik Forward Auth needs the secrets SECRET, missing: SECRET\.$'
+
+    - name: 'Run security_traefik_forward_auth with secrets in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'SECRET': 'plain', 'COOKIE_SECRET': 'plain' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'secrets in the environment'
+          search: '^Secrets must not be set in forward_auth_environment: SECRET, COOKIE_SECRET\.$'
+
+    - name: 'Run security_traefik_forward_auth with a secret starting with whitespace (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_secrets: "{{ security_traefik_forward_auth__test_secrets | rejectattr('target', 'eq', 'SECRET') | list
+                                  + [ { 'name': 'forward_auth_secret', 'data': ' molecule', 'target': 'SECRET' } ] }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'a secret starting with whitespace'
+          search: '^Secrets must not be empty, contain line breaks, start or end with whitespace or start with a quote: forward_auth_secret\.$'
+
+    - name: 'Run security_traefik_forward_auth with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'MOLECULE_UNKNOWN': 'molecule' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: MOLECULE_UNKNOWN\.'
+
+    - name: 'Run security_traefik_forward_auth with CONFIG in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'CONFIG': '/etc/forward-auth.ini' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'CONFIG in the environment'
+          search: 'Unknown environment variables: CONFIG\.'
+
+    - name: 'Run security_traefik_forward_auth with a boolean that is no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'INSECURE_COOKIE': 'yes' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'a boolean that is no boolean'
+          search: '^These variables are booleans, allowed are true and false: INSECURE_COOKIE\.$'
+
+    - name: 'Run security_traefik_forward_auth with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'COOKIE_DOMAIN': 'example.org\nexample.com' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: COOKIE_DOMAIN\.$'
+
+    - name: 'Run security_traefik_forward_auth with an unknown default provider (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'DEFAULT_PROVIDER': 'github' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'an unknown default provider'
+          search: '^DEFAULT_PROVIDER has to be one of google, oidc, generic-oauth, got github\.$'
+
+    - name: 'Run security_traefik_forward_auth with the provider oidc without issuer and client secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_environment: "{{ security_traefik_forward_auth__test_environment | combine({ 'DEFAULT_PROVIDER': 'oidc', 'PROVIDERS_OIDC_CLIENT_ID': 'molecule' }) }}"
+        security_traefik_forward_auth__test_invalid:
+          message: 'the provider oidc without issuer and client secret'
+          search: '^The provider oidc needs the variables PROVIDERS_OIDC_ISSUER_URL, PROVIDERS_OIDC_CLIENT_ID and the secret PROVIDERS_OIDC_CLIENT_SECRET, missing: PROVIDERS_OIDC_ISSUER_URL, PROVIDERS_OIDC_CLIENT_SECRET\.$'
+
+    - name: 'Run security_traefik_forward_auth with forward_auth_rules not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_rules: [ 'PathPrefix(`/public`)' ]
+        security_traefik_forward_auth__test_invalid:
+          message: 'forward_auth_rules not a dictionary'
+          search: '^forward_auth_rules has to be a dictionary of the rules by their names\.$'
+
+    - name: 'Run security_traefik_forward_auth with invalid rules (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_rules:
+          'my.rule':
+            rule: 'PathPrefix(`/my`)'
+          deny:
+            action: 'deny'
+            rule: 'PathPrefix(`/deny`)'
+            priority: 1
+          empty:
+            action: 'allow'
+        security_traefik_forward_auth__test_invalid:
+          message: 'invalid rules'
+          search: >-
+            ^The names of forward_auth_rules may contain letters, digits, _ and -: my\.rule\.
+            The rules of forward_auth_rules may only contain action, rule, provider: deny\.
+            The rules of forward_auth_rules need rule: empty\.
+            The action of a rule has to be one of auth, allow: deny\.$
+
+    - name: 'Run security_traefik_forward_auth with a rule using a provider without configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_auth_rules:
+          admin:
+            rule: 'PathPrefix(`/admin`)'
+            provider: 'oidc'
+        security_traefik_forward_auth__test_invalid:
+          message: 'a rule using a provider without configuration'
+          search: '^The provider oidc needs the variables .*, missing: PROVIDERS_OIDC_ISSUER_URL, PROVIDERS_OIDC_CLIENT_ID, PROVIDERS_OIDC_CLIENT_SECRET\.$'
+
+    - name: 'Change the rule'
+      when: security_traefik_forward_auth__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'traefik-forward-auth' ]
+          register: 'security_traefik_forward_auth__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed rules'
+          ansible.builtin.set_fact:
+            forward_auth_rules: "{{ security_traefik_forward_auth__test_case.side_effect.rules }}"
+
+        - name: 'Run security_traefik_forward_auth with the changed rules'
+          ansible.builtin.include_role:
+            name: 'security_traefik_forward_auth'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'traefik-forward-auth' ]
+          register: 'security_traefik_forward_auth__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed rules and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - security_traefik_forward_auth__rules_result is changed
+              - security_traefik_forward_auth__quadlet_result is not changed
+              - security_traefik_forward_auth__secrets_result is not changed
+              - security_traefik_forward_auth__test_started_after.stdout | int > security_traefik_forward_auth__test_started_before.stdout | int
+            fail_msg: >-
+              rules changed: {{ security_traefik_forward_auth__rules_result is changed }},
+              quadlet changed: {{ security_traefik_forward_auth__quadlet_result is changed }},
+              secrets changed: {{ security_traefik_forward_auth__secrets_result is changed }},
+              start before {{ security_traefik_forward_auth__test_started_before.stdout }}, after {{ security_traefik_forward_auth__test_started_after.stdout }}

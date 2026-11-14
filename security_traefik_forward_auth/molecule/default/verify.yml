@@ -1,0 +1,151 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_traefik_forward_auth__test_case: "{{ security_traefik_forward_auth__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_traefik_forward_auth__expect: "{{ security_traefik_forward_auth__test_case.expect }}"
+    security_traefik_forward_auth__test_url: "http://{{ security_traefik_forward_auth__expect.ip }}:4181/"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ security_traefik_forward_auth__test_quadlet_path }}"
+      register: 'security_traefik_forward_auth__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + security_traefik_forward_auth__test_image) in security_traefik_forward_auth__test_quadlet_lines
+          - ('IP=' + security_traefik_forward_auth__expect.ip) in security_traefik_forward_auth__test_quadlet_lines
+          - security_traefik_forward_auth__expect.ip6 is none or ('IP6=' + security_traefik_forward_auth__expect.ip6) in security_traefik_forward_auth__test_quadlet_lines
+          - security_traefik_forward_auth__expect.ip6 is not none or security_traefik_forward_auth__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Environment=TZ=' + security_traefik_forward_auth__test_case.role_vars.forward_auth_timezone) in security_traefik_forward_auth__test_quadlet_lines
+          - security_traefik_forward_auth__expect.quadlet | reject('in', security_traefik_forward_auth__test_quadlet_lines) | list | length == 0
+          # The time zone is set with TZ, /etc/localtime is not mounted
+          - security_traefik_forward_auth__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          # The secrets are configuration files, never passed in the environment
+          - security_traefik_forward_auth__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - security_traefik_forward_auth__test_exec is search('--config=/etc/traefik-forward-auth/rules\.ini')
+          - security_traefik_forward_auth__test_secret_names | reject('in', security_traefik_forward_auth__test_config_files) | list | length == 0
+        fail_msg: "{{ security_traefik_forward_auth__test_quadlet_lines | to_json }}"
+      vars:
+        security_traefik_forward_auth__test_quadlet_lines: >-
+          {{ (security_traefik_forward_auth__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}
+        security_traefik_forward_auth__test_exec: "{{ security_traefik_forward_auth__test_quadlet_lines | select('match', 'Exec=') | join(' ') }}"
+        security_traefik_forward_auth__test_secret_names: >-
+          {{ security_traefik_forward_auth__test_case.role_vars.forward_auth_secrets | map(attribute='name') | list }}
+        security_traefik_forward_auth__test_config_files: >-
+          {{ security_traefik_forward_auth__test_exec | regex_findall('--config=/run/secrets/([^ ]+)') }}
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'traefik-forward-auth' ]
+      register: 'security_traefik_forward_auth__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'traefik-forward-auth' ]
+      register: 'security_traefik_forward_auth__test_env'
+      changed_when: false
+
+    - name: 'Read the rules'
+      ansible.builtin.slurp:
+        src: "{{ security_traefik_forward_auth__test_rules_path }}"
+      register: 'security_traefik_forward_auth__test_rules'
+
+    - name: 'Assert the service, the environment and the rules'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__test_service.stdout == 'active'
+          - ('TZ=' + security_traefik_forward_auth__test_case.role_vars.forward_auth_timezone) in security_traefik_forward_auth__test_environment
+          - security_traefik_forward_auth__test_environment | select('match', '(SECRET|COOKIE_SECRET|CLIENT_SECRET|PROVIDERS_[A-Z_]+_CLIENT_SECRET)=') | list | length == 0
+          - security_traefik_forward_auth__test_rule_lines == security_traefik_forward_auth__expect.rules
+        fail_msg: >-
+          service {{ security_traefik_forward_auth__test_service.stdout }}, environment {{ security_traefik_forward_auth__test_environment }},
+          rules {{ security_traefik_forward_auth__test_rule_lines }}
+      vars:
+        security_traefik_forward_auth__test_environment: "{{ security_traefik_forward_auth__test_env.stdout | from_json }}"
+        security_traefik_forward_auth__test_rule_lines: >-
+          {{ (security_traefik_forward_auth__test_rules.content | b64decode).splitlines() | reject('match', '#') | reject('equalto', '') | list }}
+
+    - name: 'Wait until Traefik Forward Auth listens'
+      ansible.builtin.wait_for:
+        host: "{{ security_traefik_forward_auth__expect.ip }}"
+        port: 4181
+        timeout: 60
+
+    # The requests of the middleware of Traefik, the login redirects to the provider with the client ID.
+    # Without SECRET and the client secret read from the configuration files Traefik Forward Auth does not start
+    - name: 'Request the paths that need a login'
+      ansible.builtin.command:
+        argv:
+          - 'curl'
+          - '-s'
+          - '-o'
+          - '/dev/null'
+          - '-w'
+          - '%{http_code} %{redirect_url}'
+          - '-H'
+          - 'X-Forwarded-Method: GET'
+          - '-H'
+          - 'X-Forwarded-Proto: https'
+          - '-H'
+          - 'X-Forwarded-Host: app.example.org'
+          - '-H'
+          - "X-Forwarded-Uri: {{ item }}"
+          - "{{ security_traefik_forward_auth__test_url }}"
+      loop: "{{ security_traefik_forward_auth__expect.protected }}"
+      register: 'security_traefik_forward_auth__test_protected'
+      changed_when: false
+
+    - name: 'Request the paths allowed by the rules'
+      ansible.builtin.command:
+        argv:
+          - 'curl'
+          - '-s'
+          - '-o'
+          - '/dev/null'
+          - '-w'
+          - '%{http_code}'
+          - '-H'
+          - 'X-Forwarded-Method: GET'
+          - '-H'
+          - 'X-Forwarded-Proto: https'
+          - '-H'
+          - 'X-Forwarded-Host: app.example.org'
+          - '-H'
+          - "X-Forwarded-Uri: {{ item }}"
+          - "{{ security_traefik_forward_auth__test_url }}"
+      loop: "{{ security_traefik_forward_auth__expect.allowed }}"
+      register: 'security_traefik_forward_auth__test_allowed'
+      changed_when: false
+
+    - name: 'Assert the redirects to the login and the allowed paths'
+      ansible.builtin.assert:
+        that:
+          - item.stdout is match('^307 ' ~ (security_traefik_forward_auth__expect.login | regex_escape))
+          - item.stdout is search('client_id=' ~ security_traefik_forward_auth__expect.client_id ~ '(&|$)')
+        fail_msg: "{{ item.item }}: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ security_traefik_forward_auth__test_protected.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Assert the paths allowed by the rules'
+      ansible.builtin.assert:
+        that:
+          - item.stdout == '200'
+        fail_msg: "{{ item.item }}: {{ item.stdout }}"
+        quiet: true
+      loop: "{{ security_traefik_forward_auth__test_allowed.results }}"
+      loop_control:
+        label: "{{ item.item }}"

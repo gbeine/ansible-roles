@@ -5,28 +5,157 @@
 # https://ansible-roles.org/roles/security-traefik-forward-auth
 #
 
+security_traefik_forward_auth__home: "{{ forward_auth_home | mandatory }}"
 security_traefik_forward_auth__ip: "{{ forward_auth_ip | mandatory }}"
 security_traefik_forward_auth__ipv6: "{{ forward_auth_ipv6 }}"
 security_traefik_forward_auth__network: "{{ forward_auth_network | mandatory }}"
 security_traefik_forward_auth__hostname: "{{ forward_auth_hostname | mandatory }}"
 security_traefik_forward_auth__timezone: "{{ forward_auth_timezone | mandatory }}"
-security_traefik_forward_auth__labels: "{{ forward_auth_labels | default({}) }}"
+security_traefik_forward_auth__labels: "{{ forward_auth_labels }}"
 
+# The image is not multi-arch, the role appends the suffix of the architecture (-arm64, -arm) to the version
 security_traefik_forward_auth__version: "{{ forward_auth_version | default('2') }}"
 
 security_traefik_forward_auth__container: "{{ security_traefik_forward_auth__podman_container_default | combine(forward_auth_container | default({})) }}"
 
-security_traefik_forward_auth__client_secret: "{{ forward_auth_client_secret | mandatory }}"
-security_traefik_forward_auth__secret: "{{ forward_auth_secret | mandatory }}"
+# The configuration of Traefik Forward Auth, e.g. DEFAULT_PROVIDER, COOKIE_DOMAIN, AUTH_HOST and PROVIDERS_*
+security_traefik_forward_auth__environment: "{{ security_traefik_forward_auth__environment_default | combine(forward_auth_environment | default({})) }}"
+
+# Secrets with name, data and target, SECRET is mandatory, every secret is passed as configuration file
+security_traefik_forward_auth__secrets: "{{ forward_auth_secrets | default([]) }}"
+
+# The rules by name with action, rule and provider
+security_traefik_forward_auth__rules: "{{ forward_auth_rules | default({}) }}"
+
+security_traefik_forward_auth__autoupdate_enabled: "{{ forward_auth_autoupdate_enabled | default(false) }}"
+security_traefik_forward_auth__autoupdate_schedule: "{{ forward_auth_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-# security_traefik_forward_auth__podman_image: 'docker.io/mesosphere/traefik-forward-auth'
+security_traefik_forward_auth__environment_default:
+  TZ: "{{ security_traefik_forward_auth__timezone }}"
+
+# The tags of the image by architecture, the tag without suffix is amd64 only
+security_traefik_forward_auth__tag_suffixes:
+  x86_64: ''
+  aarch64: '-arm64'
+  armv7l: '-arm'
+security_traefik_forward_auth__architecture: "{{ ansible_facts['architecture'] | default('') }}"
+
+# The port is fixed in v2.2.0 of Traefik Forward Auth
+security_traefik_forward_auth__port: 4181
+
+# Traefik Forward Auth reads no file variables, it reads its options from configuration files in INI format (--config).
+# Every secret is a configuration file with one line, the option of the target and the data of the secret.
+security_traefik_forward_auth__secret_options:
+  SECRET: 'secret'
+  PROVIDERS_GOOGLE_CLIENT_SECRET: 'providers.google.client-secret'
+  PROVIDERS_OIDC_CLIENT_SECRET: 'providers.oidc.client-secret'
+  PROVIDERS_GENERIC_OAUTH_CLIENT_SECRET: 'providers.generic-oauth.client-secret'
+
+# The targets of the secrets and the deprecated variables carrying secrets, they must not be set in forward_auth_environment
+security_traefik_forward_auth__secret_variables: "{{ security_traefik_forward_auth__secret_options.keys() | list + [ 'COOKIE_SECRET', 'CLIENT_SECRET' ] }}"
+
+# SECRET signs the cookies, Traefik Forward Auth does not start without it
+security_traefik_forward_auth__secrets_required: [ 'SECRET' ]
+
+security_traefik_forward_auth__secrets_dir: '/run/secrets'
+
+# The providers, the variables and the secret each provider needs (Setup of internal/provider/*.go of v2.2.0)
+security_traefik_forward_auth__providers:
+  google:
+    environment: [ 'PROVIDERS_GOOGLE_CLIENT_ID' ]
+    secret: 'PROVIDERS_GOOGLE_CLIENT_SECRET'
+  oidc:
+    environment: [ 'PROVIDERS_OIDC_ISSUER_URL', 'PROVIDERS_OIDC_CLIENT_ID' ]
+    secret: 'PROVIDERS_OIDC_CLIENT_SECRET'
+  generic-oauth:
+    environment:
+      - 'PROVIDERS_GENERIC_OAUTH_AUTH_URL'
+      - 'PROVIDERS_GENERIC_OAUTH_TOKEN_URL'
+      - 'PROVIDERS_GENERIC_OAUTH_USER_URL'
+      - 'PROVIDERS_GENERIC_OAUTH_CLIENT_ID'
+    secret: 'PROVIDERS_GENERIC_OAUTH_CLIENT_SECRET'
+
+# The default provider of the image
+security_traefik_forward_auth__default_provider: 'google'
+security_traefik_forward_auth__actions: [ 'auth', 'allow' ]
+
+# Traefik Forward Auth reads these values as booleans
+security_traefik_forward_auth__environment_booleans:
+  - 'INSECURE_COOKIE'
+  - 'MATCH_WHITELIST_OR_DOMAIN'
+
+# Generated from the env tags of internal/config.go and internal/provider/*.go of Traefik Forward Auth v2.2.0
+# with TZ, without the secrets, CONFIG set by the role and the deprecated COOKIE_DOMAINS, COOKIE_SECURE, CLIENT_ID and PROMPT
+security_traefik_forward_auth__environment_allowed:
+  - 'TZ'
+  - 'AUTH_HOST'
+  - 'COOKIE_DOMAIN'
+  - 'COOKIE_NAME'
+  - 'CSRF_COOKIE_NAME'
+  - 'DEFAULT_ACTION'
+  - 'DEFAULT_PROVIDER'
+  - 'DOMAIN'
+  - 'INSECURE_COOKIE'
+  - 'LIFETIME'
+  - 'LOGOUT_REDIRECT'
+  - 'LOG_FORMAT'
+  - 'LOG_LEVEL'
+  - 'MATCH_WHITELIST_OR_DOMAIN'
+  - 'URL_PATH'
+  - 'WHITELIST'
+  - 'PROVIDERS_GOOGLE_CLIENT_ID'
+  - 'PROVIDERS_GOOGLE_PROMPT'
+  - 'PROVIDERS_OIDC_ISSUER_URL'
+  - 'PROVIDERS_OIDC_CLIENT_ID'
+  - 'PROVIDERS_OIDC_RESOURCE'
+  - 'PROVIDERS_GENERIC_OAUTH_AUTH_URL'
+  - 'PROVIDERS_GENERIC_OAUTH_TOKEN_URL'
+  - 'PROVIDERS_GENERIC_OAUTH_USER_URL'
+  - 'PROVIDERS_GENERIC_OAUTH_CLIENT_ID'
+  - 'PROVIDERS_GENERIC_OAUTH_SCOPE'
+  - 'PROVIDERS_GENERIC_OAUTH_TOKEN_STYLE'
+  - 'PROVIDERS_GENERIC_OAUTH_RESOURCE'
+
+# Traefik Forward Auth splits the options of the rules (rule.<name>.<param>) at the dots
+security_traefik_forward_auth__rule_name_pattern: '^[A-Za-z0-9_-]+$'
+security_traefik_forward_auth__rule_keys: [ 'action', 'rule', 'provider' ]
+
+security_traefik_forward_auth__etc_dir: '/etc/traefik-forward-auth'
+security_traefik_forward_auth__rules_file: "{{ security_traefik_forward_auth__home }}/rules.ini"
+
+# The environment of the container, booleans in lower case
+security_traefik_forward_auth__environment_container: >-
+  {%- set environment = {} -%}
+  {%- for key, value in security_traefik_forward_auth__environment.items() -%}
+  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+# The valid entries of forward_auth_secrets, broken entries are reported by the validation of the secrets
+security_traefik_forward_auth__secrets_valid: >-
+  {{ security_traefik_forward_auth__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | list
+     if (security_traefik_forward_auth__secrets is sequence and security_traefik_forward_auth__secrets is not string
+         and security_traefik_forward_auth__secrets is not mapping)
+     else [] }}
+
+security_traefik_forward_auth__podman_secrets: >-
+  {{ security_traefik_forward_auth__secrets_valid | map(attribute='name')
+     | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ security_traefik_forward_auth__secrets_dir ~ '/\1') | list }}
+
+# The rules and every secret are configuration files
+security_traefik_forward_auth__command_default: >-
+  {{ [ '--config=' ~ security_traefik_forward_auth__etc_dir ~ '/rules.ini' ]
+     + security_traefik_forward_auth__secrets_valid | map(attribute='name')
+       | map('regex_replace', '^', '--config=' ~ security_traefik_forward_auth__secrets_dir ~ '/') | list }}
+
 security_traefik_forward_auth__podman_name: 'traefik-forward-auth'
 security_traefik_forward_auth__podman_image: 'docker.io/thomseddon/traefik-forward-auth'
-security_traefik_forward_auth__podman_tag: "{{ security_traefik_forward_auth__version }}"
+security_traefik_forward_auth__podman_tag: >-
+  {{ security_traefik_forward_auth__version ~ security_traefik_forward_auth__tag_suffixes[security_traefik_forward_auth__architecture] | default('') }}
 
 security_traefik_forward_auth__podman_container_default:
   name: "{{ security_traefik_forward_auth__podman_name }}"
@@ -36,7 +165,12 @@ security_traefik_forward_auth__podman_container_default:
   ipv6: "{{ security_traefik_forward_auth__ipv6 | default(omit) }}"
   network: "{{ security_traefik_forward_auth__network }}"
   timezone: "{{ security_traefik_forward_auth__timezone }}"
-  labels: "{{ security_traefik_forward_auth__labels }}"
+  # Set with forward_auth_environment, merged over the default
+  environment: "{{ security_traefik_forward_auth__environment_container }}"
+  labels: "{{ security_traefik_forward_auth__labels | default(omit) }}"
+  secrets: "{{ security_traefik_forward_auth__podman_secrets if security_traefik_forward_auth__podman_secrets | length > 0 else omit }}"
+  # forward_auth_container.command replaces the list completely
+  command: "{{ security_traefik_forward_auth__command_default }}"
+  # forward_auth_container.volumes replaces the list completely
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
+    - "{{ security_traefik_forward_auth__rules_file }}:{{ security_traefik_forward_auth__etc_dir }}/rules.ini:ro"

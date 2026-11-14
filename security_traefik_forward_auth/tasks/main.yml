@@ -1,35 +1,257 @@
 ---
 
-- name: 'Deploy Forward Auth container'
-  tags: [ 'security_traefik_forward_auth' ]
+- name: 'Deploy Traefik Forward Auth'
+  tags: [ 'security', 'security_traefik_forward_auth' ]
   block:
 
+    # A failing template in the variables (e.g. an unknown filter or forward_auth_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - security_traefik_forward_auth__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_traefik_forward_auth__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_traefik_forward_auth__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = security_traefik_forward_auth__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('forward_auth_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('forward_auth_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of forward_auth_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # SECRET is mandatory, every provider in use needs its variables and its client secret
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_traefik_forward_auth__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_traefik_forward_auth__targets: "{{ security_traefik_forward_auth__secrets | map(attribute='target') | list }}"
+        security_traefik_forward_auth__set: >-
+          {{ security_traefik_forward_auth__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        security_traefik_forward_auth__secrets_missing: >-
+          {{ security_traefik_forward_auth__secrets_required | reject('in', security_traefik_forward_auth__targets) | list }}
+        security_traefik_forward_auth__secrets_in_environment: >-
+          {{ (security_traefik_forward_auth__targets + security_traefik_forward_auth__secret_variables)
+             | select('in', security_traefik_forward_auth__environment.keys() | list) | unique | list }}
+        # The data of a secret is the value of a line of a configuration file
+        security_traefik_forward_auth__secrets_unsafe: >-
+          {%- set names = [] -%}
+          {%- for secret in security_traefik_forward_auth__secrets -%}
+          {%-   set data = secret.data | string -%}
+          {%-   if (data ~ '.').splitlines() | length > 1 or data | length == 0 or data != data | trim or data is match('"') -%}
+          {%-     set _ = names.append(secret.name) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ names }}
+        security_traefik_forward_auth__default_provider_set: >-
+          {{ security_traefik_forward_auth__environment.DEFAULT_PROVIDER | default(security_traefik_forward_auth__default_provider, true) | string }}
+        security_traefik_forward_auth__providers_used: >-
+          {{ ([ security_traefik_forward_auth__default_provider_set ]
+              + (security_traefik_forward_auth__rules.values() | select('mapping') | selectattr('provider', 'defined') | map(attribute='provider') | map('string') | list
+                 if security_traefik_forward_auth__rules is mapping else []))
+             | unique | select('in', security_traefik_forward_auth__providers) | list }}
+        security_traefik_forward_auth__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_traefik_forward_auth__architecture not in security_traefik_forward_auth__tag_suffixes -%}
+          {%-   set _ = errors.append('The image of Traefik Forward Auth is available for ' ~ (security_traefik_forward_auth__tag_suffixes.keys() | join(', ')) ~ ', not for ' ~ security_traefik_forward_auth__architecture ~ '.') -%}
+          {%- endif -%}
+          {%- if security_traefik_forward_auth__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Traefik Forward Auth needs the secrets ' ~ (security_traefik_forward_auth__secrets_required | join(', ')) ~ ', missing: ' ~ (security_traefik_forward_auth__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_traefik_forward_auth__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in forward_auth_environment: ' ~ (security_traefik_forward_auth__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_traefik_forward_auth__secrets_unsafe | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be empty, contain line breaks, start or end with whitespace or start with a quote: ' ~ (security_traefik_forward_auth__secrets_unsafe | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_traefik_forward_auth__default_provider_set not in security_traefik_forward_auth__providers -%}
+          {%-   set _ = errors.append('DEFAULT_PROVIDER has to be one of ' ~ (security_traefik_forward_auth__providers.keys() | join(', ')) ~ ', got ' ~ security_traefik_forward_auth__default_provider_set ~ '.') -%}
+          {%- endif -%}
+          {%- if (security_traefik_forward_auth__environment.DEFAULT_ACTION | default('auth', true) | string) not in security_traefik_forward_auth__actions -%}
+          {%-   set _ = errors.append('DEFAULT_ACTION has to be one of ' ~ (security_traefik_forward_auth__actions | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- for provider in security_traefik_forward_auth__providers_used -%}
+          {%-   set needed = security_traefik_forward_auth__providers[provider] -%}
+          {%-   set missing = needed.environment | reject('in', security_traefik_forward_auth__set) | list -%}
+          {%-   if needed.secret not in security_traefik_forward_auth__targets -%}
+          {%-     set missing = missing + [ needed.secret ] -%}
+          {%-   endif -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('The provider ' ~ provider ~ ' needs the variables ' ~ (needed.environment | join(', ')) ~ ' and the secret ' ~ needed.secret ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_traefik_forward_auth__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_traefik_forward_auth__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in security_traefik_forward_auth__environment.items() if value is not none -%}
+          {%-   if key in security_traefik_forward_auth__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The rules are lines of a configuration file, rule.<name>.<param> = <value>
+    - name: 'Validate the rules'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_traefik_forward_auth__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_traefik_forward_auth__errors: >-
+          {%- set errors = [] -%}
+          {%- set rules = security_traefik_forward_auth__rules -%}
+          {%- if rules is not mapping -%}
+          {%-   set _ = errors.append('forward_auth_rules has to be a dictionary of the rules by their names.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(names=[], entries=[], keys=[], missing=[], actions=[], providers=[], values=[]) -%}
+          {%-   for name, rule in rules.items() -%}
+          {%-     if name is not string or name is not match(security_traefik_forward_auth__rule_name_pattern) -%}
+          {%-       set ns.names = ns.names + [ name | string ] -%}
+          {%-     elif rule is not mapping -%}
+          {%-       set ns.entries = ns.entries + [ name ] -%}
+          {%-     else -%}
+          {%-       if rule.keys() | reject('in', security_traefik_forward_auth__rule_keys) | list | length > 0 -%}
+          {%-         set ns.keys = ns.keys + [ name ] -%}
+          {%-       endif -%}
+          {%-       if rule.rule is not defined or rule.rule is none or rule.rule | string | length == 0 -%}
+          {%-         set ns.missing = ns.missing + [ name ] -%}
+          {%-       endif -%}
+          {%-       if rule.action is defined and (rule.action | string) not in security_traefik_forward_auth__actions -%}
+          {%-         set ns.actions = ns.actions + [ name ] -%}
+          {%-       endif -%}
+          {%-       if rule.provider is defined and (rule.provider | string) not in security_traefik_forward_auth__providers -%}
+          {%-         set ns.providers = ns.providers + [ name ] -%}
+          {%-       endif -%}
+          {%-       for key in security_traefik_forward_auth__rule_keys if rule[key] is defined and rule[key] is not none -%}
+          {%-         if ((rule[key] | string) ~ '.').splitlines() | length > 1 or (rule[key] | string) is match('\s*"') -%}
+          {%-           set ns.values = ns.values + [ name ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.names | length > 0 -%}
+          {%-     set _ = errors.append('The names of forward_auth_rules may contain letters, digits, _ and -: ' ~ (ns.names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.entries | length > 0 -%}
+          {%-     set _ = errors.append('The rules of forward_auth_rules have to be dictionaries: ' ~ (ns.entries | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.keys | length > 0 -%}
+          {%-     set _ = errors.append('The rules of forward_auth_rules may only contain ' ~ (security_traefik_forward_auth__rule_keys | join(', ')) ~ ': ' ~ (ns.keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.missing | length > 0 -%}
+          {%-     set _ = errors.append('The rules of forward_auth_rules need rule: ' ~ (ns.missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.actions | length > 0 -%}
+          {%-     set _ = errors.append('The action of a rule has to be one of ' ~ (security_traefik_forward_auth__actions | join(', ')) ~ ': ' ~ (ns.actions | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.providers | length > 0 -%}
+          {%-     set _ = errors.append('The provider of a rule has to be one of ' ~ (security_traefik_forward_auth__providers.keys() | join(', ')) ~ ': ' ~ (ns.providers | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.values | length > 0 -%}
+          {%-     set _ = errors.append('The values of rules must not contain line breaks or start with a quote: ' ~ (ns.values | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging forward_auth_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_traefik_forward_auth__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_traefik_forward_auth__environment_unknown: >-
+          {{ (security_traefik_forward_auth__container.environment | default({})).keys()
+             | reject('in', security_traefik_forward_auth__environment_allowed) | list }}
+        security_traefik_forward_auth__secrets_unknown: >-
+          {{ security_traefik_forward_auth__secrets | map(attribute='target')
+             | reject('in', security_traefik_forward_auth__secret_options.keys() | list) | list }}
+        security_traefik_forward_auth__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_traefik_forward_auth__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (security_traefik_forward_auth__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_traefik_forward_auth__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (security_traefik_forward_auth__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Traefik Forward Auth (security_traefik_forward_auth__environment_allowed) and the secrets '
+                                    ~ (security_traefik_forward_auth__secret_options.keys() | join(', ')) ~ ', rules are set with forward_auth_rules.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of Traefik Forward Auth'
+      ansible.builtin.file:
+        path: "{{ security_traefik_forward_auth__home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+
+    - name: 'Generate the rules'
+      ansible.builtin.template:
+        src: 'rules.ini.j2'
+        dest: "{{ security_traefik_forward_auth__rules_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'security_traefik_forward_auth__rules_result'
+
+    # Every secret is a configuration file with the option of its target
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
         name: "{{ item.name }}"
-        data: "{{ item.data }}"
-      with_items:
-        - name: "forward_auth_client_secret"
-          data: "{{ security_traefik_forward_auth__client_secret }}"
-        - name: "forward_auth_secret"
-          data: "{{ security_traefik_forward_auth__secret }}"
+        data: "{{ security_traefik_forward_auth__secret_options[item.target] }} = {{ item.data }}"
+      loop: "{{ security_traefik_forward_auth__secrets }}"
+      register: 'security_traefik_forward_auth__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ security_traefik_forward_auth__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[security_traefik_forward_auth__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ security_traefik_forward_auth__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -40,6 +262,7 @@
         ip6: "{{ security_traefik_forward_auth__container.ipv6 | default(omit) }}"
         network: "{{ security_traefik_forward_auth__container.network }}"
         timezone: "{{ security_traefik_forward_auth__container.timezone }}"
+        command: "{{ security_traefik_forward_auth__container.command | default(omit) }}"
         env: "{{ security_traefik_forward_auth__container.environment | default(omit) }}"
         etc_hosts: "{{ security_traefik_forward_auth__container.etc_hosts | default(omit) }}"
         expose: "{{ security_traefik_forward_auth__container.expose | default(omit) }}"
@@ -48,21 +271,86 @@
         secrets: "{{ security_traefik_forward_auth__container.secrets | default(omit) }}"
         volume: "{{ security_traefik_forward_auth__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if security_traefik_forward_auth__container.requires is defined %}
+          Requires={{ security_traefik_forward_auth__container.requires | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'security_traefik_forward_auth__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ security_traefik_forward_auth__container.name }}"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Traefik Forward Auth'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ security_traefik_forward_auth__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if security_traefik_forward_auth__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            security_traefik_forward_auth__running: >-
+              {{ (ansible_facts.services[security_traefik_forward_auth__container.name + '.service'].state | default('')) == 'running' }}
+            security_traefik_forward_auth__restart: >-
+              {{ security_traefik_forward_auth__running | bool
+                 and (security_traefik_forward_auth__secrets_result is changed
+                      or security_traefik_forward_auth__rules_result is changed
+                      or security_traefik_forward_auth__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ security_traefik_forward_auth__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'security_traefik_forward_auth__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ security_traefik_forward_auth__container.name ~ ' did not start' ] + security_traefik_forward_auth__start_journal.stdout_lines }}"
+
+    # Traefik Forward Auth exits if the configuration is invalid, it listens after the setup of the providers
+    - name: 'Wait for Traefik Forward Auth'
+      ansible.builtin.wait_for:
+        host: "{{ security_traefik_forward_auth__container.ip }}"
+        port: "{{ security_traefik_forward_auth__port }}"
+        timeout: 60
+      register: 'security_traefik_forward_auth__ready'
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Traefik Forward Auth'
+      when:
+        - not ansible_check_mode
+        # failed_when: false keeps the message of the timeout
+        - (security_traefik_forward_auth__ready.msg | default('')) is search('Timeout')
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ security_traefik_forward_auth__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'security_traefik_forward_auth__journal'
+      changed_when: false
+
+    - name: 'Assert that Traefik Forward Auth listens'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - security_traefik_forward_auth__journal is skipped
+        fail_msg: "{{ security_traefik_forward_auth__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'security_traefik_forward_auth__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ security_traefik_forward_auth__container.name }}"
+        container_image: "{{ security_traefik_forward_auth__container.image }}"
+        container_schedule: "{{ security_traefik_forward_auth__autoupdate_schedule }}"
