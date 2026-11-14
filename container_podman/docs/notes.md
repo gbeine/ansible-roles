@@ -121,6 +121,11 @@ Setting `podman_cleanup_enabled` to `false` removes the timer.
 - `podman_environment` and `podman_containers` are no longer used.
 - `podman___update_mode` is no longer evaluated by this role.
 
+### Check mode
+
+In check mode the packages are not installed. If podman is missing (`/usr/bin/podman`), the role reports it and skips the configuration of networks,
+socket, TCP service and image cleanup, because their tasks need the podman command.
+
 ### Tests
 
 The molecule scenario `default` runs the role in a [tart](https://tart.run) VM on a macOS controller, the base VM has to be Debian 13.
@@ -131,7 +136,7 @@ The scenario runs the role twice:
 
 | Step | What happens |
 |---|---|
-| `prepare` | installs podman and creates the networks `molstale` (unused) and `molbusy` (used by a container) and the orphaned quadlet `molghost.network` |
+| `prepare` | runs the role in check mode before podman is installed, it has to skip the configuration without errors and changes, installs podman and creates the networks `molstale` (unused) and `molbusy` (used by a container) and the orphaned quadlet `molghost.network` |
 | `converge`, `idempotence` | creates `molnet-a` (IPv4 and IPv6) and `molnet-b` (without DNS), enables socket, TCP service and image cleanup, prunes `molstale` and `molghost`, keeps `molbusy` |
 | `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, runs the role with the undeclared default network `molnet-b`, which has to fail before any change, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled |
 | `verify` | checks the state after the second run, `molapp` has to run with an address from the new subnet |

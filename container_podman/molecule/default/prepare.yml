@@ -9,7 +9,43 @@
   vars:
     container_podman__test_case: "{{ container_podman__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  roles:
+    - role: 'common_filters'
+
   tasks:
+
+    - name: 'Set the role variables of the first run'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ container_podman__test_case.converge.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    # apt does not update the package lists in check mode
+    - name: 'Update the package lists, as on a host that is already in use'
+      ansible.builtin.apt:
+        update_cache: true
+
+    # podman is not installed yet, in check mode the role has to stop after the installation
+    - name: 'Run container_podman in check mode without podman'
+      ansible.builtin.include_role:
+        name: 'container_podman'
+        apply:
+          check_mode: true
+
+    - name: 'Read podman and the network quadlets after the check mode run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - '/usr/bin/podman'
+        - '/etc/containers/systemd/molnet-a.network'
+      register: 'container_podman__test_check_mode'
+
+    - name: 'Assert the check mode run changed nothing'
+      ansible.builtin.assert:
+        that:
+          - container_podman__test_check_mode.results | selectattr('stat.exists') | list | length == 0
+        fail_msg: "Exists after the check mode run: {{ container_podman__test_check_mode.results | selectattr('stat.exists') | map(attribute='item') | join(', ') }}"
 
     - name: 'Install podman'
       ansible.builtin.apt:
