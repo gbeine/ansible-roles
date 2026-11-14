@@ -1,0 +1,73 @@
+---
+
+# Keycloak creates the realm master and the admin of bootstrap-admin-* only on a new installation, an existing installation
+# starts without creating it. The container of the initialization starts Keycloak once with the options of the admin,
+# a local cache and a synchronous bootstrap, it is removed afterwards. The quadlet unit never contains the options of the admin.
+
+- name: 'Run the initialization of Keycloak'
+  block:
+
+    - name: 'Create the secret of keycloak.conf of the initialization'
+      no_log: true
+      containers.podman.podman_secret:
+        name: "{{ security_keycloak__init_secret }}"
+        data: "{{ lookup('ansible.builtin.template', 'keycloak.conf.j2', template_vars={ 'security_keycloak__conf_options': security_keycloak__init_conf }) }}"
+        state: 'present'
+
+    # The initialization needs the network of the database, it gets no address and no ports of the service
+    - name: 'Start the initialization'
+      containers.podman.podman_container:
+        name: "{{ security_keycloak__init_name }}"
+        image: "{{ security_keycloak__container.image }}"
+        network: "{{ security_keycloak__container.network }}"
+        command: "{{ security_keycloak__container.command }}"
+        env: "{{ security_keycloak__container.environment | default(omit) }}"
+        etc_hosts: "{{ security_keycloak__container.etc_hosts | default(omit) }}"
+        secrets: [ "{{ security_keycloak__init_secret }},{{ security_keycloak__secret_mount }}" ]
+        shm_size: "{{ security_keycloak__container.shm_size | default(omit) }}"
+        volume: "{{ security_keycloak__container.volumes | default(omit) }}"
+        detach: true
+        state: 'started'
+
+    # Keycloak reports the admin of a new installation, an existing installation only reports the start
+    - name: 'Wait for the end of the initialization'
+      ansible.builtin.command:
+        argv: [ 'podman', 'logs', "{{ security_keycloak__init_name }}" ]
+      register: 'security_keycloak__init_log'
+      changed_when: false
+      failed_when: false
+      until: >-
+        security_keycloak__init_created in security_keycloak__init_output
+        or security_keycloak__init_output is search(security_keycloak__init_started)
+        or security_keycloak__init_output is search('ERROR')
+      retries: 100
+      delay: 3
+      vars:
+        security_keycloak__init_output: "{{ security_keycloak__init_log.stdout | default('') ~ security_keycloak__init_log.stderr | default('') }}"
+
+    - name: 'Assert the initialization'
+      ansible.builtin.assert:
+        that:
+          - >-
+            security_keycloak__init_created in security_keycloak__init_output
+            or (security_keycloak__init_output is search(security_keycloak__init_started)
+                and security_keycloak__init_output is not search('ERROR'))
+        fail_msg: >-
+          The initialization of Keycloak failed. Check the database and its options in keycloak_config,
+          if Keycloak created a part of its tables, drop the tables of the database before the next run.
+          {{ (security_keycloak__init_output | split('\n'))[-30:] }}
+        quiet: true
+      vars:
+        security_keycloak__init_output: "{{ security_keycloak__init_log.stdout | default('') ~ security_keycloak__init_log.stderr | default('') }}"
+
+  always:
+
+    - name: 'Remove the container of the initialization'
+      containers.podman.podman_container:
+        name: "{{ security_keycloak__init_name }}"
+        state: 'absent'
+
+    - name: 'Remove the secret of the initialization'
+      containers.podman.podman_secret:
+        name: "{{ security_keycloak__init_secret }}"
+        state: 'absent'

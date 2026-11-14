@@ -1,0 +1,140 @@
+---
+# Network created by container_podman in prepare.yml
+security_keycloak__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+security_keycloak__test_image: 'quay.io/keycloak/keycloak:latest'
+security_keycloak__test_quadlet_path: '/etc/containers/systemd/keycloak.container'
+
+security_keycloak__test_cases:
+
+  # Only the mandatory variables with the default database MariaDB
+  - name: 'molecule-keycloak-default'
+    database:
+      name: 'molecule-mariadb'
+      image: 'docker.io/library/mariadb:11'
+      ip: '10.89.0.20'
+      port: 3306
+      environment:
+        MARIADB_DATABASE: 'keycloak'
+        MARIADB_USER: 'keycloak'
+        MARIADB_PASSWORD: 'molecule-db-password'
+        MARIADB_RANDOM_ROOT_PASSWORD: '1'
+    role_vars:
+      keycloak_ip: '10.89.0.120'
+      keycloak_network: 'podman-molecule'
+      keycloak_hostname: 'keycloak-default'
+      keycloak_timezone: 'Europe/Berlin'
+      keycloak_config:
+        hostname: 'https://sso-default.molecule.test'
+        db-url-host: '10.89.0.20'
+      keycloak_secrets:
+        - name: 'keycloak_db_password'
+          data: 'molecule-db-password'
+          target: 'db-password'
+        - name: 'keycloak_admin_password'
+          data: 'molecule-admin-password'
+          target: 'bootstrap-admin-password'
+    expect:
+      ip: '10.89.0.120'
+      ip6: ~
+      admin: 'admin'
+      admin_password: 'molecule-admin-password'
+      conf:
+        - 'db=mariadb'
+        - 'db-url-host=10.89.0.20'
+        - 'db-url-database=keycloak'
+        - 'db-username=keycloak'
+        - 'hostname=https://sso-default.molecule.test'
+        - 'http-enabled=true'
+        - 'health-enabled=true'
+      realm: ~
+      client: ~
+
+  # PostgreSQL, IPv6, labels, an admin with another name, log levels with a key, a disabled feature, metrics
+  # and a realm with a client and a required action
+  - name: 'molecule-keycloak'
+    database:
+      name: 'molecule-postgres'
+      image: 'docker.io/library/postgres:17'
+      ip: '10.89.0.21'
+      port: 5432
+      environment:
+        POSTGRES_DB: 'molecule_kc'
+        POSTGRES_USER: 'molecule_kc'
+        POSTGRES_PASSWORD: 'molecule-pg-password'
+    role_vars:
+      keycloak_ip: '10.89.0.121'
+      keycloak_ipv6: 'fd00:89::121'
+      keycloak_network: 'podman-molecule'
+      keycloak_hostname: 'keycloak-molecule'
+      keycloak_timezone: 'Europe/Berlin'
+      keycloak_labels:
+        traefik.enable: 'false'
+      keycloak_environment:
+        JAVA_OPTS_KC_HEAP: '-XX:MaxRAMPercentage=40'
+      keycloak_keys:
+        log_category: [ 'org.keycloak.events' ]
+      keycloak_config:
+        hostname: 'https://sso.molecule.test'
+        db: 'postgres'
+        db-url-host: '10.89.0.21'
+        db-url-database: 'molecule_kc'
+        db-username: 'molecule_kc'
+        bootstrap-admin-username: 'molecule-admin'
+        log-level: 'INFO'
+        log-level-org.keycloak.events: 'debug'
+        features-disabled: [ 'impersonation' ]
+        metrics-enabled: true
+      keycloak_secrets:
+        - name: 'keycloak_db_password'
+          data: 'molecule-pg-password'
+          target: 'db-password'
+        - name: 'keycloak_admin_password'
+          data: 'molecule-admin-password'
+          target: 'bootstrap-admin-password'
+      keycloak_realms:
+        - realm: 'molecule'
+          display_name: 'Molecule'
+          login_with_email: true
+          required_actions:
+            - alias: 'TERMS_AND_CONDITIONS'
+              name: 'Terms and Conditions'
+              providerId: 'TERMS_AND_CONDITIONS'
+              enabled: true
+          clients:
+            - client_id: 'molecule-service'
+              name: 'Molecule service'
+              secret: 'molecule-client-secret'
+              public_client: false
+              standard_flow_enabled: false
+              service_accounts_enabled: true
+    # side_effect changes the log level, keycloak.conf changes and Keycloak has to restart without a new initialization
+    side_effect:
+      config:
+        log-level: 'WARN'
+    expect:
+      ip: '10.89.0.121'
+      ip6: 'fd00:89::121'
+      admin: 'molecule-admin'
+      admin_password: 'molecule-admin-password'
+      conf:
+        - 'db=postgres'
+        - 'db-url-host=10.89.0.21'
+        - 'db-url-database=molecule_kc'
+        - 'db-username=molecule_kc'
+        - 'hostname=https://sso.molecule.test'
+        - 'log-level=WARN'
+        - 'log-level-org.keycloak.events=debug'
+        - 'features-disabled=impersonation'
+        - 'metrics-enabled=true'
+      realm: 'molecule'
+      client:
+        id: 'molecule-service'
+        secret: 'molecule-client-secret'

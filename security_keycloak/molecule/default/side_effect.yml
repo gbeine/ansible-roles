@@ -1,0 +1,173 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_keycloak__test_case: "{{ security_keycloak__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_keycloak__test_vars: "{{ security_keycloak__test_case.role_vars }}"
+    security_keycloak__test_config: "{{ security_keycloak__test_vars.keycloak_config }}"
+    security_keycloak__test_secrets: "{{ security_keycloak__test_vars.keycloak_secrets }}"
+    security_keycloak__test_checked_files:
+      - "{{ security_keycloak__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ security_keycloak__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ security_keycloak__test_checked_files }}"
+      register: 'security_keycloak__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run security_keycloak with keycloak_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_container: [ 'environment' ]
+        security_keycloak__test_invalid:
+          message: 'keycloak_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run security_keycloak with keycloak_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_secrets: { 'name': 'keycloak_db_password', 'data': 'x', 'target': 'db-password' }
+        security_keycloak__test_invalid:
+          message: 'keycloak_secrets not a list'
+          search: '^keycloak_secrets has to be a list$'
+
+    - name: 'Run security_keycloak with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_secrets: "{{ security_keycloak__test_secrets + [ { 'name': 'keycloak_other', 'data': 'x' } ] }}"
+        security_keycloak__test_invalid:
+          message: 'a secret without target'
+          search: '^keycloak_secrets entries need name, data and target$'
+
+    - name: 'Run security_keycloak with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_secrets: "{{ security_keycloak__test_secrets + [ { 'name': 'keycloak_other', 'data': 'x', 'target': 'db-password-audit' } ] }}"
+        security_keycloak__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: db-password-audit\.'
+
+    - name: 'Run security_keycloak without the database password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_secrets: "{{ security_keycloak__test_secrets | rejectattr('target', 'eq', 'db-password') | list }}"
+        security_keycloak__test_invalid:
+          message: 'without the database password'
+          search: '^Keycloak needs the secrets db-password, bootstrap-admin-password, missing: db-password\.$'
+
+    - name: 'Run security_keycloak with a password in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_config: "{{ security_keycloak__test_config | combine({ 'db-password': 'plain' }) }}"
+        security_keycloak__test_invalid:
+          message: 'a password in the configuration'
+          search: '^Passwords are set with keycloak_secrets, not in keycloak_config: db-password\.$'
+
+    - name: 'Run security_keycloak with an option in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_environment:
+          KC_DB: 'postgres'
+        security_keycloak__test_invalid:
+          message: 'an option in the environment'
+          search: '^The options of Keycloak are set with keycloak_config and keycloak_secrets, not in keycloak_environment: KC_DB\.$'
+
+    - name: 'Run security_keycloak with an unknown option, an option of an unknown key and a boolean as string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_config: "{{ security_keycloak__test_config | combine({ 'molecule-unknown': 'x', 'db-url-host-audit': '10.89.0.30', 'http-enabled': 'yes' }) }}"
+        security_keycloak__test_invalid:
+          message: 'an unknown option, an option of an unknown key and a boolean as string'
+          search: >-
+            ^Unknown options in keycloak_config: molecule-unknown, db-url-host-audit, allowed are the options of Keycloak \(security_keycloak__config_allowed\),
+            options with keys in their names \(e\.g\. db-url-host-<datasource>\) need the keys in keycloak_keys\.
+            These options are booleans, allowed are true and false: http-enabled\.$
+
+    - name: 'Run security_keycloak with an unknown family and an invalid key in keycloak_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_keys:
+          molecule: [ 'x' ]
+          datasource: [ 'audit db' ]
+        security_keycloak__test_invalid:
+          message: 'an unknown family and an invalid key in keycloak_keys'
+          search: >-
+            ^Unknown families in keycloak_keys: molecule, allowed are datasource, log_category, feature, header, spi\.
+            The keys of keycloak_keys start with a letter or digit, followed by letters, digits, \., _ and -: audit db\.$
+
+    - name: 'Run security_keycloak without the host of the database (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_config: "{{ security_keycloak__test_config | combine({ 'db-url-host': none }) }}"
+        security_keycloak__test_invalid:
+          message: 'without the host of the database'
+          search: '^Keycloak needs the options hostname, db-url-host, missing: db-url-host\.$'
+
+    - name: 'Run security_keycloak with a realm without name and a client without client_id (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keycloak_realms:
+          - realm: 'molecule-invalid'
+            enabled: 'yes'
+            clients:
+              - name: 'Molecule without client_id'
+        security_keycloak__test_invalid:
+          message: 'a realm with a boolean as string and a client without client_id'
+          search: >-
+            ^These keys of keycloak_realms are booleans, allowed are true and false: enabled\.
+            The clients are dictionaries with client_id and the keys .*, the flags are true or false: molecule-invalid\.1\.$
+
+    - name: 'Change the configuration'
+      when: security_keycloak__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'keycloak' ]
+          register: 'security_keycloak__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            keycloak_config: "{{ security_keycloak__test_config | combine(security_keycloak__test_case.side_effect.config) }}"
+
+        - name: 'Run security_keycloak with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'security_keycloak'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'keycloak' ]
+          register: 'security_keycloak__test_started_after'
+          changed_when: false
+
+        # Keycloak was running, the initialization is skipped
+        - name: 'Assert the changed configuration, the restart and no new initialization'
+          ansible.builtin.assert:
+            that:
+              - security_keycloak__conf_result is changed
+              - security_keycloak__quadlet_result is not changed
+              - security_keycloak__init_log is not defined
+              - security_keycloak__test_started_after.stdout | int > security_keycloak__test_started_before.stdout | int
+            fail_msg: >-
+              keycloak.conf changed: {{ security_keycloak__conf_result is changed }},
+              quadlet changed: {{ security_keycloak__quadlet_result is changed }},
+              initialization: {{ security_keycloak__init_log is defined }},
+              start before {{ security_keycloak__test_started_before.stdout }}, after {{ security_keycloak__test_started_after.stdout }}

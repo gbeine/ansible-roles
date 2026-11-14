@@ -10,56 +10,223 @@ security_keycloak__ipv6: "{{ keycloak_ipv6 }}"
 security_keycloak__network: "{{ keycloak_network | mandatory }}"
 security_keycloak__hostname: "{{ keycloak_hostname | mandatory }}"
 security_keycloak__timezone: "{{ keycloak_timezone | mandatory }}"
-security_keycloak__labels: "{{ keycloak_labels | default({}) }}"
-security_keycloak__publish: "{{ keycloak_publish | default([]) }}"
+security_keycloak__labels: "{{ keycloak_labels }}"
 
 security_keycloak__version: "{{ keycloak_version | default('latest') }}"
 
-security_keycloak__db_type: "{{ keycloak_db_type | default('mariadb') }}"
-security_keycloak__db_host: "{{ keycloak_db_host | mandatory }}"
-security_keycloak__db_port: "{{ keycloak_db_port | default(3306) }}"
-security_keycloak__db_user: "{{ keycloak_db_user | default('keycloak') }}"
-security_keycloak__db_pass: "{{ keycloak_db_pass | mandatory }}"
-security_keycloak__db_name: "{{ keycloak_db_name | default('keycloak') }}"
+security_keycloak__container: "{{ security_keycloak__podman_container_default | combine(keycloak_container | default({})) }}"
 
-security_keycloak__http_enabled: "{{ keycloak_http_enabled | default(false) }}"
-security_keycloak__health_enabled: "{{ keycloak_health_enabled | default(false) }}"
-security_keycloak__metrics_enabled: "{{ keycloak_metrics_enabled | default(false) }}"
-security_keycloak__url: "{{ keycloak_url | mandatory }}"
-security_keycloak__proxy_headers: "{{ keycloak_proxy_headers | default('xforwarded') }}"
-security_keycloak__log: "{{ keycloak_log | default('console') }}"
-security_keycloak__log_level: "{{ keycloak_log_level | default('INFO') }}"
-security_keycloak__proxy_address_forwarding: "{{ keycloak_proxy_address_forwarding | default(false) }}"
+# Variables of the start script and the JVM, e.g. JAVA_OPTS_APPEND, the options of Keycloak are set with keycloak_config
+security_keycloak__environment: "{{ security_keycloak__environment_default | combine(keycloak_environment | default({})) }}"
 
-security_keycloak__admin: "{{ keycloak_admin | mandatory }}"
-security_keycloak__password: "{{ keycloak_password | mandatory }}"
+# Options of Keycloak written to keycloak.conf, e.g. hostname, db, db-url-host, http-enabled
+security_keycloak__config: "{{ security_keycloak__config_default | combine(keycloak_config | default({})) }}"
 
-security_keycloak__container: "{{ security_keycloak__container_default | combine(keycloak_container | default({})) }}"
+# Keys of the options with a free part in their names, e.g. { 'datasource': [ 'audit' ], 'log_category': [ 'org.keycloak' ] }
+security_keycloak__keys: "{{ keycloak_keys | default({}) }}"
 
-security_keycloak__autoupdate_enabled: "{{ keycloak_autoupdate_enabled | default(false) }}"
+# Secrets with name, data and target, the targets are the password options of Keycloak, e.g. db-password
+security_keycloak__secrets: "{{ keycloak_secrets | default([]) }}"
 
+# Realms with their clients, required actions and user federations
 security_keycloak__realms: "{{ keycloak_realms | default([]) }}"
 
-security_keycloak__auth_url: "https://{{ security_keycloak__url }}"
-security_keycloak__auth_username: "{{ security_keycloak__admin }}"
-security_keycloak__auth_password: "{{ security_keycloak__password }}"
-security_keycloak__auth_realm: 'master'
-security_keycloak__auth_client_id: 'admin-cli'
+security_keycloak__autoupdate_enabled: "{{ keycloak_autoupdate_enabled | default(false) }}"
+security_keycloak__autoupdate_schedule: "{{ keycloak_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-security_keycloak__http_port: 8080
-security_keycloak__https_port: 8443
-security_keycloak__uid: 1000
-security_keycloak__gid: "{{ security_keycloak__uid }}"
+security_keycloak__environment_default:
+  TZ: "{{ security_keycloak__timezone }}"
+
+security_keycloak__config_default:
+  db: 'mariadb'
+  db-username: 'keycloak'
+  db-url-database: 'keycloak'
+  http-enabled: true
+  proxy-headers: 'xforwarded'
+  health-enabled: true
+  log: 'console'
+
+# The options of keycloak_config and keycloak_keys, the defaults are empty, so the role checks that they are dictionaries
+security_keycloak__config_custom: "{{ keycloak_config | default({}) }}"
+
+security_keycloak__config_required: [ 'hostname', 'db-url-host' ]
+
+# Options only used for the initialization and the login of the role, never written to the keycloak.conf of the service
+security_keycloak__init_options: [ 'bootstrap-admin-username' ]
+security_keycloak__admin_username: "{{ security_keycloak__config['bootstrap-admin-username'] | default('admin', true) }}"
+
+# Options set for the initialization only: no cluster with a running Keycloak, the admin is created before the start is reported
+security_keycloak__init_config:
+  cache: 'local'
+  server-async-bootstrap: false
+
+# The ports and the path of the API used by the role
+security_keycloak__https_only: "{{ not (security_keycloak__config['http-enabled'] | default(false) | bool) }}"
+security_keycloak__api_scheme: "{{ 'https' if security_keycloak__https_only else 'http' }}"
+security_keycloak__api_port: >-
+  {{ security_keycloak__config['https-port'] | default(8443) if security_keycloak__https_only
+     else security_keycloak__config['http-port'] | default(8080) }}
+security_keycloak__api_path: "{{ (security_keycloak__config['http-relative-path'] | default('/', true) | string).rstrip('/') }}"
+security_keycloak__api_url: >-
+  {{ security_keycloak__api_scheme }}://{{ security_keycloak__ip }}:{{ security_keycloak__api_port }}{{ security_keycloak__api_path }}
+
+# Characters of the keys of keycloak_keys, e.g. a datasource, a log category, a feature or an SPI with provider and option
+security_keycloak__key_pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+
+security_keycloak__secrets_required: [ 'db-password', 'bootstrap-admin-password' ]
+
+# The secrets only used for the initialization and the login of the role
+security_keycloak__secrets_init: [ 'bootstrap-admin-password' ]
+
+# Generated from quarkus/config-api/src/main/java/org/keycloak/config/*Options.java of Keycloak 26.8.2,
+# the password options of Keycloak, they are set with keycloak_secrets
+security_keycloak__secrets_allowed_options:
+  - 'bootstrap-admin-password'
+  - 'config-keystore-password'
+  - 'db-mtls-key-store-password'
+  - 'db-password'
+  - 'db-tls-trust-store-password'
+  - 'https-certificate-key-file-password'
+  - 'https-key-store-password'
+  - 'https-management-certificate-key-file-password'
+  - 'https-management-key-store-password'
+  - 'https-management-trust-store-password'
+  - 'https-trust-store-password'
+  - 'vault-pass'
+
+# Generated from quarkus/dist/src/main/content/bin/kc.sh and quarkus/container/Dockerfile of Keycloak 26.8.2,
+# the variables of the start script and the JVM, the options of Keycloak (KC_*) are set with keycloak_config
+security_keycloak__environment_allowed:
+  - 'TZ'
+  - 'JAVA_OPTS'
+  - 'JAVA_OPTS_APPEND'
+  - 'JAVA_OPTS_KC_HEAP'
+  - 'JAVA_ADD_OPENS'
+  - 'KC_DEBUG'
+  - 'KC_DEBUG_PORT'
+  - 'KC_DEBUG_SUSPEND'
+  - 'KC_RUN_IN_CONTAINER'
+
+# The valid keys of keycloak_keys by family, invalid keys are reported by the validation of the keys
+security_keycloak__keys_valid: >-
+  {%- set result = {} -%}
+  {%- if security_keycloak__keys is mapping -%}
+  {%-   for family, keys in security_keycloak__keys.items()
+          if family in security_keycloak__keys_families and keys is sequence and keys is not string and keys is not mapping -%}
+  {%-     set _ = result.update({ family: keys | select('string') | select('match', security_keycloak__key_pattern) | unique | list }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ result }}
+
+# The options composed from the keys of keycloak_keys
+security_keycloak__config_allowed_keys: >-
+  {%- set names = [] -%}
+  {%- for family, keys in security_keycloak__keys_valid.items() -%}
+  {%-   for template in security_keycloak__keys_families[family] -%}
+  {%-     for key in keys -%}
+  {%-       set _ = names.append(template | replace('<key>', key)) -%}
+  {%-     endfor -%}
+  {%-   endfor -%}
+  {%- endfor -%}
+  {{ names }}
+
+security_keycloak__config_booleans_keys: >-
+  {%- set names = [] -%}
+  {%- for template in security_keycloak__keys_booleans -%}
+  {%-   for key in security_keycloak__keys_valid.datasource | default([]) -%}
+  {%-     set _ = names.append(template | replace('<key>', key)) -%}
+  {%-   endfor -%}
+  {%- endfor -%}
+  {{ names }}
+
+security_keycloak__secrets_allowed_keys: >-
+  {%- set names = [] -%}
+  {%- for template in security_keycloak__keys_secrets -%}
+  {%-   for key in security_keycloak__keys_valid.datasource | default([]) -%}
+  {%-     set _ = names.append(template | replace('<key>', key)) -%}
+  {%-   endfor -%}
+  {%- endfor -%}
+  {{ names }}
+
+# The options of keycloak_config, the targets of keycloak_secrets and the boolean options
+security_keycloak__config_allowed: "{{ security_keycloak__config_allowed_options + security_keycloak__config_allowed_keys + security_keycloak__init_options }}"
+security_keycloak__config_booleans: "{{ security_keycloak__config_booleans_options + security_keycloak__config_booleans_keys }}"
+security_keycloak__secrets_allowed: "{{ security_keycloak__secrets_allowed_options + security_keycloak__secrets_allowed_keys }}"
+
+# The options written to keycloak.conf: the configuration without the options of the initialization and the secrets,
+# entries without name, data or target are left out, the validation of the secrets reports them
+security_keycloak__secret_options: >-
+  {%- set options = {} -%}
+  {%- if security_keycloak__secrets is sequence and security_keycloak__secrets is not string and security_keycloak__secrets is not mapping -%}
+  {%-   for secret in security_keycloak__secrets
+          if secret is mapping and secret.name is defined and secret.data is defined and secret.target is defined -%}
+  {%-     set _ = options.update({ secret.target | string: secret.data | string }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ options }}
+
+security_keycloak__conf: >-
+  {{ security_keycloak__config | dict2items | rejectattr('key', 'in', security_keycloak__init_options) | items2dict
+     | combine(security_keycloak__secret_options | dict2items | rejectattr('key', 'in', security_keycloak__secrets_init) | items2dict) }}
+
+# The options of the initialization: the admin, a local cache and the creation of the admin before the start is reported
+security_keycloak__init_conf: >-
+  {{ security_keycloak__conf
+     | combine({ 'bootstrap-admin-username': security_keycloak__admin_username })
+     | combine(security_keycloak__secret_options | dict2items | selectattr('key', 'in', security_keycloak__secrets_init) | items2dict)
+     | combine(security_keycloak__init_config) }}
+
+security_keycloak__admin_password: "{{ security_keycloak__secret_options['bootstrap-admin-password'] | default('') }}"
+
+# The keys of the entries of keycloak_realms, their clients and user federations, booleans are checked
+security_keycloak__realm_keys: [ 'realm', 'id', 'display_name', 'enabled', 'login_with_email', 'required_actions', 'clients', 'user_federation' ]
+security_keycloak__realm_booleans: [ 'enabled', 'login_with_email' ]
+security_keycloak__client_keys:
+  - 'client_id'
+  - 'name'
+  - 'description'
+  - 'root_url'
+  - 'client_authenticator_type'
+  - 'secret'
+  - 'redirect_uris'
+  - 'web_origins'
+  - 'standard_flow_enabled'
+  - 'implicit_flow_enabled'
+  - 'direct_access_grants_enabled'
+  - 'service_accounts_enabled'
+  - 'authorization_services_enabled'
+  - 'public_client'
+  - 'protocol'
+  - 'attributes'
+security_keycloak__client_booleans:
+  - 'standard_flow_enabled'
+  - 'implicit_flow_enabled'
+  - 'direct_access_grants_enabled'
+  - 'service_accounts_enabled'
+  - 'authorization_services_enabled'
+  - 'public_client'
+security_keycloak__federation_keys: [ 'federation_id', 'federation_name', 'provider_id', 'config', 'mappers' ]
 
 security_keycloak__podman_name: 'keycloak'
 security_keycloak__podman_image: 'quay.io/keycloak/keycloak'
 security_keycloak__podman_tag: "{{ security_keycloak__version }}"
 
-security_keycloak__container_default:
+# keycloak.conf with the passwords is a podman secret, the user keycloak (1000) of the image reads it
+security_keycloak__conf_file: '/opt/keycloak/conf/keycloak.conf'
+security_keycloak__conf_secret: "{{ security_keycloak__container.name }}-config"
+security_keycloak__init_name: "{{ security_keycloak__container.name }}-init"
+security_keycloak__init_secret: "{{ security_keycloak__container.name }}-init-config"
+security_keycloak__secret_mount: "type=mount,target={{ security_keycloak__conf_file }},uid=1000,gid=0,mode=0400"
+
+# The log messages of the initialization: the admin was created on a new installation, Keycloak started without creating it
+security_keycloak__init_created: 'Created temporary admin user with username'
+security_keycloak__init_started: 'started in [0-9.]+s'
+
+security_keycloak__podman_container_default:
   name: "{{ security_keycloak__podman_name }}"
   hostname: "{{ security_keycloak__hostname }}"
   image: "{{ security_keycloak__podman_image }}:{{ security_keycloak__podman_tag }}"
@@ -67,26 +234,290 @@ security_keycloak__container_default:
   ipv6: "{{ security_keycloak__ipv6 | default(omit) }}"
   network: "{{ security_keycloak__network }}"
   timezone: "{{ security_keycloak__timezone }}"
-  environment:
-    KC_DB: "{{ security_keycloak__db_type }}"
-    KC_DB_SCHEMA: "{{ security_keycloak__db_name }}"
-    KC_DB_URL_HOST: "{{ security_keycloak__db_host }}"
-    KC_DB_USERNAME: "{{ security_keycloak__db_user }}"
-    KC_HTTP_ENABLED: "{{ security_keycloak__http_enabled | ternary('true', 'false') }}"
-    KC_HEALTH_ENABLED: "{{ security_keycloak__health_enabled | ternary('true', 'false') }}"
-    KC_METRICS_ENABLED: "{{ security_keycloak__metrics_enabled | ternary('true', 'false') }}"
-    KC_HOSTNAME: "{{ security_keycloak__url }}"
-    KC_PROXY_HEADERS: "{{ security_keycloak__proxy_headers }}"
-    KC_LOG: "{{ security_keycloak__log }}"
-    KC_LOG_LEVEL: "{{ security_keycloak__log_level }}"
-    KEYCLOAK_ADMIN: "{{ security_keycloak__admin }}"
-    PROXY_ADDRESS_FORWARDING: "{{ security_keycloak__proxy_address_forwarding | ternary('true', 'false') }}"
-  labels: "{{ security_keycloak__labels }}"
-  secrets:
-    - "keycloak_database_passwd,type=env,target=KC_DB_PASSWORD"
-    - "keycloak_admin_passwd,type=env,target=KEYCLOAK_ADMIN_PASSWORD"
-  volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
+  # Set with keycloak_environment, merged over the default
+  environment: "{{ security_keycloak__environment }}"
+  labels: "{{ security_keycloak__labels | default(omit) }}"
   shm_size: '256m'
-  command: 'start-dev'
+  command: 'start'
+
+# Generated from quarkus/config-api/src/main/java/org/keycloak/config/*Options.java of Keycloak 26.8.2,
+# the families of keycloak_keys with the options composed from a key, <key> is replaced by the key:
+# datasource from DatabaseOptions.Datasources (the options of the default datasource with the name of a datasource),
+# log_category from log-level-<category>, feature from feature-<name>, header from the *-header-<header> options,
+# spi from the options of the providers spi-<spi>--<provider>--<option>
+security_keycloak__keys_families:
+  datasource:
+    - 'db-connect-timeout-<key>'
+    - 'db-debug-jpql-<key>'
+    - 'db-driver-<key>'
+    - 'db-enabled-<key>'
+    - 'db-health-exclude-<key>'
+    - 'db-kind-<key>'
+    - 'db-log-slow-queries-threshold-<key>'
+    - 'db-mtls-key-store-file-<key>'
+    - 'db-mtls-key-store-type-<key>'
+    - 'db-pool-initial-size-<key>'
+    - 'db-pool-max-lifetime-<key>'
+    - 'db-pool-max-size-<key>'
+    - 'db-pool-min-size-<key>'
+    - 'db-schema-<key>'
+    - 'db-tls-mode-<key>'
+    - 'db-tls-trust-store-file-<key>'
+    - 'db-tls-trust-store-type-<key>'
+    - 'db-url-database-<key>'
+    - 'db-url-full-<key>'
+    - 'db-url-host-<key>'
+    - 'db-url-port-<key>'
+    - 'db-url-properties-<key>'
+    - 'db-username-<key>'
+    - 'transaction-xa-enabled-<key>'
+  log_category:
+    - 'log-level-<key>'
+  feature:
+    - 'feature-<key>'
+  header:
+    - 'telemetry-header-<key>'
+    - 'telemetry-logs-header-<key>'
+    - 'telemetry-metrics-header-<key>'
+    - 'tracing-header-<key>'
+  spi:
+    - 'spi-<key>'
+
+# The boolean options of the families
+security_keycloak__keys_booleans:
+  - 'db-debug-jpql-<key>'
+  - 'db-enabled-<key>'
+  - 'db-health-exclude-<key>'
+  - 'transaction-xa-enabled-<key>'
+
+# The password options of the families, they are set with keycloak_secrets
+security_keycloak__keys_secrets:
+  - 'db-mtls-key-store-password-<key>'
+  - 'db-password-<key>'
+  - 'db-tls-trust-store-password-<key>'
+
+# Generated from quarkus/config-api/src/main/java/org/keycloak/config/*Options.java of Keycloak 26.8.2,
+# the options of Keycloak without the hidden ones, the options of the commands import and export,
+# the options of the initialization and the password options
+security_keycloak__config_allowed_options:
+  - 'cache'
+  - 'cache-stack'
+  - 'config-keystore'
+  - 'config-keystore-type'
+  - 'db'
+  - 'db-connect-timeout'
+  - 'db-debug-jpql'
+  - 'db-driver'
+  - 'db-log-slow-queries-threshold'
+  - 'db-mtls-key-store-file'
+  - 'db-mtls-key-store-type'
+  - 'db-pool-initial-size'
+  - 'db-pool-max-lifetime'
+  - 'db-pool-max-size'
+  - 'db-pool-min-size'
+  - 'db-schema'
+  - 'db-tls-mode'
+  - 'db-tls-trust-store-file'
+  - 'db-tls-trust-store-type'
+  - 'db-url'
+  - 'db-url-database'
+  - 'db-url-host'
+  - 'db-url-port'
+  - 'db-url-properties'
+  - 'db-username'
+  - 'event-metrics-user-enabled'
+  - 'event-metrics-user-events'
+  - 'event-metrics-user-tags'
+  - 'features'
+  - 'features-disabled'
+  - 'fips-mode'
+  - 'health-enabled'
+  - 'hostname'
+  - 'hostname-admin'
+  - 'hostname-backchannel-dynamic'
+  - 'hostname-debug'
+  - 'hostname-strict'
+  - 'http-accept-non-normalized-paths'
+  - 'http-access-log-enabled'
+  - 'http-access-log-exclude'
+  - 'http-access-log-file-enabled'
+  - 'http-access-log-file-name'
+  - 'http-access-log-file-rotate'
+  - 'http-access-log-file-suffix'
+  - 'http-access-log-masked-cookies'
+  - 'http-access-log-masked-headers'
+  - 'http-access-log-pattern'
+  - 'http-enabled'
+  - 'http-host'
+  - 'http-management-health-enabled'
+  - 'http-management-host'
+  - 'http-management-port'
+  - 'http-management-relative-path'
+  - 'http-management-scheme'
+  - 'http-max-queued-requests'
+  - 'http-metrics-histograms-enabled'
+  - 'http-metrics-slos'
+  - 'http-pool-max-threads'
+  - 'http-port'
+  - 'http-relative-path'
+  - 'https-certificate-file'
+  - 'https-certificate-key-file'
+  - 'https-certificates-reload-period'
+  - 'https-cipher-suites'
+  - 'https-client-auth'
+  - 'https-key-store-file'
+  - 'https-key-store-type'
+  - 'https-management-certificate-file'
+  - 'https-management-certificate-key-file'
+  - 'https-management-certificates-reload-period'
+  - 'https-management-cipher-suites'
+  - 'https-management-client-auth'
+  - 'https-management-key-store-file'
+  - 'https-management-key-store-type'
+  - 'https-management-protocols'
+  - 'https-management-trust-store-file'
+  - 'https-management-trust-store-type'
+  - 'https-port'
+  - 'https-protocols'
+  - 'https-sni-enabled'
+  - 'https-trust-store-file'
+  - 'https-trust-store-type'
+  - 'legacy-observability-interface'
+  - 'log'
+  - 'log-async'
+  - 'log-console-async'
+  - 'log-console-async-queue-length'
+  - 'log-console-color'
+  - 'log-console-enabled'
+  - 'log-console-format'
+  - 'log-console-include-mdc'
+  - 'log-console-include-trace'
+  - 'log-console-json-format'
+  - 'log-console-level'
+  - 'log-console-output'
+  - 'log-file'
+  - 'log-file-async'
+  - 'log-file-async-queue-length'
+  - 'log-file-enabled'
+  - 'log-file-format'
+  - 'log-file-include-mdc'
+  - 'log-file-include-trace'
+  - 'log-file-json-format'
+  - 'log-file-level'
+  - 'log-file-output'
+  - 'log-file-rotation-enabled'
+  - 'log-file-rotation-file-suffix'
+  - 'log-file-rotation-max-backup-index'
+  - 'log-file-rotation-max-file-size'
+  - 'log-file-rotation-rotate-on-boot'
+  - 'log-level'
+  - 'log-mdc-enabled'
+  - 'log-mdc-keys'
+  - 'log-service-environment'
+  - 'log-service-name'
+  - 'log-syslog-app-name'
+  - 'log-syslog-async'
+  - 'log-syslog-async-queue-length'
+  - 'log-syslog-counting-framing'
+  - 'log-syslog-enabled'
+  - 'log-syslog-endpoint'
+  - 'log-syslog-format'
+  - 'log-syslog-include-mdc'
+  - 'log-syslog-include-trace'
+  - 'log-syslog-json-format'
+  - 'log-syslog-level'
+  - 'log-syslog-max-length'
+  - 'log-syslog-output'
+  - 'log-syslog-protocol'
+  - 'log-syslog-type'
+  - 'metrics-enabled'
+  - 'openapi-enabled'
+  - 'openapi-ui-enabled'
+  - 'proxy-headers'
+  - 'proxy-protocol-enabled'
+  - 'proxy-trusted-addresses'
+  - 'server-async-bootstrap'
+  - 'shutdown-delay'
+  - 'shutdown-timeout'
+  - 'telemetry-endpoint'
+  - 'telemetry-logs-enabled'
+  - 'telemetry-logs-endpoint'
+  - 'telemetry-logs-headers'
+  - 'telemetry-logs-level'
+  - 'telemetry-logs-protocol'
+  - 'telemetry-metrics-enabled'
+  - 'telemetry-metrics-endpoint'
+  - 'telemetry-metrics-headers'
+  - 'telemetry-metrics-interval'
+  - 'telemetry-metrics-protocol'
+  - 'telemetry-protocol'
+  - 'telemetry-resource-attributes'
+  - 'telemetry-service-name'
+  - 'tls-hostname-verifier'
+  - 'tracing-compression'
+  - 'tracing-enabled'
+  - 'tracing-endpoint'
+  - 'tracing-headers'
+  - 'tracing-infinispan-enabled'
+  - 'tracing-jdbc-enabled'
+  - 'tracing-protocol'
+  - 'tracing-resource-attributes'
+  - 'tracing-sampler-ratio'
+  - 'tracing-sampler-type'
+  - 'tracing-service-name'
+  - 'transaction-default-timeout'
+  - 'transaction-setup-timeout'
+  - 'transaction-xa-enabled'
+  - 'truststore-kubernetes-enabled'
+  - 'truststore-paths'
+  - 'vault'
+  - 'vault-dir'
+  - 'vault-file'
+  - 'vault-type'
+
+# Generated from quarkus/config-api/src/main/java/org/keycloak/config/*Options.java of Keycloak 26.8.2, the boolean options
+security_keycloak__config_booleans_options:
+  - 'db-debug-jpql'
+  - 'event-metrics-user-enabled'
+  - 'health-enabled'
+  - 'hostname-backchannel-dynamic'
+  - 'hostname-debug'
+  - 'hostname-strict'
+  - 'http-accept-non-normalized-paths'
+  - 'http-access-log-enabled'
+  - 'http-access-log-file-enabled'
+  - 'http-access-log-file-rotate'
+  - 'http-enabled'
+  - 'http-management-health-enabled'
+  - 'http-metrics-histograms-enabled'
+  - 'https-sni-enabled'
+  - 'legacy-observability-interface'
+  - 'log-async'
+  - 'log-console-async'
+  - 'log-console-color'
+  - 'log-console-enabled'
+  - 'log-console-include-mdc'
+  - 'log-console-include-trace'
+  - 'log-file-async'
+  - 'log-file-enabled'
+  - 'log-file-include-mdc'
+  - 'log-file-include-trace'
+  - 'log-file-rotation-enabled'
+  - 'log-file-rotation-rotate-on-boot'
+  - 'log-mdc-enabled'
+  - 'log-syslog-async'
+  - 'log-syslog-enabled'
+  - 'log-syslog-include-mdc'
+  - 'log-syslog-include-trace'
+  - 'metrics-enabled'
+  - 'openapi-enabled'
+  - 'openapi-ui-enabled'
+  - 'proxy-protocol-enabled'
+  - 'server-async-bootstrap'
+  - 'telemetry-logs-enabled'
+  - 'telemetry-metrics-enabled'
+  - 'tracing-enabled'
+  - 'tracing-infinispan-enabled'
+  - 'tracing-jdbc-enabled'
+  - 'transaction-xa-enabled'
+  - 'truststore-kubernetes-enabled'

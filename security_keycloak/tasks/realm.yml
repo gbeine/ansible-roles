@@ -1,72 +1,90 @@
 ---
 
-- name: 'Create Keycloak realm configuration'
-  tags: [ 'security_keycloak_config' ]
-  block:
-
 # See: https://docs.ansible.com/ansible/latest/collections/community/general/keycloak_realm_module.html
-    - name: 'Create or update Keycloak realm'
-      community.general.keycloak_realm:
-        auth_client_id: "{{ security_keycloak__auth_client_id }}"
-        auth_keycloak_url: "{{ security_keycloak__auth_url }}"
-        auth_realm: "{{ security_keycloak__auth_realm }}"
-        auth_username: "{{ security_keycloak__auth_username }}"
-        auth_password: "{{ security_keycloak__auth_password }}"
-        id: "{{ realm.id }}"
-        realm: "{{ realm.realm }}"
-        display_name: "{{ realm.display_name }}"
-        login_with_email_allowed: "{{ realm.login_with_email }}"
-        enabled: "{{ realm.enabled | default(true) }}"
-        state: 'present'
+# An update reports a change on every run, because Keycloak changes the realm on every update.
+# The check mode compares the realm with the parameters, the realm is only created or updated if they differ.
+- name: 'Compare the realm with its parameters'
+  check_mode: true
+  community.general.keycloak_realm: &security_keycloak__realm_args
+    auth_client_id: 'admin-cli'
+    auth_keycloak_url: "{{ security_keycloak__api_url }}"
+    auth_realm: 'master'
+    auth_username: "{{ security_keycloak__admin_username }}"
+    auth_password: "{{ security_keycloak__admin_password }}"
+    validate_certs: false
+    id: "{{ security_keycloak__realm.id | default(security_keycloak__realm.realm) }}"
+    realm: "{{ security_keycloak__realm.realm }}"
+    display_name: "{{ security_keycloak__realm.display_name | default(omit) }}"
+    login_with_email_allowed: "{{ security_keycloak__realm.login_with_email | default(omit) }}"
+    enabled: "{{ security_keycloak__realm.enabled | default(true) }}"
+    state: 'present'
+  register: 'security_keycloak__realm_check'
+
+- name: 'Create or update the realm'
+  when: security_keycloak__realm_check is changed
+  community.general.keycloak_realm: *security_keycloak__realm_args
 
 # See: https://docs.ansible.com/ansible/latest/collections/community/general/keycloak_authentication_required_actions_module.html
-    - name: 'Create or update Keycloak required actions'
-      community.general.keycloak_authentication_required_actions:
-        auth_keycloak_url: "{{ security_keycloak__auth_url }}"
-        auth_realm: "{{ security_keycloak__auth_realm }}"
-        auth_username: "{{ security_keycloak__auth_username }}"
-        auth_password: "{{ security_keycloak__auth_password }}"
-        realm: "{{ realm.realm }}"
-        required_actions: "{{ realm.required_actions }}"
-        state: 'present'
+- name: 'Create or update the required actions'
+  when: security_keycloak__realm.required_actions is defined
+  community.general.keycloak_authentication_required_actions:
+    auth_client_id: 'admin-cli'
+    auth_keycloak_url: "{{ security_keycloak__api_url }}"
+    auth_realm: 'master'
+    auth_username: "{{ security_keycloak__admin_username }}"
+    auth_password: "{{ security_keycloak__admin_password }}"
+    validate_certs: false
+    realm: "{{ security_keycloak__realm.realm }}"
+    required_actions: "{{ security_keycloak__realm.required_actions }}"
+    state: 'present'
 
 # See: https://docs.ansible.com/ansible/latest/collections/community/general/keycloak_user_federation_module.html
-    - name: 'Create or update Keycloak user federation'
-      community.general.keycloak_user_federation:
-        auth_keycloak_url: "{{ security_keycloak__auth_url }}"
-        auth_realm: "{{ security_keycloak__auth_realm }}"
-        auth_username: "{{ security_keycloak__auth_username }}"
-        auth_password: "{{ security_keycloak__auth_password }}"
-        realm: "{{ realm.realm }}"
-        id: "{{ item.federation_id }}"
-        name: "{{ item.federation_name }}"
-        provider_id: "{{ item.provider_id }}"
-        config: "{{ item.config }}"
-        mappers: "{{ item.mappers }}"
-      with_items: "{{ realm.user_federation | default([]) }}"
+- name: 'Create or update the user federations'
+  community.general.keycloak_user_federation:
+    auth_client_id: 'admin-cli'
+    auth_keycloak_url: "{{ security_keycloak__api_url }}"
+    auth_realm: 'master'
+    auth_username: "{{ security_keycloak__admin_username }}"
+    auth_password: "{{ security_keycloak__admin_password }}"
+    validate_certs: false
+    realm: "{{ security_keycloak__realm.realm }}"
+    id: "{{ item.federation_id | default(omit) }}"
+    name: "{{ item.federation_name }}"
+    provider_id: "{{ item.provider_id }}"
+    config: "{{ item.config | default(omit) }}"
+    mappers: "{{ item.mappers | default(omit) }}"
+    state: 'present'
+  loop: "{{ security_keycloak__realm.user_federation | default([]) }}"
+  loop_control:
+    label: "{{ item.federation_name }}"
 
-## See: https://docs.ansible.com/ansible/latest/collections/community/general/keycloak_client_module.html
-    - name: 'Create or update Keycloak client'
-      community.general.keycloak_client:
-        auth_keycloak_url: "{{ security_keycloak__auth_url }}"
-        auth_realm: "{{ security_keycloak__auth_realm }}"
-        auth_username: "{{ security_keycloak__auth_username }}"
-        auth_password: "{{ security_keycloak__auth_password }}"
-        realm: "{{ realm.realm }}"
-        client_id: "{{ item.client_id }}"
-        name: "{{ item.name }}"
-        description: "{{ item.description }}"
-        root_url: "{{ item.root_url }}"
-        client_authenticator_type: "{{ item.client_authenticator_type | default('client-secret') }}"
-        secret: "{{ item.secret }}"
-        redirect_uris: "{{ item.redirect_uris }}"
-        web_origins: "{{ item.web_origins }}"
-        standard_flow_enabled: "{{ item.standard_flow_enabled | default(true) }}"
-        implicit_flow_enabled: "{{ item.implicit_flow_enabled | default(false) }}"
-        direct_access_grants_enabled: "{{ item.direct_access_grants_enabled | default(false) }}"
-        service_accounts_enabled: "{{ item.service_accounts_enabled | default(false) }}"
-        authorization_services_enabled: "{{ item.authorization_services_enabled | default(false) }}"
-        public_client: "{{ item.public_client | default(true) }}"
-        protocol: "{{ item.protocol | default('openid-connect') }}"
-        attributes: "{{ item.attributes | default({}) }}"
-      with_items: "{{ realm.clients | default([]) }}"
+# See: https://docs.ansible.com/ansible/latest/collections/community/general/keycloak_client_module.html
+- name: 'Create or update the clients'
+  community.general.keycloak_client:
+    auth_client_id: 'admin-cli'
+    auth_keycloak_url: "{{ security_keycloak__api_url }}"
+    auth_realm: 'master'
+    auth_username: "{{ security_keycloak__admin_username }}"
+    auth_password: "{{ security_keycloak__admin_password }}"
+    validate_certs: false
+    realm: "{{ security_keycloak__realm.realm }}"
+    client_id: "{{ item.client_id }}"
+    name: "{{ item.name | default(omit) }}"
+    description: "{{ item.description | default(omit) }}"
+    root_url: "{{ item.root_url | default(omit) }}"
+    client_authenticator_type: "{{ item.client_authenticator_type | default('client-secret') }}"
+    secret: "{{ item.secret | default(omit) }}"
+    redirect_uris: "{{ item.redirect_uris | default(omit) }}"
+    web_origins: "{{ item.web_origins | default(omit) }}"
+    standard_flow_enabled: "{{ item.standard_flow_enabled | default(true) }}"
+    implicit_flow_enabled: "{{ item.implicit_flow_enabled | default(false) }}"
+    direct_access_grants_enabled: "{{ item.direct_access_grants_enabled | default(false) }}"
+    service_accounts_enabled: "{{ item.service_accounts_enabled | default(false) }}"
+    authorization_services_enabled: "{{ item.authorization_services_enabled | default(false) }}"
+    public_client: "{{ item.public_client | default(true) }}"
+    protocol: "{{ item.protocol | default('openid-connect') }}"
+    attributes: "{{ item.attributes | default(omit) }}"
+    state: 'present'
+  loop: "{{ security_keycloak__realm.clients | default([]) }}"
+  loop_control:
+    label: "{{ item.client_id }}"

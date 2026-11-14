@@ -1,19 +1,428 @@
 ---
 
-- name: 'Deploy Keycloak container'
-  tags: [ 'security_keycloak' ]
+- name: 'Deploy Keycloak'
+  tags: [ 'security', 'security_keycloak' ]
   block:
 
-    - name: 'Deploy Keycloak container'
-      tags: [ 'security_keycloak_container' ]
-      ansible.builtin.include_tasks:
-        file: 'podman.yml'
+    # A failing template in the variables (e.g. an unknown filter, keycloak_container or keycloak_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - security_keycloak__container | length > 0
+          - security_keycloak__config | length > 0
+        quiet: true
 
-    - name: 'Create or update Keycloak realms'
-      tags: [ 'security_keycloak_config' ]
-      ansible.builtin.include_tasks:
-        file: 'realm.yml'
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- set keys = security_keycloak__keys -%}
+          {%- set families = security_keycloak__keys_families.keys() | list -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('keycloak_keys has to be a dictionary of lists of keys by family, allowed are the families ' ~ (families | join(', ')) ~ '.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(unknown=[], lists=[], invalid=[], duplicates=[]) -%}
+          {%-   for family, list in keys.items() -%}
+          {%-     if family not in families -%}
+          {%-       set ns.unknown = ns.unknown + [ family | string ] -%}
+          {%-     elif list is not sequence or list is string or list is mapping -%}
+          {%-       set ns.lists = ns.lists + [ family ] -%}
+          {%-     else -%}
+          {%-       set ns.invalid = ns.invalid + (list | reject('string') | map('string') | list)
+                                     + (list | select('string') | reject('match', security_keycloak__key_pattern) | list) -%}
+          {%-       if list | unique | list | length != list | length -%}
+          {%-         set ns.duplicates = ns.duplicates + [ family ] -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown families in keycloak_keys: ' ~ (ns.unknown | join(', ')) ~ ', allowed are ' ~ (families | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lists | length > 0 -%}
+          {%-     set _ = errors.append('The families of keycloak_keys have to be lists of keys: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.invalid | length > 0 -%}
+          {%-     set _ = errors.append('The keys of keycloak_keys start with a letter or digit, followed by letters, digits, ., _ and -: ' ~ (ns.invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.duplicates | length > 0 -%}
+          {%-     set _ = errors.append('The keys of keycloak_keys have to be unique: ' ~ (ns.duplicates | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_keycloak__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = security_keycloak__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('keycloak_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('keycloak_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of keycloak_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The options are lines of keycloak.conf, Keycloak itself checks their values at the start
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = security_keycloak__config_custom -%}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('keycloak_config has to be a dictionary of the options of Keycloak.') -%}
+          {%- else -%}
+          {%-   set config = security_keycloak__config -%}
+          {%-   set ns = namespace(unknown=[], secrets=[], values=[], lines=[], booleans=[]) -%}
+          {%-   for key, value in config.items() -%}
+          {%-     if key in security_keycloak__secrets_allowed -%}
+          {%-       set ns.secrets = ns.secrets + [ key ] -%}
+          {%-     elif key not in security_keycloak__config_allowed -%}
+          {%-       set ns.unknown = ns.unknown + [ key | string ] -%}
+          {%-     endif -%}
+          {%-     set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-     if value is mapping or items | select('mapping') | list | length > 0
+                     or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+          {%-       set ns.values = ns.values + [ key | string ] -%}
+          {%-     elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-       set ns.lines = ns.lines + [ key | string ] -%}
+          {%-     elif key in security_keycloak__config_booleans and value is not none and value is not boolean -%}
+          {%-       set ns.booleans = ns.booleans + [ key ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   set missing = security_keycloak__config_required | reject('in', config | dict2items | rejectattr('value', 'in', [ none, '' ]) | map(attribute='key') | list) | list -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in keycloak_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of Keycloak (security_keycloak__config_allowed),'
+                                      ~ ' options with keys in their names (e.g. db-url-host-<datasource>) need the keys in keycloak_keys.') -%}
+          {%-   endif -%}
+          {%-   if ns.secrets | length > 0 -%}
+          {%-     set _ = errors.append('Passwords are set with keycloak_secrets, not in keycloak_config: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.values | length > 0 -%}
+          {%-     set _ = errors.append('The values of keycloak_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of keycloak_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.booleans | length > 0 -%}
+          {%-     set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('Keycloak needs the options ' ~ (security_keycloak__config_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The database password and the password of the admin are mandatory
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__targets: "{{ security_keycloak__secrets | map(attribute='target') | list }}"
+        security_keycloak__secrets_missing: "{{ security_keycloak__secrets_required | reject('in', security_keycloak__targets) | list }}"
+        security_keycloak__secrets_duplicate: "{{ security_keycloak__targets | unique | select('in', security_keycloak__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list) | list }}"
+        security_keycloak__secrets_invalid: >-
+          {{ security_keycloak__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+             + security_keycloak__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]|\$\{') | map(attribute='name') | list
+             + security_keycloak__secrets | selectattr('data', 'string') | selectattr('data', 'eq', '') | map(attribute='name') | list }}
+        security_keycloak__options_in_environment: "{{ security_keycloak__environment.keys() | select('match', '^KC_') | reject('in', security_keycloak__environment_allowed) | list }}"
+        security_keycloak__environment_lines: >-
+          {{ security_keycloak__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_keycloak__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Keycloak needs the secrets ' ~ (security_keycloak__secrets_required | join(', ')) ~ ', missing: ' ~ (security_keycloak__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_keycloak__secrets_duplicate | length > 0 -%}
+          {%-   set _ = errors.append('Every target of keycloak_secrets is set once: ' ~ (security_keycloak__secrets_duplicate | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_keycloak__secrets_invalid | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings without line breaks and without ${, Keycloak would expand it: ' ~ (security_keycloak__secrets_invalid | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_keycloak__options_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('The options of Keycloak are set with keycloak_config and keycloak_secrets, not in keycloak_environment: ' ~ (security_keycloak__options_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_keycloak__environment_lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (security_keycloak__environment_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the realms'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- set realms = security_keycloak__realms -%}
+          {%- if realms is not sequence or realms is string or realms is mapping -%}
+          {%-   set _ = errors.append('keycloak_realms has to be a list of realms.') -%}
+          {%- elif realms | reject('mapping') | list | length > 0 or realms | rejectattr('realm', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('The entries of keycloak_realms are dictionaries with realm.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(keys=[], booleans=[], lists=[], clients=[], federations=[]) -%}
+          {%-   for realm in realms -%}
+          {%-     set ns.keys = ns.keys + (realm.keys() | reject('in', security_keycloak__realm_keys) | map('string') | list) -%}
+          {%-     set ns.booleans = ns.booleans + (security_keycloak__realm_booleans | select('in', realm) | reject('in', realm | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list) | list) -%}
+          {%-     for key in [ 'required_actions', 'clients', 'user_federation' ] if key in realm -%}
+          {%-       if realm[key] is not sequence or realm[key] is string or realm[key] is mapping -%}
+          {%-         set ns.lists = ns.lists + [ realm.realm ~ '.' ~ key ] -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-     if realm.clients is defined and realm.clients is sequence and realm.clients is not string and realm.clients is not mapping -%}
+          {%-       for client in realm.clients -%}
+          {%-         if client is not mapping or client.client_id is not defined
+                         or client.keys() | reject('in', security_keycloak__client_keys) | list | length > 0
+                         or security_keycloak__client_booleans | select('in', client) | reject('in', client | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list) | list | length > 0 -%}
+          {%-           set ns.clients = ns.clients + [ realm.realm ~ '.' ~ (client.client_id | default(loop.index) if client is mapping else loop.index) ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-     if realm.user_federation is defined and realm.user_federation is sequence and realm.user_federation is not string and realm.user_federation is not mapping -%}
+          {%-       for federation in realm.user_federation -%}
+          {%-         if federation is not mapping or federation.federation_name is not defined or federation.provider_id is not defined
+                         or federation.keys() | reject('in', security_keycloak__federation_keys) | list | length > 0 -%}
+          {%-           set ns.federations = ns.federations + [ realm.realm ~ '.' ~ (federation.federation_name | default(loop.index) if federation is mapping else loop.index) ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if realms | map(attribute='realm') | unique | list | length != realms | length -%}
+          {%-     set _ = errors.append('The names of the realms of keycloak_realms have to be unique.') -%}
+          {%-   endif -%}
+          {%-   if ns.keys | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in keycloak_realms: ' ~ (ns.keys | unique | join(', ')) ~ ', allowed are ' ~ (security_keycloak__realm_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.booleans | length > 0 -%}
+          {%-     set _ = errors.append('These keys of keycloak_realms are booleans, allowed are true and false: ' ~ (ns.booleans | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lists | length > 0 -%}
+          {%-     set _ = errors.append('These keys of keycloak_realms have to be lists: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.clients | length > 0 -%}
+          {%-     set _ = errors.append('The clients are dictionaries with client_id and the keys ' ~ (security_keycloak__client_keys | join(', '))
+                                      ~ ', the flags are true or false: ' ~ (ns.clients | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.federations | length > 0 -%}
+          {%-     set _ = errors.append('The user federations are dictionaries with federation_name, provider_id and the keys ' ~ (security_keycloak__federation_keys | join(', ')) ~ ': '
+                                      ~ (ns.federations | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets after merging keycloak_container,
+    # unknown variables or secrets would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__environment_unknown: >-
+          {{ (security_keycloak__container.environment | default({})).keys() | reject('in', security_keycloak__environment_allowed) | list }}
+        security_keycloak__secrets_unknown: >-
+          {{ security_keycloak__secrets | map(attribute='target') | map('string') | reject('in', security_keycloak__secrets_allowed) | list }}
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_keycloak__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (security_keycloak__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_keycloak__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (security_keycloak__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (security_keycloak__environment_allowed | join(', ')) ~ ' and the secrets '
+                                    ~ (security_keycloak__secrets_allowed | join(', ')) ~ ', the options of Keycloak are set with keycloak_config,'
+                                    ~ ' options with keys in their names (e.g. db-password-<datasource>) need the keys in keycloak_keys.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # keycloak.conf contains the passwords, it is a podman secret mounted into the container
+    - name: 'Create the secret of keycloak.conf'
+      no_log: true
+      containers.podman.podman_secret:
+        name: "{{ security_keycloak__conf_secret }}"
+        data: "{{ lookup('ansible.builtin.template', 'keycloak.conf.j2', template_vars={ 'security_keycloak__conf_options': security_keycloak__conf }) }}"
+        state: 'present'
+      register: 'security_keycloak__conf_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ security_keycloak__container.name }}"
+        hostname: "{{ security_keycloak__container.hostname }}"
+        image: "{{ security_keycloak__container.image }}"
+        ip: "{{ security_keycloak__container.ip }}"
+        ip6: "{{ security_keycloak__container.ipv6 | default(omit) }}"
+        network: "{{ security_keycloak__container.network }}"
+        timezone: "{{ security_keycloak__container.timezone }}"
+        command: "{{ security_keycloak__container.command | default(omit) }}"
+        env: "{{ security_keycloak__container.environment | default(omit) }}"
+        etc_hosts: "{{ security_keycloak__container.etc_hosts | default(omit) }}"
+        expose: "{{ security_keycloak__container.expose | default(omit) }}"
+        label: "{{ security_keycloak__container.labels | default(omit) }}"
+        publish: "{{ security_keycloak__container.publish | default(omit) }}"
+        secrets: [ "{{ security_keycloak__conf_secret }},{{ security_keycloak__secret_mount }}" ]
+        shm_size: "{{ security_keycloak__container.shm_size | default(omit) }}"
+        volume: "{{ security_keycloak__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if security_keycloak__container.requires is defined %}
+          Requires={{ security_keycloak__container.requires | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'security_keycloak__quadlet_result'
+
+    # Keycloak only creates the admin on a new installation, the initialization runs if Keycloak is not running
+    - name: 'Initialize Keycloak'
+      when:
+        - not ansible_check_mode
+        - (ansible_facts.services[security_keycloak__container.name + '.service'].state | default('')) != 'running'
+      ansible.builtin.include_tasks: 'init.yml'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Keycloak'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ security_keycloak__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if security_keycloak__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            security_keycloak__running: >-
+              {{ (ansible_facts.services[security_keycloak__container.name + '.service'].state | default('')) == 'running' }}
+            security_keycloak__restart: >-
+              {{ security_keycloak__running | bool
+                 and (security_keycloak__conf_result is changed or security_keycloak__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ security_keycloak__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'security_keycloak__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ security_keycloak__container.name ~ ' did not start' ] + security_keycloak__start_journal.stdout_lines }}"
+
+    # The start builds Keycloak if build options changed, the realm master answers after the bootstrap
+    - name: 'Wait for Keycloak'
+      ansible.builtin.uri:
+        url: "{{ security_keycloak__api_url }}/realms/master"
+        validate_certs: false
+      register: 'security_keycloak__ready'
+      until: security_keycloak__ready.status | default(-1) == 200
+      retries: 100
+      delay: 3
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Keycloak'
+      when:
+        - not ansible_check_mode
+        - security_keycloak__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ security_keycloak__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'security_keycloak__journal'
+      changed_when: false
+
+    - name: 'Assert that Keycloak answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__journal is skipped
+        fail_msg: "{{ security_keycloak__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # The request contains the password of the admin
+    - name: 'Log in as admin'
+      when: 'not ansible_check_mode'
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ security_keycloak__api_url }}/realms/master/protocol/openid-connect/token"
+        method: 'POST'
+        body_format: 'form-urlencoded'
+        body:
+          grant_type: 'password'
+          client_id: 'admin-cli'
+          username: "{{ security_keycloak__admin_username }}"
+          password: "{{ security_keycloak__admin_password }}"
+        validate_certs: false
+        status_code: [ 200, 400, 401 ]
+      register: 'security_keycloak__login'
+
+    - name: 'Assert the login of the admin'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__login.status == 200
+        fail_msg: >-
+          The admin {{ security_keycloak__admin_username }} cannot log in to the realm master (HTTP {{ security_keycloak__login.status }}).
+          Keycloak only creates the admin on a new installation, the password of the existing admin differs from the secret bootstrap-admin-password
+          or the admin does not exist. Change the password of the admin in Keycloak or create the admin with kc.sh bootstrap-admin user.
+        quiet: true
+
+    - name: 'Configure the realms'
+      when: 'not ansible_check_mode'
+      ansible.builtin.include_tasks: 'realm.yml'
+      loop: "{{ security_keycloak__realms }}"
       loop_control:
-        loop_var: 'realm'
-      with_items: "{{ security_keycloak__realms }}"
-      when: 'not podman___update_mode'
+        loop_var: 'security_keycloak__realm'
+        label: "{{ security_keycloak__realm.realm }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'security_keycloak__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ security_keycloak__container.name }}"
+        container_image: "{{ security_keycloak__container.image }}"
+        container_schedule: "{{ security_keycloak__autoupdate_schedule }}"
