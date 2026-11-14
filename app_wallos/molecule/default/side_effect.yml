@@ -1,0 +1,213 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_wallos__test_case: "{{ app_wallos__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_wallos__test_vars: "{{ app_wallos__test_case.role_vars }}"
+    app_wallos__test_environment: "{{ app_wallos__test_vars.wallos_environment | default({}) }}"
+    app_wallos__test_secrets: "{{ app_wallos__test_vars.wallos_secrets | default([]) }}"
+    app_wallos__test_admin: "{{ app_wallos__test_vars.wallos_admin }}"
+    app_wallos__test_checked_files:
+      - "{{ app_wallos__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_wallos__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_wallos__test_checked_files }}"
+      register: 'app_wallos__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_wallos with wallos_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_container: [ 'environment' ]
+        app_wallos__test_invalid:
+          message: 'wallos_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_wallos with wallos_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_secrets: { 'name': 'wallos_other', 'data': 'x', 'target': 'OIDC_CLIENT_SECRET' }
+        app_wallos__test_invalid:
+          message: 'wallos_secrets not a list'
+          search: '^wallos_secrets has to be a list$'
+
+    - name: 'Run app_wallos with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_secrets: "{{ app_wallos__test_secrets + [ { 'name': 'wallos_other', 'data': 'x' } ] }}"
+        app_wallos__test_invalid:
+          message: 'a secret without target'
+          search: '^wallos_secrets entries need name, data and target$'
+
+    - name: 'Run app_wallos with duplicate names of secrets (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_secrets:
+          - { 'name': 'wallos_twice', 'data': 'x', 'target': 'OIDC_CLIENT_SECRET' }
+          - { 'name': 'wallos_twice', 'data': 'y', 'target': 'OIDC_CLIENT_SECRET' }
+        app_wallos__test_invalid:
+          message: 'duplicate names of secrets'
+          search: '^the names of wallos_secrets have to be unique$'
+
+    - name: 'Run app_wallos with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_secrets: "{{ app_wallos__test_secrets + [ { 'name': 'wallos_other', 'data': 'x', 'target': 'MOLECULE_SECRET' } ] }}"
+        app_wallos__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: MOLECULE_SECRET\.'
+
+    - name: 'Run app_wallos with a secret in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'OIDC_CLIENT_SECRET': 'plain' }) }}"
+        app_wallos__test_invalid:
+          message: 'a secret in the environment'
+          search: '^Secrets and their file variables must not be set in wallos_environment: OIDC_CLIENT_SECRET\.$'
+
+    - name: 'Run app_wallos with the file variable of a secret in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'OIDC_CLIENT_SECRET_FILE': '/tmp/secret' }) }}"
+        app_wallos__test_invalid:
+          message: 'the file variable of a secret in the environment'
+          search: '^Secrets and their file variables must not be set in wallos_environment: OIDC_CLIENT_SECRET_FILE\.$'
+
+    - name: 'Run app_wallos with a secret containing a line break (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_secrets: [ { 'name': 'wallos_oidc_client_secret', 'data': "molecule\nsecret", 'target': 'OIDC_CLIENT_SECRET' } ]
+        app_wallos__test_invalid:
+          message: 'a secret containing a line break'
+          search: '^Secrets must not contain line breaks: wallos_oidc_client_secret\.$'
+
+    - name: 'Run app_wallos with PUID not a number (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'PUID': 'www-data' }) }}"
+        app_wallos__test_invalid:
+          message: 'PUID not a number'
+          search: '^These variables have to be numeric IDs: PUID\.$'
+
+    - name: 'Run app_wallos with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'DEMO_MODE': 'true' }) }}"
+        app_wallos__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: DEMO_MODE\.'
+
+    - name: 'Run app_wallos with an unknown variable in wallos_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_container:
+          environment:
+            TZ: 'Europe/Berlin'
+            MOLECULE_UNKNOWN: 'molecule'
+        app_wallos__test_invalid:
+          message: 'an unknown variable in wallos_container.environment'
+          search: 'Unknown environment variables: MOLECULE_UNKNOWN\.'
+
+    - name: 'Run app_wallos with a boolean that is no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'OIDC_ENABLED': 'enabled' }) }}"
+        app_wallos__test_invalid:
+          message: 'a boolean that is no boolean'
+          search: '^These variables are booleans, allowed are true and false: OIDC_ENABLED\.$'
+
+    - name: 'Run app_wallos with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'SSRF_ALLOWLIST': 'nas.local\nrouter.local' }) }}"
+        app_wallos__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: SSRF_ALLOWLIST\.$'
+
+    - name: 'Run app_wallos with wallos_admin not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_admin: 'admin'
+        app_wallos__test_invalid:
+          message: 'wallos_admin not a dictionary'
+          search: '^wallos_admin has to be a dictionary with username, email and password\.$'
+
+    - name: 'Run app_wallos with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_admin: "{{ app_wallos__test_admin | dict2items | rejectattr('key', 'eq', 'password') | items2dict }}"
+        app_wallos__test_invalid:
+          message: 'an administrator without password'
+          search: '^wallos_admin needs a password\.$'
+
+    - name: 'Run app_wallos with an invalid email and username of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_admin: "{{ app_wallos__test_admin | combine({ 'username': 'molecule admin', 'email': 'molecule' }) }}"
+        app_wallos__test_invalid:
+          message: 'an invalid email and username of the administrator'
+          search: '^wallos_admin needs a username of letters, digits, \., _, @ and -\. wallos_admin needs a valid email\.$'
+
+    - name: 'Run app_wallos with an unknown key, language and currency of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_admin: "{{ app_wallos__test_admin | combine({ 'role': 'admin', 'language': 'xx', 'currency': 'XXX' }) }}"
+        app_wallos__test_invalid:
+          message: 'an unknown key, language and currency of the administrator'
+          search: '^Unknown keys in wallos_admin: role, allowed are .*\. The language of wallos_admin has to be one of .*\. The currency of wallos_admin has to be one of .*\.$'
+
+    - name: 'Change the client secret and the password of the administrator'
+      when: app_wallos__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'wallos' ]
+          register: 'app_wallos__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            wallos_secrets: "{{ app_wallos__test_case.side_effect.secrets }}"
+            wallos_admin: "{{ app_wallos__test_case.side_effect.admin }}"
+
+        - name: 'Run app_wallos with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_wallos'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'wallos' ]
+          register: 'app_wallos__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed secret, the restart and the changed password'
+          ansible.builtin.assert:
+            that:
+              - app_wallos__secrets_result is changed
+              - app_wallos__quadlet_result is not changed
+              - app_wallos__admin_result is changed
+              - app_wallos__admin_result.updated == [ 'password' ]
+              - app_wallos__test_started_after.stdout | int > app_wallos__test_started_before.stdout | int
+            fail_msg: >-
+              secret changed: {{ app_wallos__secrets_result is changed }}, quadlet changed: {{ app_wallos__quadlet_result is changed }},
+              administrator: {{ app_wallos__admin_result.updated | default([]) }},
+              start before {{ app_wallos__test_started_before.stdout }}, after {{ app_wallos__test_started_after.stdout }}

@@ -1,19 +1,182 @@
 ---
 
-- name: 'Deploy wallos container'
-  tags: [ 'app_wallos' ]
+- name: 'Deploy Wallos'
+  tags: [ 'app', 'app_wallos' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or wallos_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_wallos__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallos__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_wallos__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_wallos__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('wallos_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('wallos_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of wallos_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallos__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallos__secret_targets: "{{ app_wallos__secrets | map(attribute='target') | list }}"
+        app_wallos__secrets_in_environment: >-
+          {{ (app_wallos__secret_targets + app_wallos__secret_variables + app_wallos__secret_files.values() | list)
+             | select('in', app_wallos__environment.keys() | list) | unique | list }}
+        app_wallos__secrets_lines: >-
+          {{ app_wallos__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_wallos__ids_invalid: >-
+          {%- set invalid = [] -%}
+          {%- for key in app_wallos__id_variables if key in app_wallos__environment -%}
+          {%-   set value = app_wallos__environment[key] -%}
+          {%-   if value is boolean or value is none or (value | string) is not match('^[0-9]+$') -%}
+          {%-     set _ = invalid.append(key) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ invalid }}
+        app_wallos__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_wallos__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in wallos_environment: ' ~ (app_wallos__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallos__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_wallos__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallos__ids_invalid | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be numeric IDs: ' ~ (app_wallos__ids_invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallos__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallos__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_wallos__environment.items() if value is not none -%}
+          {%-   if key in app_wallos__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallos__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallos__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_wallos__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('wallos_admin has to be a dictionary with username, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | reject('in', app_wallos__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in wallos_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_wallos__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.username | default('') | string) is not match(app_wallos__admin_name_pattern) -%}
+          {%-     set _ = errors.append('wallos_admin needs a username of letters, digits, ., _, @ and -.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_wallos__admin_email_pattern) -%}
+          {%-     set _ = errors.append('wallos_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none or admin.password | string | length == 0 -%}
+          {%-     set _ = errors.append('wallos_admin needs a password.') -%}
+          {%-   elif (admin.password | string ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('The password of wallos_admin must not contain line breaks.') -%}
+          {%-   endif -%}
+          {%-   if (admin.language | default(app_wallos__admin_default.language)) not in app_wallos__admin_languages -%}
+          {%-     set _ = errors.append('The language of wallos_admin has to be one of ' ~ (app_wallos__admin_languages | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.currency | default(app_wallos__admin_default.currency)) not in app_wallos__admin_currencies -%}
+          {%-     set _ = errors.append('The currency of wallos_admin has to be one of ' ~ (app_wallos__admin_currencies | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging wallos_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_wallos__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_wallos__environment_unknown: >-
+          {{ (app_wallos__container.environment | default({})).keys() | reject('in', app_wallos__environment_allowed) | list }}
+        app_wallos__secrets_unknown: >-
+          {{ app_wallos__secrets | select('mapping') | selectattr('target', 'defined') | map(attribute='target')
+             | reject('in', app_wallos__secret_files.keys() | list) | list }}
+        app_wallos__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_wallos__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_wallos__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_wallos__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_wallos__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Wallos (app_wallos__environment_allowed) and the secrets '
+                                    ~ (app_wallos__secret_files.keys() | join(', ')) ~ ', the administrator is set with wallos_admin.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # startup.sh sets both directories to www-data (PUID and PGID) and 0755 at every start,
+    # the role uses the same owner and mode, otherwise every run would change them
+    - name: 'Create the directories of Wallos'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ item }}"
         owner: "{{ app_wallos__uid }}"
         group: "{{ app_wallos__gid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0755'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_wallos__podman_home }}/db"
-        - dest: "{{ app_wallos__podman_home }}/logos"
+      loop:
+        - "{{ app_wallos__podman_db_dir }}"
+        - "{{ app_wallos__podman_logos_dir }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -21,24 +184,13 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items: "{{ app_wallos__secrets }}"
+      loop: "{{ app_wallos__secrets }}"
+      register: 'app_wallos__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_wallos__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_wallos__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_wallos__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name:  'Install container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_wallos__container.name }}"
         hostname: "{{ app_wallos__container.hostname }}"
@@ -47,6 +199,7 @@
         ip6: "{{ app_wallos__container.ipv6 | default(omit) }}"
         network: "{{ app_wallos__container.network }}"
         timezone: "{{ app_wallos__container.timezone }}"
+        command: "{{ app_wallos__container.command | default(omit) }}"
         env: "{{ app_wallos__container.environment | default(omit) }}"
         etc_hosts: "{{ app_wallos__container.etc_hosts | default(omit) }}"
         expose: "{{ app_wallos__container.expose | default(omit) }}"
@@ -68,20 +221,85 @@
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_wallos__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ app_wallos__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Wallos'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_wallos__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_wallos__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_wallos__running: >-
+              {{ (ansible_facts.services[app_wallos__container.name + '.service'].state | default('')) == 'running' }}
+            app_wallos__restart: >-
+              {{ app_wallos__running | bool
+                 and (app_wallos__secrets_result is changed or app_wallos__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_wallos__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_wallos__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_wallos__container.name ~ ' did not start' ] + app_wallos__start_journal.stdout_lines }}"
+
+    # startup.sh starts nginx after php-fpm, the health check answers then
+    - name: 'Wait for Wallos'
+      ansible.builtin.uri:
+        url: "http://{{ app_wallos__container.ip }}:{{ app_wallos__port }}/health.php"
+        return_content: true
+      register: 'app_wallos__ready'
+      until: (app_wallos__ready.content | default('') | trim) == 'OK'
+      retries: 60
+      delay: 2
+      failed_when: false
       when: 'not ansible_check_mode'
 
+    - name: 'Read the log of Wallos'
+      when:
+        - not ansible_check_mode
+        - (app_wallos__ready.content | default('') | trim) != 'OK'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_wallos__container.name }}", '-n', '80', '--no-pager' ]
+      register: 'app_wallos__journal'
+      changed_when: false
+
+    - name: 'Assert that Wallos answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__journal is skipped
+        fail_msg: "{{ app_wallos__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # Without users the first visitor registers as administrator, the module registers it with the form of Wallos
+    # inside the container. The password is an option with no_log, it is passed to php on stdin
+    - name: 'Create the administrator'
+      when: 'not ansible_check_mode'
+      app_wallos_admin:
+        container: "{{ app_wallos__container.name }}"
+        username: "{{ app_wallos__admin.username | string }}"
+        email: "{{ app_wallos__admin.email | string }}"
+        password: "{{ app_wallos__admin.password | string }}"
+        language: "{{ app_wallos__admin.language | default(app_wallos__admin_default.language) }}"
+        currency: "{{ app_wallos__admin.currency | default(app_wallos__admin_default.currency) }}"
+      register: 'app_wallos__admin_result'
+
     - name: 'Enable autoupdate on container'
-      when: 'app_wallos__autoupdate_enabled'
-      include_role:
+      when: 'app_wallos__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_wallos__container.name }}"
         container_image: "{{ app_wallos__container.image }}"
+        container_schedule: "{{ app_wallos__autoupdate_schedule }}"

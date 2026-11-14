@@ -1,0 +1,100 @@
+---
+# Network created by container_podman in prepare.yml
+app_wallos__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_wallos__test_image: 'docker.io/bellamy/wallos:latest'
+app_wallos__test_quadlet_path: '/etc/containers/systemd/wallos.container'
+
+app_wallos__test_cases:
+
+  # Only the mandatory variables, the administrator with the defaults of language and currency
+  - name: 'molecule-wallos-default'
+    role_vars:
+      wallos_home: '/opt/wallos'
+      wallos_ip: '10.89.0.90'
+      wallos_network: 'podman-molecule'
+      wallos_hostname: 'wallos-default'
+      wallos_timezone: 'Europe/Berlin'
+      wallos_admin:
+        username: 'admin'
+        email: 'admin@example.org'
+        password: 'molecule-admin-password'
+    expect:
+      ip: '10.89.0.90'
+      ip6: ~
+      uid: 82
+      password: 'molecule-admin-password'
+      oidc: false
+      quadlet:
+        - 'Volume=/opt/wallos/db:/var/www/html/db'
+        - 'Volume=/opt/wallos/logos:/var/www/html/images/uploads/logos'
+
+  # IPv6, labels, PUID and PGID and the login with OIDC with the client secret as file,
+  # OIDC_ISSUER is not set, Wallos would read the discovery document of the provider
+  - name: 'molecule-wallos'
+    role_vars:
+      wallos_home: '/opt/wallos'
+      wallos_ip: '10.89.0.91'
+      wallos_ipv6: 'fd00:89::91'
+      wallos_network: 'podman-molecule'
+      wallos_hostname: 'wallos-molecule'
+      wallos_timezone: 'Europe/Berlin'
+      wallos_labels:
+        traefik.enable: 'false'
+      wallos_environment:
+        PUID: 1000
+        PGID: 1000
+        OIDC_ENABLED: true
+        OIDC_PROVIDER_NAME: 'Molecule'
+        OIDC_CLIENT_ID: 'wallos'
+        OIDC_AUTH_URL: 'https://sso.example.org/authorize'
+        OIDC_TOKEN_URL: 'https://sso.example.org/token'
+        OIDC_USERINFO_URL: 'https://sso.example.org/userinfo'
+        OIDC_REDIRECT_URL: 'https://wallos.example.org/'
+        OIDC_USER_IDENTIFIER: 'preferred_username'
+        OIDC_SCOPES: 'openid email profile'
+      wallos_secrets:
+        - name: 'wallos_oidc_client_secret'
+          data: 'molecule-oidc-client-secret'
+          target: 'OIDC_CLIENT_SECRET'
+      wallos_admin:
+        username: 'molecule'
+        email: 'molecule@example.org'
+        password: 'molecule-admin-password'
+        language: 'de'
+        currency: 'CHF'
+    # side_effect changes the client secret and the password of the administrator,
+    # the secret changes, Wallos has to restart and the module has to set the password
+    side_effect:
+      secrets:
+        - name: 'wallos_oidc_client_secret'
+          data: 'molecule-oidc-client-secret-changed'
+          target: 'OIDC_CLIENT_SECRET'
+      admin:
+        username: 'molecule'
+        email: 'molecule@example.org'
+        password: 'molecule-admin-password-changed'
+        language: 'de'
+        currency: 'CHF'
+    expect:
+      ip: '10.89.0.91'
+      ip6: 'fd00:89::91'
+      uid: 1000
+      password: 'molecule-admin-password-changed'
+      oidc: true
+      client_secret: 'molecule-oidc-client-secret-changed'
+      quadlet:
+        - 'Volume=/opt/wallos/db:/var/www/html/db'
+        - 'Volume=/opt/wallos/logos:/var/www/html/images/uploads/logos'
+        - 'Label=traefik.enable=false'
+        - 'Secret=wallos_oidc_client_secret,type=mount,target=/run/secrets/wallos_oidc_client_secret'
+        - 'Environment=OIDC_CLIENT_SECRET_FILE=/run/secrets/wallos_oidc_client_secret'
+        - 'Environment=OIDC_ENABLED=true'
+        - 'Environment=PUID=1000'
