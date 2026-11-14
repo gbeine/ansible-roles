@@ -1,0 +1,134 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_icinga_icingadb__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_icinga_icingadb__test_image: 'docker.io/icinga/icingadb:latest'
+monitoring_icinga_icingadb__test_quadlet_path: '/etc/containers/systemd/icingadb.container'
+
+monitoring_icinga_icingadb__test_cases:
+
+  # Only the mandatory variables with MariaDB and Redis without password
+  - name: 'molecule-icingadb-default'
+    database:
+      name: 'mariadb-molecule'
+      image: 'docker.io/library/mariadb:11'
+      ip: '10.89.0.101'
+      port: 3306
+      environment:
+        MARIADB_ROOT_PASSWORD: 'molecule-root-password'
+        MARIADB_DATABASE: 'icinga'
+        MARIADB_USER: 'icinga'
+        MARIADB_PASSWORD: 'molecule-database-password'
+      # Counts the rows of the schema table, the password is passed in the environment of the command
+      query: [ 'podman', 'exec', '-e', 'MYSQL_PWD=molecule-database-password', 'mariadb-molecule',
+               'mariadb', '-u', 'icinga', '-N', '-e', 'SELECT COUNT(*) FROM icingadb_schema', 'icinga' ]
+    redis:
+      name: 'redis-molecule'
+      image: 'docker.io/library/redis:7'
+      ip: '10.89.0.102'
+      command: [ 'redis-server' ]
+    role_vars:
+      icingadb_ip: '10.89.0.100'
+      icingadb_network: 'podman-molecule'
+      icingadb_hostname: 'icingadb-default'
+      icingadb_timezone: 'Europe/Berlin'
+      icingadb_environment:
+        ICINGADB_DATABASE_HOST: '10.89.0.101'
+        ICINGADB_REDIS_HOST: '10.89.0.102'
+      icingadb_secrets:
+        - name: 'icingadb_database_password'
+          data: 'molecule-database-password'
+          target: 'ICINGADB_DATABASE_PASSWORD'
+    expect:
+      ip: '10.89.0.100'
+      quadlet:
+        - 'Secret=icingadb_database_password,type=mount,target=/run/secrets/icingadb_database_password'
+      quadlet_absent: [ 'Volume=', 'type=env', '/etc/timezone', 'IP6=', 'Wants=', 'After=' ]
+      environment:
+        ICINGADB_DATABASE_HOST: '10.89.0.101'
+        ICINGADB_DATABASE_PORT: '3306'
+        ICINGADB_DATABASE_DATABASE: 'icinga'
+        ICINGADB_DATABASE_USER: 'icinga'
+        ICINGADB_DATABASE_PASSWORD_FILE: '/run/secrets/icingadb_database_password'
+        ICINGADB_REDIS_HOST: '10.89.0.102'
+        ICINGADB_REDIS_PORT: '6379'
+      secrets: [ 'molecule-database-password' ]
+
+  # IPv6, PostgreSQL, Redis with password, logging, retention and dependencies of the quadlet unit
+  - name: 'molecule-icingadb'
+    database:
+      name: 'postgresql-molecule'
+      image: 'docker.io/library/postgres:17'
+      ip: '10.89.0.111'
+      port: 5432
+      environment:
+        POSTGRES_DB: 'icinga'
+        POSTGRES_USER: 'icinga'
+        POSTGRES_PASSWORD: 'molecule-database-password'
+      # psql connects through the socket of the container without password
+      query: [ 'podman', 'exec', 'postgresql-molecule', 'psql', '-U', 'icinga', '-d', 'icinga', '-tAc', 'SELECT COUNT(*) FROM icingadb_schema' ]
+    redis:
+      name: 'redis-molecule'
+      image: 'docker.io/library/redis:7'
+      ip: '10.89.0.112'
+      command: [ 'redis-server', '--requirepass', 'molecule-redis-password' ]
+    role_vars:
+      icingadb_ip: '10.89.0.110'
+      icingadb_ipv6: 'fd00:89::110'
+      icingadb_network: 'podman-molecule'
+      icingadb_hostname: 'icingadb'
+      icingadb_timezone: 'Europe/Berlin'
+      icingadb_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+      icingadb_environment:
+        ICINGADB_DATABASE_TYPE: 'pgsql'
+        ICINGADB_DATABASE_HOST: '10.89.0.111'
+        ICINGADB_DATABASE_PORT: 5432
+        ICINGADB_DATABASE_OPTIONS_MAX_CONNECTIONS: 8
+        ICINGADB_REDIS_HOST: '10.89.0.112'
+        ICINGADB_LOGGING_LEVEL: 'info'
+        ICINGADB_LOGGING_OPTIONS: 'database:warn'
+        ICINGADB_RETENTION_HISTORY_DAYS: 30
+      icingadb_secrets:
+        - name: 'icingadb_database_password'
+          data: 'molecule-database-password'
+          target: 'ICINGADB_DATABASE_PASSWORD'
+        - name: 'icingadb_redis_password'
+          data: 'molecule-redis-password'
+          target: 'ICINGADB_REDIS_PASSWORD'
+    # side_effect changes the retention, the quadlet unit changes and Icinga DB has to restart
+    side_effect:
+      environment:
+        ICINGADB_RETENTION_HISTORY_DAYS: 60
+    expect:
+      ip: '10.89.0.110'
+      quadlet:
+        - 'IP6=fd00:89::110'
+        - 'Secret=icingadb_database_password,type=mount,target=/run/secrets/icingadb_database_password'
+        - 'Secret=icingadb_redis_password,type=mount,target=/run/secrets/icingadb_redis_password'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      quadlet_absent: [ 'Volume=', 'type=env', '/etc/timezone' ]
+      environment:
+        ICINGADB_DATABASE_TYPE: 'pgsql'
+        ICINGADB_DATABASE_HOST: '10.89.0.111'
+        ICINGADB_DATABASE_PORT: '5432'
+        ICINGADB_DATABASE_DATABASE: 'icinga'
+        ICINGADB_DATABASE_USER: 'icinga'
+        ICINGADB_DATABASE_OPTIONS_MAX_CONNECTIONS: '8'
+        ICINGADB_DATABASE_PASSWORD_FILE: '/run/secrets/icingadb_database_password'
+        ICINGADB_REDIS_HOST: '10.89.0.112'
+        ICINGADB_REDIS_PORT: '6379'
+        ICINGADB_REDIS_PASSWORD_FILE: '/run/secrets/icingadb_redis_password'
+        ICINGADB_LOGGING_LEVEL: 'info'
+        ICINGADB_LOGGING_OPTIONS: 'database:warn'
+        ICINGADB_RETENTION_HISTORY_DAYS: '60'
+      secrets: [ 'molecule-database-password', 'molecule-redis-password' ]

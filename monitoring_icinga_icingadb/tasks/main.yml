@@ -1,30 +1,145 @@
 ---
 
-- name: 'Deploy IcingaDB container'
-  tags: [ 'monitoring_icinga_icingadb'  ]
+- name: 'Install Icinga DB'
+  tags: [ 'monitoring', 'monitoring_icinga_icingadb' ]
   block:
+
+    # A failing template in the variables (e.g. icingadb_container or icingadb_environment not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_icinga_icingadb__container | length > 0
+          - monitoring_icinga_icingadb__environment | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_icingadb__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_icingadb__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_icingadb__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_icinga_icingadb__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('icingadb_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('icingadb_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of icingadb_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Icinga DB checks the values of the variables at the start
+    - name: 'Validate the environment'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_icingadb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_icingadb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_icingadb__former: >-
+          {{ query('ansible.builtin.varnames', '^(' ~ (monitoring_icinga_icingadb__former_variables.keys() | join('|')) ~ ')$') | sort }}
+        monitoring_icinga_icingadb__errors: >-
+          {%- set errors = [] -%}
+          {%- set environment = monitoring_icinga_icingadb__environment -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in environment.items() if value is not none -%}
+          {%-   if key in monitoring_icinga_icingadb__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set present = environment | dict2items | rejectattr('value', 'in', [ '', none ]) | map(attribute='key') | list -%}
+          {%- set missing = monitoring_icinga_icingadb__environment_required | reject('in', present) | list -%}
+          {%- set secrets = (monitoring_icinga_icingadb__secret_variables + (monitoring_icinga_icingadb__secret_files.values() | list)) | select('in', environment.keys() | list) | list -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if secrets | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in icingadb_environment: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Icinga DB needs the variables ' ~ (monitoring_icinga_icingadb__environment_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_icinga_icingadb__former | length > 0 -%}
+          {%-   set names = [] -%}
+          {%-   for name in monitoring_icinga_icingadb__former -%}
+          {%-     set _ = names.append(name ~ ' (' ~ monitoring_icinga_icingadb__former_variables[name] ~ ')') -%}
+          {%-   endfor -%}
+          {%-   set _ = errors.append('The options of Icinga DB are set with icingadb_environment now: ' ~ (names | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging icingadb_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_icingadb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_icingadb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_icingadb__targets: "{{ monitoring_icinga_icingadb__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_icinga_icingadb__errors: >-
+          {%- set errors = [] -%}
+          {%- set targets = monitoring_icinga_icingadb__targets -%}
+          {%- set environment = monitoring_icinga_icingadb__container.environment | default(none) -%}
+          {%- set variables = (environment.keys() | reject('in', monitoring_icinga_icingadb__environment_allowed) | list) if environment is mapping else [] -%}
+          {%- set unknown = targets | reject('in', monitoring_icinga_icingadb__secret_variables) | list -%}
+          {%- set missing = monitoring_icinga_icingadb__secrets_required | reject('in', targets) | list -%}
+          {%- set duplicates = targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%- set names = monitoring_icinga_icingadb__secrets | map(attribute='name') | map('string') | reject('match', monitoring_icinga_icingadb__name_pattern) | list -%}
+          {%- set data = monitoring_icinga_icingadb__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+                         + monitoring_icinga_icingadb__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list -%}
+          {%- if variables | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if (variables + unknown) | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Icinga DB (monitoring_icinga_icingadb__environment_allowed) and the secrets '
+                                    ~ (monitoring_icinga_icingadb__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Icinga DB needs the secrets ' ~ (monitoring_icinga_icingadb__secrets_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('Every target of icingadb_secrets is set once: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if names | length > 0 -%}
+          {%-   set _ = errors.append('The names of icingadb_secrets start with a letter or digit, followed by letters, digits, ., _ and -: ' ~ (names | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks, Icinga DB reads the files as they are: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: 'icingadb_database_password'
-        data: "{{ monitoring_icinga_icingadb__db_pass }}"
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_icinga_icingadb__secrets }}"
+      register: 'monitoring_icinga_icingadb__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ monitoring_icinga_icingadb__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[monitoring_icinga_icingadb__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ monitoring_icinga_icingadb__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -35,6 +150,7 @@
         ip6: "{{ monitoring_icinga_icingadb__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_icinga_icingadb__container.network }}"
         timezone: "{{ monitoring_icinga_icingadb__container.timezone }}"
+        command: "{{ monitoring_icinga_icingadb__container.command | default(omit) }}"
         env: "{{ monitoring_icinga_icingadb__container.environment | default(omit) }}"
         etc_hosts: "{{ monitoring_icinga_icingadb__container.etc_hosts | default(omit) }}"
         expose: "{{ monitoring_icinga_icingadb__container.expose | default(omit) }}"
@@ -54,14 +170,88 @@
           {% if monitoring_icinga_icingadb__container.requires is defined %}
           Requires={{ monitoring_icinga_icingadb__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_icinga_icingadb__container.wants is defined %}
+          Wants={{ monitoring_icinga_icingadb__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_icinga_icingadb__container.after is defined %}
+          After={{ monitoring_icinga_icingadb__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_icinga_icingadb__container.part_of is defined %}
+          PartOf={{ monitoring_icinga_icingadb__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_icinga_icingadb__container.binds_to is defined %}
+          BindsTo={{ monitoring_icinga_icingadb__container.binds_to | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'monitoring_icinga_icingadb__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ monitoring_icinga_icingadb__container.name }}"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Icinga DB'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_icinga_icingadb__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_icinga_icingadb__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_icinga_icingadb__running: >-
+              {{ (ansible_facts.services[monitoring_icinga_icingadb__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_icinga_icingadb__restart: >-
+              {{ monitoring_icinga_icingadb__running | bool
+                 and (monitoring_icinga_icingadb__secrets_result is changed
+                      or monitoring_icinga_icingadb__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_icinga_icingadb__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_icinga_icingadb__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ monitoring_icinga_icingadb__container.name ~ ' did not start' ] + monitoring_icinga_icingadb__start_journal.stdout_lines }}"
+
+    # Icinga DB exits if the configuration, the database or Redis fail, after the login to Redis it waits for Icinga 2 or syncs,
+    # the quadlet unit creates a new container at every start, its log only contains the current start
+    - name: 'Wait for Icinga DB'
+      when: 'not ansible_check_mode'
+      ansible.builtin.command:
+        argv: [ 'podman', 'logs', "{{ monitoring_icinga_icingadb__container.name }}" ]
+      register: 'monitoring_icinga_icingadb__log'
+      changed_when: false
+      failed_when: false
+      until: (monitoring_icinga_icingadb__log.stdout ~ monitoring_icinga_icingadb__log.stderr) is search(monitoring_icinga_icingadb__ready)
+      retries: 30
+      delay: 3
+
+    - name: 'Read the journal of Icinga DB'
+      when:
+        - not ansible_check_mode
+        - (monitoring_icinga_icingadb__log.stdout ~ monitoring_icinga_icingadb__log.stderr) is not search(monitoring_icinga_icingadb__ready)
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_icinga_icingadb__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'monitoring_icinga_icingadb__journal'
+      changed_when: false
+
+    - name: 'Assert that Icinga DB is connected'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_icingadb__journal is skipped
+        fail_msg: "{{ monitoring_icinga_icingadb__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_icinga_icingadb__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_icinga_icingadb__container.name }}"
+        container_image: "{{ monitoring_icinga_icingadb__container.image }}"
+        container_schedule: "{{ monitoring_icinga_icingadb__autoupdate_schedule }}"

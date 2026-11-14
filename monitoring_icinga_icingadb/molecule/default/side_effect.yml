@@ -1,0 +1,167 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icinga_icingadb__test_case: "{{ monitoring_icinga_icingadb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icinga_icingadb__test_vars: "{{ monitoring_icinga_icingadb__test_case.role_vars }}"
+    monitoring_icinga_icingadb__test_environment: "{{ monitoring_icinga_icingadb__test_vars.icingadb_environment }}"
+    monitoring_icinga_icingadb__test_secrets: "{{ monitoring_icinga_icingadb__test_vars.icingadb_secrets }}"
+    monitoring_icinga_icingadb__test_checked_files:
+      - "{{ monitoring_icinga_icingadb__test_quadlet_path }}"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_icinga_icingadb__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_icinga_icingadb__test_checked_files }}"
+      register: 'monitoring_icinga_icingadb__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_icinga_icingadb with icingadb_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_container: [ 'environment' ]
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'icingadb_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_icinga_icingadb with icingadb_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_environment: [ 'ICINGADB_DATABASE_HOST' ]
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'icingadb_environment is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_icinga_icingadb with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_environment: "{{ monitoring_icinga_icingadb__test_environment | combine({ 'ICINGADB_DATABASE_HOSTNAME': 'db' }) }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: ICINGADB_DATABASE_HOSTNAME\.'
+
+    - name: 'Run monitoring_icinga_icingadb with a boolean that is no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_environment: "{{ monitoring_icinga_icingadb__test_environment | combine({ 'ICINGADB_REDIS_TLS': 'yes' }) }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'a boolean that is no boolean'
+          search: '^These variables are booleans, allowed are true and false: ICINGADB_REDIS_TLS\.$'
+
+    - name: 'Run monitoring_icinga_icingadb with the password of Redis in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_environment: "{{ monitoring_icinga_icingadb__test_environment | combine({ 'ICINGADB_REDIS_PASSWORD': 'molecule' }) }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'the password of Redis in the environment'
+          search: '^Secrets and their file variables must not be set in icingadb_environment: ICINGADB_REDIS_PASSWORD\.$'
+
+    - name: 'Run monitoring_icinga_icingadb with the file variable of the password of the database in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_environment: "{{ monitoring_icinga_icingadb__test_environment | combine({ 'ICINGADB_DATABASE_PASSWORD_FILE': '/run/secrets/x' }) }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'the file variable of the password of the database in the environment'
+          search: '^Secrets and their file variables must not be set in icingadb_environment: ICINGADB_DATABASE_PASSWORD_FILE\.$'
+
+    - name: 'Run monitoring_icinga_icingadb without the host of Redis (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_environment: "{{ monitoring_icinga_icingadb__test_environment | combine({ 'ICINGADB_REDIS_HOST': none }) }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'no host of Redis'
+          search: '^Icinga DB needs the variables ICINGADB_DATABASE_HOST, ICINGADB_REDIS_HOST, missing: ICINGADB_REDIS_HOST\.$'
+
+    - name: 'Run monitoring_icinga_icingadb with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_secrets:
+          - name: 'icingadb_database_password'
+            data: 'molecule-database-password'
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'a secret without target'
+          search: '^icingadb_secrets entries need name, data and target$'
+
+    - name: 'Run monitoring_icinga_icingadb with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_secrets: "{{ monitoring_icinga_icingadb__test_secrets + [{ 'name': 'icingadb_api', 'data': 'x', 'target': 'ICINGADB_API_PASSWORD' }] }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: ICINGADB_API_PASSWORD\.'
+
+    - name: 'Run monitoring_icinga_icingadb without the password of the database (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_secrets: "{{ monitoring_icinga_icingadb__test_secrets | rejectattr('target', 'eq', 'ICINGADB_DATABASE_PASSWORD') | list }}"
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'no password of the database'
+          search: 'Icinga DB needs the secrets ICINGADB_DATABASE_PASSWORD, missing: ICINGADB_DATABASE_PASSWORD\.'
+
+    - name: 'Run monitoring_icinga_icingadb with a former variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_db_pass: 'molecule-database-password'
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'a former variable'
+          search: '^The options of Icinga DB are set with icingadb_environment now: icingadb_db_pass \(the secret ICINGADB_DATABASE_PASSWORD\)\.$'
+
+    - name: 'Run monitoring_icinga_icingadb with an unknown variable in icingadb_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        icingadb_container:
+          environment:
+            ICINGADB_DATABASE_HOST: '10.89.0.101'
+            FOO: 'bar'
+        monitoring_icinga_icingadb__test_invalid:
+          message: 'an unknown variable in icingadb_container.environment'
+          search: '^Unknown environment variables: FOO\.'
+
+    - name: 'Run monitoring_icinga_icingadb with the changed environment'
+      when: monitoring_icinga_icingadb__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icingadb' ]
+          register: 'monitoring_icinga_icingadb__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            icingadb_environment: "{{ monitoring_icinga_icingadb__test_environment | combine(monitoring_icinga_icingadb__test_case.side_effect.environment) }}"
+
+        - name: 'Run monitoring_icinga_icingadb with the changed environment'
+          ansible.builtin.include_role:
+            name: 'monitoring_icinga_icingadb'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icingadb' ]
+          register: 'monitoring_icinga_icingadb__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - monitoring_icinga_icingadb__quadlet_result is changed
+              - monitoring_icinga_icingadb__test_started_after.stdout | int > monitoring_icinga_icingadb__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ monitoring_icinga_icingadb__quadlet_result is changed }},
+              start before {{ monitoring_icinga_icingadb__test_started_before.stdout }}, after {{ monitoring_icinga_icingadb__test_started_after.stdout }}
