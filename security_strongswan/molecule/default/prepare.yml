@@ -1,0 +1,90 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_strongswan__test_case: "{{ security_strongswan__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_strongswan__test_archive: "{{ security_strongswan__test_certbot_home }}/etc/archive/{{ security_strongswan__test_realm }}"
+    security_strongswan__test_live: "{{ security_strongswan__test_certbot_home }}/etc/live/{{ security_strongswan__test_realm }}"
+
+  tasks:
+
+    - name: 'Create the PKI on the controller'
+      ansible.builtin.include_tasks:
+        file: 'tasks/pki.yml'
+        apply:
+          delegate_to: 'localhost'
+          become: false
+          run_once: true
+
+    - name: 'Install ping and ip'
+      ansible.builtin.apt:
+        name: [ 'iputils-ping', 'iproute2' ]
+        state: 'present'
+        update_cache: true
+
+    # The NAT of tart isolates the VMs from each other, the host forwards between them,
+    # a redirect of the host would bring back the direct way
+    - name: 'Ignore ICMP redirects'
+      ansible.builtin.command:
+        argv: [ 'sysctl', '-w', 'net.ipv4.conf.all.accept_redirects=0', 'net.ipv4.conf.default.accept_redirects=0' ]
+      changed_when: true
+
+    - name: 'Route the other VM through the host'
+      ansible.builtin.command:
+        argv: [ 'ip', 'route', 'replace', "{{ security_strongswan__test_peer }}/32", 'via', "{{ ansible_facts.default_ipv4.gateway }}" ]
+      changed_when: true
+
+    # The mesh needs traffic between the VMs, a network isolating them fails here and not in verify
+    - name: 'Ping the other VM without IPsec'
+      ansible.builtin.command:
+        argv: [ 'ping', '-c', '3', '-W', '2', "{{ security_strongswan__test_peer }}" ]
+      register: 'security_strongswan__test_plain_ping'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the VMs reach each other without IPsec'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_plain_ping.rc == 0
+        fail_msg: >-
+          The VMs cannot reach each other through the host ({{ inventory_hostname }} to {{ security_strongswan__test_peer }}),
+          the host does not forward between the VMs: {{ security_strongswan__test_plain_ping.stdout_lines | default([]) }}
+        quiet: true
+
+    # certbot keeps the certificates in the archive, live contains symlinks to the current ones
+    - name: 'Create the certificate of pki_certbot'
+      when: security_strongswan__test_case.role_vars.strongswan_certificate.source == 'certbot'
+      block:
+
+        - name: 'Create the directories of certbot'
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: 'directory'
+            mode: '0700'
+          loop: [ "{{ security_strongswan__test_archive }}", "{{ security_strongswan__test_live }}" ]
+
+        - name: 'Copy the certificates to the archive'
+          ansible.builtin.copy:
+            src: "{{ item.src }}"
+            dest: "{{ security_strongswan__test_archive }}/{{ item.dest }}"
+            mode: '0600'
+          loop:
+            - { src: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-1.pem", dest: 'cert1.pem' }
+            - { src: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-2.pem", dest: 'cert2.pem' }
+            - { src: "{{ security_strongswan__test_pki }}/ca.pem", dest: 'chain1.pem' }
+            - { src: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}.key", dest: 'privkey1.pem' }
+          loop_control:
+            label: "{{ item.dest }}"
+
+        - name: 'Link the first certificate'
+          ansible.builtin.file:
+            src: "../../archive/{{ security_strongswan__test_realm }}/{{ item }}1.pem"
+            dest: "{{ security_strongswan__test_live }}/{{ item }}.pem"
+            state: 'link'
+            force: true
+          loop: [ 'cert', 'chain', 'privkey' ]

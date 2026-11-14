@@ -1,0 +1,139 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_strongswan__test_case: "{{ security_strongswan__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_strongswan__expect: "{{ security_strongswan__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the state of the strongswan service'
+      ansible.builtin.command: 'systemctl is-active strongswan'
+      register: 'security_strongswan__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the configuration of swanctl'
+      ansible.builtin.slurp:
+        src: "{{ security_strongswan__test_config_path }}"
+      register: 'security_strongswan__test_config'
+
+    - name: 'Read the files of swanctl'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop:
+        - "{{ security_strongswan__test_config_path }}"
+        - '/etc/swanctl/x509/host.pem'
+        - '/etc/swanctl/private/host.key'
+        - "/etc/swanctl/x509ca/{{ security_strongswan__expect.ca_name }}"
+      register: 'security_strongswan__test_files'
+
+    # The deployed certificate is the first one or the renewal of side_effect
+    - name: 'Read the checksum of the expected certificate on the controller'
+      ansible.builtin.stat:
+        path: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-{{ security_strongswan__expect.certificate }}.pem"
+        checksum_algorithm: 'md5'
+      delegate_to: 'localhost'
+      become: false
+      register: 'security_strongswan__test_expected'
+
+    - name: 'Read the connections of swanctl'
+      ansible.builtin.command: 'swanctl --list-conns'
+      register: 'security_strongswan__test_conns'
+      changed_when: false
+
+    - name: 'Assert the service, the files and the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_service.stdout == 'active'
+          - security_strongswan__expect.lines | reject('in', security_strongswan__test_config_lines) | list | length == 0
+          - security_strongswan__test_config_lines | select('search', 'enabled') | list | length == 0
+          - security_strongswan__test_files.results | map(attribute='stat.mode') | list == [ '0640', '0644', '0600', '0644' ]
+          - security_strongswan__test_files.results[1].stat.checksum == security_strongswan__test_expected.stat.checksum
+          - security_strongswan__test_conns.stdout is search('^mesh:\sIKEv2', multiline=true)
+        fail_msg: >-
+          service {{ security_strongswan__test_service.stdout }},
+          modes {{ security_strongswan__test_files.results | map(attribute='stat.mode', default='missing') | list }},
+          certificate {{ security_strongswan__test_files.results[1].stat.checksum | default('') }} != {{ security_strongswan__test_expected.stat.checksum }},
+          configuration {{ security_strongswan__test_config_lines | to_json }}, connections {{ security_strongswan__test_conns.stdout_lines | to_json }}
+      vars:
+        security_strongswan__test_config_lines: "{{ (security_strongswan__test_config.content | b64decode).splitlines() }}"
+
+    # The trap needs the first packets to establish the security association,
+    # a failed ping shows the negotiation and the log of charon
+    - name: 'Ping the other VM through IPsec'
+      block:
+
+        - name: 'Ping the other VM through IPsec'
+          ansible.builtin.command:
+            argv: [ 'ping', '-c', '3', '-W', '2', "{{ security_strongswan__test_peer }}" ]
+          register: 'security_strongswan__test_ping'
+          until: security_strongswan__test_ping.rc == 0
+          retries: 10
+          delay: 3
+          changed_when: false
+
+      rescue:
+
+        - name: 'Read the negotiation, the state and the log of strongSwan'
+          ansible.builtin.command: "{{ item }}"
+          loop:
+            - 'swanctl --initiate --child mesh --timeout 20'
+            - 'swanctl --list-certs'
+            - 'swanctl --list-pols'
+            - 'swanctl --list-sas'
+            - 'ip xfrm policy'
+            - 'journalctl -u strongswan -n 150 --no-pager'
+          register: 'security_strongswan__test_diagnosis'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Fail with the negotiation, the state and the log of strongSwan'
+          ansible.builtin.fail:
+            msg: >-
+              {%- set lines = [ 'The ping of ' ~ security_strongswan__test_peer ~ ' through IPsec failed' ] -%}
+              {%- for result in security_strongswan__test_diagnosis.results -%}
+              {%-   set _ = lines.extend([ '=== ' ~ result.item ] + result.stdout_lines | default([]) + result.stderr_lines | default([])) -%}
+              {%- endfor -%}
+              {{ lines }}
+
+    - name: 'Read the security associations'
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - 'swanctl --list-sas'
+        - 'ip xfrm state'
+      register: 'security_strongswan__test_sas'
+      changed_when: false
+
+    - name: 'Assert the security associations of the mesh'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_sas.results[0].stdout is search('^mesh:\s#\d+, ESTABLISHED, IKEv2', multiline=true)
+          - security_strongswan__test_sas.results[0].stdout is search('mesh:\s#\d+, reqid \d+, INSTALLED, TRANSPORT')
+          - security_strongswan__test_sas.results[1].stdout is search('proto esp')
+          - security_strongswan__test_sas.results[1].stdout is search(security_strongswan__test_peer)
+        fail_msg: "{{ security_strongswan__test_sas.results | map(attribute='stdout_lines') | list | to_json }}"
+
+    - name: 'Assert the deployment of the certificate of pki_certbot'
+      when: security_strongswan__test_case.renewal
+      block:
+
+        - name: 'Read the state of the deployment of the certificate'
+          ansible.builtin.command: "systemctl is-active {{ item }}"
+          loop: [ 'strongswan-certificate.path' ]
+          register: 'security_strongswan__test_deploy'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the path unit of the deployment'
+          ansible.builtin.assert:
+            that:
+              - security_strongswan__test_deploy.results[0].stdout == 'active'
+            fail_msg: "strongswan-certificate.path {{ security_strongswan__test_deploy.results[0].stdout }}"

@@ -1,0 +1,147 @@
+---
+
+- name: 'Install and configure strongSwan'
+  tags: [ 'security', 'security_strongswan' ]
+  block:
+
+    # OpenWrt has no Python, raw works without facts on every system
+    - name: 'Detect OpenWrt'
+      ansible.builtin.raw: 'cat /etc/openwrt_release 2>/dev/null || true'
+      register: 'security_strongswan__release_file'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Set the platform'
+      ansible.builtin.set_fact:
+        security_strongswan__platform: "{{ 'OpenWrt' if security_strongswan__release_file.stdout is search('DISTRIB_ID=.?OpenWrt') else 'Debian' }}"
+
+    - name: 'Include the variables of the platform'
+      ansible.builtin.include_vars:
+        file: "{{ security_strongswan__platform }}.yml"
+
+    # A failing template in the variables (e.g. an unknown filter or strongswan_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - (security_strongswan__config | to_json | length) + (security_strongswan__certificate | to_json | length) > 0
+        quiet: true
+
+    # The sections are walked with a stack, Jinja has no recursion with results
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_strongswan__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_strongswan__invalid: >-
+          {%- set errors = [] -%}
+          {%- set config = security_strongswan__config -%}
+          {%- for key in security_strongswan__boolean_options if config[key] is defined and config[key] is not boolean -%}
+          {%-   set _ = errors.append(key ~ ' has to be a boolean: ' ~ config[key]) -%}
+          {%- endfor -%}
+          {%- set sections = config.keys() | reject('in', security_strongswan__role_options) | list -%}
+          {%- set unknown = sections | reject('in', security_strongswan__config_sections) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('strongswan_config allows the sections ' ~ (security_strongswan__config_sections | join(', '))
+                                      ~ ', secrets are no part of the configuration, not allowed: ' ~ (unknown | join(', '))) -%}
+          {%- endif -%}
+          {%- set ns = namespace(stack=[]) -%}
+          {%- for section in sections if section in security_strongswan__config_sections -%}
+          {%-   if config[section] is not none and config[section] is not mapping -%}
+          {%-     set _ = errors.append(section ~ ' has to be a dictionary') -%}
+          {%-   elif config[section] is mapping -%}
+          {%-     set ns.stack = ns.stack + [ [ section, config[section] ] ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- for _ in range(1000) if ns.stack | length > 0 -%}
+          {%-   set entry = ns.stack[-1] -%}
+          {%-   set ns.stack = ns.stack[:-1] -%}
+          {%-   for key, value in entry[1].items() if value is not none -%}
+          {%-     set path = entry[0] ~ '.' ~ key -%}
+          {%-     set values = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-     if key is not string or key is not match(security_strongswan__name_pattern) -%}
+          {%-       set _ = errors.append('invalid name ' ~ entry[0] ~ '.' ~ (key | string) ~ ', allowed is ' ~ security_strongswan__name_pattern) -%}
+          {%-     elif value is mapping -%}
+          {%-       set ns.stack = ns.stack + [ [ path, value ] ] -%}
+          {%-     elif values | reject('string') | reject('number') | reject('boolean') | list | length > 0 -%}
+          {%-       set _ = errors.append(path ~ ' has to be a string, a number, a boolean or a list of them') -%}
+          {%-     elif values | map('string') | select('search', security_strongswan__value_pattern) | list | length > 0 -%}
+          {%-       set _ = errors.append(path ~ ' must not contain line breaks, braces, quotes or #') -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ errors }}
+
+    - name: 'Validate the certificate'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_strongswan__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_strongswan__invalid: >-
+          {%- set errors = [] -%}
+          {%- set certificate = security_strongswan__certificate -%}
+          {%- set sources = security_strongswan__certificate_sources[security_strongswan__platform] -%}
+          {%- if certificate is not mapping -%}
+          {%-   set _ = errors.append('strongswan_certificate has to be a dictionary') -%}
+          {%- elif certificate | length > 0 -%}
+          {%-   if certificate.source | default('') not in sources -%}
+          {%-     set _ = errors.append('strongswan_certificate.source has to be one of ' ~ (sources | join(', ')) ~ ' on '
+                                        ~ security_strongswan__platform ~ ', got ' ~ (certificate.source | default(''))) -%}
+          {%-   else -%}
+          {%-     set keys = security_strongswan__certificate_keys[certificate.source] -%}
+          {%-     set missing = keys.required | reject('in', certificate.keys() | list) | list -%}
+          {%-     set unknown = certificate.keys() | reject('in', keys.required + keys.optional) | list -%}
+          {%-     if missing | length > 0 -%}
+          {%-       set _ = errors.append('strongswan_certificate with the source ' ~ certificate.source ~ ' needs ' ~ (missing | join(', '))) -%}
+          {%-     endif -%}
+          {%-     if unknown | length > 0 -%}
+          {%-       set _ = errors.append('strongswan_certificate with the source ' ~ certificate.source ~ ' does not know ' ~ (unknown | join(', '))) -%}
+          {%-     endif -%}
+          {%-     for key in keys.required + keys.optional if certificate[key] is defined
+                     and (certificate[key] is not string or (certificate[key] ~ '.').splitlines() | length > 1) -%}
+          {%-       set _ = errors.append('strongswan_certificate.' ~ key ~ ' has to be a string without line breaks') -%}
+          {%-     endfor -%}
+          {%-     if (security_strongswan__certificate_merged.ca_name | string) is not match(security_strongswan__ca_name_pattern) -%}
+          {%-       set _ = errors.append('strongswan_certificate.ca_name has to be a file name with .pem, .crt or .der') -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The files of the source files and the CA of all sources are copied from the controller
+    - name: 'Find the files of the certificate on the controller'
+      ansible.builtin.stat:
+        path: "{{ security_strongswan__certificate[item] }}"
+      loop: "{{ [ 'cert', 'key', 'chain', 'ca' ] | select('in', security_strongswan__certificate.keys() | list) | list }}"
+      register: 'security_strongswan__controller_files'
+      delegate_to: 'localhost'
+      become: false
+      check_mode: false
+
+    - name: 'Validate the files of the certificate on the controller'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__missing | length == 0
+        fail_msg: "These files of strongswan_certificate do not exist on the controller: {{ security_strongswan__missing | join(', ') }}."
+        quiet: true
+      vars:
+        security_strongswan__missing: >-
+          {%- set missing = [] -%}
+          {%- for result in security_strongswan__controller_files.results if not result.stat.exists -%}
+          {%-   set _ = missing.append(result.item ~ ' (' ~ security_strongswan__certificate[result.item] ~ ')') -%}
+          {%- endfor -%}
+          {{ missing }}
+
+    - name: 'Install and configure strongSwan on Debian'
+      ansible.builtin.include_tasks: 'debian.yml'
+      when: security_strongswan__platform == 'Debian'
+
+    - name: 'Install and configure strongSwan on OpenWrt'
+      ansible.builtin.include_tasks: 'openwrt.yml'
+      when: security_strongswan__platform == 'OpenWrt'

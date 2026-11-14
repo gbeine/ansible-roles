@@ -1,0 +1,94 @@
+---
+# The certificates created by prepare on the controller
+security_strongswan__test_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+security_strongswan__test_config_path: '/etc/swanctl/conf.d/ansible.conf'
+# The files of the domain of acme, created by prepare like acme of bootstrap_openwrt
+security_strongswan__test_domain: 'molecule.test'
+security_strongswan__test_acme_dir: '/etc/acme/molecule.test_ecc'
+
+# The mesh of the tests only contains the two VMs: a trap on the network of tart would catch the SSH connection of the controller too
+security_strongswan__test_peer: "{{ hostvars[groups['all'] | reject('eq', inventory_hostname) | first].ansible_host }}"
+
+security_strongswan__test_cases:
+
+  # The mesh of the example with the certificate from the controller
+  - name: 'molecule-strongswan-openwrt-default'
+    role_vars:
+      strongswan_config:
+        connections:
+          mesh:
+            version: 2
+            local_addrs: "{{ ansible_host }}"
+            remote_addrs: "{{ security_strongswan__test_peer }}"
+            proposals: 'aes256gcm16-prfsha384-x25519'
+            local:
+              auth: 'pubkey'
+              certs: 'host.pem'
+              id: "{{ ansible_host }}"
+            remote:
+              auth: 'pubkey'
+              cacerts: 'molecule-ca.pem'
+            children:
+              mesh:
+                mode: 'transport'
+                start_action: 'trap'
+                remote_ts: "{{ security_strongswan__test_peer }}/32"
+                esp_proposals: 'aes256gcm16-x25519'
+      strongswan_certificate:
+        source: 'files'
+        cert: "{{ security_strongswan__test_pki }}/molecule-strongswan-openwrt-default-1.pem"
+        key: "{{ security_strongswan__test_pki }}/molecule-strongswan-openwrt-default.key"
+        ca: "{{ security_strongswan__test_pki }}/ca.pem"
+        ca_name: 'molecule-ca.pem'
+    renewal: false
+    expect:
+      lines:
+        - 'connections {'
+        - '        local_addrs = {{ ansible_host }}'
+        - '        remote_addrs = {{ security_strongswan__test_peer }}'
+        - '                mode = transport'
+        - '                start_action = trap'
+      ca_name: 'molecule-ca.pem'
+      certificate: 1
+
+  # The mesh with the certificate of acme, mobike as boolean and the time of the rekeying
+  - name: 'molecule-strongswan-openwrt'
+    role_vars:
+      strongswan_config:
+        connections:
+          mesh:
+            version: 2
+            local_addrs: "{{ ansible_host }}"
+            remote_addrs: "{{ security_strongswan__test_peer }}"
+            proposals: [ 'aes256gcm16-prfsha384-x25519', 'aes128gcm16-prfsha256-ecp256' ]
+            mobike: false
+            rekey_time: '4h'
+            local:
+              auth: 'pubkey'
+              certs: 'host.pem'
+              id: "{{ ansible_host }}"
+            remote:
+              auth: 'pubkey'
+              cacerts: 'ca.pem'
+            children:
+              mesh:
+                mode: 'transport'
+                start_action: 'trap'
+                remote_ts: "{{ security_strongswan__test_peer }}/32"
+                esp_proposals: 'aes256gcm16-x25519'
+      strongswan_certificate:
+        source: 'acme'
+        domain: "{{ security_strongswan__test_domain }}"
+        ca: "{{ security_strongswan__test_pki }}/ca.pem"
+    renewal: true
+    side_effect:
+      rekey_time: '2h'
+    expect:
+      lines:
+        - '        proposals = aes256gcm16-prfsha384-x25519, aes128gcm16-prfsha256-ecp256'
+        - '        mobike = no'
+        - '        rekey_time = 2h'
+        - '                mode = transport'
+      ca_name: 'ca.pem'
+      # The certificate of the renewal by side_effect
+      certificate: 2

@@ -1,0 +1,92 @@
+---
+# OpenWrt has no Python and no stat, all checks use raw,
+# swanctl reports the plugins packaged separately on stderr, which is dropped
+- name: 'Verify'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_strongswan__test_case: "{{ security_strongswan__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_strongswan__expect: "{{ security_strongswan__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the state of strongSwan'
+      ansible.builtin.raw: >-
+        pidof charon >/dev/null && echo 'charon=running' || echo 'charon=stopped';
+        echo "enabled=$(uci -q get ipsec.globals.enabled)";
+        for f in {{ security_strongswan__test_config_path }} /etc/swanctl/x509/host.pem /etc/swanctl/private/host.key
+        /etc/swanctl/x509ca/{{ security_strongswan__expect.ca_name }}; do echo "mode=$(ls -l "$f" | cut -c1-10) $f"; done;
+        md5sum /etc/swanctl/x509/host.pem
+      register: 'security_strongswan__test_state'
+      changed_when: false
+
+    - name: 'Read the configuration and the connections of swanctl'
+      ansible.builtin.raw: "cat {{ security_strongswan__test_config_path }}; echo '---'; swanctl --list-conns 2>/dev/null"
+      register: 'security_strongswan__test_config'
+      changed_when: false
+
+    # The deployed certificate is the first one or the renewal of side_effect
+    - name: 'Read the checksum of the expected certificate on the controller'
+      ansible.builtin.stat:
+        path: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-{{ security_strongswan__expect.certificate }}.pem"
+        checksum_algorithm: 'md5'
+      delegate_to: 'localhost'
+      register: 'security_strongswan__test_expected'
+
+    - name: 'Assert the service, the files and the configuration'
+      ansible.builtin.assert:
+        that:
+          - "'charon=running' in security_strongswan__test_state.stdout"
+          - "'enabled=1' in security_strongswan__test_state.stdout"
+          - security_strongswan__test_state.stdout | regex_findall('mode=(\S+) ') == [ '-rw-r-----', '-rw-r--r--', '-rw-------', '-rw-r--r--' ]
+          - security_strongswan__test_expected.stat.checksum in security_strongswan__test_state.stdout
+          - security_strongswan__expect.lines | reject('in', security_strongswan__test_config_lines) | list | length == 0
+          - security_strongswan__test_config.stdout is search('^mesh:\sIKEv2', multiline=true)
+        fail_msg: "{{ security_strongswan__test_state.stdout_lines + security_strongswan__test_config.stdout_lines }}"
+      vars:
+        security_strongswan__test_config_lines: "{{ security_strongswan__test_config.stdout_lines | map('regex_replace', '\\r$', '') | list }}"
+
+    # The trap needs the first packets to establish the security association,
+    # a failed ping shows the negotiation and the log of charon
+    - name: 'Ping the other VM through IPsec'
+      block:
+
+        - name: 'Ping the other VM through IPsec'
+          ansible.builtin.raw: "ping -c 3 -W 2 {{ security_strongswan__test_peer }}"
+          register: 'security_strongswan__test_ping'
+          until: security_strongswan__test_ping.rc == 0
+          retries: 10
+          delay: 3
+          changed_when: false
+
+      rescue:
+
+        - name: 'Read the negotiation, the state and the log of strongSwan'
+          ansible.builtin.raw: >-
+            for c in 'swanctl --initiate --child mesh --timeout 20' 'swanctl --list-certs' 'swanctl --list-pols' 'swanctl --list-sas';
+            do echo "=== $c"; $c 2>&1 | grep -v "failed to load"; done;
+            echo '=== logread'; logread -e charon | tail -n 150
+          register: 'security_strongswan__test_diagnosis'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Fail with the negotiation, the state and the log of strongSwan'
+          ansible.builtin.fail:
+            msg: "{{ [ 'The ping of ' ~ security_strongswan__test_peer ~ ' through IPsec failed' ] + security_strongswan__test_diagnosis.stdout_lines }}"
+
+    - name: 'Read the security associations'
+      ansible.builtin.raw: 'swanctl --list-sas 2>/dev/null'
+      register: 'security_strongswan__test_sas'
+      changed_when: false
+
+    - name: 'Assert the security associations of the mesh'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_sas.stdout is search('mesh:\s#\d+, ESTABLISHED, IKEv2')
+          - security_strongswan__test_sas.stdout is search('mesh:\s#\d+, reqid \d+, INSTALLED, TRANSPORT')
+          - security_strongswan__test_sas.stdout is search(security_strongswan__test_peer)
+        fail_msg: "{{ security_strongswan__test_sas.stdout_lines }}"

@@ -1,0 +1,97 @@
+---
+# OpenWrt has no Python, the tasks use raw and community.openwrt
+- name: 'Prepare'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_strongswan__test_case: "{{ security_strongswan__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  tasks:
+
+    - name: 'Create the PKI on the controller'
+      ansible.builtin.include_tasks:
+        file: 'tasks/pki.yml'
+        apply:
+          delegate_to: 'localhost'
+          run_once: true
+
+    - name: 'Assert the clone is OpenWrt without strongSwan'
+      ansible.builtin.raw: '. /etc/openwrt_release && ! test -x /usr/sbin/swanctl'
+      changed_when: false
+
+    # Dynamic, the collection is only needed on the controller running the scenario
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.include_role:
+        name: 'community.openwrt.init'
+
+    # The zone of the address of the VM may reject IKE and ESP
+    - name: 'Allow IKE and ESP in the firewall'
+      ansible.builtin.raw: >-
+        uci set firewall.molecule_ike=rule && uci set firewall.molecule_ike.name='Allow-IKE-molecule'
+        && uci set firewall.molecule_ike.src='*' && uci set firewall.molecule_ike.proto='udp'
+        && uci set firewall.molecule_ike.dest_port='500 4500' && uci set firewall.molecule_ike.target='ACCEPT'
+        && uci set firewall.molecule_esp=rule && uci set firewall.molecule_esp.name='Allow-ESP-molecule'
+        && uci set firewall.molecule_esp.src='*' && uci set firewall.molecule_esp.proto='esp'
+        && uci set firewall.molecule_esp.target='ACCEPT'
+        && uci commit firewall && /etc/init.d/firewall reload
+      changed_when: true
+
+    # The NAT of tart isolates the VMs from each other, the host forwards between them,
+    # a redirect of the host would bring back the direct way
+    - name: 'Route the other VM through the host'
+      ansible.builtin.raw: >-
+        gw=$(ip route show default | awk '{ print $3; exit }')
+        && test -n "$gw"
+        && echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+        && echo 0 > /proc/sys/net/ipv4/conf/default/accept_redirects
+        && { ip route replace {{ security_strongswan__test_peer }}/32 via "$gw" 2>/dev/null || route add -host {{ security_strongswan__test_peer }} gw "$gw"; }
+      changed_when: true
+
+    # The mesh needs traffic between the VMs, a network isolating them fails here and not in verify
+    - name: 'Ping the other VM without IPsec'
+      ansible.builtin.raw: "ping -c 3 -W 2 {{ security_strongswan__test_peer }}"
+      register: 'security_strongswan__test_plain_ping'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the VMs reach each other without IPsec'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_plain_ping.rc == 0
+        fail_msg: >-
+          The VMs cannot reach each other through the host ({{ inventory_hostname }} to {{ security_strongswan__test_peer }}),
+          the host does not forward between the VMs: {{ security_strongswan__test_plain_ping.stdout_lines | default([]) }}
+        quiet: true
+
+    # acme keeps the certificates in its directory, /etc/ssl/acme contains symlinks to them
+    - name: 'Create the certificate of acme'
+      when: security_strongswan__test_case.role_vars.strongswan_certificate.source == 'acme'
+      block:
+
+        - name: 'Create the directories of acme'
+          ansible.builtin.raw: "mkdir -p {{ security_strongswan__test_acme_dir }} /etc/ssl/acme"
+          changed_when: true
+
+        - name: 'Copy the certificates to the directory of acme'
+          community.openwrt.copy:
+            content: "{{ lookup('ansible.builtin.file', item.src) }}\n"
+            dest: "{{ security_strongswan__test_acme_dir }}/{{ item.dest }}"
+            mode: '0600'
+          loop:
+            - { src: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-1.pem", dest: 'molecule.test.cer' }
+            - { src: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-2.pem", dest: 'molecule.test-2.cer' }
+            - { src: "{{ security_strongswan__test_pki }}/ca.pem", dest: 'ca.cer' }
+            - { src: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}.key", dest: 'molecule.test.key' }
+          loop_control:
+            label: "{{ item.dest }}"
+
+        - name: 'Link the certificate like acme'
+          ansible.builtin.raw: >-
+            ln -sf {{ security_strongswan__test_acme_dir }}/molecule.test.cer /etc/ssl/acme/molecule.test.crt
+            && ln -sf {{ security_strongswan__test_acme_dir }}/ca.cer /etc/ssl/acme/molecule.test.chain.crt
+            && ln -sf {{ security_strongswan__test_acme_dir }}/molecule.test.key /etc/ssl/acme/molecule.test.key
+          changed_when: true

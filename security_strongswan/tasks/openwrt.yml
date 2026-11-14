@@ -1,0 +1,248 @@
+---
+
+- name: 'Configure strongSwan on OpenWrt'
+  vars:
+    security_strongswan__openwrt_enabled: "{{ security_strongswan__config.enabled | bool }}"
+    security_strongswan__openwrt_content: "{{ lookup('ansible.builtin.template', 'swanctl.conf.j2') }}"
+    security_strongswan__openwrt_missing: "{{ 'swanctl=no' in security_strongswan__openwrt_tools.stdout_lines | map('trim') }}"
+    security_strongswan__openwrt_source: "{{ security_strongswan__certificate_merged.source | default('') }}"
+  block:
+
+    - name: 'Initialise OpenWrt'
+      ansible.builtin.import_role:
+        name: 'community.openwrt.init'
+
+    - name: 'Check reachability'
+      community.openwrt.ping:
+
+    - name: 'Check strongSwan and the package manager'
+      ansible.builtin.raw: >-
+        test -x /usr/sbin/swanctl && test -x /etc/init.d/{{ security_strongswan__openwrt_service }} && echo 'swanctl=yes' || echo 'swanctl=no';
+        command -v apk >/dev/null && echo 'manager=apk' || echo 'manager=opkg';
+        test -f {{ security_strongswan__openwrt_hotplug_file }} && echo 'hotplug=yes' || echo 'hotplug=no'
+      register: 'security_strongswan__openwrt_tools'
+      changed_when: false
+      check_mode: false
+
+    # The packages are installed together, missing plugins of a former installation are added
+    - name: 'Install strongSwan with apk'
+      community.openwrt.apk:
+        name: "{{ security_strongswan__openwrt_packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      when: "'manager=apk' in security_strongswan__openwrt_tools.stdout_lines | map('trim')"
+
+    - name: 'Install strongSwan with opkg'
+      community.openwrt.opkg:
+        name: "{{ security_strongswan__openwrt_packages | join(',') }}"
+        state: 'present'
+        update_cache: true
+      when: "'manager=opkg' in security_strongswan__openwrt_tools.stdout_lines | map('trim')"
+
+    # In check mode the packages of a first installation are missing, there is no configuration to compare
+    - name: 'Configure strongSwan'
+      when: not (ansible_check_mode and security_strongswan__openwrt_missing | bool)
+      block:
+
+        - name: 'Read the current configurations of strongSwan'
+          community.openwrt.slurp:
+            src: "{{ item }}"
+          loop:
+            - "{{ security_strongswan__config_file }}"
+            - "{{ security_strongswan__openwrt_uci_config }}"
+          register: 'security_strongswan__openwrt_current'
+          check_mode: false
+          failed_when: false
+
+        # The backup contains the files before this change, it is only written if they change
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          become: false
+          check_mode: false
+          when: (security_strongswan__openwrt_current.results[0].content | default('') | b64decode) != security_strongswan__openwrt_content
+
+        - name: 'Store the backup of the configuration of swanctl on the controller'
+          ansible.builtin.copy:
+            content: "{{ security_strongswan__openwrt_current.results[0].content | default('') | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/ansible.conf"
+            mode: '0600'
+          delegate_to: 'localhost'
+          become: false
+          check_mode: false
+          when: (security_strongswan__openwrt_current.results[0].content | default('') | b64decode) != security_strongswan__openwrt_content
+
+        - name: 'Write the configuration of swanctl'
+          community.openwrt.copy:
+            content: "{{ security_strongswan__openwrt_content }}"
+            dest: "{{ security_strongswan__config_file }}"
+            mode: '0640'
+          register: 'security_strongswan__config_result'
+
+        - name: 'Copy the certificate from the controller'
+          when: security_strongswan__openwrt_source == 'files'
+          community.openwrt.copy:
+            content: "{{ lookup('ansible.builtin.file', item.src) }}\n"
+            dest: "{{ item.dest }}"
+            mode: "{{ item.mode }}"
+          loop: >-
+            {{ [ { 'src': security_strongswan__certificate_merged.cert, 'dest': security_strongswan__cert_file, 'mode': '0644' },
+                 { 'src': security_strongswan__certificate_merged.key, 'dest': security_strongswan__key_file, 'mode': '0600' } ]
+               + ([ { 'src': security_strongswan__certificate_merged.chain, 'dest': security_strongswan__chain_file, 'mode': '0644' } ]
+                  if security_strongswan__certificate_merged.chain is defined else []) }}
+          loop_control:
+            label: "{{ item.dest }}"
+          # The content contains the private key
+          no_log: true
+          diff: false
+          register: 'security_strongswan__files_result'
+
+        - name: 'Copy the CA from the controller'
+          when: security_strongswan__certificate_merged | length > 0
+          community.openwrt.copy:
+            content: "{{ lookup('ansible.builtin.file', security_strongswan__certificate_merged.ca) }}\n"
+            dest: "{{ security_strongswan__ca_file }}"
+            mode: '0644'
+          register: 'security_strongswan__ca_result'
+
+        # The files of acme are symlinks, the copies contain the files they point to
+        - name: 'Copy the certificate of acme'
+          when:
+            - not ansible_check_mode
+            - security_strongswan__openwrt_source == 'acme'
+          ansible.builtin.raw: >-
+            umask 077;
+            acme='{{ security_strongswan__openwrt_acme_dir }}/{{ security_strongswan__certificate_merged.domain }}';
+            for file in "${acme}.crt" "${acme}.chain.crt" "${acme}.key"; do test -f "${file}" || { echo "missing=${file}"; exit 1; }; done;
+            changed=0;
+            cmp -s "${acme}.crt" '{{ security_strongswan__cert_file }}' || { cp -L "${acme}.crt" '{{ security_strongswan__cert_file }}'; changed=1; };
+            cmp -s "${acme}.chain.crt" '{{ security_strongswan__chain_file }}' || { cp -L "${acme}.chain.crt" '{{ security_strongswan__chain_file }}'; changed=1; };
+            cmp -s "${acme}.key" '{{ security_strongswan__key_file }}' || { cp -L "${acme}.key" '{{ security_strongswan__key_file }}'; changed=1; };
+            chmod 0644 '{{ security_strongswan__cert_file }}' '{{ security_strongswan__chain_file }}';
+            chmod 0600 '{{ security_strongswan__key_file }}';
+            echo "changed=${changed}"
+          register: 'security_strongswan__acme_result'
+          changed_when: "'changed=1' in security_strongswan__acme_result.stdout"
+          failed_when: false
+
+        - name: 'Assert the certificate of acme'
+          when:
+            - security_strongswan__acme_result is not skipped
+            - "'changed=' not in (security_strongswan__acme_result.stdout | default('changed='))"
+          ansible.builtin.fail:
+            msg: >-
+              The certificate of {{ security_strongswan__certificate_merged.domain }} of acme is missing
+              in {{ security_strongswan__openwrt_acme_dir }}, acme of bootstrap_openwrt has to issue it first:
+              {{ security_strongswan__acme_result.stdout | trim }}
+
+        - name: 'Create the directory of the hotplug scripts of acme'
+          when:
+            - not ansible_check_mode
+            - security_strongswan__openwrt_source == 'acme'
+          ansible.builtin.raw: "mkdir -p {{ security_strongswan__openwrt_hotplug_file | dirname }}"
+          changed_when: false
+
+        # acme calls the hotplug scripts after the issuance and the renewal of a certificate
+        - name: 'Write the hook for the renewal of the certificate of acme'
+          when: security_strongswan__openwrt_source == 'acme'
+          community.openwrt.copy:
+            content: "{{ lookup('ansible.builtin.template', '50-strongswan.j2') }}"
+            dest: "{{ security_strongswan__openwrt_hotplug_file }}"
+            mode: '0755'
+
+        - name: 'Remove the hook for the renewal of the certificate of acme'
+          when:
+            - not ansible_check_mode
+            - security_strongswan__openwrt_source != 'acme'
+            - "'hotplug=yes' in security_strongswan__openwrt_tools.stdout_lines | map('trim')"
+          ansible.builtin.raw: "rm -f {{ security_strongswan__openwrt_hotplug_file }}"
+          changed_when: true
+
+        # The init script starts charon only with enabled, the other options of /etc/config/ipsec stay with the package,
+        # the section globals is created if the package delivers none
+        - name: 'Set enabled of the UCI configuration of strongSwan'
+          community.openwrt.uci:
+            command: 'section'
+            config: 'ipsec'
+            type: 'globals'
+            name: 'globals'
+            value:
+              enabled: "{{ '1' if security_strongswan__openwrt_enabled | bool else '0' }}"
+            replace: false
+
+        - name: 'Read the pending changes of the UCI configuration of strongSwan'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'ipsec'
+          register: 'security_strongswan__openwrt_pending'
+          check_mode: false
+
+        - name: 'Create the backup directory on the controller for the UCI configuration'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          become: false
+          check_mode: false
+          when: security_strongswan__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup of the UCI configuration on the controller'
+          ansible.builtin.copy:
+            content: "{{ security_strongswan__openwrt_current.results[1].content | default('') | b64decode }}"
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/ipsec"
+            mode: '0600'
+          delegate_to: 'localhost'
+          become: false
+          check_mode: false
+          when: security_strongswan__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Commit the UCI configuration of strongSwan'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'ipsec'
+          when: security_strongswan__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Start and enable strongSwan'
+          community.openwrt.service:
+            name: "{{ security_strongswan__openwrt_service }}"
+            enabled: true
+            state: 'started'
+          when:
+            - not ansible_check_mode
+            - security_strongswan__openwrt_enabled | bool
+
+        # strongSwan loads the changed configuration and certificates without a restart, the security associations stay
+        - name: 'Load the configuration and the certificates'
+          ansible.builtin.raw: 'swanctl --load-all --noprompt'
+          register: 'security_strongswan__load_result'
+          changed_when: true
+          failed_when: false
+          when:
+            - not ansible_check_mode
+            - security_strongswan__openwrt_enabled | bool
+            - >-
+              security_strongswan__config_result is changed
+              or (security_strongswan__files_result | default({})) is changed
+              or (security_strongswan__ca_result | default({})) is changed
+              or (security_strongswan__acme_result | default({})) is changed
+
+        - name: 'Assert that swanctl loaded the configuration'
+          ansible.builtin.assert:
+            that:
+              - security_strongswan__load_result.rc == 0
+            fail_msg: "{{ [ 'swanctl --load-all failed:' ] + security_strongswan__load_result.stdout_lines }}"
+            quiet: true
+          when: security_strongswan__load_result is changed
+
+        - name: 'Stop and disable strongSwan'
+          community.openwrt.service:
+            name: "{{ security_strongswan__openwrt_service }}"
+            enabled: false
+            state: 'stopped'
+          when:
+            - not ansible_check_mode
+            - not security_strongswan__openwrt_enabled | bool

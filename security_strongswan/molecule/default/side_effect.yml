@@ -1,0 +1,183 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_strongswan__test_case: "{{ security_strongswan__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_strongswan__test_vars: "{{ security_strongswan__test_case.role_vars }}"
+    security_strongswan__test_mesh: "{{ security_strongswan__test_vars.strongswan_config.connections.mesh }}"
+    security_strongswan__test_checked_files:
+      - "{{ security_strongswan__test_config_path }}"
+    security_strongswan__test_files:
+      source: 'files'
+      cert: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-1.pem"
+      key: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}.key"
+      ca: "{{ security_strongswan__test_pki }}/ca.pem"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ security_strongswan__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ security_strongswan__test_checked_files }}"
+      register: 'security_strongswan__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run security_strongswan with strongswan_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config: [ 'connections' ]
+        security_strongswan__test_invalid:
+          message: 'strongswan_config not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run security_strongswan with secrets (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          connections: { mesh: "{{ security_strongswan__test_mesh }}" }
+          secrets: { ike-mesh: { secret: 'molecule-psk' } }
+        security_strongswan__test_invalid:
+          message: 'secrets'
+          search: '^strongswan_config allows the sections connections, authorities, pools, secrets are no part of the configuration, not allowed: secrets$'
+
+    - name: 'Run security_strongswan with include (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          include: '/etc/swanctl/other.conf'
+        security_strongswan__test_invalid:
+          message: 'include'
+          search: 'not allowed: include$'
+
+    - name: 'Run security_strongswan with an invalid name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          connections: { 'mesh net': "{{ security_strongswan__test_mesh }}" }
+        security_strongswan__test_invalid:
+          message: 'an invalid name'
+          search: '^invalid name connections\.mesh net, allowed is'
+
+    - name: 'Run security_strongswan with a brace in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          connections: { mesh: "{{ security_strongswan__test_mesh | combine({ 'proposals': 'aes256gcm16 }' }) }}" }
+        security_strongswan__test_invalid:
+          message: 'a brace in a value'
+          search: '^connections\.mesh\.proposals must not contain line breaks, braces, quotes or #$'
+
+    - name: 'Run security_strongswan with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          connections: { mesh: "{{ security_strongswan__test_mesh | combine({ 'local': { 'auth': 'pubkey', 'id': 'molecule\nother' } }) }}" }
+        security_strongswan__test_invalid:
+          message: 'a line break in a value'
+          search: '^connections\.mesh\.local\.id must not contain line breaks, braces, quotes or #$'
+
+    - name: 'Run security_strongswan with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          enabled: 'yes'
+          connections: { mesh: "{{ security_strongswan__test_mesh }}" }
+        security_strongswan__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: yes$'
+
+    - name: 'Run security_strongswan with an unknown source (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: "{{ security_strongswan__test_files | combine({ 'source': 'vault' }) }}"
+        security_strongswan__test_invalid:
+          message: 'an unknown source'
+          search: '^strongswan_certificate\.source has to be one of files, certbot on Debian, got vault$'
+
+    - name: 'Run security_strongswan with acme on Debian (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: { source: 'acme', domain: 'molecule.test', ca: "{{ security_strongswan__test_pki }}/ca.pem" }
+        security_strongswan__test_invalid:
+          message: 'acme on Debian'
+          search: '^strongswan_certificate\.source has to be one of files, certbot on Debian, got acme$'
+
+    - name: 'Run security_strongswan with files without key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: "{{ security_strongswan__test_files | dict2items | rejectattr('key', 'eq', 'key') | items2dict }}"
+        security_strongswan__test_invalid:
+          message: 'files without key'
+          search: '^strongswan_certificate with the source files needs key$'
+
+    - name: 'Run security_strongswan with a missing file on the controller (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: "{{ security_strongswan__test_files | combine({ 'cert': security_strongswan__test_pki ~ '/missing.pem' }) }}"
+        security_strongswan__test_invalid:
+          message: 'a missing file on the controller'
+          search: '^These files of strongswan_certificate do not exist on the controller: cert \(.*/missing\.pem\)\.$'
+
+    - name: 'Renew the certificate and change the configuration'
+      when: security_strongswan__test_case.renewal
+      vars:
+        security_strongswan__test_live: "{{ security_strongswan__test_certbot_home }}/etc/live/{{ security_strongswan__test_realm }}"
+      block:
+
+        # certbot links the renewed certificate, the path unit copies and loads it
+        - name: 'Renew the certificate of pki_certbot'
+          ansible.builtin.file:
+            src: "../../archive/{{ security_strongswan__test_realm }}/cert2.pem"
+            dest: "{{ security_strongswan__test_live }}/cert.pem"
+            state: 'link'
+            force: true
+
+        - name: 'Read the checksum of the renewed certificate'
+          ansible.builtin.stat:
+            path: "{{ security_strongswan__test_live }}/cert.pem"
+            checksum_algorithm: 'md5'
+            # cert.pem is a symlink, stat only has a checksum of the file it points to
+            follow: true
+          register: 'security_strongswan__test_renewed'
+
+        - name: 'Wait for the deployment of the renewed certificate'
+          ansible.builtin.stat:
+            path: '/etc/swanctl/x509/host.pem'
+            checksum_algorithm: 'md5'
+          register: 'security_strongswan__test_deployed'
+          until: security_strongswan__test_deployed.stat.checksum | default('') == security_strongswan__test_renewed.stat.checksum
+          retries: 15
+          delay: 2
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            strongswan_config:
+              connections:
+                mesh: "{{ security_strongswan__test_mesh | combine(security_strongswan__test_case.side_effect) }}"
+
+        - name: 'Run security_strongswan with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'security_strongswan'
+
+        - name: 'Assert the loaded configuration'
+          ansible.builtin.assert:
+            that:
+              - security_strongswan__config_result is changed
+              - security_strongswan__load_result is changed
+              - security_strongswan__load_result.rc == 0
+            fail_msg: "configuration changed: {{ security_strongswan__config_result is changed }}, load {{ security_strongswan__load_result | default({}) }}"

@@ -1,0 +1,68 @@
+---
+# Creates the CA and the certificates of the hosts with openssl on the controller, the identities are the addresses of the hosts.
+# Every host gets a second certificate with the same key for the renewal
+
+- name: 'Create the directory of the PKI'
+  ansible.builtin.file:
+    path: "{{ security_strongswan__test_pki }}"
+    state: 'directory'
+    mode: '0700'
+
+- name: 'Write the configuration of openssl'
+  ansible.builtin.copy:
+    dest: "{{ security_strongswan__test_pki }}/openssl.cnf"
+    mode: '0600'
+    content: |
+      [req]
+      distinguished_name = dn
+      [dn]
+      [ca]
+      basicConstraints = critical, CA:TRUE
+      keyUsage = critical, keyCertSign, cRLSign
+      subjectKeyIdentifier = hash
+
+- name: 'Create the key of the CA'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', "{{ security_strongswan__test_pki }}/ca.key" ]
+    creates: "{{ security_strongswan__test_pki }}/ca.key"
+
+- name: 'Create the certificate of the CA'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'req', '-x509', '-new', '-key', "{{ security_strongswan__test_pki }}/ca.key", '-subj', '/CN=Molecule strongSwan CA',
+            '-days', '30', '-config', "{{ security_strongswan__test_pki }}/openssl.cnf", '-extensions', 'ca',
+            '-out', "{{ security_strongswan__test_pki }}/ca.pem" ]
+    creates: "{{ security_strongswan__test_pki }}/ca.pem"
+
+- name: 'Create the keys of the hosts'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', "{{ security_strongswan__test_pki }}/{{ item }}.key" ]
+    creates: "{{ security_strongswan__test_pki }}/{{ item }}.key"
+  loop: "{{ groups['all'] }}"
+
+- name: 'Write the extensions of the certificates of the hosts'
+  ansible.builtin.copy:
+    dest: "{{ security_strongswan__test_pki }}/{{ item }}.ext"
+    mode: '0600'
+    content: |
+      basicConstraints = CA:FALSE
+      keyUsage = critical, digitalSignature
+      subjectAltName = IP:{{ hostvars[item].ansible_host }}
+  loop: "{{ groups['all'] }}"
+
+- name: 'Create the requests of the hosts'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'req', '-new', '-key', "{{ security_strongswan__test_pki }}/{{ item }}.key", '-subj', "/CN={{ hostvars[item].ansible_host }}",
+            '-config', "{{ security_strongswan__test_pki }}/openssl.cnf", '-out', "{{ security_strongswan__test_pki }}/{{ item }}.csr" ]
+    creates: "{{ security_strongswan__test_pki }}/{{ item }}.csr"
+  loop: "{{ groups['all'] }}"
+
+# The first certificate is deployed, the second one is the renewal
+- name: 'Create the certificates of the hosts'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'x509', '-req', '-in', "{{ security_strongswan__test_pki }}/{{ item.0 }}.csr",
+            '-CA', "{{ security_strongswan__test_pki }}/ca.pem", '-CAkey', "{{ security_strongswan__test_pki }}/ca.key",
+            '-set_serial', "{{ (groups['all'].index(item.0) + 1) * 10 + item.1 }}", '-days', '30',
+            '-extfile', "{{ security_strongswan__test_pki }}/{{ item.0 }}.ext",
+            '-out', "{{ security_strongswan__test_pki }}/{{ item.0 }}-{{ item.1 }}.pem" ]
+    creates: "{{ security_strongswan__test_pki }}/{{ item.0 }}-{{ item.1 }}.pem"
+  loop: "{{ groups['all'] | product([ 1, 2 ]) | list }}"

@@ -1,0 +1,130 @@
+---
+# OpenWrt has no Python, all checks use raw
+- name: 'Side effect'
+  hosts: 'all'
+  gather_facts: false
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_strongswan__test_case: "{{ security_strongswan__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_strongswan__test_vars: "{{ security_strongswan__test_case.role_vars }}"
+    security_strongswan__test_mesh: "{{ security_strongswan__test_vars.strongswan_config.connections.mesh }}"
+    security_strongswan__test_files:
+      source: 'files'
+      cert: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}-1.pem"
+      key: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}.key"
+      ca: "{{ security_strongswan__test_pki }}/ca.pem"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ security_strongswan__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksum of the configuration before the invalid runs'
+      ansible.builtin.raw: "md5sum {{ security_strongswan__test_config_path }}"
+      register: 'security_strongswan__test_md5_before'
+      changed_when: false
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run security_strongswan with secrets (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          connections: { mesh: "{{ security_strongswan__test_mesh }}" }
+          secrets: { ike-mesh: { secret: 'molecule-psk' } }
+        security_strongswan__test_invalid:
+          message: 'secrets'
+          search: 'secrets are no part of the configuration, not allowed: secrets$'
+
+    - name: 'Run security_strongswan with a brace in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          connections: { mesh: "{{ security_strongswan__test_mesh | combine({ 'proposals': 'aes256gcm16 }' }) }}" }
+        security_strongswan__test_invalid:
+          message: 'a brace in a value'
+          search: '^connections\.mesh\.proposals must not contain line breaks, braces, quotes or #$'
+
+    - name: 'Run security_strongswan with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_config:
+          enabled: 'yes'
+          connections: { mesh: "{{ security_strongswan__test_mesh }}" }
+        security_strongswan__test_invalid:
+          message: 'an invalid boolean'
+          search: '^enabled has to be a boolean: yes$'
+
+    - name: 'Run security_strongswan with certbot on OpenWrt (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: { source: 'certbot', realm: 'molecule', ca: "{{ security_strongswan__test_pki }}/ca.pem" }
+        security_strongswan__test_invalid:
+          message: 'certbot on OpenWrt'
+          search: '^strongswan_certificate\.source has to be one of files, acme on OpenWrt, got certbot$'
+
+    - name: 'Run security_strongswan with acme without domain (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: { source: 'acme', ca: "{{ security_strongswan__test_pki }}/ca.pem" }
+        security_strongswan__test_invalid:
+          message: 'acme without domain'
+          search: '^strongswan_certificate with the source acme needs domain$'
+
+    - name: 'Run security_strongswan with files without key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: "{{ security_strongswan__test_files | dict2items | rejectattr('key', 'eq', 'key') | items2dict }}"
+        security_strongswan__test_invalid:
+          message: 'files without key'
+          search: '^strongswan_certificate with the source files needs key$'
+
+    - name: 'Renew the certificate and change the configuration'
+      when: security_strongswan__test_case.renewal
+      block:
+
+        # acme links the renewed certificate and calls the hotplug scripts
+        - name: 'Renew the certificate of acme'
+          ansible.builtin.raw: >-
+            ln -sf {{ security_strongswan__test_acme_dir }}/molecule.test-2.cer /etc/ssl/acme/molecule.test.crt
+            && ACTION=renewed hotplug-call acme
+          changed_when: true
+
+        - name: 'Read the checksums of the renewed and the deployed certificate'
+          ansible.builtin.raw: 'md5sum /etc/ssl/acme/molecule.test.crt /etc/swanctl/x509/host.pem'
+          register: 'security_strongswan__test_renewed'
+          changed_when: false
+
+        - name: 'Assert the deployment of the renewed certificate'
+          ansible.builtin.assert:
+            that:
+              - security_strongswan__test_sums | length == 2
+              - security_strongswan__test_sums[0] == security_strongswan__test_sums[1]
+            fail_msg: "{{ security_strongswan__test_renewed.stdout_lines }}"
+          vars:
+            security_strongswan__test_sums: "{{ security_strongswan__test_renewed.stdout | regex_findall('[0-9a-f]{32}') }}"
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            strongswan_config:
+              connections:
+                mesh: "{{ security_strongswan__test_mesh | combine(security_strongswan__test_case.side_effect) }}"
+
+        - name: 'Run security_strongswan with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'security_strongswan'
+
+        - name: 'Assert the loaded configuration'
+          ansible.builtin.assert:
+            that:
+              - security_strongswan__config_result is changed
+              - security_strongswan__load_result is changed
+              - security_strongswan__load_result.rc == 0
+            fail_msg: "configuration changed: {{ security_strongswan__config_result is changed }}, load {{ security_strongswan__load_result | default({}) }}"
