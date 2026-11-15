@@ -79,8 +79,19 @@ The lists are taken from `docker/Dockerfile` and `docker/entrypoint.sh` of step-
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `stepca_container`, it is merged over the default of the container.
-The merge is not recursive. For a reverse proxy, e.g. Traefik with TLS passthrough, the labels are set with `stepca_labels`.
+Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `stepca_container`, it is merged over the default of the container.
+The merge is not recursive.
+The dependencies of the quadlet unit are lists in `stepca_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`, `requires_mounts_for` are paths, written as `RequiresMountsFor=`,
+e.g. for `stepca_home` on a device that is mounted later:
+
+```yaml
+stepca_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/mnt/storage' ]
+```
+ For a reverse proxy, e.g. Traefik with TLS passthrough, the labels are set with `stepca_labels`.
 The directory belongs to `step` (1000) with the mode `0750`.
 
 ### Validation
@@ -129,6 +140,7 @@ Changed behavior:
 - the secret is mounted as file with `DOCKER_STEPCA_INIT_PASSWORD_FILE` instead of the environment, the former podman secret `stepca_init_password` may be reused as name
 - `/etc/localtime` and `/etc/timezone` are no longer mounted, the time zone is set with `stepca_timezone`
 - the handler `Restart step-ca container` is removed
+- the dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `stepca_container` are supported besides `requires`
 - `stepca_config` changes `ca.json`, the role validates all variables before any change
 
 ### Tests
@@ -139,7 +151,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-stepca-default` | Only the mandatory variables, remote management, SSH and ACME by default |
-| `molecule-stepca` | IPv6, labels, without SSH, standalone, the format of the logger and the durations of the certificates in `stepca_config` |
+| `molecule-stepca` | IPv6, labels, without SSH, standalone, the format of the logger and the durations of the certificates in `stepca_config`, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
 `prepare` creates the podman network, installs `curl` and pulls the image.
 `side_effect` runs the role with `stepca_container` not a dictionary, a secret without `target`, without the password, without the name of the CA,
