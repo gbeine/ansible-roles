@@ -1,5 +1,4 @@
-The role installs additional plugins for Icinga 2 that are not part of the Debian packages of the monitoring plugins,
-or links plugins of Debian packages that are not installed into the plugin directory by default.
+The role installs additional plugins for Icinga 2 that are not part of the Debian packages of the monitoring plugins.
 For every plugin it installs the needed packages, copies the plugin to the local plugin directory (`/usr/local/lib/nagios/plugins`),
 writes the Icinga configuration (`CheckCommand` or `NotificationCommand`) to `/usr/local/etc/icinga2` and adds sudoers entries if the plugin needs root.
 
@@ -24,7 +23,7 @@ monitoring_plugins:
 | `certexp` | `check_certexp.pl` | `certexp` | |
 | `container_stats_docker` | `check_container_stats_docker.py` | `container-stats-docker`, `sudo-container-stats-docker` | |
 | `container_stats_podman` | `check_container_stats_podman.py` | `container-stats-podman`, `sudo-container-stats-podman` | yes |
-| `logfiles` | link to `check_logfiles` | none, see the ITL | |
+| `logfiles` | `check_logfiles` of `monitoring-plugins-check-logfiles` | none, see the ITL | |
 | `mem` | `check_mem.pl` | none, see the ITL | |
 | `nginx` | `check_nginx_status.pl` | `nginx-status` | |
 | `pass_alive` | `check_pass_alive` | `pass-alive` | yes |
@@ -32,12 +31,12 @@ monitoring_plugins:
 | `phpfpm` | `check_phpfpm_status.pl` | `php-fpm-status` | |
 | `printer_snmp` | `check_printer_snmp.py` | `printer_snmp` | |
 | `pushover` | `pushover.sh` | `push-host-notification`, `push-service-notification` | |
-| `raid` | link to `check_raid` | `raid` | `dmsetup` |
+| `raid` | `check_raid` of `monitoring-plugins-contrib` | `raid` | `dmsetup` |
 | `reboot` | `check_reboot` | `reboot` | |
 | `rocketchat` | `notify_rocketchat` (amd64, arm64, arm) | `rocketchat` | |
-| `running_kernel` | link to `check_running_kernel` | none, see the ITL | |
+| `running_kernel` | `check_running_kernel` of `monitoring-plugins-contrib` | none, see the ITL | |
 | `smart` | `check_smart.pl` of `monitoring-plugins-check-smart` | `sudo-smartpl` | `check_smart.pl`, `smartctl` |
-| `systemd` | link to `check_systemd` | none, see the ITL | |
+| `systemd` | `check_systemd` of `monitoring-plugins-systemd` | none, see the ITL | |
 | `tls_cert` | `check_tls_cert.py` | `tls_cert` | |
 
 The role fails before it changes anything if `monitoring_plugins` contains an unknown plugin.
@@ -101,9 +100,8 @@ All credential files belong to the Icinga user and have mode `0400`.
 
 ### Pruning
 
-With `monitoring_plugins_prune: true` (default) the role removes the plugins, links, configurations and sudoers entries of all plugins of the role
-that are not in `monitoring_plugins`, the credential files that are not configured and files of earlier versions of the role
-(`check_ide_smart.conf`, `check_smartpl.conf`, `notifiy_rocketchat.conf`, `check_tls_cert`, `pushover.pl`, sudoers `icinga-run-ide-smart` and `icinga-run-podman`).
+With `monitoring_plugins_prune: true` (default) the role removes the plugins, configurations and sudoers entries of all plugins of the role
+that are not in `monitoring_plugins` and the credential files that are not configured.
 Packages are never removed.
 Files of other roles or plugins not known to the role are not touched.
 
@@ -133,7 +131,7 @@ The molecule scenario `default` uses tart with two VMs, both with Icinga 2 insta
 - `molecule-plugins-default` runs the role without variables, only the directories are created,
 - `molecule-plugins` installs all plugins with credentials, `side_effect` removes `pushover` and `reboot` again.
 
-`verify` checks that exactly the expected files, links, configurations and sudoers entries exist, the credential files, `visudo -c`,
+`verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, `visudo -c`,
 the sudo commands of the Icinga user, the syntax and dependencies of the plugins (`perl -c`, `bash -n`, `--help`),
 runs `check_mem.pl` and `check_systemd` as the Icinga user,
 runs `check_printer_snmp.py` as the Icinga user against `127.0.0.1` without SNMP agent, it has to return UNKNOWN with an SNMP error,
