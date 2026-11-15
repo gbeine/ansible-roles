@@ -83,7 +83,7 @@
         database_phpmyadmin__environment_unknown: >-
           {{ (database_phpmyadmin__container.environment | default({})).keys() | reject('in', database_phpmyadmin__environment_allowed) | list }}
         database_phpmyadmin__secrets_unknown: >-
-          {{ database_phpmyadmin__secrets | map(attribute='target') | reject('in', database_phpmyadmin__secret_files.keys() | list) | list }}
+          {{ database_phpmyadmin__secrets | map(attribute='target') | reject('in', database_phpmyadmin__secret_files.keys() | list + database_phpmyadmin__secrets_env) | list }}
         database_phpmyadmin__errors: >-
           {%- set errors = [] -%}
           {%- if database_phpmyadmin__environment_unknown | length > 0 -%}
@@ -93,7 +93,7 @@
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_phpmyadmin__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the variables of the image (database_phpmyadmin__environment_allowed) and the secrets ' ~ (database_phpmyadmin__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_phpmyadmin__environment_allowed) and the secrets ' ~ ((database_phpmyadmin__secret_files.keys() | list + database_phpmyadmin__secrets_env) | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -137,24 +137,68 @@
           {% if database_phpmyadmin__container.requires is defined %}
           Requires={{ database_phpmyadmin__container.requires | join(' ') }}
           {% endif %}
+          {% if database_phpmyadmin__container.wants is defined %}
+          Wants={{ database_phpmyadmin__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_phpmyadmin__container.after is defined %}
+          After={{ database_phpmyadmin__container.after | join(' ') }}
+          {% endif %}
+          {% if database_phpmyadmin__container.part_of is defined %}
+          PartOf={{ database_phpmyadmin__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_phpmyadmin__container.binds_to is defined %}
+          BindsTo={{ database_phpmyadmin__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_phpmyadmin__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_phpmyadmin__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'database_phpmyadmin__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_phpmyadmin__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if database_phpmyadmin__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        database_phpmyadmin__running: >-
-          {{ (ansible_facts.services[database_phpmyadmin__container.name + '.service'].state | default('')) == 'running' }}
-        database_phpmyadmin__restart: >-
-          {{ database_phpmyadmin__running | bool
-             and (database_phpmyadmin__secrets_result is changed
-                  or database_phpmyadmin__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start phpMyAdmin'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_phpmyadmin__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_phpmyadmin__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_phpmyadmin__running: >-
+              {{ (ansible_facts.services[database_phpmyadmin__container.name + '.service'].state | default('')) == 'running' }}
+            database_phpmyadmin__restart: >-
+              {{ database_phpmyadmin__running | bool
+                 and (database_phpmyadmin__secrets_result is changed
+                      or database_phpmyadmin__quadlet_result is changed) }}
+
+        # Apache answers after the entrypoint wrote the configuration, a broken configuration (e.g. of PMA_USER_CONFIG_BASE64)
+        # or a wrong port fails here
+        - name: 'Wait until phpMyAdmin shows the login form'
+          ansible.builtin.uri:
+            url: "http://{{ database_phpmyadmin__container.ip }}:{{ database_phpmyadmin__port }}/"
+            return_content: true
+          register: 'database_phpmyadmin__ready'
+          until:
+            - database_phpmyadmin__ready.status | default(0) == 200
+            - database_phpmyadmin__ready.content | default('') is search('name="token" value="')
+          retries: 60
+          delay: 2
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_phpmyadmin__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_phpmyadmin__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_phpmyadmin__container.name ~ ' did not start' ] + database_phpmyadmin__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'database_phpmyadmin__autoupdate_enabled | bool'

@@ -38,13 +38,22 @@ database_phpmyadmin__environment_required: []
 database_phpmyadmin__environment_server: [ 'PMA_HOST', 'PMA_HOSTS', 'PMA_SOCKET', 'PMA_SOCKETS', 'PMA_ARBITRARY' ]
 
 # The targets of the secrets, they must not be set in phpmyadmin_environment
-database_phpmyadmin__secret_variables: "{{ database_phpmyadmin__secret_files.keys() | list }}"
+database_phpmyadmin__secret_variables: "{{ database_phpmyadmin__secret_files.keys() | list + database_phpmyadmin__secrets_env }}"
 
 # The secrets are mounted as files, the image reads the variable target from the file variable <target>_FILE
 # (get_docker_secret in docker-entrypoint.sh of phpmyadmin/docker for phpMyAdmin 5.2.3)
 database_phpmyadmin__secret_files:
   PMA_PASSWORD: 'PMA_PASSWORD_FILE'
   PMA_CONTROLPASS: 'PMA_CONTROLPASS_FILE'
+
+# The secrets passed in the environment, the image reads them only from the environment
+# (config.inc.php and docker-entrypoint.sh of phpmyadmin/docker for phpMyAdmin 5.2.3):
+# private keys of the connections and whole configuration files, which usually contain passwords
+database_phpmyadmin__secrets_env:
+  - 'PMA_SSL_KEY_BASE64'
+  - 'PMA_SSL_KEYS_BASE64'
+  - 'PMA_CONFIG_BASE64'
+  - 'PMA_USER_CONFIG_BASE64'
 
 database_phpmyadmin__secrets_required: []
 
@@ -96,23 +105,22 @@ database_phpmyadmin__environment_allowed:
   - 'PMA_SSL_CAS_BASE64'
   - 'PMA_SSL_KEY'
   - 'PMA_SSL_KEYS'
-  - 'PMA_SSL_KEY_BASE64'
-  - 'PMA_SSL_KEYS_BASE64'
   - 'PMA_SSL_CERT'
   - 'PMA_SSL_CERTS'
   - 'PMA_SSL_CERT_BASE64'
   - 'PMA_SSL_CERTS_BASE64'
-  - 'PMA_CONFIG_BASE64'
-  - 'PMA_USER_CONFIG_BASE64'
   - 'HIDE_PHP_VERSION'
   - 'APACHE_PORT'
   - 'SESSION_SAVE_PATH'
   - 'TZ'
-  # The file variables of the secrets, set by the role
+  # The file variables of the secrets, set by the role, the secrets of database_phpmyadmin__secrets_env are no part of the list
   - 'PMA_PASSWORD_FILE'
   - 'PMA_CONTROLPASS_FILE'
 
 database_phpmyadmin__secrets_dir: '/run/secrets'
+
+# The port of Apache in the container, changed with APACHE_PORT
+database_phpmyadmin__port: "{{ (database_phpmyadmin__container.environment | default({})).APACHE_PORT | default(80) }}"
 
 database_phpmyadmin__podman_name: 'phpmyadmin'
 database_phpmyadmin__podman_image: 'docker.io/library/phpmyadmin'
@@ -129,9 +137,20 @@ database_phpmyadmin__podman_container_default:
   # Set with phpmyadmin_environment and phpmyadmin_secrets, merged over the default
   environment: "{{ database_phpmyadmin__environment | combine(database_phpmyadmin__environment_secrets_files) }}"
   labels: "{{ database_phpmyadmin__labels | default(omit) }}"
-  # Entries without name are left out, the validation of the secrets reports them
+  # The secrets of database_phpmyadmin__secrets_env are passed in the environment, the others are mounted
   secrets: >-
-    {{ (database_phpmyadmin__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
-        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ database_phpmyadmin__secrets_dir ~ '/\1') | list)
-      if (database_phpmyadmin__secrets is sequence and database_phpmyadmin__secrets is not string and database_phpmyadmin__secrets | length > 0)
-      else omit }}
+    {{ database_phpmyadmin__podman_secrets
+       if (database_phpmyadmin__secrets is sequence and database_phpmyadmin__secrets is not string and database_phpmyadmin__secrets | length > 0)
+       else omit }}
+
+# The podman secrets of phpmyadmin_secrets, entries without name or target are left out, the validation of the secrets reports them
+database_phpmyadmin__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- for secret in database_phpmyadmin__secrets if secret is mapping and secret.name is defined and secret.target is defined -%}
+  {%-   if secret.target in database_phpmyadmin__secrets_env -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=env,target=' ~ secret.target) -%}
+  {%-   else -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ database_phpmyadmin__secrets_dir ~ '/' ~ secret.name) -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ secrets }}

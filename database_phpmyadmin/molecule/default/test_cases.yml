@@ -40,12 +40,13 @@ database_phpmyadmin__test_cases:
       ip: '10.89.0.60'
       ip6: ~
       quadlet: []
+      quadlet_absent: [ 'Wants=', 'After=', 'RequiresMountsFor=', 'Secret=' ]
       env:
         - 'TZ=Europe/Berlin'
         - 'PMA_HOST=10.89.0.20'
 
   # IPv6, labels, the configuration storage with the control user and its password from a secret,
-  # the role sets PMA_CONTROLPASS_FILE
+  # the role sets PMA_CONTROLPASS_FILE, a user configuration as secret in the environment and dependencies of the quadlet unit
   - name: 'molecule-phpmyadmin'
     role_vars:
       phpmyadmin_ip: '10.89.0.61'
@@ -65,13 +66,27 @@ database_phpmyadmin__test_cases:
         - name: 'phpmyadmin_controlpass'
           data: 'molecule-database-password'
           target: 'PMA_CONTROLPASS'
+        # <?php $cfg['LoginCookieValidity'] = 3600;
+        - name: 'phpmyadmin_user_config'
+          data: 'PD9waHAKJGNmZ1snTG9naW5Db29raWVWYWxpZGl0eSddID0gMzYwMDsK'
+          target: 'PMA_USER_CONFIG_BASE64'
+      phpmyadmin_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/tmp' ]
     side_effect: true
     expect:
       ip: '10.89.0.61'
       ip6: 'fd00:89::61'
       quadlet:
         - 'Secret=phpmyadmin_controlpass,type=mount,target=/run/secrets/phpmyadmin_controlpass'
+        - 'Secret=phpmyadmin_user_config,type=env,target=PMA_USER_CONFIG_BASE64'
         - 'Label=traefik.enable=true'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/tmp'
+      # The user configuration is a secret, it is never written to the quadlet unit
+      quadlet_absent: [ 'PD9waHAKJGNmZ1snTG9naW5Db29raWVWYWxpZGl0eSddID0gMzYwMDsK' ]
       env:
         - 'TZ=Europe/Berlin'
         - 'PMA_HOST=10.89.0.20'
@@ -87,3 +102,5 @@ database_phpmyadmin__test_cases:
       # The image reads the password from PMA_CONTROLPASS_FILE and exports it for the web server
       process_env:
         - 'PMA_CONTROLPASS=molecule-database-password'
+      # The entrypoint writes the user configuration of PMA_USER_CONFIG_BASE64
+      user_config: "$cfg['LoginCookieValidity'] = 3600;"

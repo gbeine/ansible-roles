@@ -12,7 +12,8 @@ the role checks it before it changes anything.
 The variables are described in the [documentation of the image](https://hub.docker.com/_/phpmyadmin), e.g.
 `PMA_PORT`, `PMA_ABSOLUTE_URI` for a reverse proxy, `PMA_PMADB`, `PMA_CONTROLUSER` and `PMA_CONTROLHOST` for the configuration storage,
 `UPLOAD_LIMIT`, `MEMORY_LIMIT` and `MAX_EXECUTION_TIME` for PHP.
-`PMA_CONFIG_BASE64` and `PMA_USER_CONFIG_BASE64` replace `config.inc.php` or add `config.user.inc.php`, both base64 encoded.
+`PMA_CONFIG_BASE64` and `PMA_USER_CONFIG_BASE64` replace `config.inc.php` or add `config.user.inc.php`, both base64 encoded,
+they are secrets because the files usually contain passwords (see Secrets).
 
 ```yaml
 phpmyadmin_environment:
@@ -39,7 +40,7 @@ No secret is required.
 | `PMA_CONTROLPASS` | `PMA_CONTROLPASS_FILE` | Password of `PMA_CONTROLUSER` for the configuration storage |
 | `PMA_PASSWORD` | `PMA_PASSWORD_FILE` | Password of `PMA_USER` for the authentication type `config`, every visitor is logged in without a login form |
 
-The targets are the keys of `database_phpmyadmin__secret_files`. Neither a target nor its file variable may be set in `phpmyadmin_environment`.
+The targets are the keys of `database_phpmyadmin__secret_files` and `database_phpmyadmin__secrets_env`. Neither a target nor its file variable may be set in `phpmyadmin_environment`.
 
 ```yaml
 phpmyadmin_secrets:
@@ -48,11 +49,28 @@ phpmyadmin_secrets:
     target: 'PMA_CONTROLPASS'
 ```
 
+Some secrets cannot be read from files, `config.inc.php` and `docker-entrypoint.sh` of the image only read them from the environment.
+Their targets are listed in `database_phpmyadmin__secrets_env`, the role passes them with `type=env,target=<target>`,
+so they are not part of the quadlet unit, but part of the environment of the container:
+
+| Target | Description |
+|---|---|
+| `PMA_SSL_KEY_BASE64`, `PMA_SSL_KEYS_BASE64` | Private keys of the TLS connections to the servers, base64 encoded |
+| `PMA_CONFIG_BASE64` | Replaces `config.inc.php` of the image, base64 encoded |
+| `PMA_USER_CONFIG_BASE64` | Written to `config.user.inc.php` by the entrypoint, base64 encoded |
+
+```yaml
+phpmyadmin_secrets:
+  - name: 'phpmyadmin_user_config'
+    data: "{{ lookup('ansible.builtin.file', 'config.user.inc.php') | b64encode }}"
+    target: 'PMA_USER_CONFIG_BASE64'
+```
+
 The entrypoint reads `MYSQL_ROOT_PASSWORD_FILE` and `MYSQL_PASSWORD_FILE` as well, phpMyAdmin does not use them, they are not allowed.
 
 ### Allowed variables
 
-The role only allows the environment variables in `database_phpmyadmin__environment_allowed` and the secrets with a target in `database_phpmyadmin__secret_files`,
+The role only allows the environment variables in `database_phpmyadmin__environment_allowed` and the secrets with a target in `database_phpmyadmin__secret_files` or `database_phpmyadmin__secrets_env`,
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
 The check uses the environment and the secrets of the container after merging `phpmyadmin_container`,
@@ -61,18 +79,28 @@ so variables set with `phpmyadmin_container.environment` are checked as well.
 Allowed environment variables:
 
 - the variables read by `config.inc.php` of the image (`PMA_*` without the passwords, `MAX_EXECUTION_TIME`, `MEMORY_LIMIT`, `UPLOAD_LIMIT`)
-- the variables of `docker-entrypoint.sh` and the `Dockerfile` of the image: `PMA_CONFIG_BASE64`, `PMA_USER_CONFIG_BASE64`, `HIDE_PHP_VERSION`,
-  `APACHE_PORT`, `SESSION_SAVE_PATH` and `TZ`
+- the variables of `docker-entrypoint.sh` and the `Dockerfile` of the image: `HIDE_PHP_VERSION`, `APACHE_PORT`, `SESSION_SAVE_PATH` and `TZ`
 - the file variables of the secrets (`PMA_CONTROLPASS_FILE`, `PMA_PASSWORD_FILE`),
   the role sets them from `phpmyadmin_secrets`, they must not be set in `phpmyadmin_environment`
+
+The private keys and the configuration files (`PMA_SSL_KEY_BASE64`, `PMA_SSL_KEYS_BASE64`, `PMA_CONFIG_BASE64`, `PMA_USER_CONFIG_BASE64`) are secrets, not environment variables.
 
 The list is generated from `config.inc.php`, `docker-entrypoint.sh` and `apache/Dockerfile` of [phpmyadmin/docker](https://github.com/phpmyadmin/docker)
 for phpMyAdmin 5.2.3, new versions of the image may add variables.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `phpmyadmin_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `phpmyadmin_container`, it is merged over the default of the container.
 The merge is not recursive, `phpmyadmin_container.environment` replaces the environment including `phpmyadmin_environment`, use `phpmyadmin_environment` instead.
+The dependencies of the quadlet unit are lists in `phpmyadmin_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`, `requires_mounts_for` are paths, written as `RequiresMountsFor=`,
+e.g. to start phpMyAdmin after the database:
+
+```yaml
+phpmyadmin_container:
+  wants: [ 'mariadb.service' ]
+  after: [ 'mariadb.service' ]
+```
 For a reverse proxy, e.g. Traefik, the labels are set with `phpmyadmin_labels`.
 
 ### Validation
@@ -86,6 +114,7 @@ The role checks before any change:
 
 If `phpmyadmin_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
+After the start the role waits until phpMyAdmin shows the login form (on `APACHE_PORT`, default 80), a failed start shows the journal of the service.
 
 ### Restart and updates
 
@@ -112,6 +141,10 @@ The image is `docker.io/library/phpmyadmin`, the same image as the former `docke
 `phpmyadmin_labels` has no default anymore, without it the container has no labels.
 `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
 The tag `database_phpmyadmin` stays, the tag `database` is added.
+`PMA_SSL_KEY_BASE64`, `PMA_SSL_KEYS_BASE64`, `PMA_CONFIG_BASE64` and `PMA_USER_CONFIG_BASE64` are secrets now,
+they are rejected in `phpmyadmin_environment` and set with `phpmyadmin_secrets` and the variable as target, they were written to the quadlet unit in plain text before.
+The dependencies `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` are set with `phpmyadmin_container`, only `requires` was supported before.
+The role waits for the login form after the start and shows the journal if the start fails.
 
 ### Tests
 
@@ -121,15 +154,16 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-phpmyadmin-default` | Only the mandatory variables and `PMA_HOST` |
-| `molecule-phpmyadmin` | IPv6, labels, `PMA_PORT`, `PMA_ABSOLUTE_URI`, the configuration storage with `PMA_PMADB`, `PMA_CONTROLUSER` and its password from a secret with the target `PMA_CONTROLPASS` |
+| `molecule-phpmyadmin` | IPv6, labels, `PMA_PORT`, `PMA_ABSOLUTE_URI`, the configuration storage with `PMA_PMADB`, `PMA_CONTROLUSER` and its password from a secret with the target `PMA_CONTROLPASS`, a user configuration from a secret with the target `PMA_USER_CONFIG_BASE64` and dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
 `prepare` installs curl, creates the podman network, pulls the images and starts a MariaDB container with a database and a user.
 `side_effect` runs the role with `phpmyadmin_container` not a dictionary, a secret without `target`, without a server,
-the password of the control user and its file variable in the environment, an unknown environment variable in `phpmyadmin_environment` and in `phpmyadmin_container.environment` and an unknown secret
+the password of the control user and its file variable in the environment, an unknown environment variable in `phpmyadmin_environment` and in `phpmyadmin_container.environment`, an unknown secret,
+`PMA_USER_CONFIG_BASE64` in `phpmyadmin_environment` and `PMA_SSL_KEY_BASE64` in `phpmyadmin_container.environment`
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `MEMORY_LIMIT` on `molecule-phpmyadmin`, the quadlet unit changes and phpMyAdmin has to restart.
-`verify` checks the quadlet unit with the mounted secret, the service, the addresses and the environment of the container
-with the file variable set by the role and without passwords, the file of the secret and the password exported by the entrypoint,
+`verify` checks the quadlet unit with the mounted secret, the secret in the environment without its value and the dependencies, the service, the addresses and the environment of the container
+with the file variable set by the role and without passwords, the file of the secret and the password exported by the entrypoint, `config.user.inc.php` written by the entrypoint from the secret,
 logs in with the user of the database using curl with a cookie file and checks the list of the databases.
 
 | Environment variable | Default | Description |
