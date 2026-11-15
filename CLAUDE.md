@@ -40,7 +40,12 @@ The roles are migrated and modernized one at a time. These rules apply to every 
 - The container is `<role>__podman_container_default | combine(<short>_container | default({}))`, the merge is not recursive.
 - `volumes`, `publish`, `command` and flags are only changed with `<short>_container`, there are no own variables for them.
 - Environment:
-  - `<role>__environment: "{{ <role>__environment_default | combine(<short>_environment | default({})) }}"`
+  - without defaults: `<role>__environment: "{{ <short>_environment }}"` and in the container default
+    `environment: "{{ <role>__environment | default(omit) }}"`, without `<short>_environment` the quadlet unit has no environment
+    and the checks of the environment are skipped (`when: <role>__environment is defined`,
+    after merging `<short>_container` only if `<role>__container.environment is mapping`), see `app_grafana`
+  - with defaults the image needs (e.g. `PUID`, `PGID`):
+    `<role>__environment: "{{ <role>__environment_default | combine(<short>_environment | default({})) }}"`
   - mandatory variables are listed in `<role>__environment_required`
 - Allow lists:
   - `container.environment` contains only variables listed in `<role>__environment_allowed`,
@@ -51,8 +56,59 @@ The roles are migrated and modernized one at a time. These rules apply to every 
 - `podman___update_mode` is removed. The service is restarted only if it was running and a secret or the quadlet unit changed,
   otherwise it is started. Updates are done by `container_update` with `<short>_autoupdate_enabled` and `<short>_autoupdate_schedule`.
 - Tags are the category and the role, e.g. `[ 'app', 'app_grafana' ]`.
+- The task "Install container" writes the dependencies of the quadlet unit in `[Unit]` of `quadlet_options` from
+  `<role>__container.requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for`
+  (`Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=`, `RequiresMountsFor=`, joined by spaces, only if defined,
+  see `webserver_traefik`). They are set with `<short>_container`, `requires_mounts_for` is a list of paths.
+
+### Configuration file first
+
+The options of an application are passed in this order of preference, the first possible way is used:
+
+1. A configuration file of the image, the secrets are files referenced in the configuration (see Secrets in the configuration).
+2. A configuration file of the image, the secrets are passed with `*_FILE` or `FILE__*` variables (see Secrets as file variables next to the configuration).
+3. A configuration file of the image as podman secret containing the secrets (see Configuration as secret), only if neither 1 nor 2 is possible.
+4. The environment, only for images without configuration file.
+
+- `<short>_config` is the content of the configuration file in its format (INI, TOML, YAML, JSON, conf, PHP or JS array),
+  the values follow `time_chrony` as far as the format allows.
+- `<role>__config_allowed` lists the allowed options, generated from the sources or the sample configuration of the image
+  with a comment naming source and version. Composed names apply to options of the file as well.
+- `<short>_environment` only takes the variables of the image or its entrypoint that are no options of the application
+  (e.g. `TZ`, `PUID`, `PGID`, `JAVA_OPTS`), `<role>__environment_allowed` only lists these variables.
+- The format and the path of the file, the reading of secrets from files and the precedence between environment and file
+  are confirmed in the sources of the image before a role is migrated.
+- The migration in `docs/notes.md` maps every former environment variable to its path in `<short>_config`,
+  the role rejects former variables in `<short>_environment` with "… are set with `<short>_config` now: …".
+
+### Secrets in the configuration
+
+- If the configuration file can read files (e.g. `$__file{…}` of Grafana, `*File` options, `passwordeval`,
+  `file_get_contents()` in PHP or `fs.readFileSync()` in JS), the secrets are mounted as files (see Secrets as files)
+  and the role writes the references to `/run/secrets/<name>` into the configuration.
+- The `target` of an entry of `<short>_secrets` is the path of the option in the configuration (e.g. `security.admin_password`),
+  `<role>__secrets_allowed` lists the allowed targets, a target must not be set in `<short>_config`.
+
+### Secrets as file variables next to the configuration
+
+- If the configuration file cannot read files, but the image reads the secrets from `*_FILE` or `FILE__*` variables,
+  the options are written to the configuration file and the secrets are passed as described in Secrets as files.
+- The environment variable has to take precedence over the file or complement it, this is confirmed in the sources of the image.
+- The section Secrets of `docs/notes.md` explains why the file cannot read the secrets and that the variable takes precedence.
+
+### Configuration as secret
+
+The last resort if neither the configuration file nor file variables can provide the secrets (see `security_keycloak`):
+
+- The secrets are merged into the options and the whole rendered configuration file is the podman secret `<container name>-config`,
+  mounted with `type=mount,target=<path of the file>,uid=…,gid=…,mode=0400`, the file never exists on the host.
+- The `target` of an entry of `<short>_secrets` is the option of the configuration, a target must not be set in `<short>_config`.
+- A changed configuration changes the secret and restarts the running service.
+- The section Secrets of `docs/notes.md` explains why the image cannot read the secrets from files.
 
 ### Secrets
+
+The following sections on secrets apply to images without configuration file and to secrets passed as file variables next to a configuration file.
 
 - `<short>_secrets` is a list of entries with `name`, `data` and `target`, the target is the usual name of the variable (e.g. `DB_PASSWORD`).
   The role creates every entry with `podman secret`, a changed secret restarts the running service.
