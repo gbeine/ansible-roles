@@ -119,8 +119,16 @@ The check of the environment uses the environment of the container after merging
 Ports, volumes, labels, additional hosts (`etc_hosts`) and dependencies are changed with `traefik_container`, it is merged over the default of the container.
 The merge is not recursive, `publish` and `volumes` replace the values of the default completely,
 `traefik_container.environment` replaces `traefik_environment`.
-The dependencies of the quadlet unit are lists of units in `traefik_container`: `requires`, `wants`, `after`, `part_of` and `binds_to`
-are written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`.
+The dependencies of the quadlet unit are lists in `traefik_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`, `requires_mounts_for` are paths, written as `RequiresMountsFor=`,
+e.g. for `traefik_home` on a device that is mounted later:
+
+```yaml
+traefik_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/mnt/storage' ]
+```
 
 | Host | Container |
 |---|---|
@@ -161,6 +169,7 @@ Updates of the image are done by `container_update` with `traefik_autoupdate_ena
 - `/etc/localtime` and `/etc/timezone` are not mounted anymore, the time zone is set with `traefik_timezone`.
 - A file of `traefik_dynamic` set to `null` is removed, the files are written with mode `0644`.
 - The tags are `webserver` and `webserver_traefik`.
+- The dependencies `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` are set with `traefik_container`.
 
 ### Tests
 
@@ -171,7 +180,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Test case |
 |---|---|
 | `molecule-traefik-default` | The mandatory values only, IPv4, the docker provider routes to a labeled container through the podman socket |
-| `molecule-traefik` | IPv4 and IPv6, `traefik_provider_podman: false`, the file provider with a file of `traefik_dynamic`, a file removed with `null`, `serversTransport` removed with `null`, `traefik_environment` and dependencies of the quadlet unit |
+| `molecule-traefik` | IPv4 and IPv6, `traefik_provider_podman: false`, the file provider with a file of `traefik_dynamic`, a file removed with `null`, `serversTransport` removed with `null`, `traefik_environment` and dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
 `prepare` sets up podman with the socket and the network `podman-molecule` with the role `container_podman`, pulls the images
 and starts the container `molecule-whoami` (`docker.io/traefik/whoami`) with the labels of the docker provider as backend of the routes.
