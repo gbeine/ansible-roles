@@ -197,15 +197,33 @@ database_mariadb__podman_container_default:
   network: "{{ database_mariadb__network }}"
   timezone: "{{ database_mariadb__timezone }}"
   labels: "{{ database_mariadb__labels | default(omit) }}"
-  # Set with mariadb_environment and mariadb_secrets, merged over the default
-  environment: "{{ database_mariadb__environment | combine(database_mariadb__environment_secrets_files) }}"
+  # Set with mariadb_environment, the variables and the secrets of the initialization are not part of the quadlet unit
+  environment: "{{ database_mariadb__environment | dict2items | rejectattr('key', 'in', database_mariadb__environment_init) | items2dict }}"
   # backup_mysql uses the container mariadb
   volumes:
     - "{{ database_mariadb__home }}:/config"
-  secrets: "{{ database_mariadb__podman_secrets if database_mariadb__podman_secrets | length > 0 else omit }}"
 
-# The podman secrets of mariadb_secrets, entries without name are left out, the validation of the secrets reports them
-database_mariadb__podman_secrets: >-
+# The variables only read by the initialization of the image (init-mariadb-initdb of linuxserver/docker-mariadb)
+database_mariadb__environment_init: [ 'REMOTE_SQL' ]
+
+# The environment of the container of the initialization: the environment of the container, the variables of the initialization
+# and the file variable of the root password
+database_mariadb__init_environment: >-
+  {{ (database_mariadb__container.environment | default({}))
+     | combine(database_mariadb__environment | dict2items | selectattr('key', 'in', database_mariadb__environment_init) | items2dict)
+     | combine(database_mariadb__environment_secrets_files) }}
+
+# The image initializes /config/databases if it contains no mysql directory (init-mariadb-initdb of linuxserver/docker-mariadb)
+database_mariadb__initialized_path: "{{ database_mariadb__home }}/databases/mysql"
+
+# The message of the image after the initialization
+database_mariadb__init_message: 'Database Setup Completed'
+
+database_mariadb__podman_init_name: "{{ database_mariadb__container.name }}-init"
+
+# The podman secrets of mariadb_secrets, only mounted in the container of the initialization,
+# entries without name are left out, the validation of the secrets reports them
+database_mariadb__podman_init_secrets: >-
   {%- set secrets = [] -%}
   {%- if database_mariadb__secrets is sequence and database_mariadb__secrets is not string and database_mariadb__secrets is not mapping -%}
   {%-   for secret in database_mariadb__secrets if secret is mapping and secret.name is defined -%}

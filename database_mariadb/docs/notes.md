@@ -60,10 +60,24 @@ mariadb_passwords:
 Every account needs a password in `mariadb_passwords`. The host of the role needs `python3-pymysql`, the role installs it.
 The controller needs the collection `ansible.mariadb` (`ansible-galaxy collection install ansible.mariadb`).
 
+### Initialization
+
+The image initializes `/config/databases` only if it contains no directory `mysql` (`init-mariadb-initdb` of linuxserver/docker-mariadb):
+it creates `root@%` with the root password, runs the SQL of `REMOTE_SQL`, stops the temporary MariaDB and starts MariaDB.
+The root password and `REMOTE_SQL` are not needed afterwards, so the initialization runs exactly once in its own container `mariadb-init`:
+
+- the role checks `<mariadb_home>/databases/mysql`, the same directory the image checks, and skips the initialization if it exists
+- `mariadb-init` uses the image, `custom.cnf`, the volume and the environment of the quadlet unit, `REMOTE_SQL` and the root password as file,
+  it has no network unless `REMOTE_SQL` is set
+- the role waits for `Database Setup Completed` in the log and removes `mariadb-init` afterwards, also if the initialization failed
+- if the initialization fails, the content of `<mariadb_home>/databases` has to be removed before the next run
+- the quadlet unit contains neither the root password nor `REMOTE_SQL`
+
 ### Secrets
 
 `mariadb_secrets` is a list of podman secrets with `name`, `data` and `target`, the target is the name of the variable of the image.
-The base image of linuxserver reads `FILE__<VARIABLE>` as file, the role mounts the secrets to `/run/secrets/<name>` and sets the file variable.
+The base image of linuxserver reads `FILE__<VARIABLE>` as file, the role mounts the secrets to `/run/secrets/<name>` in the container of the initialization
+and sets the file variable there.
 
 | Target | File variable | |
 |---|---|---|
@@ -76,7 +90,8 @@ mariadb_secrets:
     target: 'MYSQL_ROOT_PASSWORD'
 ```
 
-The image sets the root password only on the first start, the role uses it as `root@%` afterwards, so it has to stay the password of the first start.
+The image sets the root password only on the initialization, the role uses it as `root@%` afterwards, so it has to stay the password of the initialization,
+changing the secret does not change the password in MariaDB.
 The image sets no password with less than 4 characters and writes the password into SQL in single quotes without escaping,
 the role rejects shorter passwords and passwords with single quotes, backslashes or line breaks.
 
@@ -96,14 +111,26 @@ The options are generated from the sources of MariaDB 11.8.9, the version of the
 
 New versions of MariaDB may add options, the lists are generated again.
 
-The environment allows `PUID`, `PGID`, `TZ`, `UMASK`, `CLI_OPTS` and `REMOTE_SQL`, the role sets `PUID`, `PGID`, `TZ` and `FILE__MYSQL_ROOT_PASSWORD`.
+The environment allows `PUID`, `PGID`, `TZ`, `UMASK`, `CLI_OPTS` and `REMOTE_SQL`, the role sets `PUID`, `PGID` and `TZ`,
+`REMOTE_SQL` and `FILE__MYSQL_ROOT_PASSWORD` are only set in the container of the initialization.
 `MYSQL_DATABASE`, `MYSQL_USER` and `MYSQL_PASSWORD` of the image are rejected, databases and accounts are managed by the role.
 The check uses the container after merging `mariadb_container`, so variables set with `mariadb_container.environment` are checked as well.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `mariadb_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `mariadb_container`, it is merged over the default of the container.
 The merge is not recursive, `mariadb_container.volumes` replaces `/config`, `mariadb_container.environment` replaces the environment including `mariadb_environment`.
+The dependencies of the quadlet unit are lists in `mariadb_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`, `requires_mounts_for` are paths, written as `RequiresMountsFor=`,
+e.g. for `mariadb_home` on a device that is mounted later:
+
+```yaml
+mariadb_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/mnt/storage' ]
+```
+
 The role waits until MariaDB answers as root, shows the log of the service otherwise, and manages the databases and accounts afterwards.
 
 ### Validation
@@ -125,7 +152,9 @@ the same applies to a failing template in the variables, e.g. an unknown filter.
 
 ### Restart and updates
 
-MariaDB is restarted if it was running and a secret, the quadlet unit or `custom.cnf` changed, otherwise it is started and enabled.
+MariaDB is restarted if it was running and the quadlet unit or `custom.cnf` changed, otherwise it is started and enabled,
+a changed secret does not restart MariaDB, it is only used by the initialization. If the start fails, the role shows the journal of the service.
+The image does not run `mariadb-upgrade` after an update of MariaDB, it has to be run with `podman exec -it mariadb mariadb-upgrade -u root -p` if needed.
 Updates of the image are done by `container_update` with `mariadb_autoupdate_enabled: true` and `mariadb_autoupdate_schedule`,
 without `mariadb_autoupdate_schedule` the schedule of `container_update` is used.
 
@@ -142,6 +171,9 @@ without `mariadb_autoupdate_schedule` the schedule of `container_update` is used
   the installation without podman, which failed with "Currently not supported", is removed, the host does not get `mariadb-client` anymore.
 - The service is not stopped on every run anymore, the handler `Restart MariaDB` and `podman___update_mode` are removed.
 - The tag `database_mariadb` stays, the tag `database` is added.
+- The initialization runs once in `mariadb-init`, the quadlet unit has no secret, no `FILE__MYSQL_ROOT_PASSWORD` and no `REMOTE_SQL` anymore,
+  existing installations are not initialized again. Without the root password in the container the image does not log the hint about a needed `mariadb-upgrade` anymore.
+- The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `mariadb_container` are supported besides `requires`.
 - The databases and accounts are managed with the collection `ansible.mariadb` instead of `community.mysql`, `community.mysql` drops the support of MariaDB with version 6.0.0.
   The controller needs `ansible.mariadb`, `community.mysql` is not needed by the role anymore.
 
@@ -153,7 +185,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-mariadb-default` | Only the mandatory variables and the root password |
-| `molecule-mariadb` | IPv6, labels, options of `mysqld` and `mysqldump` with a removed option, an option without value and a prefix, databases and accounts with privileges |
+| `molecule-mariadb` | IPv6, labels, options of `mysqld` and `mysqldump` with a removed option, an option without value and a prefix, databases and accounts with privileges, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
 `prepare` creates the podman network and pulls the image.
 `side_effect` runs the role with `mariadb_container` not a dictionary, a secret without `target`, without the root password, a short root password,
@@ -161,8 +193,8 @@ a single quote in the root password, the root password and a user of the image i
 the option `datadir` set by the role, a password in `custom.cnf`, a line break in a value, an account without password, the password of an unknown account
 and an unknown environment variable in `mariadb_container.environment`
 and checks that it fails with the expected message and the quadlet unit and `custom.cnf` are unchanged (tasks marked `expect ERROR`),
-then it changes `max_connections` on `molecule-mariadb`, `custom.cnf` changes and MariaDB has to restart.
-`verify` checks the quadlet unit with the secret as file, the service, the addresses and the environment of the container, `custom.cnf` without passwords,
+then it changes `max_connections` on `molecule-mariadb`, `custom.cnf` changes and MariaDB has to restart without a second initialization.
+`verify` checks the quadlet unit without the secret, that `mariadb-init` does not exist, the service, the addresses and the environment of the container, `custom.cnf` without passwords,
 the variables, the databases and the accounts as root, that `app` may write, `reader` may only read and that a wrong password is rejected,
 it connects like the role with `ansible.mariadb` from the VM to the address of the container.
 

@@ -12,6 +12,7 @@
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - database_mariadb__container | length > 0
           - database_mariadb__config | length > 0
+          - database_mariadb__init_environment | length > 0
         quiet: true
 
     - name: 'Validate the secrets'
@@ -263,10 +264,63 @@
         name: "{{ item.name }}"
         data: "{{ item.data }}"
       loop: "{{ database_mariadb__secrets }}"
-      register: 'database_mariadb__secrets_result'
+
+    - name: 'Find the databases of an initialized MariaDB'
+      ansible.builtin.stat:
+        path: "{{ database_mariadb__initialized_path }}"
+      register: 'database_mariadb__initialized'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
+
+    # The image only initializes /config/databases without the directory mysql: it creates root with the password of the secret,
+    # runs the SQL of REMOTE_SQL, stops the temporary MariaDB and starts MariaDB.
+    # The container of the initialization runs once, without network unless REMOTE_SQL is set, and is removed afterwards.
+    - name: 'Initialize MariaDB'
+      when:
+        - not ansible_check_mode
+        - not database_mariadb__initialized.stat.exists
+      block:
+
+        - name: 'Run the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_mariadb__podman_init_name }}"
+            image: "{{ database_mariadb__container.image }}"
+            # The initialization needs no network, only REMOTE_SQL downloads SQL files
+            network: "{{ database_mariadb__container.network if 'REMOTE_SQL' in database_mariadb__init_environment else 'none' }}"
+            env: "{{ database_mariadb__init_environment }}"
+            secrets: "{{ database_mariadb__podman_init_secrets }}"
+            volume: "{{ database_mariadb__container.volumes }}"
+            detach: true
+            state: 'started'
+          register: 'database_mariadb__init_result'
+
+        - name: 'Wait for the end of the initialization'
+          ansible.builtin.command:
+            argv: [ 'podman', 'logs', "{{ database_mariadb__podman_init_name }}" ]
+          register: 'database_mariadb__init_log'
+          changed_when: false
+          failed_when: false
+          until: database_mariadb__init_message in (database_mariadb__init_log.stdout ~ database_mariadb__init_log.stderr)
+          retries: 60
+          delay: 2
+
+        - name: 'Assert the initialization'
+          ansible.builtin.assert:
+            that:
+              - database_mariadb__init_message in (database_mariadb__init_log.stdout ~ database_mariadb__init_log.stderr)
+            fail_msg: >-
+              The initialization of MariaDB failed, remove the content of {{ database_mariadb__home }}/databases before the next run,
+              the initialization only runs without databases/mysql.
+              {{ (database_mariadb__init_log.stdout_lines | default([]) + database_mariadb__init_log.stderr_lines | default([]))[-30:] }}
+            quiet: true
+
+      always:
+
+        - name: 'Remove the container of the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_mariadb__podman_init_name }}"
+            state: 'absent'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -283,7 +337,6 @@
         expose: "{{ database_mariadb__container.expose | default(omit) }}"
         label: "{{ database_mariadb__container.labels | default(omit) }}"
         publish: "{{ database_mariadb__container.publish | default(omit) }}"
-        secrets: "{{ database_mariadb__container.secrets | default(omit) }}"
         volume: "{{ database_mariadb__container.volumes | default(omit) }}"
         quadlet_options: |
           [Install]
@@ -297,27 +350,56 @@
           {% if database_mariadb__container.requires is defined %}
           Requires={{ database_mariadb__container.requires | join(' ') }}
           {% endif %}
+          {% if database_mariadb__container.wants is defined %}
+          Wants={{ database_mariadb__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_mariadb__container.after is defined %}
+          After={{ database_mariadb__container.after | join(' ') }}
+          {% endif %}
+          {% if database_mariadb__container.part_of is defined %}
+          PartOf={{ database_mariadb__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_mariadb__container.binds_to is defined %}
+          BindsTo={{ database_mariadb__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_mariadb__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_mariadb__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'database_mariadb__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_mariadb__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if database_mariadb__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        database_mariadb__running: >-
-          {{ (ansible_facts.services[database_mariadb__container.name + '.service'].state | default('')) == 'running' }}
-        database_mariadb__restart: >-
-          {{ database_mariadb__running | bool
-             and (database_mariadb__secrets_result is changed
-                  or database_mariadb__quadlet_result is changed
-                  or database_mariadb__config_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start MariaDB'
       when: 'not ansible_check_mode'
+      block:
 
-    # On the first start the image initializes the databases and restarts MariaDB
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_mariadb__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_mariadb__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_mariadb__running: >-
+              {{ (ansible_facts.services[database_mariadb__container.name + '.service'].state | default('')) == 'running' }}
+            database_mariadb__restart: >-
+              {{ database_mariadb__running | bool
+                 and (database_mariadb__quadlet_result is changed or database_mariadb__config_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_mariadb__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_mariadb__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_mariadb__container.name ~ ' did not start' ] + database_mariadb__start_journal.stdout_lines }}"
+
+    # MariaDB answers after the start of the service, the initialization ran before
     - name: 'Wait for MariaDB'
       ansible.mariadb.mariadb_info:
         login_user: 'root'
