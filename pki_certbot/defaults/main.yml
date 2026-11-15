@@ -34,6 +34,9 @@ pki_certbot__provider_server: "{{ pki_certbot__provider_server_default | combine
 pki_certbot__plugins: "{{ certbot_plugins | default({}) }}"
 pki_certbot__realms: "{{ certbot_realms | default([]) }}"
 
+# Private CAs trusted by Certbot in addition to the CAs of the host, a dictionary of names and certificates (PEM)
+pki_certbot__ca_certificates: "{{ certbot_ca_certificates | default({}) }}"
+
 pki_certbot__container: "{{ pki_certbot__podman_container_default | combine(certbot_container | default({})) }}"
 
 pki_certbot__autoupdate_enabled: "{{ certbot_autoupdate_enabled | default(false) }}"
@@ -61,8 +64,21 @@ pki_certbot__podman_socket_path: '/run/podman/podman.sock'
 pki_certbot__ca_certificates_dir: '/etc/ssl/certs'
 pki_certbot__ca_certificates_mount: '/etc/ssl/host-certs'
 
+# The private CAs are written to <home>/ca/certs, the bundle of the CAs of the host and the private CAs to <home>/ca/ca-certificates.crt,
+# the directory is mounted, so a rewritten bundle is visible in the container
+pki_certbot__ca_dir: "{{ pki_certbot__podman_home }}/ca"
+pki_certbot__ca_certs_dir: "{{ pki_certbot__ca_dir }}/certs"
+pki_certbot__ca_bundle: "{{ pki_certbot__ca_dir }}/ca-certificates.crt"
+pki_certbot__ca_mount: '/etc/ssl/certbot-ca'
+pki_certbot__ca_host_bundle: "{{ pki_certbot__ca_certificates_dir }}/ca-certificates.crt"
+pki_certbot__ca_name_pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
+
+# The private CAs are used if certbot_ca_certificates is a non-empty dictionary, the validation reports other values
+pki_certbot__ca_enabled: "{{ pki_certbot__ca_certificates is mapping and pki_certbot__ca_certificates | length > 0 }}"
+
 pki_certbot__environment_default:
-  REQUESTS_CA_BUNDLE: "{{ pki_certbot__ca_certificates_mount }}/ca-certificates.crt"
+  REQUESTS_CA_BUNDLE: >-
+    {{ (pki_certbot__ca_mount if pki_certbot__ca_enabled | bool else pki_certbot__ca_certificates_mount) ~ '/ca-certificates.crt' }}
 
 pki_certbot__podman_socket_environment:
   CONTAINER_HOST: "unix://{{ pki_certbot__podman_socket_path }}"
@@ -85,6 +101,7 @@ pki_certbot__podman_container_default:
          pki_certbot__podman_etc_dir + ':/etc/letsencrypt',
          pki_certbot__podman_lib_dir + ':/var/lib/letsencrypt',
          pki_certbot__podman_log_dir + ':/var/log/letsencrypt']
+       + ([pki_certbot__ca_dir + ':' + pki_certbot__ca_mount + ':ro'] if pki_certbot__ca_enabled | bool else [])
        + ([pki_certbot__podman_socket_path + ':' + pki_certbot__podman_socket_path] if pki_certbot__podman_socket | bool else [])
        + pki_certbot__volumes }}
 

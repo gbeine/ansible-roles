@@ -8,6 +8,38 @@ the certificates of a realm are in `<certbot_home>/etc/live/<realm>`.
 `/etc/ssl/certs` of the host is mounted as `/etc/ssl/host-certs` and used with `REQUESTS_CA_BUNDLE`,
 so ACME servers with certificates of an own CA (e.g. a Step CA) are trusted if the CA is trusted by the host, e.g. with `debian_pki_enable` of `bootstrap_debian`.
 
+`certbot_ca_certificates` adds private CAs that only Certbot trusts, not the host. It is a dictionary of names and certificates in PEM format:
+
+```yaml
+certbot_ca_certificates:
+  step-ca: "{{ lookup('ansible.builtin.file', 'step-ca-root.crt') }}"
+  lab-ca: |
+    -----BEGIN CERTIFICATE-----
+    MIIB…
+    -----END CERTIFICATE-----
+```
+
+Every CA is written to `<certbot_home>/ca/certs/<name>.crt`, CAs that are not listed anymore are removed.
+The role writes the bundle `<certbot_home>/ca/ca-certificates.crt`: first `/etc/ssl/certs/ca-certificates.crt` of the host, then the private CAs sorted by their names.
+`<certbot_home>/ca` is mounted read-only as `/etc/ssl/certbot-ca`, and `REQUESTS_CA_BUNDLE` points to `/etc/ssl/certbot-ca/ca-certificates.crt`,
+so Certbot trusts the public CAs of the host and the private CAs.
+The bundle is written on every run of the role. A change of the CAs of the host reaches the bundle with the next run of the role, the container needs no restart.
+Without `certbot_ca_certificates` the role removes `<certbot_home>/ca` and uses the bundle of the host as before.
+
+### Container
+
+Ports, volumes and dependencies are changed with `certbot_container`, it is merged over the default of the container, the merge is not recursive.
+The dependencies of the quadlet unit are lists in `certbot_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`, `requires_mounts_for` are paths, written as `RequiresMountsFor=`,
+e.g. for `certbot_home` on a device that is mounted later:
+
+```yaml
+certbot_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/mnt/storage' ]
+```
+
 ### `certbot_provider_server`
 
 A dict containing the URL of an ACME provider, e.g. a Step CA.
@@ -72,6 +104,8 @@ certbot_realms:
 
 The role fails before it changes anything if `certbot_plugins` is not a dict of `dns-*` plugins with credentials,
 if `certbot_provider` is not in `certbot_provider_server`, if a realm has no `realm` or uses a DNS plugin that is not configured.
+It also fails if `certbot_ca_certificates` is no dictionary, a name does not consist of letters, digits, `_`, `.` and `-`,
+a value is no certificate in PEM format or contains a private key.
 
 ### Restarting containers in a post_hook
 
@@ -107,14 +141,17 @@ without `certbot_autoupdate_schedule` the schedule of `container_update` is used
 | accounts for all providers | accounts for the servers used |
 | `<certbot_home>/etc/ca-bundle.pem` | removed, `/etc/ssl/certs` of the host is mounted |
 | `systemd_services` and `systemd_timers` for the renew units | units are created by the role |
+| - | `certbot_ca_certificates` adds private CAs to the bundle of Certbot |
+| - | the dependencies `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` are set with `certbot_container` |
 
 ### Tests
 
 The molecule scenario `default` uses tart with one VM `molecule-certbot`.
-`prepare` starts [Pebble](https://github.com/letsencrypt/pebble) as ACME server and adds its TLS root to the CA certificates of the host.
-`converge` registers an account and requests a certificate from Pebble, `idempotence` checks that both are not repeated.
+`prepare` starts [Pebble](https://github.com/letsencrypt/pebble) as ACME server and copies its TLS root to the host, the host does not trust it.
+`converge` passes the TLS root with `certbot_ca_certificates` and dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`),
+registers an account and requests a certificate from Pebble, which only works with the bundle of the role. `idempotence` checks that nothing is repeated.
 `side_effect` checks the credentials of `dns-hetzner`, then enables the podman socket and removes the plugin, Certbot has to be restarted.
-`verify` checks the quadlet unit, the podman socket in the container, the issuer of the certificate, that the credentials were removed and runs the renew service.
+`verify` checks the quadlet unit with the dependencies and the mount of the bundle, the bundle with the CAs of the host and the private CA, the podman socket in the container, the issuer of the certificate, that the credentials were removed and runs the renew service.
 The VM needs access to `c0d3.sh` and `ghcr.io`.
 
 ```

@@ -19,3 +19,37 @@
     pki_certbot__plugins_missing: >-
       {{ pki_certbot__realms | map(attribute='authenticator', default='standalone') | select('match', 'dns-')
          | reject('in', (pki_certbot__plugins.keys() | list) if pki_certbot__plugins is mapping else []) | unique | list }}
+
+- name: 'Validate the CA certificates'
+  ansible.builtin.assert:
+    that:
+      - pki_certbot__errors | length == 0
+    # Only the failing checks are reported
+    fail_msg: "{{ pki_certbot__errors | join(' ') }}"
+    quiet: true
+  vars:
+    pki_certbot__ca_items: "{{ pki_certbot__ca_certificates | dict2items if pki_certbot__ca_certificates is mapping else [] }}"
+    pki_certbot__ca_invalid_names: >-
+      {{ pki_certbot__ca_items | map(attribute='key') | map('string') | reject('match', pki_certbot__ca_name_pattern) | list }}
+    pki_certbot__ca_invalid_certificates: >-
+      {{ pki_certbot__ca_items | rejectattr('value', 'string') | map(attribute='key') | list
+         + pki_certbot__ca_items | selectattr('value', 'string')
+           | rejectattr('value', 'search', '-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----')
+           | map(attribute='key') | list }}
+    pki_certbot__ca_private_keys: >-
+      {{ pki_certbot__ca_items | selectattr('value', 'string') | selectattr('value', 'search', 'PRIVATE KEY') | map(attribute='key') | list }}
+    pki_certbot__errors: >-
+      {%- set errors = [] -%}
+      {%- if pki_certbot__ca_certificates is not mapping -%}
+      {%-   set _ = errors.append('certbot_ca_certificates has to be a dictionary of names and certificates.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__ca_invalid_names | length > 0 -%}
+      {%-   set _ = errors.append('The names of certbot_ca_certificates consist of letters, digits, _, . and -: ' ~ (pki_certbot__ca_invalid_names | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__ca_invalid_certificates | length > 0 -%}
+      {%-   set _ = errors.append('The values of certbot_ca_certificates have to be certificates in PEM format: ' ~ (pki_certbot__ca_invalid_certificates | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__ca_private_keys | length > 0 -%}
+      {%-   set _ = errors.append('certbot_ca_certificates must not contain private keys: ' ~ (pki_certbot__ca_private_keys | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {{ errors }}

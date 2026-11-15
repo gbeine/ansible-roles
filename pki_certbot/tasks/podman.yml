@@ -45,6 +45,64 @@
        | reject('in', pki_certbot__plugins.keys() | map('regex_replace', '^', pki_certbot__podman_etc_dir + '/') | list)
        | list }}
 
+- name: 'Install the private CAs'
+  when: pki_certbot__ca_enabled | bool
+  block:
+
+    - name: 'Create the directories of the private CAs'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - "{{ pki_certbot__ca_dir }}"
+        - "{{ pki_certbot__ca_certs_dir }}"
+
+    - name: 'Write the private CAs'
+      ansible.builtin.copy:
+        dest: "{{ pki_certbot__ca_certs_dir }}/{{ item.key }}.crt"
+        content: "{{ item.value | trim }}\n"
+        mode: '0644'
+      loop: "{{ pki_certbot__ca_certificates | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Find the private CAs'
+      ansible.builtin.find:
+        paths: "{{ pki_certbot__ca_certs_dir }}"
+        patterns: '*.crt'
+        file_type: 'file'
+      register: 'pki_certbot__ca_found'
+
+    - name: 'Remove the private CAs that are not configured'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ pki_certbot__ca_found.files | map(attribute='path')
+           | reject('in', pki_certbot__ca_certificates.keys() | map('regex_replace', '^(.*)$', pki_certbot__ca_certs_dir + '/\1.crt') | list)
+           | list }}
+
+    - name: 'Read the CA certificates of the host'
+      ansible.builtin.slurp:
+        src: "{{ pki_certbot__ca_host_bundle }}"
+      register: 'pki_certbot__ca_host'
+
+    # The CAs of the host first, then the private CAs sorted by their names,
+    # double quotes, so \n is a line break
+    - name: 'Write the bundle of the CAs of the host and the private CAs'
+      ansible.builtin.copy:
+        dest: "{{ pki_certbot__ca_bundle }}"
+        content: "{{ ([ pki_certbot__ca_host.content | b64decode | trim ]
+          + (pki_certbot__ca_certificates | dictsort | map(attribute=1) | map('trim') | list)) | join('\n') ~ '\n' }}"
+        mode: '0644'
+
+- name: 'Remove the private CAs'
+  ansible.builtin.file:
+    path: "{{ pki_certbot__ca_dir }}"
+    state: 'absent'
+  when: not pki_certbot__ca_enabled | bool
+
 - name: 'Gathering facts about services...'
   ansible.builtin.service_facts:
 
@@ -72,6 +130,26 @@
       [Service]
       RestartSec=5
       Restart=on-failure
+
+      [Unit]
+      {% if pki_certbot__container.requires is defined %}
+      Requires={{ pki_certbot__container.requires | join(' ') }}
+      {% endif %}
+      {% if pki_certbot__container.wants is defined %}
+      Wants={{ pki_certbot__container.wants | join(' ') }}
+      {% endif %}
+      {% if pki_certbot__container.after is defined %}
+      After={{ pki_certbot__container.after | join(' ') }}
+      {% endif %}
+      {% if pki_certbot__container.part_of is defined %}
+      PartOf={{ pki_certbot__container.part_of | join(' ') }}
+      {% endif %}
+      {% if pki_certbot__container.binds_to is defined %}
+      BindsTo={{ pki_certbot__container.binds_to | join(' ') }}
+      {% endif %}
+      {% if pki_certbot__container.requires_mounts_for is defined %}
+      RequiresMountsFor={{ pki_certbot__container.requires_mounts_for | join(' ') }}
+      {% endif %}
     restart_policy: 'no'
     state: 'quadlet'
   register: 'pki_certbot__quadlet_result'
