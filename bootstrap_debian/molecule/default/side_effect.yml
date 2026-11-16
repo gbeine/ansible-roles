@@ -10,7 +10,8 @@
     bootstrap_debian__test_case: "{{ bootstrap_debian__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     bootstrap_debian__test_checked_files: >-
       {{ [ '/etc/ssh/sshd_config.d/00-ansible.conf', '/etc/ssh/ssh_config.d/00-ansible.conf' ]
-         + ([ bootstrap_debian__test_case.expect.udev.checked_file ] if bootstrap_debian__test_case.expect.udev is defined else []) }}
+         + ([ bootstrap_debian__test_case.expect.udev.checked_file ] if bootstrap_debian__test_case.expect.udev is defined else [])
+         + (bootstrap_debian__test_case.expect.dotfiles | default([]) | map(attribute='dest') | list) }}
 
   roles:
     - role: 'common_filters'
@@ -148,6 +149,26 @@
         bootstrap_debian__test_invalid:
           message: 'a rule udev rejects'
           search: 'Invalid key/value pair'
+
+    - name: 'Run bootstrap_debian with invalid dotfiles (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        debian_dotfiles:
+          - 'molecule-missing'
+          - name: 'bashrc'
+            user: 'molecule-unknown'
+          - name: 'screenrc'
+            dest: 'etc/molecule-relative'
+            mode: 644
+            permissions: '0644'
+        bootstrap_debian__test_invalid:
+          message: 'invalid dotfiles'
+          search: >-
+            ^Unknown keys in debian_dotfiles: permissions, allowed are name, user, dest, owner, group, mode\.
+            The files of debian_dotfiles do not exist in .*/files: molecule-missing\.
+            The users of debian_dotfiles do not exist: molecule-unknown\.
+            The targets of debian_dotfiles have to be absolute paths: etc/molecule-relative\.
+            The modes of debian_dotfiles are strings of three or four octal digits, e\.g\. 0644: screenrc\.$
 
     - name: 'Change an option of sshd and a udev rule'
       when: bootstrap_debian__test_case.side_effect is defined

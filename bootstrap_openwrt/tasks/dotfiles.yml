@@ -1,0 +1,57 @@
+---
+
+- name: Read the current dotfiles
+  community.openwrt.slurp:
+    src: "{{ item.dest }}"
+  loop: "{{ bootstrap_openwrt__dotfiles_entries }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: bootstrap_openwrt__dotfiles_current
+  failed_when: false
+  check_mode: false
+
+# The backup contains the file before this change, it is only written if the file exists and changes
+- name: Store backups of the changed dotfiles on the controller
+  vars:
+    bootstrap_openwrt__dotfiles_backups: >-
+      {%- set backups = [] -%}
+      {%- for result in bootstrap_openwrt__dotfiles_current.results if result.content is defined -%}
+      {%-   set source = lookup('ansible.builtin.file', bootstrap_openwrt__dotfiles_dir ~ '/' ~ result.item.name, rstrip=false) -%}
+      {%-   if result.content | b64decode != source -%}
+      {%-     set _ = backups.append({ 'dest': result.item.dest, 'content': result.content | b64decode }) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ backups }}
+  when: bootstrap_openwrt__dotfiles_backups | length > 0
+  block:
+
+    - name: Create the backup directories on the controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/dotfiles{{ item | dirname }}"
+        state: directory
+        mode: '0700'
+      loop: "{{ bootstrap_openwrt__dotfiles_backups | map(attribute='dest') | unique | list }}"
+      delegate_to: localhost
+      check_mode: false
+
+    - name: Store the backups on the controller
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/dotfiles{{ item.dest }}"
+        mode: '0600'
+      loop: "{{ bootstrap_openwrt__dotfiles_backups }}"
+      loop_control:
+        label: "{{ item.dest }}"
+      delegate_to: localhost
+      check_mode: false
+
+- name: Copy the dotfiles
+  community.openwrt.copy:
+    content: "{{ lookup('ansible.builtin.file', bootstrap_openwrt__dotfiles_dir ~ '/' ~ item.name, rstrip=false) }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop: "{{ bootstrap_openwrt__dotfiles_entries }}"
+  loop_control:
+    label: "{{ item.dest }}"

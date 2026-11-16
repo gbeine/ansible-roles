@@ -184,6 +184,76 @@
           {{ bootstrap_openwrt__sshd.authorized_keys.keys() | reject('eq', 'root')
              | reject('in', bootstrap_openwrt__sshd_users.keys() | list) | list }}
 
+    # Before any change, the files and users of the dotfiles
+    - name: 'Validate the dotfiles'
+      when: bootstrap_openwrt__dotfiles | length > 0
+      ansible.builtin.assert:
+        that:
+          - bootstrap_openwrt__dotfiles_errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ bootstrap_openwrt__dotfiles_errors | join(' ') }}"
+        quiet: true
+      vars:
+        bootstrap_openwrt__dotfiles_errors: >-
+          {%- set errors = [] -%}
+          {%- set dotfiles = bootstrap_openwrt__dotfiles -%}
+          {%- if dotfiles is not sequence or dotfiles is string or dotfiles is mapping -%}
+          {%-   set _ = errors.append('openwrt_dotfiles has to be a list of names or dictionaries.') -%}
+          {%- else -%}
+          {%-   set invalid = dotfiles | reject('string') | reject('mapping') | list
+                              + dotfiles | select('mapping') | rejectattr('name', 'defined') | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The entries of openwrt_dotfiles are names or dictionaries with name: ' ~ (invalid | map('to_json') | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set ns = namespace(unknown=[]) -%}
+          {%-   for item in dotfiles | select('mapping') -%}
+          {%-     set ns.unknown = ns.unknown + (item.keys() | map('string') | reject('in', bootstrap_openwrt__dotfiles_keys) | list) -%}
+          {%-   endfor -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in openwrt_dotfiles: ' ~ (ns.unknown | unique | join(', ')) ~ ', allowed are ' ~ (bootstrap_openwrt__dotfiles_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set entries = bootstrap_openwrt__dotfiles_entries -%}
+          {%-   set names = entries | map(attribute='name') | reject('match', bootstrap_openwrt__dotfiles_name_pattern) | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The names of openwrt_dotfiles consist of letters, digits, _, . and - without a leading dot: ' ~ (names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set missing = entries | map(attribute='name') | select('match', bootstrap_openwrt__dotfiles_name_pattern)
+                              | reject('in', entries | map(attribute='name') | select('match', bootstrap_openwrt__dotfiles_name_pattern)
+                                              | map('regex_replace', '^', bootstrap_openwrt__dotfiles_dir ~ '/') | select('file')
+                                              | map('basename') | list) | unique | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('The files of openwrt_dotfiles do not exist in ' ~ bootstrap_openwrt__dotfiles_dir ~ ': ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set users = entries | map(attribute='user') | reject('in', bootstrap_openwrt__sshd_users.keys() | list) | unique | list -%}
+          {%-   if users | length > 0 -%}
+          {%-     set _ = errors.append('The users of openwrt_dotfiles do not exist: ' ~ (users | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set dests = entries | map(attribute='dest') | reject('match', '^/[^\n\r]*\Z') | list -%}
+          {%-   if dests | length > 0 -%}
+          {%-     set _ = errors.append('The targets of openwrt_dotfiles have to be absolute paths: ' ~ (dests | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set accounts = (entries | map(attribute='owner') | list + entries | map(attribute='group') | list)
+                               | reject('match', '^[A-Za-z0-9_][A-Za-z0-9_.-]*[$]?$') | unique | list -%}
+          {%-   if accounts | length > 0 -%}
+          {%-     set _ = errors.append('The owners and groups of openwrt_dotfiles are names or numbers: ' ~ (accounts | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set modes = entries | rejectattr('mode', 'string') | map(attribute='name') | list
+                            + entries | selectattr('mode', 'string') | rejectattr('mode', 'match', '^[0-7]{3,4}$') | map(attribute='name') | list -%}
+          {%-   if modes | length > 0 -%}
+          {%-     set _ = errors.append('The modes of openwrt_dotfiles are strings of three or four octal digits, e.g. 0644: ' ~ (modes | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set targets = entries | map(attribute='dest') | list -%}
+          {%-   set ns2 = namespace(seen=[], dup=[]) -%}
+          {%-   for target in targets -%}
+          {%-     if target in ns2.seen -%}{%- set ns2.dup = ns2.dup + [ target ] -%}{%- endif -%}
+          {%-     set ns2.seen = ns2.seen + [ target ] -%}
+          {%-   endfor -%}
+          {%-   if ns2.dup | length > 0 -%}
+          {%-     set _ = errors.append('The targets of openwrt_dotfiles have to be unique: ' ~ (ns2.dup | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
     - name: Install packages
       ansible.builtin.include_tasks: packages.yml
       when: bootstrap_openwrt__packages | length > 0
@@ -217,3 +287,7 @@
 
     - name: Configure SSH
       ansible.builtin.include_tasks: ssh.yml
+
+    - name: Copy dotfiles
+      ansible.builtin.include_tasks: dotfiles.yml
+      when: bootstrap_openwrt__dotfiles | length > 0

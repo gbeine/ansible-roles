@@ -325,6 +325,42 @@ bootstrap_openwrt__sshd_default:
   authorized_keys: {}
 ```
 
+### Dotfiles
+
+`openwrt_dotfiles` copies files from `files/` next to the playbook (`<playbook_dir>/files/<name>`) to the host.
+The files have their names without the leading dot, an entry is a name or a dictionary:
+
+```yaml
+openwrt_dotfiles:
+  - 'screenrc'                    # files/screenrc to /root/.screenrc
+  - name: 'bashrc'
+    user: 'gerrit'                # files/bashrc to /home/gerrit/.bashrc
+  - name: 'vimrc'
+    dest: '/etc/vim/vimrc.local'
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+```
+
+| Key | Default |
+|---|---|
+| `name` | mandatory, the file in `<playbook_dir>/files` |
+| `user` | `root`, the home of the user is the directory of the target |
+| `dest` | `<home of user>/.<name>`, otherwise an absolute path |
+| `owner` | `user` |
+| `group` | the primary group of `user` |
+| `mode` | `'0644'` |
+
+Files that are not listed anymore are not changed or removed.
+Before any change the role checks that `openwrt_dotfiles` is a list of names or dictionaries with known keys, the names consist of letters, digits, `_`, `.` and `-`
+without a leading dot, the files exist on the controller, the users exist in `/etc/passwd`, the targets are absolute paths and unique
+and the modes are strings of three or four octal digits.
+Before a file that exists is replaced with another content, the role stores it on the controller in
+`<playbook_dir>/backups/<inventory_hostname>/dotfiles/<target>`, e.g. `dotfiles/root/.screenrc`.
+
+The former role `bootstrap_dotfiles` is removed, it copied its own `screenrc` to `/root/.screenrc`.
+The same is done with `openwrt_dotfiles: [ 'screenrc' ]` and the file `files/screenrc` next to the playbook.
+
 ### Backups
 
 Before the role commits a change of a UCI configuration (`system`, `network`, `dhcp`, `wireless`, `attendedsysupgrade`, `acme`, `uhttpd`, `dropbear`),
@@ -355,7 +391,7 @@ the platforms of this scenario set `image`, `user`, `password` and `authorized_k
 | Platform | Tested |
 |---|---|
 | `molecule-openwrt-minimal` | Network of the base VM (`br-lan` via DHCP), removal of an undeclared network section, protected network sections (interface by name, peer by type, device by option `name`), time zone and NTP servers of the site settings (`site_timezone`, `site_ntp_sources`, servers before pools), attendedsysupgrade with defaults including the section `owut`, odhcpd with defaults, removal of an undeclared option of odhcpd (`dhcp.wan.ra`) |
-| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), an enabled service (`uhttpd`, disabled and stopped in `prepare`) and uhttpd with HTTPS, own `openwrt_odhcpd` with numbers, booleans and lists, a new section `molecule6`, kept options of dns_dnsmasq (`dhcp.lan.start`) |
+| `molecule-openwrt-full` | Additionally an own `openwrt_system` with hostname, `openwrt_timezone`, a package (`htop`), a disabled service (`dnsmasq`), an enabled service (`uhttpd`, disabled and stopped in `prepare`) and uhttpd with HTTPS, own `openwrt_odhcpd` with numbers, booleans and lists, a new section `molecule6`, kept options of dns_dnsmasq (`dhcp.lan.start`), dotfiles (`/root/.screenrc` and an own target with mode `0600`) |
 
 ACME is not tested, it needs a real DNS zone and CA, wireless is not tested, the VM has no radios.
 
@@ -367,7 +403,7 @@ the protected sections `wg_molecule`, a section of the type `wireguard_wg_molecu
 the init script of uhttpd generates certificate and key, the role does not install uhttpd and fails without them.
 `converge` reads the ports of `br-lan` from the clone.
 `side_effect` runs the role with a declared section that is protected, with a pattern instead of a list,
-with `openwrt_odhcpd` as dictionary, with an option of dns_dnsmasq and with an unknown type in `openwrt_odhcpd`,
+with `openwrt_odhcpd` as dictionary, with an option of dns_dnsmasq and with an unknown type in `openwrt_odhcpd`, with dotfiles of a missing file and an unknown user,
 and checks that the role fails with exactly the expected message and `/etc/config/network` is unchanged (tasks marked `expect ERROR`).
 `verify` checks that the protected sections still exist, `molecule_stale` is removed and the options of `/etc/config/dhcp`. The backups of the role are written to `molecule/default/backups/`, which is ignored by git.
 

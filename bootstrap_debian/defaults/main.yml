@@ -42,6 +42,10 @@ bootstrap_debian__pki_ca_certificates_dir: "{{ common_globals__pki_ca_certificat
 bootstrap_debian__groups: "{{ debian_groups | default([]) }}"
 bootstrap_debian__users: "{{ debian_users | default([]) }}"
 
+# Files of <playbook_dir>/files copied to the host, a name (e.g. screenrc to /root/.screenrc)
+# or a dictionary with name and optionally user, dest, owner, group and mode
+bootstrap_debian__dotfiles: "{{ debian_dotfiles | default([]) }}"
+
 bootstrap_debian__sshd_enable: "{{ debian_sshd_enable | default(false) }}"
 # Options of sshd (config) and of the ssh client (client) and the authorized keys of users,
 # merged recursively into the default, null removes an option
@@ -86,6 +90,42 @@ bootstrap_debian__mail_aliases: >-
      | combine(debian_mail_aliases | default({})) }}
 
 # Defaults - do not change
+
+# The dotfiles are read from files next to the playbook, the names have no leading dot
+bootstrap_debian__dotfiles_dir: "{{ playbook_dir }}/files"
+bootstrap_debian__dotfiles_name_pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+bootstrap_debian__dotfiles_keys: [ 'name', 'user', 'dest', 'owner', 'group', 'mode' ]
+
+# The users of the host (getent passwd, read by the role) and the users created by the role, with their home and primary group
+bootstrap_debian__dotfiles_users: >-
+  {%- set users = {} -%}
+  {%- for name, fields in (ansible_facts.getent_passwd | default({})).items() -%}
+  {%-   set _ = users.update({ name: { 'home': fields[4], 'group': fields[2] } }) -%}
+  {%- endfor -%}
+  {%- for user in bootstrap_debian__users if user is mapping and user.user is defined -%}
+  {%-   set _ = users.update({ user.user: { 'home': user.home | default('/nonexistent'), 'group': user.group | default(user.user) } }) -%}
+  {%- endfor -%}
+  {{ users }}
+
+# The dotfiles with all keys, the defaults are root, <home>/.<name>, the user, the primary group of the user and 0644,
+# entries the validation rejects are left out
+bootstrap_debian__dotfiles_entries: >-
+  {%- set entries = [] -%}
+  {%- set dotfiles = bootstrap_debian__dotfiles if bootstrap_debian__dotfiles is sequence and bootstrap_debian__dotfiles is not string
+                     and bootstrap_debian__dotfiles is not mapping else [] -%}
+  {%- for item in dotfiles if item is string or (item is mapping and item.name is defined) -%}
+  {%-   set entry = { 'name': item } if item is string else item -%}
+  {%-   set user = entry.user | default('root') | string -%}
+  {%-   set account = bootstrap_debian__dotfiles_users[user] | default({ 'home': '', 'group': user }) -%}
+  {%-   set _ = entries.append({
+          'name': entry.name | string,
+          'user': user,
+          'dest': entry.dest | default(account.home ~ '/.' ~ entry.name) | string,
+          'owner': entry.owner | default(user) | string,
+          'group': entry.group | default(account.group) | string,
+          'mode': entry.mode | default('0644') }) -%}
+  {%- endfor -%}
+  {{ entries }}
 bootstrap_debian__apt_packages:
   - 'python3-apt'
   - 'python3-debian'
@@ -167,18 +207,18 @@ bootstrap_debian__logrotate_packages:
   - 'logrotate'
 bootstrap_debian__logrotate_etc_dir: '/etc/logrotate.d'
 
+bootstrap_debian__pki_packages:
+  - 'acl'
+  - 'ca-certificates'
+  - 'openssl'
+  - 'ssl-cert'
+
 # Account of the site settings, used if debian_mail_accounts is not set
 bootstrap_debian__mail_site_accounts: >-
   {{ [{'name': 'site', 'smtp_host': common_globals__mail_smtp_host, 'smtp_port': common_globals__mail_smtp_port}
       | combine({'from': common_globals__mail_from} if common_globals__mail_from | length > 0 else {})
       | combine({'auth': true, 'user': common_globals__mail_smtp_user, 'password': common_globals__mail_smtp_password}
                 if common_globals__mail_smtp_user | length > 0 else {})] }}
-
-bootstrap_debian__pki_packages:
-  - 'acl'
-  - 'ca-certificates'
-  - 'openssl'
-  - 'ssl-cert'
 
 bootstrap_debian__mail_packages:
   - 'msmtp'

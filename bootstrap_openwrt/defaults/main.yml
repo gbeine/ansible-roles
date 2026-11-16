@@ -35,7 +35,36 @@ bootstrap_openwrt__uhttpd: "{{ openwrt_uhttpd | default(bootstrap_openwrt__uhttp
 # merged recursively into the delivered configuration of OpenWrt, null removes an option of dropbear
 bootstrap_openwrt__sshd: "{{ bootstrap_openwrt__sshd_default | combine(openwrt_sshd | default({}), recursive=true) }}"
 
+# Files of <playbook_dir>/files copied to the device, a name (e.g. screenrc to /root/.screenrc)
+# or a dictionary with name and optionally user, dest, owner, group and mode
+bootstrap_openwrt__dotfiles: "{{ openwrt_dotfiles | default([]) }}"
+
 # Defaults - no not change
+
+# The dotfiles are read from files next to the playbook, the names have no leading dot
+bootstrap_openwrt__dotfiles_dir: "{{ playbook_dir }}/files"
+bootstrap_openwrt__dotfiles_name_pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+bootstrap_openwrt__dotfiles_keys: [ 'name', 'user', 'dest', 'owner', 'group', 'mode' ]
+
+# The dotfiles with all keys, the defaults are root, <home>/.<name>, the user, the primary group of the user and 0644,
+# the users are read from /etc/passwd (bootstrap_openwrt__sshd_users), entries the validation rejects are left out
+bootstrap_openwrt__dotfiles_entries: >-
+  {%- set entries = [] -%}
+  {%- set dotfiles = bootstrap_openwrt__dotfiles if bootstrap_openwrt__dotfiles is sequence and bootstrap_openwrt__dotfiles is not string
+                     and bootstrap_openwrt__dotfiles is not mapping else [] -%}
+  {%- for item in dotfiles if item is string or (item is mapping and item.name is defined) -%}
+  {%-   set entry = { 'name': item } if item is string else item -%}
+  {%-   set user = entry.user | default('root') | string -%}
+  {%-   set account = bootstrap_openwrt__sshd_users[user] | default({ 'home': '', 'gid': user }) -%}
+  {%-   set _ = entries.append({
+          'name': entry.name | string,
+          'user': user,
+          'dest': entry.dest | default(account.home ~ '/.' ~ entry.name) | string,
+          'owner': entry.owner | default(user) | string,
+          'group': entry.group | default(account.gid) | string,
+          'mode': entry.mode | default('0644') }) -%}
+  {%- endfor -%}
+  {{ entries }}
 bootstrap_openwrt__system_default:
   - type: 'system'
     find: { compat_version: '1.1' }

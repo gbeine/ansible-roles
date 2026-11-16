@@ -211,6 +211,40 @@ debian_udev_rules:
   The rules apply to the next events of the devices, e.g. when the LUKS device is opened or at the next boot,
   devices that already exist are not changed, a renamed interface gets its name at the next boot.
 
+### Dotfiles
+
+`debian_dotfiles` copies files from `files/` next to the playbook (`<playbook_dir>/files/<name>`) to the host.
+The files have their names without the leading dot, an entry is a name or a dictionary:
+
+```yaml
+debian_dotfiles:
+  - 'screenrc'                    # files/screenrc to /root/.screenrc
+  - name: 'bashrc'
+    user: 'gerrit'                # files/bashrc to /home/gerrit/.bashrc
+  - name: 'vimrc'
+    dest: '/etc/vim/vimrc.local'
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+```
+
+| Key | Default |
+|---|---|
+| `name` | mandatory, the file in `<playbook_dir>/files` |
+| `user` | `root`, the home of the user is the directory of the target |
+| `dest` | `<home of user>/.<name>`, otherwise an absolute path |
+| `owner` | `user` |
+| `group` | the primary group of `user` |
+| `mode` | `'0644'` |
+
+Files that are not listed anymore are not changed or removed.
+Before any change the role checks that `debian_dotfiles` is a list of names or dictionaries with known keys, the names consist of letters, digits, `_`, `.` and `-`
+without a leading dot, the files exist on the controller, the users exist (in `/etc/passwd` or in `debian_users`), the targets are absolute paths and unique
+and the modes are strings of three or four octal digits.
+
+The former role `bootstrap_dotfiles` is removed, it copied its own `screenrc` to `/root/.screenrc`.
+The same is done with `debian_dotfiles: [ 'screenrc' ]` and the file `files/screenrc` next to the playbook.
+
 ### Tests
 
 The molecule scenario `default` runs the role in [tart](https://tart.run) VMs on a macOS controller.
@@ -220,7 +254,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Tested |
 |---|---|
 | `molecule-bootstrap-debian-minimal` | repositories including the removal of repositories that are not configured, packages, timezone, hostname and hosts with defaults, no NTP drop-in without `debian_ntp_enable`, SSH without options (empty drop-ins, sshd listens on all addresses) |
-| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`, a missing device with `noauto` only in `/etc/fstab`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), udev rules (renaming an interface by its address, removal of a file with an empty list), logrotate, unattended upgrades and mail |
+| `molecule-bootstrap-debian-full` | PKI (CA certificate), mail with root forward, NTP client with servers, pool and poll interval of the site settings, `/etc/hosts` managed by cloud-init (not generated), repositories that are not configured are kept (`debian_repositories_prune: false`), additionally storage (additional disk `/dev/vdb`, a missing device with `noauto` only in `/etc/fstab`) and bind mounts, networking (`dummy0`), accounts, SSH with options of sshd and of the client and authorized keys (login with a key, removal of the keys of a user with an empty list), udev rules (renaming an interface by its address, removal of a file with an empty list), dotfiles (default target of root, a user created by the role, own target, owner, group and mode), logrotate, unattended upgrades and mail |
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `ansible.posix`.
 
@@ -235,11 +269,13 @@ cd bootstrap_debian
 MOLECULE_TART_IMAGE='debian' molecule test
 ```
 
+`prepare` stops `apt-daily.timer` and `apt-daily-upgrade.timer` of the clones and waits until running updates of apt and unattended-upgrades have ended,
+a new clone catches up on the missed runs and holds the dpkg lock longer than the role waits for it.
 For SSH, `prepare` stores the checksums of `sshd_config` and `ssh_config`, creates the file of the former role `security_ssh`,
 on `molecule-bootstrap-debian-full` a key pair and a user `stale` with authorized keys, `converge` adds the public key to `debian_sshd.authorized_keys`.
 `side_effect` runs the role with an unknown key in `debian_sshd`, `config` not a dictionary, `Match` and `Host`, invalid options, authorized keys of an unknown user,
-an option unknown to sshd, `debian_udev_rules` not a dictionary, invalid file names and rules and a rule `udevadm verify` rejects
-and checks that it fails with the expected message and the drop-ins and the udev rule are unchanged (tasks marked `expect ERROR`),
+an option unknown to sshd, `debian_udev_rules` not a dictionary, invalid file names and rules, a rule `udevadm verify` rejects and invalid dotfiles (unknown key, missing file, unknown user, relative target, mode as number)
+and checks that it fails with the expected message and the drop-ins, the udev rule and the dotfiles are unchanged (tasks marked `expect ERROR`),
 then it changes an option of sshd and a udev rule on `molecule-bootstrap-debian-full`, both files change, sshd and udev are reloaded.
 `verify` checks the drop-ins (empty without options), that `sshd_config` and `ssh_config` are unchanged, that the file of `security_ssh` is removed,
 the effective options of sshd (`sshd -T`) and of the client (`ssh -G`), the authorized keys and logs in with the key.

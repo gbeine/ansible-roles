@@ -35,7 +35,7 @@
                 or ('127.0.1.1 ' + bootstrap_debian__expect.hostname_short) in bootstrap_debian__test_etc_hosts
               - >-
                 bootstrap_debian__expect.etc_hosts_managed
-                or lookup('ansible.builtin.config', 'DEFAULT_MANAGED_STR') not in bootstrap_debian__test_etc_hosts
+                or 'Ansible managed' not in bootstrap_debian__test_etc_hosts
             fail_msg: "/etc/hosts: {{ bootstrap_debian__test_etc_hosts }}"
           vars:
             bootstrap_debian__test_etc_hosts: "{{ bootstrap_debian__test_hosts.results[1].content | b64decode }}"
@@ -643,3 +643,38 @@
               owners {{ bootstrap_debian__test_ssh_keys.results | map(attribute='stat.pw_name') | list }},
               modes {{ bootstrap_debian__test_ssh_keys.results | map(attribute='stat.mode') | list }},
               login {{ bootstrap_debian__test_ssh_login.rc }} {{ bootstrap_debian__test_ssh_login.stdout }} {{ bootstrap_debian__test_ssh_login.stderr }}
+
+    - name: 'Verify dotfiles'
+      when: bootstrap_debian__expect.dotfiles is defined
+      block:
+
+        - name: 'Read the state of the dotfiles'
+          ansible.builtin.stat:
+            path: "{{ item.dest }}"
+          loop: "{{ bootstrap_debian__expect.dotfiles }}"
+          loop_control:
+            label: "{{ item.dest }}"
+          register: 'bootstrap_debian__test_dotfiles_stat'
+
+        - name: 'Read the dotfiles'
+          ansible.builtin.slurp:
+            src: "{{ item.dest }}"
+          loop: "{{ bootstrap_debian__expect.dotfiles }}"
+          loop_control:
+            label: "{{ item.dest }}"
+          register: 'bootstrap_debian__test_dotfiles_content'
+
+        - name: 'Assert the content, owner, group and mode of the dotfiles'
+          ansible.builtin.assert:
+            that:
+              - item.0.stat.exists
+              - item.0.stat.pw_name == item.0.item.owner
+              - item.0.stat.gr_name == item.0.item.group
+              - item.0.stat.mode == item.0.item.mode
+              - (item.1.content | b64decode) == lookup('ansible.builtin.file', playbook_dir ~ '/files/' ~ item.0.item.name, rstrip=false)
+            fail_msg: >-
+              {{ item.0.item.dest }}: owner {{ item.0.stat.pw_name | default('-') }}, group {{ item.0.stat.gr_name | default('-') }},
+              mode {{ item.0.stat.mode | default('-') }}
+          loop: "{{ bootstrap_debian__test_dotfiles_stat.results | zip(bootstrap_debian__test_dotfiles_content.results) | list }}"
+          loop_control:
+            label: "{{ item.0.item.dest }}"
