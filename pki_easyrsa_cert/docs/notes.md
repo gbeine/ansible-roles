@@ -7,11 +7,12 @@ A realm shared by several hosts has to be defined the same way on all of them, o
 
 ### Realms
 
-The realms are `site_pki_realms` of `common_globals`, the role creates the certificates of the realms with `easyrsa: true`.
+The realms are `easyrsa_realms` of the host, set in `host_vars`, the role creates the certificates of the realms with `easyrsa: true`.
 Other keys of a realm belong to other roles and are ignored.
 
 ```yaml
-site_pki_realms:
+# host_vars/vpn.example.org
+easyrsa_realms:
   - name: 'www.example.org'
     easyrsa: true
   - name: 'vpn.example.org'
@@ -78,7 +79,8 @@ This prevents unexpected behavior by accident, e.g. by a typo in an option or by
 
 The role checks before any change:
 
-- `site_pki_realms` is a list of dictionaries with a name, `easyrsa` is a boolean
+- the former variable `pki_realms` is not set
+- `easyrsa_realms` is a list of dictionaries with a name, `easyrsa` is a boolean
 - the names of the realms with `easyrsa: true` consist of letters, digits, `_`, `.` and `-` and are unique
 - the realms have no unknown `easyrsa_*` keys and no `easyrsa_environment`, `easyrsa_type` is `server`, `client` or `cs`
 - `easyrsa_san` is a list of `DNS:<name>` and `IP:<address>` with valid addresses
@@ -92,6 +94,7 @@ The checks of Easy-RSA, the CA and the addresses are done by the module in check
 
 | Before | Now |
 |---|---|
+| `pki_realms` | `easyrsa_realms` of the host, the role rejects `pki_realms` |
 | `easyrsa_environment` of a realm | `easyrsa_config` of the realm and `easyrsa_san`, the role rejects `easyrsa_environment` |
 | `pki_easyrsa_cert_expire` | `EASYRSA_CERT_EXPIRE` in `easyrsa_cert_config` |
 | `pki_easyrsa_cert_renew` | `EASYRSA_PRE_EXPIRY_WINDOW` in `easyrsa_cert_config` |

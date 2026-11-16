@@ -11,7 +11,7 @@ It is the only role of Easy-RSA working on the host, it creates no keys and need
 
 ### Realms
 
-The role deploys the realms of `site_pki_realms` with `easyrsa: true` to `site_pki_realms_dir` of `common_globals` (default `/etc/pki/realms`).
+The role deploys the realms of `easyrsa_realms` of the host with `easyrsa: true` to `site_pki_realms_dir` of `common_globals` (default `/etc/pki/realms`).
 The directories and owners of a realm are `common_globals__pki_realm_structure`, `owner` and `group` of a realm replace the owner and group
 of all directories and files of the realm.
 
@@ -33,7 +33,8 @@ The files are read from `easyrsa_pki_dir` on the controller (default `<site_pki_
 The role checks before any change:
 
 - `easyrsa_ca_cn` is a string without line breaks
-- `site_pki_realms` is a list of dictionaries with a name, `easyrsa` is a boolean
+- the former variable `pki_realms` is not set
+- `easyrsa_realms` is a list of dictionaries with a name, `easyrsa` is a boolean
 - the names of the realms with `easyrsa: true` consist of letters, digits, `_`, `.` and `-` and are unique
 - `owner` and `group` of the realms are names of users and groups
 - `ca.crt`, the keys and the certificates of the realms exist on the controller, otherwise `pki_easyrsa_ca` and `pki_easyrsa_cert` have to run first
@@ -41,6 +42,7 @@ The role checks before any change:
 
 ### Migration
 
+- The realms are `easyrsa_realms` of the host, the former variable `pki_realms` is rejected.
 - The role does not depend on `pki_easyrsa_cert` anymore, the certificates are not created when the role runs.
   Plays run `pki_easyrsa_ca` and `pki_easyrsa_cert` before the role.
 - The directory of the realms is `site_pki_realms_dir` of `common_globals`, the CA certificates are written to `site_pki_ca_certificates_dir`,
@@ -69,7 +71,7 @@ Every platform has its own PKI in the ephemeral directory of molecule.
 `prepare` installs `ca-certificates`, `openssl` and `ssl-cert` and creates the user and group `molecule`.
 `side_effect` runs the roles with a wrong password, unknown options and `EASYRSA_PASSIN` in `easyrsa_ca_config`, invalid realms
 (unknown type, invalid subjectAltName, `easyrsa_environment`, duplicate names, unknown keys, `easyrsa` no boolean), an invalid IP address,
-`EASYRSA_CERT_EXPIRE` not greater than `EASYRSA_PRE_EXPIRY_WINDOW`, the role without the files of the PKI and with an unknown group
+`EASYRSA_CERT_EXPIRE` not greater than `EASYRSA_PRE_EXPIRY_WINDOW`, the former variable `pki_realms`, the role without the files of the PKI and with an unknown group
 and checks that they fail with the expected messages before the files of the PKI and the certificates on the host change (tasks marked `expect ERROR`).
 On `molecule-easyrsa` it adds a subjectAltName to `molecule-cs` (revoked, built again, CRL written) and renews `molecule-owned` twice
 (renewed, then the renewed certificate revoked and renewed again).

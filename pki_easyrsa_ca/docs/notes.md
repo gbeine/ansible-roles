@@ -10,6 +10,19 @@ Everything containing secrets stays on the controller: the private key of the CA
     - 'pki_easyrsa_deploy'
 ```
 
+The CA and the options are the same for all hosts, the realms are set per host:
+
+```yaml
+# group_vars/all
+easyrsa_ca_cn: 'Example CA'
+easyrsa_ca_password: "{{ vault_easyrsa_ca_password }}"
+
+# host_vars/www.example.org
+easyrsa_realms:
+  - name: 'www.example.org'
+    easyrsa: true
+```
+
 The tasks run with `delegate_to: localhost` and `throttle: 1`.
 Hosts sharing a PKI create it one after the other, the second host finds the CA and changes nothing.
 
@@ -82,6 +95,7 @@ The roles `pki_easyrsa_ca`, `pki_easyrsa_cert` and `pki_easyrsa_deploy` replace 
 | `pki_easyrsa_key_size`, `pki_easyrsa_algo`, `pki_easyrsa_curve`, `pki_easyrsa_digest` | `EASYRSA_KEY_SIZE`, `EASYRSA_ALGO`, `EASYRSA_CURVE`, `EASYRSA_DIGEST` |
 | `pki_easyrsa_ca_expire` | `EASYRSA_CA_EXPIRE` in `easyrsa_ca_config` |
 | `pki_easyrsa_ca_certificates_dir` | `site_pki_ca_certificates_dir` of `common_globals` |
+| `pki_realms` | `easyrsa_realms` of the host, see `pki_easyrsa_cert` |
 
 - The password of the CA was passed as `EASYRSA_PASSIN` and `EASYRSA_PASSOUT` (`pass:…`) in the environment, it is passed in temporary files now.
 - `EASYRSA_CURVE` was never passed, it is used now.
