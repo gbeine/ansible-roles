@@ -148,12 +148,19 @@ The role checks before any change:
 - `strongswan_certificate` has a source of the platform, its mandatory keys and no unknown keys, `ca_name` is a file name
 - the files of the certificate exist on the controller
 - with the source `realm` the name of the realm consists of letters, digits, `_`, `.` and `-`
-  and the certificate, the key, the CA and the CRL of the realm exist on the host
+  and the certificate, the key, the CA and the CRL of the realm exist on the host,
+  in check mode missing files are only reported, `pki_easyrsa_deploy` creates a new realm only in a real run
 
 If `strongswan_config` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 `swanctl` has no check without loading a configuration, the options themselves are checked by `swanctl --load-all` after the configuration was written,
 the role fails with the messages of `swanctl` then.
+
+### Check mode
+
+In check mode the role stops after the installation if strongSwan is missing on Debian and OpenWrt,
+the directories of `swanctl` do not exist then and there is no configuration to compare.
+On Debian the role detects this by the missing `/etc/swanctl`, so it works with `--check` and with `check_mode` of a task.
 
 ### Restart and reload
 
@@ -178,6 +185,7 @@ On `molecule-strongswan-default` it creates the realm `molecule-strongswan-defau
 with the second certificate and a CRL of the CA created with `openssl ca -gencrl`.
 The NAT of tart isolates the VMs from each other, `prepare` routes the address of the other VM through the host and ignores ICMP redirects,
 the host forwards the packets unchanged. Then `prepare` pings the other VM without IPsec and fails if the VMs cannot reach each other.
+The scenario `default` runs `check` after `prepare`: `converge` with `--check` on the VMs without strongSwan, the role has to stop after the installation.
 
 | Platform | Test case |
 |---|---|
