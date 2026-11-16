@@ -107,7 +107,7 @@
         strongswan_certificate: "{{ security_strongswan__test_files | combine({ 'source': 'vault' }) }}"
         security_strongswan__test_invalid:
           message: 'an unknown source'
-          search: '^strongswan_certificate\.source has to be one of files, certbot on Debian, got vault$'
+          search: '^strongswan_certificate\.source has to be one of files, certbot, realm on Debian, got vault$'
 
     - name: 'Run security_strongswan with acme on Debian (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -115,7 +115,7 @@
         strongswan_certificate: { source: 'acme', domain: 'molecule.test', ca: "{{ security_strongswan__test_pki }}/ca.pem" }
         security_strongswan__test_invalid:
           message: 'acme on Debian'
-          search: '^strongswan_certificate\.source has to be one of files, certbot on Debian, got acme$'
+          search: '^strongswan_certificate\.source has to be one of files, certbot, realm on Debian, got acme$'
 
     - name: 'Run security_strongswan with files without key (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -132,6 +132,59 @@
         security_strongswan__test_invalid:
           message: 'a missing file on the controller'
           search: '^These files of strongswan_certificate do not exist on the controller: cert \(.*/missing\.pem\)\.$'
+
+    - name: 'Run security_strongswan with realm and ca (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: { source: 'realm', realm: 'molecule', ca: "{{ security_strongswan__test_pki }}/ca.pem" }
+        security_strongswan__test_invalid:
+          message: 'realm and ca'
+          search: '^strongswan_certificate with the source realm does not know ca$'
+
+    - name: 'Run security_strongswan with an invalid name of the realm (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: { source: 'realm', realm: '../molecule' }
+        security_strongswan__test_invalid:
+          message: 'an invalid name of the realm'
+          search: '^strongswan_certificate\.realm has to be the name of a realm of letters, digits, _, \. and -$'
+
+    - name: 'Run security_strongswan with a realm not deployed on the host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        strongswan_certificate: { source: 'realm', realm: 'molecule-missing' }
+        security_strongswan__test_invalid:
+          message: 'a realm not deployed on the host'
+          search: '^These files of the realm molecule-missing do not exist on the host, pki_easyrsa_deploy has to deploy the realm first: .*/molecule-missing/public/molecule-missing\.crt'
+
+    # The certificate of the realm replaces the certificate from the controller, the configuration is loaded
+    - name: 'Switch to the certificate of the realm of pki_easyrsa_deploy'
+      when: security_strongswan__test_case.realm is defined
+      block:
+
+        - name: 'Run security_strongswan with the certificate of the realm'
+          ansible.builtin.include_role:
+            name: 'security_strongswan'
+          vars:
+            strongswan_certificate: "{{ security_strongswan__test_case.realm }}"
+            # The connection trusts the CA of the realm with its new name
+            strongswan_config:
+              connections:
+                mesh: >-
+                  {{ security_strongswan__test_mesh
+                     | combine({ 'remote': { 'auth': 'pubkey', 'cacerts': security_strongswan__test_case.realm.ca_name } }) }}
+
+        - name: 'Assert the deployed and loaded certificate of the realm'
+          ansible.builtin.assert:
+            that:
+              - security_strongswan__realm_result is changed
+              - security_strongswan__cleanup_result is changed
+              - security_strongswan__load_result is changed
+              - "'--clear' in security_strongswan__load_result.cmd"
+              - security_strongswan__load_result.rc == 0
+            fail_msg: >-
+              realm {{ security_strongswan__realm_result | default({}) }}, cleanup {{ security_strongswan__cleanup_result | default({}) }},
+              load {{ security_strongswan__load_result | default({}) }}
 
     - name: 'Renew the certificate and change the configuration'
       when: security_strongswan__test_case.renewal

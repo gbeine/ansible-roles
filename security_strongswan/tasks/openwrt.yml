@@ -138,6 +138,23 @@
               in {{ security_strongswan__openwrt_acme_dir }}, acme of bootstrap_openwrt has to issue it first:
               {{ security_strongswan__acme_result.stdout | trim }}
 
+        # A file of a former source or ca_name would stay a trusted CA or a CRL of swanctl
+        - name: 'Remove the CA certificates and CRLs of former sources'
+          when:
+            - not ansible_check_mode
+            - security_strongswan__certificate_merged | length > 0
+          ansible.builtin.raw: >-
+            changed=0;
+            for file in {% for dir in security_strongswan__cleanup_dirs %}'{{ dir }}'/* '{{ dir }}'/.[!.]* {% endfor %}; do
+            test -e "${file}" || test -L "${file}" || continue;
+            test -d "${file}" && continue;
+            case "${file}" in {{ security_strongswan__managed_files | map('quote') | join('|') }}) continue ;; esac;
+            rm -f "${file}"; echo "removed=${file}"; changed=1;
+            done;
+            echo "changed=${changed}"
+          register: 'security_strongswan__cleanup_result'
+          changed_when: "'changed=1' in security_strongswan__cleanup_result.stdout"
+
         - name: 'Create the directory of the hotplug scripts of acme'
           when:
             - not ansible_check_mode
@@ -217,7 +234,8 @@
 
         # strongSwan loads the changed configuration and certificates without a restart, the security associations stay
         - name: 'Load the configuration and the certificates'
-          ansible.builtin.raw: 'swanctl --load-all --noprompt'
+          # --clear unloads the credentials first, so removed CA certificates and CRLs are no longer trusted
+          ansible.builtin.raw: "swanctl --load-all --noprompt{{ ' --clear' if (security_strongswan__cleanup_result | default({})) is changed else '' }}"
           register: 'security_strongswan__load_result'
           changed_when: true
           failed_when: false
@@ -229,6 +247,7 @@
               or (security_strongswan__files_result | default({})) is changed
               or (security_strongswan__ca_result | default({})) is changed
               or (security_strongswan__acme_result | default({})) is changed
+              or (security_strongswan__cleanup_result | default({})) is changed
 
         - name: 'Assert that swanctl loaded the configuration'
           ansible.builtin.assert:

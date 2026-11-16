@@ -110,6 +110,10 @@
           {%-     if (security_strongswan__certificate_merged.ca_name | string) is not match(security_strongswan__ca_name_pattern) -%}
           {%-       set _ = errors.append('strongswan_certificate.ca_name has to be a file name with .pem, .crt or .der') -%}
           {%-     endif -%}
+          {%-     if certificate.source == 'realm' and certificate.realm is string
+                     and certificate.realm is not match(security_strongswan__realm_name_pattern) -%}
+          {%-       set _ = errors.append('strongswan_certificate.realm has to be the name of a realm of letters, digits, _, . and -') -%}
+          {%-     endif -%}
           {%-   endif -%}
           {%- endif -%}
           {{ errors }}
@@ -137,6 +141,26 @@
           {%-   set _ = missing.append(result.item ~ ' (' ~ security_strongswan__certificate[result.item] ~ ')') -%}
           {%- endfor -%}
           {{ missing }}
+
+    # The realm is deployed on the host by pki_easyrsa_deploy
+    - name: 'Find the files of the realm on the host'
+      ansible.builtin.stat:
+        path: "{{ item.src }}"
+      loop: "{{ security_strongswan__realm_files if security_strongswan__certificate_merged.source | default('') == 'realm' else [] }}"
+      loop_control:
+        label: "{{ item.src }}"
+      register: 'security_strongswan__realm_stat'
+
+    - name: 'Validate the files of the realm on the host'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__missing | length == 0
+        fail_msg: >-
+          These files of the realm {{ security_strongswan__certificate_merged.realm | default('') }} do not exist on the host,
+          pki_easyrsa_deploy has to deploy the realm first: {{ security_strongswan__missing | join(', ') }}.
+        quiet: true
+      vars:
+        security_strongswan__missing: "{{ security_strongswan__realm_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
 
     - name: 'Install and configure strongSwan on Debian'
       ansible.builtin.include_tasks: 'debian.yml'

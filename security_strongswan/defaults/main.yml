@@ -9,7 +9,8 @@
 # a dictionary is a section, a list is written separated by commas, true and false are yes and no, null removes the option
 security_strongswan__config: "{{ security_strongswan__config_default | combine(strongswan_config | default({})) }}"
 
-# The certificate of the host, its key and the CA: source files (controller), certbot (pki_certbot on Debian) or acme (OpenWrt),
+# The certificate of the host, its key and the CA: source files (controller), certbot (pki_certbot on Debian),
+# realm (pki_easyrsa_deploy on Debian) or acme (OpenWrt),
 # empty if the role does not manage the certificates
 security_strongswan__certificate: "{{ strongswan_certificate | default({}) }}"
 
@@ -25,6 +26,7 @@ security_strongswan__certificate_defaults:
   files: { ca_name: 'ca.pem' }
   certbot: { ca_name: 'ca.pem', home: '/opt/certbot' }
   acme: { ca_name: 'ca.pem' }
+  realm: { ca_name: 'ca.pem' }
 security_strongswan__certificate_merged: >-
   {{ (security_strongswan__certificate_defaults[security_strongswan__certificate.source | default('')] | default({}))
      | combine(security_strongswan__certificate)
@@ -35,6 +37,25 @@ security_strongswan__certificate_keys:
   files: { required: [ 'source', 'cert', 'key', 'ca' ], optional: [ 'chain', 'ca_name' ] }
   certbot: { required: [ 'source', 'realm', 'ca' ], optional: [ 'home', 'ca_name' ] }
   acme: { required: [ 'source', 'domain', 'ca' ], optional: [ 'ca_name' ] }
+  realm: { required: [ 'source', 'realm' ], optional: [ 'ca_name' ] }
+
+# The realms deployed by pki_easyrsa_deploy, the source realm copies the certificate, the key and the CA of a realm on the host
+security_strongswan__realms_dir: "{{ common_globals__pki_realms_dir }}"
+security_strongswan__realm_name_pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+security_strongswan__realm_dir: "{{ security_strongswan__realms_dir }}/{{ security_strongswan__certificate_merged.realm | default('') }}"
+security_strongswan__realm_files:
+  - src: "{{ security_strongswan__realm_dir }}/public/{{ security_strongswan__certificate_merged.realm | default('') }}.crt"
+    dest: "{{ security_strongswan__cert_file }}"
+    mode: '0644'
+  - src: "{{ security_strongswan__realm_dir }}/private/{{ security_strongswan__certificate_merged.realm | default('') }}.key"
+    dest: "{{ security_strongswan__key_file }}"
+    mode: '0600'
+  - src: "{{ security_strongswan__realm_dir }}/public/ca.crt"
+    dest: "{{ security_strongswan__ca_file }}"
+    mode: '0644'
+  - src: "{{ security_strongswan__realm_dir }}/public/crl.pem"
+    dest: "{{ security_strongswan__crl_file }}"
+    mode: '0644'
 
 # The files of swanctl, the configuration references host.pem with certs and the CA with cacerts
 security_strongswan__swanctl_dir: '/etc/swanctl'
@@ -43,3 +64,16 @@ security_strongswan__cert_file: "{{ security_strongswan__swanctl_dir }}/x509/hos
 security_strongswan__key_file: "{{ security_strongswan__swanctl_dir }}/private/host.key"
 security_strongswan__chain_file: "{{ security_strongswan__swanctl_dir }}/x509ca/chain.pem"
 security_strongswan__ca_file: "{{ security_strongswan__swanctl_dir }}/x509ca/{{ security_strongswan__certificate_merged.ca_name | default('ca.pem') }}"
+security_strongswan__crl_file: "{{ security_strongswan__swanctl_dir }}/x509crl/crl.pem"
+
+# swanctl loads every file of x509ca and x509crl, the role removes the files of former sources and names,
+# so no former CA stays trusted. Without strongswan_certificate the role does not touch them.
+security_strongswan__cleanup_dirs:
+  - "{{ security_strongswan__swanctl_dir }}/x509ca"
+  - "{{ security_strongswan__swanctl_dir }}/x509crl"
+security_strongswan__managed_files: >-
+  {%- set source = security_strongswan__certificate_merged.source | default('') -%}
+  {{ [ security_strongswan__ca_file ]
+     + ([ security_strongswan__chain_file ] if source in [ 'certbot', 'acme' ]
+        or (source == 'files' and security_strongswan__certificate_merged.chain is defined) else [])
+     + ([ security_strongswan__crl_file ] if source == 'realm' else []) }}

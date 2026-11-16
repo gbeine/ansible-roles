@@ -44,6 +44,31 @@
       become: false
       register: 'security_strongswan__test_expected'
 
+    # Only the files of the current source, a former CA would stay trusted
+    - name: 'Read the CA certificates and CRLs of swanctl'
+      ansible.builtin.find:
+        paths: "/etc/swanctl/{{ item }}"
+        file_type: 'any'
+        hidden: true
+      loop: [ 'x509ca', 'x509crl' ]
+      register: 'security_strongswan__test_trusted'
+
+    - name: 'Read the CRLs loaded by charon'
+      ansible.builtin.command: 'swanctl --list-certs --type x509crl'
+      register: 'security_strongswan__test_crls'
+      changed_when: false
+
+    - name: 'Assert the CA certificates and CRLs of swanctl'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_x509ca == security_strongswan__expect.x509ca | sort
+          - security_strongswan__test_x509crl == security_strongswan__expect.x509crl | sort
+          - (security_strongswan__expect.x509crl | length == 0) or (security_strongswan__test_crls.stdout is search('Molecule strongSwan CA'))
+        fail_msg: "x509ca {{ security_strongswan__test_x509ca }}, x509crl {{ security_strongswan__test_x509crl }}, loaded {{ security_strongswan__test_crls.stdout_lines }}"
+      vars:
+        security_strongswan__test_x509ca: "{{ security_strongswan__test_trusted.results[0].files | map(attribute='path') | map('basename') | sort }}"
+        security_strongswan__test_x509crl: "{{ security_strongswan__test_trusted.results[1].files | map(attribute='path') | map('basename') | sort }}"
+
     - name: 'Read the connections of swanctl'
       ansible.builtin.command: 'swanctl --list-conns'
       register: 'security_strongswan__test_conns'

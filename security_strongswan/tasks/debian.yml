@@ -35,7 +35,9 @@
 
 # The root of the CA is not part of the files of certbot
 - name: 'Copy the CA from the controller'
-  when: security_strongswan__certificate_merged | length > 0
+  when:
+    - security_strongswan__certificate_merged | length > 0
+    - security_strongswan__certificate_merged.source != 'realm'
   ansible.builtin.copy:
     src: "{{ security_strongswan__certificate_merged.ca }}"
     dest: "{{ security_strongswan__ca_file }}"
@@ -43,6 +45,21 @@
     group: 'root'
     mode: '0644'
   register: 'security_strongswan__ca_result'
+
+# pki_easyrsa_deploy changes the realm only in a run of Ansible, the play runs security_strongswan afterwards
+- name: 'Copy the certificate of the realm of pki_easyrsa_deploy'
+  when: security_strongswan__certificate_merged.source | default('') == 'realm'
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    remote_src: true
+    owner: 'root'
+    group: 'root'
+    mode: "{{ item.mode }}"
+  loop: "{{ security_strongswan__realm_files }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: 'security_strongswan__realm_result'
 
 - name: 'Deploy the certificate of pki_certbot'
   when: security_strongswan__certificate_merged.source | default('') == 'certbot'
@@ -105,6 +122,27 @@
         state: "{{ 'restarted' if security_strongswan__deploy_result is changed else 'started' }}"
       when: not ansible_check_mode
 
+# A file of a former source or ca_name would stay a trusted CA or a CRL of swanctl
+- name: 'Remove the certificates of former sources'
+  when: security_strongswan__certificate_merged | length > 0
+  block:
+
+    - name: 'Find the CA certificates and CRLs of swanctl'
+      ansible.builtin.find:
+        paths: "{{ security_strongswan__cleanup_dirs }}"
+        file_type: 'any'
+        hidden: true
+      register: 'security_strongswan__cleanup_found'
+
+    - name: 'Remove the CA certificates and CRLs of former sources'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ security_strongswan__cleanup_found.files | rejectattr('isdir') | map(attribute='path')
+           | reject('in', security_strongswan__managed_files) | list }}
+      register: 'security_strongswan__cleanup_result'
+
 # Without the source certbot the deployment of a former run is removed
 - name: 'Remove the deployment of the certificate of pki_certbot'
   when: security_strongswan__certificate_merged.source | default('') != 'certbot'
@@ -143,10 +181,11 @@
     - not ansible_check_mode
     - security_strongswan__config.enabled | bool
 
-# strongSwan loads the changed configuration and certificates without a restart, the security associations stay
+# strongSwan loads the changed configuration and certificates without a restart, the security associations stay.
+# --clear unloads the credentials first, so removed CA certificates and CRLs are no longer trusted.
 - name: 'Load the configuration and the certificates'
   ansible.builtin.command:
-    argv: [ 'swanctl', '--load-all', '--noprompt' ]
+    argv: "{{ [ 'swanctl', '--load-all', '--noprompt' ] + ([ '--clear' ] if (security_strongswan__cleanup_result | default({})) is changed else []) }}"
   register: 'security_strongswan__load_result'
   changed_when: true
   failed_when: false
@@ -158,6 +197,8 @@
       or (security_strongswan__files_result | default({})) is changed
       or (security_strongswan__ca_result | default({})) is changed
       or (security_strongswan__certbot_result | default({})) is changed
+      or (security_strongswan__realm_result | default({})) is changed
+      or (security_strongswan__cleanup_result | default({})) is changed
 
 - name: 'Assert that swanctl loaded the configuration'
   ansible.builtin.assert:
