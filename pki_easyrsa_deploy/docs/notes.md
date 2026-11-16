@@ -20,6 +20,7 @@ of all directories and files of the realm.
 | `<realms_dir>/<name>/private/<name>.key` | private key, mode `0640`, group `ssl-cert` |
 | `<realms_dir>/<name>/public/<name>.crt` | certificate, mode `0644` |
 | `<realms_dir>/<name>/public/ca.crt` | CA certificate |
+| `<realms_dir>/<name>/public/crl.pem` | CRL of the CA, e.g. for `security_strongswan` |
 | `<realms_dir>/<name>/public/<name>.fullchain.crt` | certificate followed by the CA certificate |
 | `<realms_dir>/<name>/cert.pem`, `fullchain.pem`, `chain.pem`, `privkey.pem` | links with the names of certbot |
 | `<site_pki_ca_certificates_dir>/<CA name>.crt` | CA certificate, trusted by the host with `update-ca-certificates` |
@@ -27,6 +28,7 @@ of all directories and files of the realm.
 The name of the CA certificate is `easyrsa_ca_cn` with all characters except letters, digits, `-` and `_` replaced by `_`.
 The files are read from `easyrsa_pki_dir` on the controller (default `<site_pki_secrets_dir>/pki`).
 `update-ca-certificates` only runs if the CA certificate changed.
+The CRL is written by `pki_easyrsa_ca` and after revocations by `pki_easyrsa_cert`, a play deploys a new CRL by running the three roles.
 
 ### Validation
 
@@ -37,7 +39,7 @@ The role checks before any change:
 - `easyrsa_realms` is a list of dictionaries with a name, `easyrsa` is a boolean
 - the names of the realms with `easyrsa: true` consist of letters, digits, `_`, `.` and `-` and are unique
 - `owner` and `group` of the realms are names of users and groups
-- `ca.crt`, the keys and the certificates of the realms exist on the controller, otherwise `pki_easyrsa_ca` and `pki_easyrsa_cert` have to run first
+- `ca.crt`, `crl.pem`, the keys and the certificates of the realms exist on the controller, otherwise `pki_easyrsa_ca` and `pki_easyrsa_cert` have to run first
 - the users and groups exist on the host, the group `ssl-cert` is installed by `bootstrap_debian` with `debian_pki_enable`
 
 ### Migration
@@ -51,6 +53,7 @@ The role checks before any change:
   a changed CA certificate did not change it.
 - The directories are not created recursively anymore, the modes of files below them are not changed.
 - The links of certbot replace existing files with the same name.
+- The CRL is deployed to `public/crl.pem` of every realm, before it stayed on the controller.
 - The tasks run in check mode, they were skipped before.
 - The tags are `pki` and `pki_easyrsa_deploy`.
 - `app_gitlab_ce` reads the directory of the realms from `common_globals__pki_realms_dir`.
@@ -71,13 +74,15 @@ Every platform has its own PKI in the ephemeral directory of molecule.
 `prepare` installs `ca-certificates`, `openssl` and `ssl-cert` and creates the user and group `molecule`.
 `side_effect` runs the roles with a wrong password, unknown options and `EASYRSA_PASSIN` in `easyrsa_ca_config`, invalid realms
 (unknown type, invalid subjectAltName, `easyrsa_environment`, duplicate names, unknown keys, `easyrsa` no boolean), an invalid IP address,
-`EASYRSA_CERT_EXPIRE` not greater than `EASYRSA_PRE_EXPIRY_WINDOW`, the former variable `pki_realms`, the role without the files of the PKI and with an unknown group
+`EASYRSA_CERT_EXPIRE` not greater than `EASYRSA_PRE_EXPIRY_WINDOW`, `EASYRSA_CRL_DAYS` in `easyrsa_cert_config`, the former variable `pki_realms`, the role without the files of the PKI and with an unknown group
 and checks that they fail with the expected messages before the files of the PKI and the certificates on the host change (tasks marked `expect ERROR`).
 On `molecule-easyrsa` it adds a subjectAltName to `molecule-cs` (revoked, built again, CRL written) and renews `molecule-owned` twice
 (renewed, then the renewed certificate revoked and renewed again).
+Then it raises `EASYRSA_CRL_DAYS` of the CA from 3 to 30 days, the CRL expires within half of the validity and is written again and deployed.
 `verify` checks the directories, files, modes, owners and links, the fullchains, the certificates against the CA certificates of the host,
 the extended key usage and subjectAltNames, TLS handshakes with `openssl s_server` and `s_client` (with a client certificate for `molecule-cs`),
-the encrypted private key of the CA and the revoked certificates in the database of the PKI.
+the encrypted private key of the CA and the revoked certificates in the database of the PKI,
+the CRL of the realms (the CRL of the PKI, the revoked certificates and its validity).
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and Easy-RSA 3.2.3 or later in `PATH` (`brew install easy-rsa`).
 

@@ -61,7 +61,8 @@ The module `pki_easyrsa_cert_realm` decides per realm:
   (`revoke-renewed <name> superseded`) and the CRL is written.
 - Otherwise nothing changes, the module only reports `changed` for real changes.
 
-The CRL is `<easyrsa_pki_dir>/crl.pem` on the controller, the role does not deploy it.
+The CRL is `<easyrsa_pki_dir>/crl.pem` on the controller, written with `EASYRSA_CRL_DAYS` of `easyrsa_ca_config` (default 180).
+`pki_easyrsa_ca` renews it before it expires, `pki_easyrsa_deploy` copies it to the realms on the hosts.
 
 ### Secrets
 
@@ -84,7 +85,8 @@ The role checks before any change:
 - the names of the realms with `easyrsa: true` consist of letters, digits, `_`, `.` and `-` and are unique
 - the realms have no unknown `easyrsa_*` keys and no `easyrsa_environment`, `easyrsa_type` is `server`, `client` or `cs`
 - `easyrsa_san` is a list of `DNS:<name>` and `IP:<address>` with valid addresses
-- `easyrsa_cert_config` and `easyrsa_config` of the realms only contain allowed options with strings or numbers without line breaks
+- `easyrsa_cert_config` and `easyrsa_config` of the realms only contain allowed options with strings or numbers without line breaks,
+  `EASYRSA_CRL_DAYS` is an option of the CA in `easyrsa_ca_config`
 - `EASYRSA_CERT_EXPIRE` is greater than `EASYRSA_PRE_EXPIRY_WINDOW`, otherwise the certificates would be renewed on every run
 - Easy-RSA can be run and is not older than 3.2.3, the CA exists and the password opens its private key
 
@@ -98,7 +100,8 @@ The checks of Easy-RSA, the CA and the addresses are done by the module in check
 | `easyrsa_environment` of a realm | `easyrsa_config` of the realm and `easyrsa_san`, the role rejects `easyrsa_environment` |
 | `pki_easyrsa_cert_expire` | `EASYRSA_CERT_EXPIRE` in `easyrsa_cert_config` |
 | `pki_easyrsa_cert_renew` | `EASYRSA_PRE_EXPIRY_WINDOW` in `easyrsa_cert_config` |
-| `pki_easyrsa_crl_days`, `pki_easyrsa_rand_sn`, `pki_easyrsa_ns_support`, `pki_easyrsa_ns_comment` | `EASYRSA_CRL_DAYS`, `EASYRSA_RAND_SN`, `EASYRSA_NS_SUPPORT`, `EASYRSA_NS_COMMENT` in `easyrsa_cert_config` |
+| `pki_easyrsa_crl_days` | `EASYRSA_CRL_DAYS` in `easyrsa_ca_config`, the role rejects it in `easyrsa_cert_config` |
+| `pki_easyrsa_rand_sn`, `pki_easyrsa_ns_support`, `pki_easyrsa_ns_comment` | `EASYRSA_RAND_SN`, `EASYRSA_NS_SUPPORT`, `EASYRSA_NS_COMMENT` in `easyrsa_cert_config` |
 | `pki_easyrsa_renew` | removed, certificates are renewed within `EASYRSA_PRE_EXPIRY_WINDOW` |
 
 The variables of the CA and of Easy-RSA are mapped in the migration of `pki_easyrsa_ca`.

@@ -12,6 +12,7 @@
     pki_easyrsa__test_realms_dir: '/etc/pki/realms'
     pki_easyrsa__test_pki_dir: "{{ pki_easyrsa__test_case.role_vars.easyrsa_pki_dir }}"
     pki_easyrsa__test_ca_file: "/usr/local/share/ca-certificates/{{ pki_easyrsa__test_expect.ca_name }}.crt"
+    pki_easyrsa__test_crl_file: "{{ pki_easyrsa__test_realms_dir }}/{{ pki_easyrsa__test_expect.realms[0].name }}/public/crl.pem"
 
   tasks:
 
@@ -40,6 +41,7 @@
              { 'path': 'public/' ~ '%s.crt', 'type': 'file', 'mode': '0644', 'group': 'public' },
              { 'path': 'public/' ~ '%s.fullchain.crt', 'type': 'file', 'mode': '0644', 'group': 'public' },
              { 'path': 'public/ca.crt', 'type': 'file', 'mode': '0644', 'group': 'public' },
+             { 'path': 'public/crl.pem', 'type': 'file', 'mode': '0644', 'group': 'public' },
              { 'path': 'cert.pem', 'type': 'link', 'source': 'public/%s.crt' },
              { 'path': 'fullchain.pem', 'type': 'link', 'source': 'public/%s.fullchain.crt' },
              { 'path': 'chain.pem', 'type': 'link', 'source': 'public/ca.crt' },
@@ -186,3 +188,36 @@
           - pki_easyrsa__test_pki.stdout_lines[0] == '-----BEGIN ENCRYPTED PRIVATE KEY-----'
           - pki_easyrsa__test_pki.stdout_lines | select('match', '^R\t') | list | length == pki_easyrsa__test_expect.revoked
         fail_msg: "{{ pki_easyrsa__test_pki.stdout_lines | select('match', '^[RV]\t') | list }}"
+
+    # The CRL of the realms is the CRL of the PKI, it lists the revoked certificates and is valid long enough
+    - name: 'Read the validity and the revoked certificates of the CRL on the host'
+      ansible.builtin.shell: >-
+        crl='{{ pki_easyrsa__test_crl_file }}';
+        next=$(openssl crl -in "${crl}" -noout -nextupdate | cut -d= -f2);
+        echo "days=$(( ($(date -d "${next}" +%s) - $(date +%s)) / 86400 ))";
+        echo "revoked=$(openssl crl -in "${crl}" -noout -text | grep -c 'Serial Number')"
+      register: 'pki_easyrsa__test_crl'
+      changed_when: false
+
+    - name: 'Read the checksum of the CRL on the host'
+      ansible.builtin.stat:
+        path: "{{ pki_easyrsa__test_crl_file }}"
+      register: 'pki_easyrsa__test_crl_host'
+
+    - name: 'Read the checksum of the CRL on the controller'
+      ansible.builtin.stat:
+        path: "{{ pki_easyrsa__test_pki_dir }}/crl.pem"
+      register: 'pki_easyrsa__test_crl_controller'
+      delegate_to: 'localhost'
+      become: false
+
+    - name: 'Assert the CRL of the realms'
+      ansible.builtin.assert:
+        that:
+          - pki_easyrsa__test_crl_host.stat.checksum == pki_easyrsa__test_crl_controller.stat.checksum
+          - pki_easyrsa__test_crl_values.days | int >= pki_easyrsa__test_expect.crl_min_days
+          - pki_easyrsa__test_crl_values.revoked | int == pki_easyrsa__test_expect.revoked
+        fail_msg: "CRL {{ pki_easyrsa__test_crl.stdout_lines }}, host {{ pki_easyrsa__test_crl_host.stat.checksum | default('missing') }},
+          controller {{ pki_easyrsa__test_crl_controller.stat.checksum | default('missing') }}"
+      vars:
+        pki_easyrsa__test_crl_values: "{{ dict(pki_easyrsa__test_crl.stdout_lines | map('split', '=', 1)) }}"

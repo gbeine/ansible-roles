@@ -12,6 +12,8 @@ short_description: Initializes a PKI of Easy-RSA and builds its CA
 description:
   - Runs C(easyrsa init-pki) if the directory of the PKI does not exist or is empty and C(easyrsa build-ca) if C(ca.crt) does not exist.
   - An existing CA is never replaced, an existing C(private/ca.key) has to be opened by the password.
+  - Runs C(easyrsa gen-crl) if C(crl.pem) does not exist or its nextUpdate is less than half of C(EASYRSA_CRL_DAYS) away,
+    so the CRL never expires if the module runs at least every C(EASYRSA_CRL_DAYS / 2) days.
   - The password is written to temporary files with mode 0600 and passed as C(--passin=file:...) and C(--passout=file:...),
     it is neither part of the environment nor of the command line.
   - In check mode the module only checks Easy-RSA, the PKI and the password and reports what it would do.
@@ -52,6 +54,7 @@ EXAMPLES = r'''
     config:
       EASYRSA_ALGO: 'ec'
       EASYRSA_CURVE: 'secp384r1'
+      EASYRSA_CRL_DAYS: 180
 '''
 
 RETURN = r'''
@@ -64,17 +67,29 @@ ca_crt:
   description: The certificate of the CA.
   returned: always
   type: str
+crl:
+  description: The CRL of the CA.
+  returned: always
+  type: str
 '''
 
+import calendar
 import os
 import re
 import shutil
 import tempfile
+import time
 
 from ansible.module_utils.basic import AnsibleModule
 
 # renew is part of easyrsa again since 3.2.3, before it needed easyrsa-tools.lib
 MIN_VERSION = (3, 2, 3)
+
+# The default of EASYRSA_CRL_DAYS of Easy-RSA
+CRL_DAYS = 180
+# nextUpdate=Dec  6 10:00:00 2026 GMT of OpenSSL and LibreSSL, the months are not localized
+MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+NEXT_UPDATE = re.compile(r'nextUpdate=(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\s+GMT')
 
 
 class EasyRSA(object):
@@ -135,6 +150,18 @@ class EasyRSA(object):
             return 'Easy-RSA %s is too old, the role needs Easy-RSA %s or later.' % ('.'.join(match.groups()), '.'.join(str(v) for v in MIN_VERSION))
         return None
 
+    def crl_expires(self, crl, days):
+        """True if the CRL does not exist or its nextUpdate is less than half of days away"""
+        if not os.path.exists(crl):
+            return True
+        rc, out, err = self.module.run_command([self.openssl, 'crl', '-in', crl, '-noout', '-nextupdate'])
+        match = NEXT_UPDATE.search(out)
+        if rc != 0 or not match or match.group(1) not in MONTHS:
+            self.module.fail_json(msg='The nextUpdate of the CRL %s cannot be read: %s' % (crl, err.strip() or out.strip()))
+        month, day, hour, minute, second, year = match.groups()
+        next_update = calendar.timegm((int(year), MONTHS.index(month) + 1, int(day), int(hour), int(minute), int(second), 0, 0, 0))
+        return next_update - time.time() < days * 86400 / 2
+
     def check_password(self, key, passin):
         rc, out, err = self.module.run_command([self.openssl, 'pkey', '-in', key, '-passin', 'file:%s' % passin, '-noout'])
         if rc != 0:
@@ -158,7 +185,9 @@ def main():
     pki_dir = easyrsa.pki_dir
     ca_crt = os.path.join(pki_dir, 'ca.crt')
     ca_key = os.path.join(pki_dir, 'private', 'ca.key')
-    result = dict(changed=False, actions=[], ca_crt=ca_crt)
+    crl = os.path.join(pki_dir, 'crl.pem')
+    crl_days = int(easyrsa.env.get('EASYRSA_CRL_DAYS', CRL_DAYS))
+    result = dict(changed=False, actions=[], ca_crt=ca_crt, crl=crl)
 
     try:
         error = easyrsa.check_version()
@@ -180,6 +209,8 @@ def main():
             result['actions'].append('init-pki')
         if not os.path.exists(ca_crt):
             result['actions'].append('build-ca')
+        if not os.path.exists(ca_crt) or easyrsa.crl_expires(crl, crl_days):
+            result['actions'].append('gen-crl')
         result['changed'] = len(result['actions']) > 0
         if module.check_mode or not result['changed']:
             module.exit_json(**result)
@@ -189,6 +220,8 @@ def main():
             os.chmod(pki_dir, 0o700)
         if not os.path.exists(ca_crt):
             easyrsa.run(['--req-cn=%s' % module.params['cn'], '--passin=file:%s' % passin, '--passout=file:%s' % passout, 'build-ca'])
+        if 'gen-crl' in result['actions']:
+            easyrsa.run(['--passin=file:%s' % passin, 'gen-crl'])
         module.exit_json(**result)
     finally:
         easyrsa.cleanup()

@@ -19,7 +19,7 @@
            | map('regex_replace', '^(.*)$', pki_easyrsa__test_realms_dir ~ '/\1/private/\1.key') | list }}
     # The database, the CA and the certificates of the PKI on the controller
     pki_easyrsa__test_checked_pki_files: >-
-      {{ [ pki_easyrsa__test_pki_dir ~ '/index.txt', pki_easyrsa__test_pki_dir ~ '/ca.crt' ]
+      {{ [ pki_easyrsa__test_pki_dir ~ '/index.txt', pki_easyrsa__test_pki_dir ~ '/ca.crt', pki_easyrsa__test_pki_dir ~ '/crl.pem' ]
          + pki_easyrsa__test_case.expect.realms | map(attribute='name')
            | map('regex_replace', '^(.*)$', pki_easyrsa__test_pki_dir ~ '/issued/\1.crt') | list }}
 
@@ -139,3 +139,32 @@
               - pki_easyrsa__test_md5_renewed.results[1].stat.checksum == pki_easyrsa__test_md5_changed.results[1].stat.checksum
               - pki_easyrsa__test_pki_renewed.stdout_lines | select('match', '^R\t') | list | length == 2
             fail_msg: "{{ pki_easyrsa__test_pki_renewed.stdout_lines | select('match', '^[RV]\t') | list }}"
+
+        - name: 'Read the CRL of molecule-cs on the host before the change of EASYRSA_CRL_DAYS'
+          ansible.builtin.stat:
+            path: "{{ pki_easyrsa__test_realms_dir }}/molecule-cs/public/crl.pem"
+            checksum_algorithm: 'md5'
+          register: 'pki_easyrsa__test_crl_before'
+
+        # The CRL of 3 days expires within half of 30 days, pki_easyrsa_ca writes it again and pki_easyrsa_deploy copies it
+        - name: 'Set the longer validity of the CRL'
+          ansible.builtin.set_fact:
+            easyrsa_ca_config: "{{ easyrsa_ca_config | combine({ 'EASYRSA_CRL_DAYS': pki_easyrsa__test_case.side_effect.crl_days }) }}"
+
+        - name: 'Run the roles of Easy-RSA with the longer validity of the CRL'
+          ansible.builtin.include_role:
+            name: "{{ pki_easyrsa__test_role }}"
+          loop: "{{ pki_easyrsa__test_roles }}"
+          loop_control:
+            loop_var: 'pki_easyrsa__test_role'
+
+        - name: 'Read the CRL of molecule-cs on the host after the change of EASYRSA_CRL_DAYS'
+          ansible.builtin.stat:
+            path: "{{ pki_easyrsa__test_realms_dir }}/molecule-cs/public/crl.pem"
+            checksum_algorithm: 'md5'
+          register: 'pki_easyrsa__test_crl_after'
+
+        - name: 'Assert the CRL was written again and deployed'
+          ansible.builtin.assert:
+            that:
+              - pki_easyrsa__test_crl_after.stat.checksum != pki_easyrsa__test_crl_before.stat.checksum

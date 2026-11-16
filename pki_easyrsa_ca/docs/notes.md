@@ -42,16 +42,24 @@ easyrsa_ca_config:
   EASYRSA_ALGO: 'ec'
   EASYRSA_CURVE: 'secp384r1'
   EASYRSA_CA_EXPIRE: 3650
+  EASYRSA_CRL_DAYS: 180
 ```
 
 `easyrsa_ca_config` contains the options of Easy-RSA with the names of `vars.example`, merged over the default of the role
-(`EASYRSA_DN: cn_only`, `EASYRSA_ALGO: rsa`, `EASYRSA_KEY_SIZE: 2048`, `EASYRSA_CA_EXPIRE: 3650`, `EASYRSA_DIGEST: sha256`), `null` removes an option.
+(`EASYRSA_DN: cn_only`, `EASYRSA_ALGO: rsa`, `EASYRSA_KEY_SIZE: 2048`, `EASYRSA_CA_EXPIRE: 3650`, `EASYRSA_CRL_DAYS: 180`, `EASYRSA_DIGEST: sha256`), `null` removes an option.
 They are passed to `easyrsa` in the environment, they contain no secrets.
 `easyrsa_path` is the command of Easy-RSA (default `easyrsa` from `PATH`), `easyrsa_openssl_path` the command of OpenSSL passed as `EASYRSA_OPENSSL`.
 
 The controller needs Easy-RSA 3.2.3 or later, e.g. `brew install easy-rsa`, packages of older releases need `easyrsa_path` to a newer `easyrsa`.
 `renew` is part of `easyrsa` since 3.2.3, before it needed `easyrsa-tools.lib`.
 If a package does not set the version (`Version: ~VER~`), the role warns and continues.
+
+### CRL
+
+The role writes the CRL `<easyrsa_pki_dir>/crl.pem` with `easyrsa gen-crl` if it does not exist
+or its `nextUpdate` is less than half of `EASYRSA_CRL_DAYS` away.
+A play has to run the role at least every `EASYRSA_CRL_DAYS / 2` days, otherwise the CRL expires on the hosts.
+`pki_easyrsa_cert` writes the CRL after every revocation with the same `EASYRSA_CRL_DAYS`, `pki_easyrsa_deploy` copies it to the realms.
 
 ### Secrets
 
@@ -63,7 +71,7 @@ Easy-RSA itself rejects passwords in a `vars` file, the role sets `EASYRSA_NO_VA
 
 ### Allowed variables
 
-The role only allows the options of `vars.example` of Easy-RSA v3.2.7 used by `build-ca` in `easyrsa_ca_config`.
+The role only allows the options of `vars.example` of Easy-RSA v3.2.7 used by `build-ca` and `gen-crl` in `easyrsa_ca_config`.
 This prevents unexpected behavior by accident, e.g. by a typo in an option or by `EASYRSA_PASSIN` with a password in the inventory.
 `EASYRSA_PKI`, `EASYRSA_BATCH`, `EASYRSA_PASSIN`, `EASYRSA_PASSOUT`, `EASYRSA_NO_PASS` and `EASYRSA_OPENSSL` are set by the role,
 `EASYRSA_REQ_CN` is `easyrsa_ca_cn`.
@@ -73,7 +81,8 @@ This prevents unexpected behavior by accident, e.g. by a typo in an option or by
 The role checks before any change:
 
 - `easyrsa_ca_cn` and `easyrsa_ca_password` are strings without line breaks
-- `easyrsa_ca_config` only contains allowed options with strings or numbers without line breaks, `EASYRSA_DN` is `cn_only` or `org`, `EASYRSA_ALGO` is `rsa`, `ec` or `ed`
+- `easyrsa_ca_config` only contains allowed options with strings or numbers without line breaks, `EASYRSA_DN` is `cn_only` or `org`, `EASYRSA_ALGO` is `rsa`, `ec` or `ed`,
+  `EASYRSA_CRL_DAYS` is a positive number of days
 - Easy-RSA can be run and is not older than 3.2.3
 - the directory of the PKI is a PKI of Easy-RSA or empty, `ca.crt` has its private key
 - the password opens an existing `private/ca.key`
@@ -94,11 +103,13 @@ The roles `pki_easyrsa_ca`, `pki_easyrsa_cert` and `pki_easyrsa_deploy` replace 
 | `pki_easyrsa_req_country`, `_province`, `_city`, `_org`, `_email`, `_ou` | `EASYRSA_REQ_*` in `easyrsa_ca_config` and `easyrsa_cert_config` |
 | `pki_easyrsa_key_size`, `pki_easyrsa_algo`, `pki_easyrsa_curve`, `pki_easyrsa_digest` | `EASYRSA_KEY_SIZE`, `EASYRSA_ALGO`, `EASYRSA_CURVE`, `EASYRSA_DIGEST` |
 | `pki_easyrsa_ca_expire` | `EASYRSA_CA_EXPIRE` in `easyrsa_ca_config` |
+| `pki_easyrsa_crl_days` | `EASYRSA_CRL_DAYS` in `easyrsa_ca_config` |
 | `pki_easyrsa_ca_certificates_dir` | `site_pki_ca_certificates_dir` of `common_globals` |
 | `pki_realms` | `easyrsa_realms` of the host, see `pki_easyrsa_cert` |
 
 - The password of the CA was passed as `EASYRSA_PASSIN` and `EASYRSA_PASSOUT` (`pass:…`) in the environment, it is passed in temporary files now.
 - `EASYRSA_CURVE` was never passed, it is used now.
+- The CRL is written when the CA is built and renewed before it expires, before it only existed after the first revocation and expired after `EASYRSA_CRL_DAYS`.
 - The role does not create the `.gitkeep` files in the directories of the PKI anymore and does not remove `vars`, Easy-RSA ignores it.
 - The tags are `pki` and `pki_easyrsa_ca`.
 
