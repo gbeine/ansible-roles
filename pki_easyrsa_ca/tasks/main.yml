@@ -1,65 +1,80 @@
 ---
 
-- name: Initialize Easy-RSA CA
-  tags: [ 'pki_easyrsa_ca'  ]
-  run_once: yes
-  become: no
+# Everything runs on the controller, the private key of the CA never leaves it.
+# throttle: hosts sharing a PKI create it one after the other, the second host finds the CA.
+- name: 'Initialize the PKI and the CA of Easy-RSA on the controller'
+  tags: [ 'pki', 'pki_easyrsa_ca' ]
+  delegate_to: 'localhost'
+  become: false
+  throttle: 1
   block:
 
-    - name: Create secrets directory
-      local_action:
-        module: ansible.builtin.file
-        path: "{{ pki_easyrsa_ca__pki_dir }}"
-        state: directory
-        mode: '750'
+    - name: 'Render the configuration'
+      ansible.builtin.set_fact:
+        pki_easyrsa_ca__config_rendered: "{{ pki_easyrsa_ca__config }}"
 
-    - name: Is Easy-RSA PKI initialized?
-      local_action:
-        module: ansible.builtin.stat
-        path: "{{ pki_easyrsa_ca__pki_dir }}/safessl-easyrsa.cnf"
-      register: easyrsa_pki_stat_result
+    - name: 'Validate the configuration of the CA'
+      ansible.builtin.assert:
+        that: pki_easyrsa_ca__errors | length == 0
+        fail_msg: "{{ pki_easyrsa_ca__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_easyrsa_ca__options: "{{ pki_easyrsa_ca__config_rendered | dict2items | rejectattr('value', 'none') | list }}"
+        pki_easyrsa_ca__errors: >-
+          {%- set errors = [] -%}
+          {%- if pki_easyrsa_ca__cn is not string or pki_easyrsa_ca__cn | length == 0 or pki_easyrsa_ca__cn is search('[\n\r]') -%}
+          {%-   set _ = errors.append('easyrsa_ca_cn has to be a string without line breaks.') -%}
+          {%- endif -%}
+          {%- if pki_easyrsa_ca__password is not string or pki_easyrsa_ca__password | length == 0 or pki_easyrsa_ca__password is search('[\n\r]') -%}
+          {%-   set _ = errors.append('easyrsa_ca_password has to be a string without line breaks.') -%}
+          {%- endif -%}
+          {%- set unknown = pki_easyrsa_ca__config_rendered.keys() | reject('in', pki_easyrsa_ca__config_allowed) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in easyrsa_ca_config: ' ~ unknown | join(', ')
+                  ~ ', allowed are ' ~ pki_easyrsa_ca__config_allowed | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- set invalid = pki_easyrsa_ca__options
+                | selectattr('value', 'boolean') | map(attribute='key') | list
+                + pki_easyrsa_ca__options | rejectattr('value', 'boolean')
+                | rejectattr('value', 'string') | rejectattr('value', 'number') | map(attribute='key') | list
+                + pki_easyrsa_ca__options | selectattr('value', 'string')
+                | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list -%}
+          {%- if invalid | length > 0 -%}
+          {%-   set _ = errors.append('The values of easyrsa_ca_config have to be strings or numbers without line breaks: ' ~ invalid | unique | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- if pki_easyrsa_ca__config_rendered.EASYRSA_DN | default('cn_only') not in [ 'cn_only', 'org' ] -%}
+          {%-   set _ = errors.append('EASYRSA_DN of easyrsa_ca_config has to be cn_only or org.') -%}
+          {%- endif -%}
+          {%- if pki_easyrsa_ca__config_rendered.EASYRSA_ALGO | default('rsa') not in [ 'rsa', 'ec', 'ed' ] -%}
+          {%-   set _ = errors.append('EASYRSA_ALGO of easyrsa_ca_config has to be rsa, ec or ed.') -%}
+          {%- endif -%}
+          {{ errors }}
 
-    - name: Is Easy-RSA CA initialized?
-      local_action:
-        module: ansible.builtin.stat
-        path: "{{ pki_easyrsa_ca__pki_dir }}/ca.crt"
-      register: easyrsa_ca_stat_result
+    # Check mode: checks Easy-RSA, the PKI and the password before anything changes
+    - name: 'Check Easy-RSA, the PKI and the password of the CA'
+      pki_easyrsa_ca_pki:
+        pki_dir: "{{ pki_easyrsa_ca__pki_dir }}"
+        easyrsa: "{{ pki_easyrsa_ca__path }}"
+        openssl: "{{ pki_easyrsa_ca__openssl_path }}"
+        cn: "{{ pki_easyrsa_ca__cn }}"
+        password: "{{ pki_easyrsa_ca__password }}"
+        config: "{{ pki_easyrsa_ca__config_rendered }}"
+      check_mode: true
+      changed_when: false
+      failed_when: false
+      register: 'pki_easyrsa_ca__check'
 
-    - name: Init Easy-RSA PKI
-      local_action:
-        module: ansible.builtin.command
-        chdir: "{{ pki_easyrsa_ca__pki_dir }}"
-        cmd: "{{ pki_easyrsa_ca__path }} init-pki"
-      environment: "{{ pki_easyrsa_ca__environment }}"
-      when: not easyrsa_pki_stat_result.stat.exists
+    - name: 'Validate Easy-RSA, the PKI and the password of the CA'
+      ansible.builtin.assert:
+        that: pki_easyrsa_ca__check.msg is not defined
+        fail_msg: "{{ pki_easyrsa_ca__check.msg | default('') }}"
+        quiet: true
 
-    - name: Remove vars file after initialization
-      local_action:
-        module: ansible.builtin.file
-        path: "{{ pki_easyrsa_ca__pki_dir }}/vars"
-        state: absent
-
-    - name: Create Easy-RSA CA
-      local_action:
-        module: ansible.builtin.command
-        chdir: "{{ pki_easyrsa_ca__pki_dir }}"
-        cmd: "{{ pki_easyrsa_ca__path }} build-ca"
-      environment: "{{ pki_easyrsa_ca__environment }}"
-      when: not easyrsa_ca_stat_result.stat.exists
-
-    - name: Ensure Eays-RSA directories exist
-      local_action:
-        module: ansible.builtin.file
-        dest: "{{ pki_easyrsa_ca__pki_dir }}/{{ item }}"
-        state: directory
-        recurse: yes
-      with_items: "{{ pki_easyrsa_ca__directories_gitkeep }}"
-      when: not easyrsa_pki_stat_result.stat.exists
-
-    - name: Keep Eays-RSA directories in git
-      local_action:
-        module: ansible.builtin.file
-        dest: "{{ pki_easyrsa_ca__pki_dir }}/{{ item }}/.gitkeep"
-        state: touch
-      with_items: "{{ pki_easyrsa_ca__directories_gitkeep }}"
-      when: not easyrsa_pki_stat_result.stat.exists
+    - name: 'Create the PKI and the CA'
+      pki_easyrsa_ca_pki:
+        pki_dir: "{{ pki_easyrsa_ca__pki_dir }}"
+        easyrsa: "{{ pki_easyrsa_ca__path }}"
+        openssl: "{{ pki_easyrsa_ca__openssl_path }}"
+        cn: "{{ pki_easyrsa_ca__cn }}"
+        password: "{{ pki_easyrsa_ca__password }}"
+        config: "{{ pki_easyrsa_ca__config_rendered }}"

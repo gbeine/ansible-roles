@@ -1,0 +1,141 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_easyrsa__test_case: "{{ pki_easyrsa__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_easyrsa__test_realms_dir: '/etc/pki/realms'
+    pki_easyrsa__test_pki_dir: "{{ pki_easyrsa__test_case.role_vars.easyrsa_pki_dir }}"
+    # The CA certificate and the certificates and keys of the realms on the host
+    pki_easyrsa__test_checked_files: >-
+      {{ [ '/usr/local/share/ca-certificates/' ~ pki_easyrsa__test_case.expect.ca_name ~ '.crt' ]
+         + pki_easyrsa__test_case.expect.realms | map(attribute='name')
+           | map('regex_replace', '^(.*)$', pki_easyrsa__test_realms_dir ~ '/\1/public/\1.crt') | list
+         + pki_easyrsa__test_case.expect.realms | map(attribute='name')
+           | map('regex_replace', '^(.*)$', pki_easyrsa__test_realms_dir ~ '/\1/private/\1.key') | list }}
+    # The database, the CA and the certificates of the PKI on the controller
+    pki_easyrsa__test_checked_pki_files: >-
+      {{ [ pki_easyrsa__test_pki_dir ~ '/index.txt', pki_easyrsa__test_pki_dir ~ '/ca.crt' ]
+         + pki_easyrsa__test_case.expect.realms | map(attribute='name')
+           | map('regex_replace', '^(.*)$', pki_easyrsa__test_pki_dir ~ '/issued/\1.crt') | list }}
+
+  pre_tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ pki_easyrsa__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+  tasks:
+
+    - name: 'Read the checksums of the certificates on the host before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_easyrsa__test_checked_files }}"
+      register: 'pki_easyrsa__test_md5_before'
+
+    - name: 'Read the checksums of the files of the PKI on the controller before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_easyrsa__test_checked_pki_files }}"
+      register: 'pki_easyrsa__test_pki_md5_before'
+      delegate_to: 'localhost'
+      become: false
+
+    - name: 'Run the roles of Easy-RSA with invalid variables (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      loop: "{{ pki_easyrsa__test_invalid_runs }}"
+      loop_control:
+        loop_var: 'pki_easyrsa__test_invalid'
+        label: "{{ pki_easyrsa__test_invalid.message }}"
+
+    # A new subjectAltName of molecule-cs and the renewal of molecule-owned
+    - name: 'Change the subjectAltNames of molecule-cs and renew molecule-owned'
+      when: pki_easyrsa__test_case.side_effect is defined
+      block:
+
+        - name: 'Set the changed realms'
+          ansible.builtin.set_fact:
+            site_pki_realms: "{{ pki_easyrsa__test_case.side_effect.realms_changed }}"
+
+        - name: 'Run the roles of Easy-RSA with the changed realms'
+          ansible.builtin.include_role:
+            name: "{{ pki_easyrsa__test_role }}"
+          loop: "{{ pki_easyrsa__test_roles }}"
+          loop_control:
+            loop_var: 'pki_easyrsa__test_role'
+
+        - name: 'Read the checksums of the certificates on the host after the change'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: 'md5'
+          loop: "{{ pki_easyrsa__test_checked_files }}"
+          register: 'pki_easyrsa__test_md5_changed'
+
+        - name: 'Read the database and the renewed certificate of the PKI on the controller'
+          ansible.builtin.command:
+            argv: [ 'cat', "{{ pki_easyrsa__test_pki_dir }}/index.txt", "{{ pki_easyrsa__test_pki_dir }}/renewed/issued/molecule-owned.crt",
+                    "{{ pki_easyrsa__test_pki_dir }}/crl.pem" ]
+          register: 'pki_easyrsa__test_pki_changed'
+          changed_when: false
+          delegate_to: 'localhost'
+          become: false
+
+        - name: 'Assert molecule-cs was built again and molecule-owned was renewed'
+          ansible.builtin.assert:
+            that:
+              # molecule-cs: certificate and key are new
+              - pki_easyrsa__test_md5_changed.results[1].stat.checksum != pki_easyrsa__test_md5_before.results[1].stat.checksum
+              - pki_easyrsa__test_md5_changed.results[4].stat.checksum != pki_easyrsa__test_md5_before.results[4].stat.checksum
+              # molecule-client: unchanged
+              - pki_easyrsa__test_md5_changed.results[2].stat.checksum == pki_easyrsa__test_md5_before.results[2].stat.checksum
+              - pki_easyrsa__test_md5_changed.results[5].stat.checksum == pki_easyrsa__test_md5_before.results[5].stat.checksum
+              # molecule-owned: new certificate, the key stays
+              - pki_easyrsa__test_md5_changed.results[3].stat.checksum != pki_easyrsa__test_md5_before.results[3].stat.checksum
+              - pki_easyrsa__test_md5_changed.results[6].stat.checksum == pki_easyrsa__test_md5_before.results[6].stat.checksum
+              # one revoked certificate in the database and a CRL
+              - pki_easyrsa__test_pki_changed.stdout_lines | select('match', '^R\t') | list | length == 1
+              - pki_easyrsa__test_pki_changed.stdout is search('BEGIN X509 CRL')
+            fail_msg: "{{ pki_easyrsa__test_pki_changed.stdout_lines | select('match', '^[RV]\t') | list }}"
+
+        - name: 'Set the realms with molecule-owned expiring again'
+          ansible.builtin.set_fact:
+            site_pki_realms: "{{ pki_easyrsa__test_case.side_effect.realms_renewed }}"
+
+        - name: 'Run the roles of Easy-RSA with molecule-owned expiring again'
+          ansible.builtin.include_role:
+            name: "{{ pki_easyrsa__test_role }}"
+          loop: "{{ pki_easyrsa__test_roles }}"
+          loop_control:
+            loop_var: 'pki_easyrsa__test_role'
+
+        - name: 'Read the checksums of the certificates on the host after the second renewal'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: 'md5'
+          loop: "{{ pki_easyrsa__test_checked_files }}"
+          register: 'pki_easyrsa__test_md5_renewed'
+
+        - name: 'Read the database of the PKI on the controller after the second renewal'
+          ansible.builtin.command:
+            argv: [ 'cat', "{{ pki_easyrsa__test_pki_dir }}/index.txt" ]
+          register: 'pki_easyrsa__test_pki_renewed'
+          changed_when: false
+          delegate_to: 'localhost'
+          become: false
+
+        - name: 'Assert molecule-owned was renewed again and the former renewed certificate was revoked'
+          ansible.builtin.assert:
+            that:
+              - pki_easyrsa__test_md5_renewed.results[3].stat.checksum != pki_easyrsa__test_md5_changed.results[3].stat.checksum
+              - pki_easyrsa__test_md5_renewed.results[1].stat.checksum == pki_easyrsa__test_md5_changed.results[1].stat.checksum
+              - pki_easyrsa__test_pki_renewed.stdout_lines | select('match', '^R\t') | list | length == 2
+            fail_msg: "{{ pki_easyrsa__test_pki_renewed.stdout_lines | select('match', '^[RV]\t') | list }}"

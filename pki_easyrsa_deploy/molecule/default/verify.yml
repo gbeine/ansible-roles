@@ -1,0 +1,188 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_easyrsa__test_case: "{{ pki_easyrsa__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_easyrsa__test_expect: "{{ pki_easyrsa__test_case.expect }}"
+    pki_easyrsa__test_realms_dir: '/etc/pki/realms'
+    pki_easyrsa__test_pki_dir: "{{ pki_easyrsa__test_case.role_vars.easyrsa_pki_dir }}"
+    pki_easyrsa__test_ca_file: "/usr/local/share/ca-certificates/{{ pki_easyrsa__test_expect.ca_name }}.crt"
+
+  tasks:
+
+    - name: 'Read the state of the CA certificate in the CA certificates'
+      ansible.builtin.stat:
+        path: "{{ pki_easyrsa__test_ca_file }}"
+      register: 'pki_easyrsa__test_ca_stat'
+
+    - name: 'Assert the CA certificate in the CA certificates'
+      ansible.builtin.assert:
+        that:
+          - pki_easyrsa__test_ca_stat.stat.exists
+          - pki_easyrsa__test_ca_stat.stat.mode == '0644'
+          - pki_easyrsa__test_ca_stat.stat.pw_name == 'root'
+
+    - name: 'Read the state of the directories, files and links of the realms'
+      ansible.builtin.stat:
+        path: "{{ pki_easyrsa__test_realms_dir }}/{{ item.0.name }}/{{ item.1.path | replace('%s', item.0.name) }}"
+      # %s is the name of the realm
+      loop: >-
+        {{ pki_easyrsa__test_expect.realms | product([
+             { 'path': 'config', 'type': 'dir', 'mode': '0755', 'group': 'public' },
+             { 'path': 'private', 'type': 'dir', 'mode': '0750', 'group': 'private' },
+             { 'path': 'public', 'type': 'dir', 'mode': '0755', 'group': 'public' },
+             { 'path': 'private/' ~ '%s.key', 'type': 'file', 'mode': '0640', 'group': 'private' },
+             { 'path': 'public/' ~ '%s.crt', 'type': 'file', 'mode': '0644', 'group': 'public' },
+             { 'path': 'public/' ~ '%s.fullchain.crt', 'type': 'file', 'mode': '0644', 'group': 'public' },
+             { 'path': 'public/ca.crt', 'type': 'file', 'mode': '0644', 'group': 'public' },
+             { 'path': 'cert.pem', 'type': 'link', 'source': 'public/%s.crt' },
+             { 'path': 'fullchain.pem', 'type': 'link', 'source': 'public/%s.fullchain.crt' },
+             { 'path': 'chain.pem', 'type': 'link', 'source': 'public/ca.crt' },
+             { 'path': 'privkey.pem', 'type': 'link', 'source': 'private/%s.key' } ]) | list }}
+      loop_control:
+        label: "{{ item.0.name }}/{{ item.1.path | replace('%s', item.0.name) }}"
+      register: 'pki_easyrsa__test_stats'
+
+    - name: 'Assert the directories, files and links of the realms'
+      ansible.builtin.assert:
+        that:
+          - pki_easyrsa__test_stat.exists
+          - (pki_easyrsa__test_spec.type != 'dir') or (pki_easyrsa__test_stat.isdir | default(false))
+          - (pki_easyrsa__test_spec.type != 'file') or (pki_easyrsa__test_stat.isreg | default(false))
+          - (pki_easyrsa__test_spec.type != 'link') or (pki_easyrsa__test_stat.islnk | default(false))
+          - (pki_easyrsa__test_spec.type == 'link') or (pki_easyrsa__test_stat.mode == pki_easyrsa__test_spec.mode)
+          - (pki_easyrsa__test_spec.type == 'link') or (pki_easyrsa__test_stat.pw_name == pki_easyrsa__test_realm.owner)
+          - (pki_easyrsa__test_spec.type == 'link') or (pki_easyrsa__test_stat.gr_name == pki_easyrsa__test_realm[pki_easyrsa__test_spec.group ~ '_group'])
+          - (pki_easyrsa__test_spec.type != 'link')
+            or (pki_easyrsa__test_stat.lnk_target | default('') == pki_easyrsa__test_spec.source | replace('%s', pki_easyrsa__test_realm.name))
+        fail_msg: "{{ item.item.0.name }}/{{ item.item.1.path | replace('%s', item.item.0.name) }}: {{ pki_easyrsa__test_stat }}"
+        quiet: true
+      loop: "{{ pki_easyrsa__test_stats.results }}"
+      loop_control:
+        label: "{{ item.item.0.name }}/{{ item.item.1.path | replace('%s', item.item.0.name) }}"
+      vars:
+        pki_easyrsa__test_realm: "{{ item.item.0 }}"
+        pki_easyrsa__test_spec: "{{ item.item.1 }}"
+        pki_easyrsa__test_stat: "{{ item.stat }}"
+
+    - name: 'Read the realms that are not deployed'
+      ansible.builtin.stat:
+        path: "{{ pki_easyrsa__test_realms_dir }}/{{ item }}"
+      loop: "{{ pki_easyrsa__test_expect.absent }}"
+      register: 'pki_easyrsa__test_absent'
+
+    - name: 'Assert the realms of other roles are not deployed'
+      ansible.builtin.assert:
+        that: pki_easyrsa__test_absent.results | map(attribute='stat') | selectattr('exists') | list | length == 0
+
+    - name: 'Read the certificates, the CA certificates and the fullchains of the realms'
+      ansible.builtin.slurp:
+        src: "{{ pki_easyrsa__test_realms_dir }}/{{ item.0.name }}/public/{{ item.1 | replace('%s', item.0.name) }}"
+      loop: "{{ pki_easyrsa__test_expect.realms | product([ '%s.crt', 'ca.crt', '%s.fullchain.crt' ]) | list }}"
+      loop_control:
+        label: "{{ item.0.name }}/{{ item.1 | replace('%s', item.0.name) }}"
+      register: 'pki_easyrsa__test_certificates'
+
+    - name: 'Assert the fullchains are the certificates followed by the CA certificate'
+      ansible.builtin.assert:
+        that:
+          - (pki_easyrsa__test_files[2].content | b64decode) == (pki_easyrsa__test_files[0].content | b64decode) ~ (pki_easyrsa__test_files[1].content | b64decode)
+        quiet: true
+      loop: "{{ range(pki_easyrsa__test_expect.realms | length) | list }}"
+      loop_control:
+        label: "{{ pki_easyrsa__test_expect.realms[item].name }}"
+      vars:
+        pki_easyrsa__test_files: "{{ pki_easyrsa__test_certificates.results[item * 3:item * 3 + 3] }}"
+
+    - name: 'Verify the certificates of the realms with the CA certificates of the host'
+      ansible.builtin.command:
+        argv: [ 'openssl', 'verify', '-CApath', '/etc/ssl/certs', "{{ pki_easyrsa__test_realms_dir }}/{{ item.name }}/public/{{ item.name }}.crt" ]
+      loop: "{{ pki_easyrsa__test_expect.realms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+
+    - name: 'Read the extended key usage and the subjectAltNames of the certificates'
+      ansible.builtin.command:
+        argv: [ 'openssl', 'x509', '-noout', '-ext', 'extendedKeyUsage,subjectAltName',
+                '-in', "{{ pki_easyrsa__test_realms_dir }}/{{ item.name }}/public/{{ item.name }}.crt" ]
+      loop: "{{ pki_easyrsa__test_expect.realms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      register: 'pki_easyrsa__test_extensions'
+
+    - name: 'Assert the extended key usage and the subjectAltNames of the certificates'
+      ansible.builtin.assert:
+        that:
+          - pki_easyrsa__test_lines[pki_easyrsa__test_lines.index('X509v3 Extended Key Usage:') + 1] == item.item.eku
+          - >-
+            (item.item.san == '' and 'X509v3 Subject Alternative Name:' not in pki_easyrsa__test_lines)
+            or (item.item.san != '' and pki_easyrsa__test_lines[pki_easyrsa__test_lines.index('X509v3 Subject Alternative Name:') + 1] == item.item.san)
+        fail_msg: "{{ item.item.name }}: {{ pki_easyrsa__test_lines }}"
+      loop: "{{ pki_easyrsa__test_extensions.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      vars:
+        pki_easyrsa__test_lines: "{{ item.stdout_lines | map('trim') | list }}"
+
+    # The server presents the certificate of the realm, the client verifies it with the CA certificates of the host.
+    # With a client realm the server requires and verifies the client certificate.
+    - name: 'Run a TLS handshake with the certificates of the realms'
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          dir='{{ pki_easyrsa__test_realms_dir }}'
+          # The server waits for the client, sleep keeps its input open
+          sleep 30 | openssl s_server -accept 127.0.0.1:{{ 8443 + index }} -naccept 1 -quiet -cert "$dir/{{ item.realm }}/cert.pem" -key "$dir/{{ item.realm }}/privkey.pem" {{ pki_easyrsa__test_server_args }} >/dev/null 2>&1 &
+          server=$!
+          sleep 1
+          echo | timeout 10 openssl s_client -connect 127.0.0.1:{{ 8443 + index }} -brief -verify_return_error -CApath /etc/ssl/certs {{ item.verify }} {{ pki_easyrsa__test_client_args }}
+          rc=$?
+          kill "$server" 2>/dev/null
+          exit $rc
+        executable: '/bin/bash'
+      vars:
+        # With a client realm the server requires the client certificate, the client presents it
+        pki_easyrsa__test_server_args: >-
+          {{ ('-Verify 1 -verify_return_error -CAfile ' ~ pki_easyrsa__test_realms_dir ~ '/' ~ item.realm ~ '/chain.pem')
+             if item.client is defined else '' }}
+        pki_easyrsa__test_client_args: >-
+          {{ ('-cert ' ~ pki_easyrsa__test_realms_dir ~ '/' ~ item.client ~ '/cert.pem -key '
+              ~ pki_easyrsa__test_realms_dir ~ '/' ~ item.client ~ '/privkey.pem')
+             if item.client is defined else '' }}
+      loop: "{{ pki_easyrsa__test_expect.tls }}"
+      loop_control:
+        label: "{{ item.realm }}"
+        index_var: 'index'
+      changed_when: false
+      register: 'pki_easyrsa__test_tls'
+
+    - name: 'Assert the TLS handshakes'
+      ansible.builtin.assert:
+        that:
+          - "(item.stdout ~ item.stderr) is search('Verification: OK')"
+        fail_msg: "{{ item.item.realm }}: {{ item.stdout }} {{ item.stderr }}"
+      loop: "{{ pki_easyrsa__test_tls.results }}"
+      loop_control:
+        label: "{{ item.item.realm }}"
+
+    - name: 'Read the private key of the CA and the database of the PKI on the controller'
+      ansible.builtin.command:
+        argv: [ 'cat', "{{ pki_easyrsa__test_pki_dir }}/private/ca.key", "{{ pki_easyrsa__test_pki_dir }}/index.txt" ]
+      register: 'pki_easyrsa__test_pki'
+      changed_when: false
+      delegate_to: 'localhost'
+      become: false
+
+    - name: 'Assert the private key of the CA is encrypted and the revoked certificates'
+      ansible.builtin.assert:
+        that:
+          - pki_easyrsa__test_pki.stdout_lines[0] == '-----BEGIN ENCRYPTED PRIVATE KEY-----'
+          - pki_easyrsa__test_pki.stdout_lines | select('match', '^R\t') | list | length == pki_easyrsa__test_expect.revoked
+        fail_msg: "{{ pki_easyrsa__test_pki.stdout_lines | select('match', '^[RV]\t') | list }}"

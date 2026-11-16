@@ -1,23 +1,167 @@
 ---
 
-- name: Create Easy-RSA certificate
-  tags: [ 'pki', 'pki_easyrsa_cert'  ]
-  become: no
+# Everything runs on the controller, the private key of the CA never leaves it.
+# throttle: hosts sharing a realm create its certificate one after the other, the second host finds it.
+- name: 'Create the certificates of the realms with Easy-RSA on the controller'
+  tags: [ 'pki', 'pki_easyrsa_cert' ]
+  delegate_to: 'localhost'
+  become: false
+  throttle: 1
   block:
 
-    - name: Is Easy-RSA CA initialized?
-      local_action:
-        module: ansible.builtin.stat
-        path: "{{ pki_easyrsa_cert__pki_dir }}/ca.crt"
-      register: easyrsa_ca_stat_result
+    - name: 'Render the configuration'
+      ansible.builtin.set_fact:
+        pki_easyrsa_cert__config_rendered: "{{ pki_easyrsa_cert__config }}"
 
-    - name: Easy-RSA PKI is not initialized
-      ansible.builtin.fail:
-        msg: The Easy-RSA CA has is not initialized
-      when: not easyrsa_ca_stat_result.stat.exists
+    - name: 'Validate the configuration and the realms'
+      ansible.builtin.assert:
+        that: pki_easyrsa_cert__errors | length == 0
+        fail_msg: "{{ pki_easyrsa_cert__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_easyrsa_cert__errors: >-
+          {%- set errors = [] -%}
+          {%- set realms = pki_easyrsa_cert__realms -%}
+          {%- if realms is not sequence or realms is string or realms is mapping -%}
+          {%-   set _ = errors.append('site_pki_realms has to be a list of realms.') -%}
+          {%- else -%}
+          {%-   set broken = realms | reject('mapping') | list | length + realms | select('mapping') | rejectattr('name', 'defined') | list | length -%}
+          {%-   if broken > 0 -%}
+          {%-     set _ = errors.append('The realms of site_pki_realms have to be dictionaries with a name.') -%}
+          {%-   endif -%}
+          {%-   set named = realms | select('mapping') | selectattr('name', 'defined') | list -%}
+          {%-   set environment = named | selectattr('easyrsa_environment', 'defined') | map(attribute='name') | list -%}
+          {%-   if environment | length > 0 -%}
+          {%-     set _ = errors.append('easyrsa_environment is replaced by easyrsa_config and easyrsa_san, see the migration of pki_easyrsa_cert: '
+                    ~ environment | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   set not_boolean = named | selectattr('easyrsa', 'defined') | rejectattr('easyrsa', 'boolean') | map(attribute='name') | list -%}
+          {%-   if not_boolean | length > 0 -%}
+          {%-     set _ = errors.append('easyrsa of the realms has to be a boolean: ' ~ not_boolean | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   set unknown = [] -%}
+          {%-   set invalid_names = [] -%}
+          {%-   set invalid_types = [] -%}
+          {%-   set invalid_sans = [] -%}
+          {%-   set invalid_configs = [] -%}
+          {%-   for realm in pki_easyrsa_cert__realms_easyrsa -%}
+          {%-     set keys = realm.keys() | select('match', '^easyrsa') | reject('in', pki_easyrsa_cert__realm_keys + [ 'easyrsa_environment' ]) | list -%}
+          {%-     if keys | length > 0 -%}
+          {%-       set _ = unknown.append(realm.name ~ ' (' ~ keys | join(', ') ~ ')') -%}
+          {%-     endif -%}
+          {%-     if realm.name is not string or realm.name is not match(pki_easyrsa_cert__name_pattern) -%}
+          {%-       set _ = invalid_names.append(realm.name | string) -%}
+          {%-     endif -%}
+          {%-     if realm.easyrsa_type | default('server') not in pki_easyrsa_cert__types -%}
+          {%-       set _ = invalid_types.append(realm.name | string) -%}
+          {%-     endif -%}
+          {%-     set san = realm.easyrsa_san | default([]) -%}
+          {%-     if san is not sequence or san is string or san is mapping
+                    or san | reject('string') | list | length > 0
+                    or san | select('string') | reject('match', pki_easyrsa_cert__san_pattern) | list | length > 0 -%}
+          {%-       set _ = invalid_sans.append(realm.name | string) -%}
+          {%-     endif -%}
+          {%-     if realm.easyrsa_config is defined and realm.easyrsa_config is not mapping -%}
+          {%-       set _ = invalid_configs.append(realm.name | string) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in the realms: ' ~ unknown | join(', ') ~ ', allowed are ' ~ pki_easyrsa_cert__realm_keys | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   if invalid_names | length > 0 -%}
+          {%-     set _ = errors.append('The names of the realms consist of letters, digits, _, . and -: ' ~ invalid_names | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   set names = pki_easyrsa_cert__realms_easyrsa | map(attribute='name') | map('string') | list -%}
+          {%-   set duplicates = [] -%}
+          {%-   for name in names if names | select('equalto', name) | list | length > 1 and name not in duplicates -%}
+          {%-     set _ = duplicates.append(name) -%}
+          {%-   endfor -%}
+          {%-   if duplicates | length > 0 -%}
+          {%-     set _ = errors.append('The names of the realms have to be unique: ' ~ duplicates | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   if invalid_types | length > 0 -%}
+          {%-     set _ = errors.append('easyrsa_type of the realms has to be ' ~ pki_easyrsa_cert__types | join(', ') ~ ': ' ~ invalid_types | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   if invalid_sans | length > 0 -%}
+          {%-     set _ = errors.append('easyrsa_san of the realms has to be a list of DNS:<name> and IP:<address>: ' ~ invalid_sans | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   if invalid_configs | length > 0 -%}
+          {%-     set _ = errors.append('easyrsa_config of the realms has to be a dictionary: ' ~ invalid_configs | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set configs = [ { 'name': 'easyrsa_cert_config', 'config': pki_easyrsa_cert__config_rendered } ] -%}
+          {%- for realm in pki_easyrsa_cert__realms_easyrsa if realm.easyrsa_config is defined and realm.easyrsa_config is mapping -%}
+          {%-   set _ = configs.append({ 'name': 'easyrsa_config of ' ~ realm.name, 'config': realm.easyrsa_config }) -%}
+          {%- endfor -%}
+          {%- for entry in configs -%}
+          {%-   set options = entry.config | dict2items | rejectattr('value', 'none') | list -%}
+          {%-   set unknown = entry.config.keys() | reject('in', pki_easyrsa_cert__config_allowed) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in ' ~ entry.name ~ ': ' ~ unknown | join(', ')
+                    ~ ', allowed are ' ~ pki_easyrsa_cert__config_allowed | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%-   set invalid = options | selectattr('value', 'boolean') | map(attribute='key') | list
+                  + options | rejectattr('value', 'boolean') | rejectattr('value', 'string') | rejectattr('value', 'number') | map(attribute='key') | list
+                  + options | selectattr('value', 'string') | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The values of ' ~ entry.name ~ ' have to be strings or numbers without line breaks: ' ~ invalid | unique | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set renewed_always = [] -%}
+          {%- for realm in pki_easyrsa_cert__realms_easyrsa -%}
+          {%-   set realm_config = realm.easyrsa_config | default({}) -%}
+          {%-   set config = pki_easyrsa_cert__config_rendered | combine(realm_config if realm_config is mapping else {}) -%}
+          {%-   set expire = config.EASYRSA_CERT_EXPIRE | default(825) -%}
+          {%-   set window = config.EASYRSA_PRE_EXPIRY_WINDOW | default(90) -%}
+          {%-   if expire is number and window is number and expire is not boolean and window is not boolean and expire <= window -%}
+          {%-     set _ = renewed_always.append(realm.name | string) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if renewed_always | length > 0 -%}
+          {%-   set _ = errors.append('EASYRSA_CERT_EXPIRE has to be greater than EASYRSA_PRE_EXPIRY_WINDOW, the certificates would be renewed on every run: '
+                  ~ renewed_always | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
-    - name: Create realms
-      include_tasks: realm.yml
+    # Check mode: checks Easy-RSA, the CA, the password and the subjectAltNames before anything changes
+    - name: 'Check Easy-RSA, the CA and the realms'
+      pki_easyrsa_cert_realm:
+        pki_dir: "{{ pki_easyrsa_cert__pki_dir }}"
+        easyrsa: "{{ pki_easyrsa_cert__path }}"
+        openssl: "{{ pki_easyrsa_cert__openssl_path }}"
+        name: "{{ realm.name }}"
+        type: "{{ realm.easyrsa_type | default('server') }}"
+        san: "{{ realm.easyrsa_san | default([]) }}"
+        password: "{{ pki_easyrsa_cert__password }}"
+        config: "{{ pki_easyrsa_cert__config_rendered | combine(realm.easyrsa_config | default({})) }}"
+      loop: "{{ pki_easyrsa_cert__realms_easyrsa }}"
       loop_control:
-        loop_var: realm
-      with_items: "{{ pki_easyrsa_cert__realms }}"
+        loop_var: 'realm'
+        label: "{{ realm.name }}"
+      check_mode: true
+      changed_when: false
+      failed_when: false
+      register: 'pki_easyrsa_cert__check'
+
+    - name: 'Validate Easy-RSA, the CA and the realms'
+      ansible.builtin.assert:
+        that: pki_easyrsa_cert__check_errors | length == 0
+        fail_msg: "{{ pki_easyrsa_cert__check_errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_easyrsa_cert__check_errors: "{{ pki_easyrsa_cert__check.results | default([]) | selectattr('msg', 'defined') | map(attribute='msg') | unique | list }}"
+
+    - name: 'Create, rebuild and renew the certificates of the realms'
+      pki_easyrsa_cert_realm:
+        pki_dir: "{{ pki_easyrsa_cert__pki_dir }}"
+        easyrsa: "{{ pki_easyrsa_cert__path }}"
+        openssl: "{{ pki_easyrsa_cert__openssl_path }}"
+        name: "{{ realm.name }}"
+        type: "{{ realm.easyrsa_type | default('server') }}"
+        san: "{{ realm.easyrsa_san | default([]) }}"
+        password: "{{ pki_easyrsa_cert__password }}"
+        config: "{{ pki_easyrsa_cert__config_rendered | combine(realm.easyrsa_config | default({})) }}"
+      loop: "{{ pki_easyrsa_cert__realms_easyrsa }}"
+      loop_control:
+        loop_var: 'realm'
+        label: "{{ realm.name }}"

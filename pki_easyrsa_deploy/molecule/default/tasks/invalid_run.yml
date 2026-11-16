@@ -1,0 +1,76 @@
+---
+# Runs the roles of Easy-RSA with invalid variables, the roles have to fail before the files of the PKI
+# on the controller and the certificates on the host change. The variables of the test case are restored afterwards.
+
+- name: "Run the roles of Easy-RSA with {{ pki_easyrsa__test_invalid.message }} (expect ERROR)"
+  block:
+
+    - name: 'Set the invalid variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ pki_easyrsa__test_invalid.vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run the roles of Easy-RSA, they have to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: "{{ pki_easyrsa__test_role }}"
+      loop: "{{ pki_easyrsa__test_invalid.roles | default(pki_easyrsa__test_roles) }}"
+      loop_control:
+        loop_var: 'pki_easyrsa__test_role'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ pki_easyrsa__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksums of the certificates on the host after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_easyrsa__test_checked_files }}"
+      register: 'pki_easyrsa__test_md5_after'
+
+    - name: 'Read the checksums of the files of the PKI on the controller after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_easyrsa__test_checked_pki_files }}"
+      register: 'pki_easyrsa__test_pki_md5_after'
+      delegate_to: 'localhost'
+      become: false
+
+    - name: 'Assert the run failed with the expected messages before the files changed'
+      ansible.builtin.assert:
+        that:
+          - pki_easyrsa__test_missing | length == 0
+          - pki_easyrsa__test_before | select('equalto', '') | list | length == 0
+          - pki_easyrsa__test_after == pki_easyrsa__test_before
+        fail_msg: >-
+          Failure: {{ pki_easyrsa__test_failure }}
+          Missing messages: {{ pki_easyrsa__test_missing | join(' | ') }}.
+          Checksums before: {{ pki_easyrsa__test_before | join(', ') }},
+          after: {{ pki_easyrsa__test_after | join(', ') }}.
+      vars:
+        # A failed loop reports the messages of the items in results
+        pki_easyrsa__test_failure: "{{ ([ ansible_failed_result.msg | default('') ]
+          + (ansible_failed_result.results | default([]) | map(attribute='msg', default='') | list)) | join(' ') }}"
+        pki_easyrsa__test_missing: >-
+          {%- set missing = [] -%}
+          {%- for pattern in pki_easyrsa__test_invalid.search if pki_easyrsa__test_failure is not search(pattern) -%}
+          {%-   set _ = missing.append(pattern) -%}
+          {%- endfor -%}
+          {{ missing }}
+        pki_easyrsa__test_before: "{{ (pki_easyrsa__test_md5_before.results + pki_easyrsa__test_pki_md5_before.results)
+          | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+        pki_easyrsa__test_after: "{{ (pki_easyrsa__test_md5_after.results + pki_easyrsa__test_pki_md5_after.results)
+          | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+
+  always:
+
+    # Variables that the test case does not set are set to an empty dictionary, the roles use their defaults then
+    - name: 'Restore the variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item }}": "{{ pki_easyrsa__test_case.role_vars[item] | default({}) }}"
+      loop: "{{ pki_easyrsa__test_invalid.vars.keys() | list }}"

@@ -1,50 +1,132 @@
 ---
 
-- name: Deploy Easy-RSA certificate
-  tags: [ 'pki', 'pki_easyrsa_deploy'  ]
-  become: yes
+- name: 'Deploy the certificates of Easy-RSA'
+  tags: [ 'pki', 'pki_easyrsa_deploy' ]
+  become: true
   block:
 
-#    - name: Install pki packages
-#      ansible.builtin.apt:
-#        update_cache: yes
-#        install_recommends: no
-#        pkg: "{{ pki_easyrsa_deploy__packages }}"
+    - name: 'Read the users and groups of the host'
+      ansible.builtin.getent:
+        database: "{{ item }}"
+      loop: [ 'passwd', 'group' ]
 
-    - name: Create pki directories
+    # The files are read on the controller, they are created by pki_easyrsa_ca and pki_easyrsa_cert
+    - name: 'Validate the realms and the files of the PKI'
+      ansible.builtin.assert:
+        that: pki_easyrsa_deploy__errors | length == 0
+        fail_msg: "{{ pki_easyrsa_deploy__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_easyrsa_deploy__errors: >-
+          {%- set errors = [] -%}
+          {%- set realms = pki_easyrsa_deploy__realms -%}
+          {%- if pki_easyrsa_deploy__ca_cn is not string or pki_easyrsa_deploy__ca_cn | length == 0 or pki_easyrsa_deploy__ca_cn is search('[\n\r]') -%}
+          {%-   set _ = errors.append('easyrsa_ca_cn has to be a string without line breaks.') -%}
+          {%- endif -%}
+          {%- if realms is not sequence or realms is string or realms is mapping -%}
+          {%-   set _ = errors.append('site_pki_realms has to be a list of realms.') -%}
+          {%- else -%}
+          {%-   set broken = realms | reject('mapping') | list | length + realms | select('mapping') | rejectattr('name', 'defined') | list | length -%}
+          {%-   if broken > 0 -%}
+          {%-     set _ = errors.append('The realms of site_pki_realms have to be dictionaries with a name.') -%}
+          {%-   endif -%}
+          {%-   set not_boolean = realms | select('mapping') | selectattr('name', 'defined') | selectattr('easyrsa', 'defined')
+                  | rejectattr('easyrsa', 'boolean') | map(attribute='name') | list -%}
+          {%-   if not_boolean | length > 0 -%}
+          {%-     set _ = errors.append('easyrsa of the realms has to be a boolean: ' ~ not_boolean | join(', ') ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set invalid_names = [] -%}
+          {%- set invalid_accounts = [] -%}
+          {%- set users = [ pki_easyrsa_deploy__private_owner, pki_easyrsa_deploy__public_owner ]
+                + pki_easyrsa_deploy__realm_structure | map(attribute='owner') | list -%}
+          {%- set groups = [ pki_easyrsa_deploy__private_group, pki_easyrsa_deploy__public_group ]
+                + pki_easyrsa_deploy__realm_structure | map(attribute='group') | list -%}
+          {%- set missing_files = [] -%}
+          {%- for realm in pki_easyrsa_deploy__realms_easyrsa -%}
+          {%-   if realm.name is not string or realm.name is not match(pki_easyrsa_deploy__name_pattern) -%}
+          {%-     set _ = invalid_names.append(realm.name | string) -%}
+          {%-   else -%}
+          {%-     for file in [ 'private/' ~ realm.name ~ '.key', 'issued/' ~ realm.name ~ '.crt' ] -%}
+          {%-       if not (pki_easyrsa_deploy__pki_dir ~ '/' ~ file) is file -%}
+          {%-         set _ = missing_files.append(file) -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%-   for key in [ 'owner', 'group' ] if realm[key] is defined -%}
+          {%-     if realm[key] is not string or realm[key] is not match(pki_easyrsa_deploy__account_pattern) -%}
+          {%-       set _ = invalid_accounts.append(realm.name ~ ' (' ~ key ~ ')') -%}
+          {%-     elif key == 'owner' -%}
+          {%-       set _ = users.append(realm.owner) -%}
+          {%-     else -%}
+          {%-       set _ = groups.append(realm.group) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {%- if invalid_names | length > 0 -%}
+          {%-   set _ = errors.append('The names of the realms consist of letters, digits, _, . and -: ' ~ invalid_names | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- set names = pki_easyrsa_deploy__realms_easyrsa | map(attribute='name') | map('string') | list -%}
+          {%- set duplicates = [] -%}
+          {%- for name in names if names | select('equalto', name) | list | length > 1 and name not in duplicates -%}
+          {%-   set _ = duplicates.append(name) -%}
+          {%- endfor -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('The names of the realms have to be unique: ' ~ duplicates | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- if invalid_accounts | length > 0 -%}
+          {%-   set _ = errors.append('owner and group of the realms are names of users and groups: ' ~ invalid_accounts | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- if not (pki_easyrsa_deploy__pki_dir ~ '/ca.crt') is file -%}
+          {%-   set _ = missing_files.append('ca.crt') -%}
+          {%- endif -%}
+          {%- if missing_files | length > 0 -%}
+          {%-   set _ = errors.append('The files do not exist in ' ~ pki_easyrsa_deploy__pki_dir ~ ' on the controller, run pki_easyrsa_ca and pki_easyrsa_cert first: '
+                  ~ missing_files | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- set unknown_users = users | unique | reject('in', ansible_facts.getent_passwd.keys() | list) | list -%}
+          {%- if unknown_users | length > 0 -%}
+          {%-   set _ = errors.append('The users of the realms do not exist: ' ~ unknown_users | join(', ') ~ '.') -%}
+          {%- endif -%}
+          {%- set unknown_groups = groups | unique | reject('in', ansible_facts.getent_group.keys() | list) | list -%}
+          {%- if unknown_groups | length > 0 -%}
+          {%-   set _ = errors.append('The groups of the realms do not exist: ' ~ unknown_groups | join(', ')
+                  ~ ', ssl-cert is installed by bootstrap_debian with debian_pki_enable.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of the realms'
       ansible.builtin.file:
         path: "{{ pki_easyrsa_deploy__realms_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: '755'
-        recurse: yes
+        state: 'directory'
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
 
-    - name: Create ca-certificates directory
+    - name: 'Create the directory of the CA certificates'
       ansible.builtin.file:
         path: "{{ pki_easyrsa_deploy__ca_certificates_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: '755'
-        recurse: yes
+        state: 'directory'
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
 
-    - name: "Copy CA certificate for {{ pki_easyrsa_deploy__ca_cn }} to {{ pki_easyrsa_deploy__ca_certificates_dir }}"
+    - name: 'Copy the CA certificate to the CA certificates'
       ansible.builtin.copy:
         src: "{{ pki_easyrsa_deploy__pki_dir }}/ca.crt"
         dest: "{{ pki_easyrsa_deploy__ca_certificates_file }}"
-        owner: root
-        group: "{{ pki_easyrsa_deploy__public_group }}"
+        owner: 'root'
+        group: 'root'
         mode: "{{ pki_easyrsa_deploy__public_file_mode }}"
-      register: ca_cert_state
-      when: not ansible_check_mode
+      register: 'pki_easyrsa_deploy__ca_certificate'
 
-    - name: Recreate ca-certificates
-      ansible.builtin.shell: "/usr/sbin/update-ca-certificates"
-      when: ca_cert_state.changed
+    - name: 'Update the CA certificates'
+      ansible.builtin.command: 'update-ca-certificates'
+      when: pki_easyrsa_deploy__ca_certificate is changed
 
-    - name: Deploy certificates for realms
-      include_tasks: realm.yml
+    - name: 'Deploy the certificates of the realms'
+      ansible.builtin.include_tasks: 'realm.yml'
+      loop: "{{ pki_easyrsa_deploy__realms_easyrsa }}"
       loop_control:
-        loop_var: realm
-      with_items: "{{ pki_easyrsa_deploy__realms }}"
+        loop_var: 'realm'
+        label: "{{ realm.name }}"

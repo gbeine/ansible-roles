@@ -5,4 +5,4 @@ project_repository: https://github.com/OpenVPN/easy-rsa
 documentation_link: https://easy-rsa.readthedocs.io/
 ---
 
-Initializes an Easy-RSA PKI and certificate authority on the Ansible controller.
+Initializes an Easy-RSA PKI and certificate authority on the Ansible controller, the private key of the CA is encrypted with the password from the vault and never leaves the controller.

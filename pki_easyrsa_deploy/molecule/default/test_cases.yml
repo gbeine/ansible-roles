@@ -1,0 +1,221 @@
+---
+# pki_easyrsa_ca and pki_easyrsa_cert run on the controller, every platform gets its own PKI in the ephemeral directory of molecule
+pki_easyrsa__test_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}"
+
+pki_easyrsa__test_roles: [ 'pki_easyrsa_ca', 'pki_easyrsa_cert', 'pki_easyrsa_deploy' ]
+
+# The realms of molecule-easyrsa, side_effect changes them
+pki_easyrsa__test_realms_full:
+  - name: 'molecule-cs'
+    easyrsa: true
+    easyrsa_type: 'cs'
+    easyrsa_san: [ 'DNS:molecule-cs.example.test', 'IP:127.0.0.1', 'IP:::1' ]
+  - name: 'molecule-client'
+    easyrsa: true
+    easyrsa_type: 'client'
+  - name: 'molecule-owned'
+    easyrsa: true
+    owner: 'molecule'
+    group: 'molecule'
+    easyrsa_config:
+      EASYRSA_CERT_EXPIRE: 60
+  # A realm of another role, it is not deployed
+  - name: 'molecule-other'
+    certbot: true
+
+pki_easyrsa__test_cases:
+
+  - name: 'molecule-easyrsa-default'
+    role_vars:
+      easyrsa_pki_dir: "{{ pki_easyrsa__test_dir }}/pki-molecule-easyrsa-default"
+      easyrsa_ca_cn: 'Molecule Default CA'
+      easyrsa_ca_password: 'Molecule-Default-Password-1'
+      site_pki_realms:
+        - name: 'molecule-default'
+          easyrsa: true
+    expect:
+      ca_name: 'Molecule_Default_CA'
+      realms:
+        - name: 'molecule-default'
+          owner: 'root'
+          private_group: 'ssl-cert'
+          public_group: 'root'
+          eku: 'TLS Web Server Authentication'
+          san: 'DNS:molecule-default'
+      absent: []
+      tls:
+        - realm: 'molecule-default'
+          verify: '-verify_hostname molecule-default'
+      revoked: 0
+
+  - name: 'molecule-easyrsa'
+    role_vars:
+      easyrsa_pki_dir: "{{ pki_easyrsa__test_dir }}/pki-molecule-easyrsa"
+      easyrsa_ca_cn: 'Molecule CA'
+      easyrsa_ca_password: 'Molecule-Password-1'
+      easyrsa_ca_config:
+        EASYRSA_DN: 'org'
+        EASYRSA_REQ_COUNTRY: 'DE'
+        EASYRSA_REQ_ORG: 'Molecule'
+        EASYRSA_ALGO: 'ec'
+        EASYRSA_CURVE: 'secp384r1'
+        EASYRSA_CA_EXPIRE: 365
+      easyrsa_cert_config:
+        EASYRSA_ALGO: 'ec'
+        EASYRSA_CURVE: 'prime256v1'
+        EASYRSA_CERT_EXPIRE: 90
+      site_pki_realms: "{{ pki_easyrsa__test_realms_full }}"
+    side_effect:
+      # A new subjectAltName: the certificate is revoked and built again, the CRL is written.
+      # The certificate of molecule-owned expires within EASYRSA_PRE_EXPIRY_WINDOW and is renewed.
+      realms_changed:
+        - name: 'molecule-cs'
+          easyrsa: true
+          easyrsa_type: 'cs'
+          easyrsa_san: [ 'DNS:molecule-cs.example.test', 'IP:127.0.0.1', 'IP:::1', 'DNS:molecule-cs-new.example.test' ]
+        - name: 'molecule-client'
+          easyrsa: true
+          easyrsa_type: 'client'
+        - name: 'molecule-owned'
+          easyrsa: true
+          owner: 'molecule'
+          group: 'molecule'
+          easyrsa_config:
+            EASYRSA_CERT_EXPIRE: 90
+            EASYRSA_PRE_EXPIRY_WINDOW: 70
+        - name: 'molecule-other'
+          certbot: true
+      # The renewed certificate of molecule-owned expires within the window again, the former renewed certificate is revoked first
+      realms_renewed:
+        - name: 'molecule-cs'
+          easyrsa: true
+          easyrsa_type: 'cs'
+          easyrsa_san: [ 'DNS:molecule-cs.example.test', 'IP:127.0.0.1', 'IP:::1', 'DNS:molecule-cs-new.example.test' ]
+        - name: 'molecule-client'
+          easyrsa: true
+          easyrsa_type: 'client'
+        - name: 'molecule-owned'
+          easyrsa: true
+          owner: 'molecule'
+          group: 'molecule'
+          easyrsa_config:
+            EASYRSA_CERT_EXPIRE: 200
+            EASYRSA_PRE_EXPIRY_WINDOW: 100
+        - name: 'molecule-other'
+          certbot: true
+    expect:
+      ca_name: 'Molecule_CA'
+      realms:
+        - name: 'molecule-cs'
+          owner: 'root'
+          private_group: 'ssl-cert'
+          public_group: 'root'
+          eku: 'TLS Web Server Authentication, TLS Web Client Authentication'
+          san: 'DNS:molecule-cs.example.test, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1, DNS:molecule-cs-new.example.test'
+        - name: 'molecule-client'
+          owner: 'root'
+          private_group: 'ssl-cert'
+          public_group: 'root'
+          eku: 'TLS Web Client Authentication'
+          san: ''
+        - name: 'molecule-owned'
+          owner: 'molecule'
+          private_group: 'molecule'
+          public_group: 'molecule'
+          eku: 'TLS Web Server Authentication'
+          san: 'DNS:molecule-owned'
+      absent: [ 'molecule-other' ]
+      # The server of molecule-cs requires the certificate of molecule-client
+      tls:
+        - realm: 'molecule-cs'
+          verify: '-verify_ip 127.0.0.1'
+          client: 'molecule-client'
+      # molecule-cs revoked by side_effect, molecule-owned revoked as renewed certificate
+      revoked: 2
+
+# Invalid runs of side_effect, the variables are passed as include parameters over the variables of the test case
+pki_easyrsa__test_invalid_runs:
+
+  - message: 'wrong password of the CA'
+    vars:
+      easyrsa_ca_password: 'Molecule-Wrong-Password'
+    search:
+      - 'The password does not open the private key of the CA'
+
+  - message: 'unknown options and EASYRSA_PASSIN in easyrsa_ca_config'
+    vars:
+      easyrsa_ca_config:
+        EASYRSA_PASSIN: 'pass:molecule'
+        EASYRSA_UNKNOWN: 1
+        EASYRSA_KEY_SIZE: true
+    search:
+      - 'Unknown options in easyrsa_ca_config: EASYRSA_PASSIN, EASYRSA_UNKNOWN'
+      - 'The values of easyrsa_ca_config have to be strings or numbers without line breaks: EASYRSA_KEY_SIZE'
+
+  - message: 'invalid realms'
+    vars:
+      site_pki_realms:
+        - name: 'molecule-type'
+          easyrsa: true
+          easyrsa_type: 'peer'
+        - name: 'molecule-san'
+          easyrsa: true
+          easyrsa_san: [ 'molecule.example.test' ]
+        - name: 'molecule-environment'
+          easyrsa: true
+          easyrsa_environment:
+            EASYRSA_REQ_CN: 'molecule'
+        - name: 'molecule-duplicate'
+          easyrsa: true
+        - name: 'molecule-duplicate'
+          easyrsa: true
+        - name: 'molecule-keys'
+          easyrsa: true
+          easyrsa_unknown: 1
+          easyrsa_config:
+            EASYRSA_PASSIN: 'pass:molecule'
+        - name: 'molecule-boolean'
+          easyrsa: 'yes'
+    search:
+      - 'easyrsa_environment is replaced by easyrsa_config and easyrsa_san, see the migration of pki_easyrsa_cert: molecule-environment'
+      - 'easyrsa of the realms has to be a boolean: molecule-boolean'
+      - 'Unknown keys in the realms: molecule-keys \(easyrsa_unknown\)'
+      - 'The names of the realms have to be unique: molecule-duplicate'
+      - 'easyrsa_type of the realms has to be server, client, cs: molecule-type'
+      - 'easyrsa_san of the realms has to be a list of DNS:<name> and IP:<address>: molecule-san'
+      - 'Unknown options in easyrsa_config of molecule-keys: EASYRSA_PASSIN'
+
+  - message: 'an invalid IP address in easyrsa_san'
+    vars:
+      site_pki_realms:
+        - name: 'molecule-ip'
+          easyrsa: true
+          easyrsa_san: [ 'IP:999.1.1.1' ]
+    search:
+      - 'The subjectAltNames of molecule-ip are no DNS:<name> or IP:<address>: IP:999.1.1.1'
+
+  - message: 'certificates renewed on every run'
+    vars:
+      easyrsa_cert_config:
+        EASYRSA_CERT_EXPIRE: 30
+    search:
+      - 'EASYRSA_CERT_EXPIRE has to be greater than EASYRSA_PRE_EXPIRY_WINDOW'
+
+  - message: 'pki_easyrsa_deploy without the files of the PKI'
+    roles: [ 'pki_easyrsa_deploy' ]
+    vars:
+      site_pki_realms:
+        - name: 'molecule-missing'
+          easyrsa: true
+    search:
+      - 'run pki_easyrsa_ca and pki_easyrsa_cert first: private/molecule-missing.key, issued/molecule-missing.crt'
+
+  - message: 'pki_easyrsa_deploy with an unknown group'
+    roles: [ 'pki_easyrsa_deploy' ]
+    vars:
+      site_pki_realms:
+        - name: "{{ pki_easyrsa__test_case.expect.realms[0].name }}"
+          easyrsa: true
+          group: 'molecule-nogroup'
+    search:
+      - 'The groups of the realms do not exist: molecule-nogroup'
