@@ -1,0 +1,105 @@
+---
+# Network created by container_podman in prepare.yml, shared by all test cases
+mail_opensmtpd__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+mail_opensmtpd__test_image: 'c0d3.sh/container/opensmtpd:latest'
+mail_opensmtpd__test_quadlet_path: '/etc/containers/systemd/opensmtpd.container'
+mail_opensmtpd__test_home: '/opt/opensmtpd-molecule'
+
+# The CA and the certificate of the realm, created by prepare.yml with openssl on the controller,
+# the certificate names the realm and the address of molecule-opensmtpd
+mail_opensmtpd__test_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+mail_opensmtpd__test_realm: 'mx.molecule.test'
+mail_opensmtpd__test_realms_dir: '/etc/pki/realms'
+mail_opensmtpd__test_tls_ip: '10.89.0.11'
+
+# The user of AUTH, the table contains the SHA-512 crypt of the password (openssl passwd -6 -salt moleculesalt)
+mail_opensmtpd__test_user: 'molecule'
+mail_opensmtpd__test_password: 'Molecule-Password-1'
+mail_opensmtpd__test_password_hash: '$6$moleculesalt$AF2GPODHVhnAcZWgYVWGcKnj2.95SObcTNYMSwbWDYKA2xY6A.zdyxqN97gNfFyxEUrNIy3Yu0aZqM1hzgC5I/'
+
+# Mails of authenticated users are relayed to an address of TEST-NET-1, the connection fails and the mail stays in the queue
+mail_opensmtpd__test_relay: 'relay host smtp://192.0.2.1'
+
+mail_opensmtpd__test_cases:
+
+  # The mandatory values only: port 25, relays only the mails of the container itself
+  - name: 'molecule-opensmtpd-default'
+    role_vars:
+      opensmtpd_home: "{{ mail_opensmtpd__test_home }}"
+      opensmtpd_ip: '10.89.0.10'
+      opensmtpd_network: 'podman-molecule'
+      opensmtpd_hostname: 'mx-default.molecule.test'
+      opensmtpd_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.10'
+      quadlet:
+        - 'Volume=/opt/opensmtpd-molecule:/config'
+        - 'PublishPort=25:25'
+      quadlet_absent:
+        - 'Secret='
+        - 'Environment='
+      config:
+        - 'listen on 0.0.0.0'
+        - 'action "relay" relay'
+        - 'match from local for any action "relay"'
+      tls: false
+      secrets: false
+      banner: 'mx-default.molecule.test'
+
+  # TLS of the realm, submission with AUTH from the table of the secret, relay to an unreachable host
+  - name: 'molecule-opensmtpd'
+    role_vars:
+      opensmtpd_home: "{{ mail_opensmtpd__test_home }}"
+      opensmtpd_ip: "{{ mail_opensmtpd__test_tls_ip }}"
+      opensmtpd_network: 'podman-molecule'
+      opensmtpd_hostname: "{{ mail_opensmtpd__test_realm }}"
+      opensmtpd_timezone: 'Europe/Berlin'
+      opensmtpd_tls:
+        realm: "{{ mail_opensmtpd__test_realm }}"
+      opensmtpd_secrets:
+        - name: 'opensmtpd-molecule'
+          data: "{{ mail_opensmtpd__test_user }} {{ mail_opensmtpd__test_password_hash }}\n"
+          target: 'secrets'
+      opensmtpd_environment:
+        TZ: 'Europe/Berlin'
+      opensmtpd_config:
+        listen:
+          - "on 0.0.0.0 tls pki {{ mail_opensmtpd__test_realm }}"
+          - "on 0.0.0.0 port 587 tls-require pki {{ mail_opensmtpd__test_realm }} auth <secrets>"
+        action:
+          molecule: "{{ mail_opensmtpd__test_relay }}"
+        match:
+          - 'from auth for any action "molecule"'
+          - 'from local for any action "relay"'
+        smtp: [ 'max-message-size 10M' ]
+    side_effect:
+      # A changed statement restarts OpenSMTPD
+      config:
+        smtp: [ 'max-message-size 20M' ]
+    expect:
+      ip: '10.89.0.11'
+      quadlet:
+        - 'Volume=/opt/opensmtpd-molecule:/config'
+        - 'Secret=opensmtpd-molecule,type=mount,target=/config/secrets,uid=0,gid=100,mode=0440'
+        - 'Environment=TZ=Europe/Berlin'
+      quadlet_absent: []
+      config:
+        - 'pki "mx.molecule.test" cert "/config/tls/fullchain.pem"'
+        - 'pki "mx.molecule.test" key "/config/tls/privkey.pem"'
+        - 'smtp max-message-size 20M'
+        - 'table "secrets" file:/config/secrets'
+        - 'listen on 0.0.0.0 tls pki mx.molecule.test'
+        - 'listen on 0.0.0.0 port 587 tls-require pki mx.molecule.test auth <secrets>'
+        - 'action "molecule" relay host smtp://192.0.2.1'
+        - 'match from auth for any action "molecule"'
+      tls: true
+      secrets: true
+      banner: 'mx.molecule.test'

@@ -1,0 +1,249 @@
+---
+
+- name: 'Install OpenSMTPD'
+  tags: [ 'mail', 'mail_opensmtpd' ]
+  block:
+
+    # A failing template in the variables (e.g. opensmtpd_container or opensmtpd_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - mail_opensmtpd__container | length > 0
+          - mail_opensmtpd__config | length > 0
+          - mail_opensmtpd__config_content | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_opensmtpd__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        mail_opensmtpd__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = mail_opensmtpd__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('opensmtpd_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('opensmtpd_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of opensmtpd_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The statements are lines of smtpd.conf, smtpd -n checks them before smtpd.conf is replaced
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_opensmtpd__errors | join(' ') }}"
+        quiet: true
+      vars:
+        mail_opensmtpd__errors: >-
+          {%- set errors = [] -%}
+          {%- set custom = mail_opensmtpd__config_custom -%}
+          {%- if custom is not mapping -%}
+          {%-   set _ = errors.append('opensmtpd_config has to be a dictionary of the statements of smtpd.conf.') -%}
+          {%- else -%}
+          {%-   set config = mail_opensmtpd__config -%}
+          {%-   set ns = namespace(names=[], values=[], lines=[]) -%}
+          {%-   if 'include' in config -%}
+          {%-     set _ = errors.append('include is not allowed, smtpd.conf is written from opensmtpd_config.') -%}
+          {%-   endif -%}
+          {%-   set unknown = config.keys() | map('string') | reject('in', mail_opensmtpd__config_allowed + [ 'include' ]) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown statements in opensmtpd_config: ' ~ (unknown | join(', ')) ~ ', allowed are '
+                                        ~ (mail_opensmtpd__config_allowed | join(', ')) ~ ', macros are not supported.') -%}
+          {%-   endif -%}
+          {%-   set named = config | dict2items | selectattr('key', 'in', mail_opensmtpd__config_named) | rejectattr('value', 'none')
+                  | rejectattr('value', 'false') | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
+          {%-   if named | length > 0 -%}
+          {%-     set _ = errors.append('The statements ' ~ (named | join(', ')) ~ ' are dictionaries of names and values, e.g. { "action": { "relay": "relay" } }.') -%}
+          {%-   endif -%}
+          {%-   for statement, value in config.items() if statement in mail_opensmtpd__config_allowed and value is not none and value is not false -%}
+          {%-     if statement in mail_opensmtpd__config_named and value is mapping -%}
+          {%-       set entries = value | dict2items -%}
+          {%-       set ns.names = ns.names + (value.keys() | map('string') | reject('match', mail_opensmtpd__name_pattern) | map('regex_replace', '^', statement ~ ' ') | list) -%}
+          {%-     elif statement in mail_opensmtpd__config_named -%}
+          {%-       set entries = [] -%}
+          {%-     else -%}
+          {%-       set entries = [ { 'key': '', 'value': value } ] -%}
+          {%-     endif -%}
+          {%-     for entry in entries if entry.value is not none and entry.value is not false -%}
+          {%-       set path = (statement ~ ' ' ~ entry.key) | trim -%}
+          {%-       set items = entry.value if (entry.value is sequence and entry.value is not string and entry.value is not mapping) else [ entry.value ] -%}
+          {%-       if items | reject('string') | reject('number') | reject('true') | list | length > 0 -%}
+          {%-         set ns.values = ns.values + [ path ] -%}
+          {%-       elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-         set ns.lines = ns.lines + [ path ] -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endfor -%}
+          {%-   if ns.names | length > 0 -%}
+          {%-     set _ = errors.append('The names of the statements consist of letters, digits, _, . and -: ' ~ (ns.names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.values | length > 0 -%}
+          {%-     set _ = errors.append('The values of opensmtpd_config have to be strings, numbers, true, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of opensmtpd_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if mail_opensmtpd__tls_valid | bool and mail_opensmtpd__tls_realm in (custom.pki | default({}) if custom.pki | default({}) is mapping else {}) -%}
+          {%-     set _ = errors.append('The pki ' ~ mail_opensmtpd__tls_realm ~ ' is written by opensmtpd_tls, not in opensmtpd_config.') -%}
+          {%-   endif -%}
+          {%-   if mail_opensmtpd__secrets_list | length > 0 and 'secrets' in (custom.table | default({}) if custom.table | default({}) is mapping else {}) -%}
+          {%-     set _ = errors.append('The table secrets is written by opensmtpd_secrets, not in opensmtpd_config.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the certificate'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_opensmtpd__errors | join(' ') }}"
+        quiet: true
+      vars:
+        mail_opensmtpd__errors: >-
+          {%- set errors = [] -%}
+          {%- set tls = mail_opensmtpd__tls -%}
+          {%- if tls is not mapping -%}
+          {%-   set _ = errors.append('opensmtpd_tls has to be a dictionary with the realm, e.g. { "realm": "mx.example.org" }.') -%}
+          {%- elif tls | length > 0 -%}
+          {%-   set unknown = tls.keys() | map('string') | reject('in', mail_opensmtpd__tls_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in opensmtpd_tls: ' ~ (unknown | join(', ')) ~ ', allowed is realm.') -%}
+          {%-   endif -%}
+          {%-   if not mail_opensmtpd__tls_valid | bool -%}
+          {%-     set _ = errors.append('opensmtpd_tls.realm is the name of a realm of pki_easyrsa_deploy of letters, digits, _, . and -.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The realm is deployed on the host by pki_easyrsa_deploy
+    - name: 'Find the certificate of the realm'
+      ansible.builtin.stat:
+        path: "{{ item.src }}"
+      loop: "{{ mail_opensmtpd__tls_files if mail_opensmtpd__tls_valid | bool else [] }}"
+      loop_control:
+        label: "{{ item.src }}"
+      register: 'mail_opensmtpd__tls_stat'
+
+    # In check mode pki_easyrsa_deploy does not create a new realm, the missing files are only reported
+    - name: 'Validate the certificate of the realm'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or mail_opensmtpd__tls_missing | length == 0
+        fail_msg: "{{ mail_opensmtpd__tls_message }}"
+        quiet: true
+      vars:
+        mail_opensmtpd__tls_missing: "{{ mail_opensmtpd__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+        mail_opensmtpd__tls_message: >-
+          These files of the realm {{ mail_opensmtpd__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy has to deploy the realm first: {{ mail_opensmtpd__tls_missing | join(', ') }}.
+
+    - name: 'Report the missing certificate of the realm in check mode'
+      ansible.builtin.debug:
+        msg: >-
+          These files of the realm {{ mail_opensmtpd__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy has to deploy the realm first: {{ mail_opensmtpd__tls_missing | join(', ') }}.
+      when:
+        - ansible_check_mode
+        - mail_opensmtpd__tls_missing | length > 0
+      vars:
+        mail_opensmtpd__tls_missing: "{{ mail_opensmtpd__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+
+    # The options of OpenSMTPD are written to smtpd.conf, the image only reads the variables of baseimage-alpine,
+    # without opensmtpd_environment there is nothing to check
+    - name: 'Validate the environment'
+      when: mail_opensmtpd__environment is defined
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_opensmtpd__errors | join(' ') }}"
+        quiet: true
+      vars:
+        mail_opensmtpd__errors: >-
+          {%- set errors = [] -%}
+          {%- set environment = mail_opensmtpd__environment -%}
+          {%- if environment is not mapping -%}
+          {%-   set _ = errors.append('opensmtpd_environment has to be a dictionary of variables.') -%}
+          {%- else -%}
+          {%-   set lines = environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ mail_opensmtpd__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # Without opensmtpd_environment and opensmtpd_container.environment the environment is omitted, there is nothing to check
+        mail_opensmtpd__environment_unknown: >-
+          {{ (mail_opensmtpd__container.environment.keys() | map('string') | reject('in', mail_opensmtpd__environment_allowed) | list)
+             if mail_opensmtpd__container.environment | default(none) is mapping else [] }}
+        mail_opensmtpd__secrets_unknown: >-
+          {{ mail_opensmtpd__secrets_list | map(attribute='target') | map('string') | reject('in', mail_opensmtpd__secrets_allowed) | list }}
+        mail_opensmtpd__secrets_data: "{{ mail_opensmtpd__secrets_list | rejectattr('data', 'string') | map(attribute='name') | list }}"
+        mail_opensmtpd__secrets_duplicate: >-
+          {{ mail_opensmtpd__secrets_list | map(attribute='target') | list | community.general.counter | dict2items
+             | selectattr('value', 'gt', 1) | map(attribute='key') | list }}
+        mail_opensmtpd__errors: >-
+          {%- set errors = [] -%}
+          {%- if mail_opensmtpd__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (mail_opensmtpd__environment_unknown | join(', ')) ~ ', allowed are '
+                                    ~ (mail_opensmtpd__environment_allowed | join(', ')) ~ ', the options of OpenSMTPD are set with opensmtpd_config.') -%}
+          {%- endif -%}
+          {%- if mail_opensmtpd__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (mail_opensmtpd__secrets_unknown | join(', ')) ~ ', allowed is the target secrets,'
+                                    ~ ' the table mounted as ' ~ mail_opensmtpd__secrets_file ~ '.') -%}
+          {%- endif -%}
+          {%- if mail_opensmtpd__secrets_duplicate | length > 0 -%}
+          {%-   set _ = errors.append('Every target of opensmtpd_secrets is set once: ' ~ (mail_opensmtpd__secrets_duplicate | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if mail_opensmtpd__secrets_data | length > 0 -%}
+          {%-   set _ = errors.append('The data of opensmtpd_secrets is the content of a table, a string: ' ~ (mail_opensmtpd__secrets_data | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image hands /config over to its user abc at the start, the role only manages the content
+    - name: 'Create the home directory'
+      ansible.builtin.file:
+        path: "{{ mail_opensmtpd__podman_home }}"
+        state: 'directory'
+
+    - name: 'Create the directory of the certificate'
+      ansible.builtin.file:
+        path: "{{ mail_opensmtpd__podman_tls_dir }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0700'
+        state: 'directory'
+
+    # In check mode a new home directory is not created, there are no files to compare.
+    # ansible_check_mode is only set by --check, the directory shows it in every check mode.
+    - name: 'Find the home directory'
+      ansible.builtin.stat:
+        path: "{{ mail_opensmtpd__podman_tls_dir }}"
+      register: 'mail_opensmtpd__home_stat'
+      check_mode: false
+
+    - name: 'Configure OpenSMTPD'
+      ansible.builtin.include_tasks: 'configure.yml'
+      when: mail_opensmtpd__home_stat.stat.isdir | default(false)

@@ -1,0 +1,40 @@
+---
+# Runs mail_opensmtpd with the invalid role variables passed as include parameters,
+# the role has to fail before the quadlet unit or smtpd.conf change.
+# Include parameters only exist inside the include, the invalid values are gone afterwards.
+
+- name: "Run mail_opensmtpd with invalid variables (expect ERROR): {{ mail_opensmtpd__test_invalid.message }}"
+  block:
+
+    - name: 'Run mail_opensmtpd, it has to fail (expect ERROR)'
+      ansible.builtin.include_role:
+        name: 'mail_opensmtpd'
+
+    - name: 'Fail because the invalid variables were accepted'
+      ansible.builtin.fail:
+        msg: "The invalid variables were accepted: {{ mail_opensmtpd__test_invalid.message }}"
+
+  rescue:
+
+    - name: 'Read the checksums of the checked files after the invalid run'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ mail_opensmtpd__test_checked_files }}"
+      register: 'mail_opensmtpd__test_md5_after'
+
+    - name: 'Assert the run failed before the checked files changed'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_failure is search(mail_opensmtpd__test_invalid.search, multiline=true)
+          - mail_opensmtpd__test_before | select('equalto', '') | list | length == 0
+          - mail_opensmtpd__test_after == mail_opensmtpd__test_before
+        fail_msg: >-
+          Failure: {{ mail_opensmtpd__test_failure }}
+          Checksums before: {{ mail_opensmtpd__test_before | join(', ') }},
+          after: {{ mail_opensmtpd__test_after | join(', ') }}.
+      vars:
+        # Double quotes, so \n is a line break for the anchors of the searches
+        mail_opensmtpd__test_failure: "{{ [ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ] | join('\n') }}"
+        mail_opensmtpd__test_before: "{{ mail_opensmtpd__test_md5_before.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"
+        mail_opensmtpd__test_after: "{{ mail_opensmtpd__test_md5_after.results | map(attribute='stat') | map(attribute='checksum', default='') | list }}"

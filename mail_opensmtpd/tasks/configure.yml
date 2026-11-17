@@ -1,0 +1,200 @@
+---
+# Included by tasks/main.yml after the validation, the home directory exists
+
+# The links of certbot of the realm point to the files, the copies contain the files they point to
+- name: 'Copy the certificate of the realm'
+  when:
+    - mail_opensmtpd__tls_valid | bool
+    # Only in check mode, the validation stops a real run with missing files
+    - mail_opensmtpd__tls_stat.results | rejectattr('stat.exists') | list | length == 0
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    remote_src: true
+    owner: 'root'
+    group: 'root'
+    mode: "{{ item.mode }}"
+  loop: "{{ mail_opensmtpd__tls_files }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: 'mail_opensmtpd__tls_result'
+
+# The secret is mounted as /config/secrets, the check of the configuration mounts the home directory read-only
+- name: 'Create the mount point of the secret'
+  when: mail_opensmtpd__secrets_list | length > 0
+  ansible.builtin.copy:
+    content: ''
+    dest: "{{ mail_opensmtpd__secrets_mount_point }}"
+    force: false
+    owner: 'root'
+    group: 'root'
+    mode: '0600'
+
+- name: 'Create secrets'
+  no_log: true
+  containers.podman.podman_secret:
+    state: 'present'
+    name: "{{ item.name }}"
+    data: "{{ item.data }}"
+  loop: "{{ mail_opensmtpd__secrets_list }}"
+  register: 'mail_opensmtpd__secrets_result'
+
+- name: 'Read the current smtpd.conf'
+  ansible.builtin.slurp:
+    src: "{{ mail_opensmtpd__config_file }}"
+  register: 'mail_opensmtpd__config_current'
+  check_mode: false
+  failed_when: false
+
+# smtpd -n checks the new smtpd.conf with the certificate and the secret in a container of the image,
+# a rejected configuration does not replace smtpd.conf
+- name: 'Check the configuration'
+  when:
+    - not ansible_check_mode
+    - (mail_opensmtpd__config_current.content | default('') | b64decode) != mail_opensmtpd__config_content
+  block:
+
+    - name: 'Write the configuration to check'
+      ansible.builtin.copy:
+        content: "{{ mail_opensmtpd__config_content }}"
+        dest: "{{ mail_opensmtpd__config_check_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+
+    - name: 'Check the configuration with smtpd -n'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'podman', 'run', '--rm', '--network', 'none', '--entrypoint', 'smtpd',
+               '--volume', mail_opensmtpd__podman_home ~ ':/config:ro' ]
+             + (mail_opensmtpd__secrets_mount | map('regex_replace', '^', '--secret=') | list)
+             + [ mail_opensmtpd__container.image, '-n', '-f', '/config/' ~ (mail_opensmtpd__config_check_file | basename) ] }}
+      register: 'mail_opensmtpd__config_check'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert that smtpd accepts the configuration'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__config_check.rc == 0
+        fail_msg: >-
+          {{ [ 'smtpd -n rejects the configuration, smtpd.conf is unchanged:' ]
+             + mail_opensmtpd__config_check.stdout_lines + mail_opensmtpd__config_check.stderr_lines }}
+        quiet: true
+
+  always:
+
+    - name: 'Remove the checked configuration'
+      ansible.builtin.file:
+        path: "{{ mail_opensmtpd__config_check_file }}"
+        state: 'absent'
+
+- name: 'Generate smtpd.conf'
+  ansible.builtin.copy:
+    content: "{{ mail_opensmtpd__config_content }}"
+    dest: "{{ mail_opensmtpd__config_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  register: 'mail_opensmtpd__config_result'
+
+- name: 'Gathering facts about services...'
+  ansible.builtin.service_facts:
+
+- name: 'Install container'
+  containers.podman.podman_container:
+    name: "{{ mail_opensmtpd__container.name }}"
+    hostname: "{{ mail_opensmtpd__container.hostname }}"
+    image: "{{ mail_opensmtpd__container.image }}"
+    ip: "{{ mail_opensmtpd__container.ip }}"
+    ip6: "{{ mail_opensmtpd__container.ipv6 | default(omit) }}"
+    network: "{{ mail_opensmtpd__container.network }}"
+    timezone: "{{ mail_opensmtpd__container.timezone }}"
+    command: "{{ mail_opensmtpd__container.command | default(omit) }}"
+    env: "{{ mail_opensmtpd__container.environment | default(omit) }}"
+    etc_hosts: "{{ mail_opensmtpd__container.etc_hosts | default(omit) }}"
+    expose: "{{ mail_opensmtpd__container.expose | default(omit) }}"
+    label: "{{ mail_opensmtpd__container.labels | default(omit) }}"
+    publish: "{{ mail_opensmtpd__container.publish | default(omit) }}"
+    secrets: "{{ mail_opensmtpd__container.secrets | default(omit) }}"
+    volume: "{{ mail_opensmtpd__container.volumes | default(omit) }}"
+    quadlet_options: |
+      [Install]
+      WantedBy=default.target
+
+      [Service]
+      RestartSec=5
+      Restart=always
+
+      [Unit]
+      {% if mail_opensmtpd__container.requires is defined %}
+      Requires={{ mail_opensmtpd__container.requires | join(' ') }}
+      {% endif %}
+      {% if mail_opensmtpd__container.wants is defined %}
+      Wants={{ mail_opensmtpd__container.wants | join(' ') }}
+      {% endif %}
+      {% if mail_opensmtpd__container.after is defined %}
+      After={{ mail_opensmtpd__container.after | join(' ') }}
+      {% endif %}
+      {% if mail_opensmtpd__container.part_of is defined %}
+      PartOf={{ mail_opensmtpd__container.part_of | join(' ') }}
+      {% endif %}
+      {% if mail_opensmtpd__container.binds_to is defined %}
+      BindsTo={{ mail_opensmtpd__container.binds_to | join(' ') }}
+      {% endif %}
+      {% if mail_opensmtpd__container.requires_mounts_for is defined %}
+      RequiresMountsFor={{ mail_opensmtpd__container.requires_mounts_for | join(' ') }}
+      {% endif %}
+    restart_policy: 'no'
+    state: 'quadlet'
+  register: 'mail_opensmtpd__quadlet_result'
+
+# A failed start of the service only reports the exit code, the reason is in the journal,
+# smtpd reads smtpd.conf, the certificate and the tables only at the start
+- name: 'Start OpenSMTPD'
+  when: 'not ansible_check_mode'
+  block:
+
+    - name: 'Start and enable container'
+      ansible.builtin.systemd_service:
+        name: "{{ mail_opensmtpd__container.name }}"
+        daemon_reload: true
+        state: "{{ 'restarted' if mail_opensmtpd__restart | bool else 'started' }}"
+        enabled: true
+      vars:
+        mail_opensmtpd__running: >-
+          {{ (ansible_facts.services[mail_opensmtpd__container.name + '.service'].state | default('')) == 'running' }}
+        mail_opensmtpd__restart: >-
+          {{ mail_opensmtpd__running | bool
+             and (mail_opensmtpd__config_result is changed
+                  or mail_opensmtpd__tls_result is changed
+                  or mail_opensmtpd__secrets_result is changed
+                  or mail_opensmtpd__quadlet_result is changed) }}
+
+    - name: 'Wait for the listeners of OpenSMTPD'
+      ansible.builtin.wait_for:
+        host: "{{ mail_opensmtpd__container.ip }}"
+        port: "{{ item }}"
+        timeout: 60
+      loop: "{{ mail_opensmtpd__listen_ports }}"
+
+  rescue:
+
+    - name: 'Read the log of the failed start'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ mail_opensmtpd__container.name }}", '-n', '80', '--no-pager' ]
+      register: 'mail_opensmtpd__start_journal'
+      changed_when: false
+
+    - name: 'Fail with the log of the failed start'
+      ansible.builtin.fail:
+        msg: "{{ [ mail_opensmtpd__container.name ~ ' did not start' ] + mail_opensmtpd__start_journal.stdout_lines }}"
+
+- name: 'Enable autoupdate on container'
+  when: 'mail_opensmtpd__autoupdate_enabled | bool'
+  ansible.builtin.include_role:
+    name: 'container_update'
+  vars:
+    container_name: "{{ mail_opensmtpd__container.name }}"
+    container_image: "{{ mail_opensmtpd__container.image }}"
+    container_schedule: "{{ mail_opensmtpd__autoupdate_schedule }}"

@@ -1,0 +1,146 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    mail_opensmtpd__test_case: "{{ mail_opensmtpd__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    mail_opensmtpd__test_vars: "{{ mail_opensmtpd__test_case.role_vars }}"
+    mail_opensmtpd__test_config: "{{ mail_opensmtpd__test_vars.opensmtpd_config | default({}) }}"
+    mail_opensmtpd__test_checked_files:
+      - "{{ mail_opensmtpd__test_quadlet_path }}"
+      - "{{ mail_opensmtpd__test_home }}/smtpd.conf"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ mail_opensmtpd__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ mail_opensmtpd__test_checked_files }}"
+      register: 'mail_opensmtpd__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run mail_opensmtpd with opensmtpd_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_config: [ 'listen' ]
+        mail_opensmtpd__test_invalid:
+          message: 'opensmtpd_config is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run mail_opensmtpd with include and unknown statements (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_config: "{{ mail_opensmtpd__test_config | combine({ 'include': '/etc/smtpd/smtpd.conf', 'lisen': 'on lo' }) }}"
+        mail_opensmtpd__test_invalid:
+          message: 'include and unknown statements'
+          search: '^include is not allowed, smtpd\.conf is written from opensmtpd_config\. Unknown statements in opensmtpd_config: lisen, allowed are '
+
+    - name: 'Run mail_opensmtpd with an invalid name, a value of the wrong type and a line break (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        # The double quotes of YAML turn \n into a line break, a Jinja literal in a folded block keeps \n
+        mail_opensmtpd__test_line_break: "on 0.0.0.0\nlisten on lo"
+        opensmtpd_config: >-
+          {{ mail_opensmtpd__test_config | combine({ 'action': { 'bad name': 'relay' }, 'match': [ { 'from': 'any' } ],
+                                                     'listen': [ mail_opensmtpd__test_line_break ] }) }}
+        mail_opensmtpd__test_invalid:
+          message: 'an invalid name, a value of the wrong type and a line break'
+          search: 'consist of letters, digits, _, \. and -: action bad name\. .* lists of them: match\. .* must not contain line breaks: listen\.$'
+
+    - name: 'Run mail_opensmtpd with the table secrets in opensmtpd_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_secrets: [ { name: 'opensmtpd-molecule', data: "molecule x\n", target: 'secrets' } ]
+        opensmtpd_config: "{{ mail_opensmtpd__test_config | combine({ 'table': { 'secrets': 'file:/config/other' } }) }}"
+        mail_opensmtpd__test_invalid:
+          message: 'the table secrets in opensmtpd_config'
+          search: '^The table secrets is written by opensmtpd_secrets, not in opensmtpd_config\.$'
+
+    - name: 'Run mail_opensmtpd with an unknown target and data that is no string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_secrets: [ { name: 'opensmtpd-molecule', data: [ 'molecule' ], target: 'credentials' } ]
+        mail_opensmtpd__test_invalid:
+          message: 'an unknown target and data that is no string'
+          search: '^Unknown secrets: credentials, allowed is the target secrets, .* a string: opensmtpd-molecule\.$'
+
+    - name: 'Run mail_opensmtpd with a secret without data (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_secrets: [ { name: 'opensmtpd-molecule', target: 'secrets' } ]
+        mail_opensmtpd__test_invalid:
+          message: 'a secret without data'
+          search: '^opensmtpd_secrets entries need name, data and target$'
+
+    - name: 'Run mail_opensmtpd with a realm missing on the host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_tls: { realm: 'molecule-missing' }
+        mail_opensmtpd__test_invalid:
+          message: 'a realm missing on the host'
+          search: '^These files of the realm molecule-missing do not exist on the host, pki_easyrsa_deploy has to deploy the realm first: '
+
+    - name: 'Run mail_opensmtpd with an unknown variable in opensmtpd_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_environment: { SMTPD_DEBUG: '1' }
+        mail_opensmtpd__test_invalid:
+          message: 'an unknown variable in opensmtpd_environment'
+          search: '^Unknown environment variables: SMTPD_DEBUG, allowed are TZ, PUID, PGID, UMASK'
+
+    # The statement is allowed, smtpd itself rejects the option, smtpd.conf stays unchanged
+    - name: 'Run mail_opensmtpd with an option smtpd rejects (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_config: "{{ mail_opensmtpd__test_config | combine({ 'listen': [ 'on 0.0.0.0 molecule-option' ] }) }}"
+        mail_opensmtpd__test_invalid:
+          message: 'an option smtpd rejects'
+          search: 'smtpd -n rejects the configuration, smtpd\.conf is unchanged'
+
+    - name: 'Run mail_opensmtpd with the changed configuration'
+      when: mail_opensmtpd__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the main PID of OpenSMTPD before the change'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value opensmtpd'
+          register: 'mail_opensmtpd__test_pid_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            opensmtpd_config: "{{ mail_opensmtpd__test_config | combine(mail_opensmtpd__test_case.side_effect.config) }}"
+
+        - name: 'Run mail_opensmtpd with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'mail_opensmtpd'
+
+        - name: 'Read the main PID of OpenSMTPD after the change'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value opensmtpd'
+          register: 'mail_opensmtpd__test_pid_after'
+          changed_when: false
+
+        - name: 'Assert the changed smtpd.conf and the restart of OpenSMTPD'
+          ansible.builtin.assert:
+            that:
+              - mail_opensmtpd__config_result is changed
+              - mail_opensmtpd__quadlet_result is not changed
+              - mail_opensmtpd__test_pid_after.stdout != '0'
+              - mail_opensmtpd__test_pid_after.stdout != mail_opensmtpd__test_pid_before.stdout
+            fail_msg: >-
+              smtpd.conf changed: {{ mail_opensmtpd__config_result is changed }},
+              quadlet changed: {{ mail_opensmtpd__quadlet_result is changed }},
+              PID {{ mail_opensmtpd__test_pid_before.stdout }} -> {{ mail_opensmtpd__test_pid_after.stdout }}

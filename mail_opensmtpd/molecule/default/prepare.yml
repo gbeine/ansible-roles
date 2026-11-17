@@ -1,0 +1,82 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    mail_opensmtpd__test_case: "{{ mail_opensmtpd__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    mail_opensmtpd__test_realm_dir: "{{ mail_opensmtpd__test_realms_dir }}/{{ mail_opensmtpd__test_realm }}"
+    podman_networks:
+      - "{{ mail_opensmtpd__test_network }}"
+    podman_default_network: "{{ mail_opensmtpd__test_network.name }}"
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ mail_opensmtpd__test_image }}"
+      register: 'mail_opensmtpd__test_pull'
+      until: mail_opensmtpd__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Create the PKI on the controller'
+      ansible.builtin.include_tasks:
+        file: 'tasks/pki.yml'
+        apply:
+          delegate_to: 'localhost'
+          become: false
+          run_once: true
+
+    # The realm with the structure of pki_easyrsa_deploy, the links of certbot point to the files
+    - name: 'Create the realm of pki_easyrsa_deploy'
+      when: mail_opensmtpd__test_case.role_vars.opensmtpd_tls is defined
+      block:
+
+        - name: 'Create the directories of the realm'
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: 'directory'
+            mode: "{{ item.mode }}"
+          loop:
+            - { path: '/etc/pki', mode: '0755' }
+            - { path: "{{ mail_opensmtpd__test_realms_dir }}", mode: '0755' }
+            - { path: "{{ mail_opensmtpd__test_realm_dir }}", mode: '0755' }
+            - { path: "{{ mail_opensmtpd__test_realm_dir }}/public", mode: '0755' }
+            - { path: "{{ mail_opensmtpd__test_realm_dir }}/private", mode: '0750' }
+
+        - name: 'Copy the certificates and the key to the realm'
+          ansible.builtin.copy:
+            src: "{{ item.src | default(omit) }}"
+            content: "{{ item.content | default(omit) }}"
+            dest: "{{ mail_opensmtpd__test_realm_dir }}/{{ item.dest }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ mail_opensmtpd__test_pki }}/realm.crt", dest: "public/{{ mail_opensmtpd__test_realm }}.crt", mode: '0644' }
+            - { src: "{{ mail_opensmtpd__test_pki }}/ca.crt", dest: 'public/ca.crt', mode: '0644' }
+            - content: >-
+                {{ lookup('ansible.builtin.file', mail_opensmtpd__test_pki ~ '/realm.crt', rstrip=false)
+                   ~ lookup('ansible.builtin.file', mail_opensmtpd__test_pki ~ '/ca.crt', rstrip=false) }}
+              dest: "public/{{ mail_opensmtpd__test_realm }}.fullchain.crt"
+              mode: '0644'
+            - { src: "{{ mail_opensmtpd__test_pki }}/realm.key", dest: "private/{{ mail_opensmtpd__test_realm }}.key", mode: '0640' }
+          loop_control:
+            label: "{{ item.dest }}"
+
+        - name: 'Create the links of the realm compatible with certbot'
+          ansible.builtin.file:
+            src: "{{ item.src }}"
+            dest: "{{ mail_opensmtpd__test_realm_dir }}/{{ item.dest }}"
+            state: 'link'
+            force: true
+          loop:
+            - { src: "public/{{ mail_opensmtpd__test_realm }}.fullchain.crt", dest: 'fullchain.pem' }
+            - { src: "private/{{ mail_opensmtpd__test_realm }}.key", dest: 'privkey.pem' }

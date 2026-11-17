@@ -1,0 +1,161 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    mail_opensmtpd__test_case: "{{ mail_opensmtpd__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    mail_opensmtpd__expect: "{{ mail_opensmtpd__test_case.expect }}"
+    mail_opensmtpd__test_cafile: "{{ mail_opensmtpd__test_realms_dir }}/{{ mail_opensmtpd__test_realm }}/public/ca.crt"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ mail_opensmtpd__test_quadlet_path }}"
+      register: 'mail_opensmtpd__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + mail_opensmtpd__expect.ip) in mail_opensmtpd__test_lines
+          - ('Network=' + mail_opensmtpd__test_case.role_vars.opensmtpd_network) in mail_opensmtpd__test_lines
+          - mail_opensmtpd__expect.quadlet | reject('in', mail_opensmtpd__test_lines) | list | length == 0
+          - >-
+            mail_opensmtpd__expect.quadlet_absent | length == 0
+            or mail_opensmtpd__test_lines | select('search', mail_opensmtpd__expect.quadlet_absent | map('regex_escape') | join('|')) | list | length == 0
+        fail_msg: "Quadlet: {{ mail_opensmtpd__test_quadlet.content | b64decode }}"
+      vars:
+        mail_opensmtpd__test_lines: "{{ (mail_opensmtpd__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read smtpd.conf'
+      ansible.builtin.slurp:
+        src: "{{ mail_opensmtpd__test_home }}/smtpd.conf"
+      register: 'mail_opensmtpd__test_config'
+
+    - name: 'Assert smtpd.conf'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_lines[0] == '# Ansible managed'
+          - mail_opensmtpd__expect.config | reject('in', mail_opensmtpd__test_lines) | list | length == 0
+        fail_msg: "smtpd.conf: {{ mail_opensmtpd__test_lines }}"
+      vars:
+        mail_opensmtpd__test_lines: "{{ (mail_opensmtpd__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Read the files of the home directory'
+      ansible.builtin.stat:
+        path: "{{ mail_opensmtpd__test_home }}/{{ item }}"
+      loop: [ 'smtpd.conf', 'tls', 'tls/fullchain.pem', 'tls/privkey.pem', 'spool', 'smtpd.conf.check' ]
+      register: 'mail_opensmtpd__test_files'
+
+    # The image creates the spool owned by root with 0711, OpenSMTPD reads the key only owned by root with at most 0740
+    - name: 'Assert the files of the home directory'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_modes['smtpd.conf'] == '0644 root'
+          - mail_opensmtpd__test_modes['tls'] == '0700 root'
+          - mail_opensmtpd__test_modes['spool'] == '0711 root'
+          - mail_opensmtpd__test_modes['smtpd.conf.check'] == 'absent'
+          - mail_opensmtpd__test_modes['tls/fullchain.pem'] == ('0644 root' if mail_opensmtpd__expect.tls else 'absent')
+          - mail_opensmtpd__test_modes['tls/privkey.pem'] == ('0600 root' if mail_opensmtpd__expect.tls else 'absent')
+        fail_msg: "{{ mail_opensmtpd__test_modes | to_json }}"
+      vars:
+        mail_opensmtpd__test_modes: >-
+          {%- set modes = {} -%}
+          {%- for result in mail_opensmtpd__test_files.results -%}
+          {%-   set _ = modes.update({ result.item: (result.stat.mode ~ ' ' ~ result.stat.pw_name) if result.stat.exists else 'absent' }) -%}
+          {%- endfor -%}
+          {{ modes }}
+
+    - name: 'Read the state of the opensmtpd service'
+      ansible.builtin.command: 'systemctl is-active opensmtpd'
+      register: 'mail_opensmtpd__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the opensmtpd service is active'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_service.stdout == 'active'
+        fail_msg: "opensmtpd is {{ mail_opensmtpd__test_service.stdout }}"
+
+    # lka of OpenSMTPD opens the tables as user smtpd (gid 100), the init script of the image changes the mode to 0640
+    - name: 'Read the owner and mode of the secret in the container'
+      when: mail_opensmtpd__expect.secrets
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'opensmtpd', 'stat', '-L', '-c', '%u %g %a', '/config/secrets' ]
+      register: 'mail_opensmtpd__test_secret'
+      changed_when: false
+
+    - name: 'Assert the owner and mode of the secret in the container'
+      when: mail_opensmtpd__expect.secrets
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_secret.stdout is match('^0 100 [46]40$')
+        fail_msg: "/config/secrets: {{ mail_opensmtpd__test_secret.stdout }}"
+
+    - name: 'Talk to OpenSMTPD on port 25'
+      mail_opensmtpd_test_smtp:
+        host: "{{ mail_opensmtpd__expect.ip }}"
+        port: 25
+        starttls: "{{ mail_opensmtpd__expect.tls }}"
+        cafile: "{{ mail_opensmtpd__test_cafile if mail_opensmtpd__expect.tls else omit }}"
+        mail_from: 'molecule@example.org'
+        rcpt_to: 'test@example.org'
+      register: 'mail_opensmtpd__test_smtp'
+
+    # The host is no local client, OpenSMTPD relays only for local clients and with AUTH
+    - name: 'Assert the banner, TLS and the refused relay on port 25'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_smtp.banner is search(mail_opensmtpd__expect.banner)
+          - mail_opensmtpd__test_smtp.tls == mail_opensmtpd__expect.tls
+          - mail_opensmtpd__test_smtp.mail.code >= 500
+        fail_msg: "{{ mail_opensmtpd__test_smtp | to_json }}"
+
+    - name: 'Test the submission with AUTH'
+      when: mail_opensmtpd__expect.secrets
+      block:
+
+        - name: 'Authenticate with the wrong password on port 587'
+          mail_opensmtpd_test_smtp:
+            host: "{{ mail_opensmtpd__expect.ip }}"
+            port: 587
+            starttls: true
+            cafile: "{{ mail_opensmtpd__test_cafile }}"
+            username: "{{ mail_opensmtpd__test_user }}"
+            password: 'Molecule-Wrong-Password'
+          register: 'mail_opensmtpd__test_auth_wrong'
+
+        - name: 'Send a mail with AUTH on port 587'
+          mail_opensmtpd_test_smtp:
+            host: "{{ mail_opensmtpd__expect.ip }}"
+            port: 587
+            starttls: true
+            cafile: "{{ mail_opensmtpd__test_cafile }}"
+            username: "{{ mail_opensmtpd__test_user }}"
+            password: "{{ mail_opensmtpd__test_password }}"
+            mail_from: 'molecule@molecule.test'
+            rcpt_to: 'test@example.org'
+          register: 'mail_opensmtpd__test_auth'
+
+        # The relay host is not reachable, the mail stays in the queue in the spool of the home directory
+        - name: 'Read the queue of OpenSMTPD'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'opensmtpd', 'smtpctl', 'show', 'queue' ]
+          register: 'mail_opensmtpd__test_queue'
+          changed_when: false
+
+        - name: 'Assert AUTH and the queued mail'
+          ansible.builtin.assert:
+            that:
+              - mail_opensmtpd__test_auth_wrong.auth.code == 535
+              - mail_opensmtpd__test_auth.auth.code == 235
+              - mail_opensmtpd__test_auth.mail.code == 250
+              - mail_opensmtpd__test_queue.stdout is search('test@example.org')
+            fail_msg: >-
+              wrong password: {{ mail_opensmtpd__test_auth_wrong.auth }}, password: {{ mail_opensmtpd__test_auth.auth }},
+              mail: {{ mail_opensmtpd__test_auth.mail }}, queue: {{ mail_opensmtpd__test_queue.stdout_lines }}

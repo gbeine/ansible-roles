@@ -1,0 +1,62 @@
+---
+# Creates the CA and the certificate of the realm with openssl on the controller,
+# the certificate names the realm and the address of molecule-opensmtpd, so TLS is verified with the address
+
+- name: 'Create the directory of the PKI'
+  ansible.builtin.file:
+    path: "{{ mail_opensmtpd__test_pki }}"
+    state: 'directory'
+    mode: '0700'
+
+- name: 'Write the configuration of openssl'
+  ansible.builtin.copy:
+    dest: "{{ mail_opensmtpd__test_pki }}/openssl.cnf"
+    mode: '0600'
+    content: |
+      [req]
+      distinguished_name = dn
+      [dn]
+      [ca]
+      basicConstraints = critical, CA:TRUE
+      keyUsage = critical, keyCertSign, cRLSign
+      subjectKeyIdentifier = hash
+
+- name: 'Write the extensions of the certificate'
+  ansible.builtin.copy:
+    dest: "{{ mail_opensmtpd__test_pki }}/realm.ext"
+    mode: '0600'
+    content: |
+      basicConstraints = CA:FALSE
+      keyUsage = critical, digitalSignature
+      extendedKeyUsage = serverAuth
+      # VERIFY_X509_STRICT of Python 3.13 requires the key identifiers
+      subjectKeyIdentifier = hash
+      authorityKeyIdentifier = keyid,issuer
+      subjectAltName = DNS:{{ mail_opensmtpd__test_realm }}, IP:{{ mail_opensmtpd__test_tls_ip }}
+
+- name: 'Create the keys of the CA and the realm'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', "{{ mail_opensmtpd__test_pki }}/{{ item }}.key" ]
+    creates: "{{ mail_opensmtpd__test_pki }}/{{ item }}.key"
+  loop: [ 'ca', 'realm' ]
+
+- name: 'Create the certificate of the CA'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'req', '-x509', '-new', '-key', "{{ mail_opensmtpd__test_pki }}/ca.key", '-subj', '/CN=Molecule OpenSMTPD CA',
+            '-days', '30', '-config', "{{ mail_opensmtpd__test_pki }}/openssl.cnf", '-extensions', 'ca',
+            '-out', "{{ mail_opensmtpd__test_pki }}/ca.crt" ]
+    creates: "{{ mail_opensmtpd__test_pki }}/ca.crt"
+
+- name: 'Create the request of the realm'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'req', '-new', '-key', "{{ mail_opensmtpd__test_pki }}/realm.key", '-subj', "/CN={{ mail_opensmtpd__test_realm }}",
+            '-config', "{{ mail_opensmtpd__test_pki }}/openssl.cnf", '-out', "{{ mail_opensmtpd__test_pki }}/realm.csr" ]
+    creates: "{{ mail_opensmtpd__test_pki }}/realm.csr"
+
+- name: 'Create the certificate of the realm'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'x509', '-req', '-in', "{{ mail_opensmtpd__test_pki }}/realm.csr",
+            '-CA', "{{ mail_opensmtpd__test_pki }}/ca.crt", '-CAkey', "{{ mail_opensmtpd__test_pki }}/ca.key",
+            '-set_serial', '10', '-days', '30', '-extfile', "{{ mail_opensmtpd__test_pki }}/realm.ext",
+            '-out', "{{ mail_opensmtpd__test_pki }}/realm.crt" ]
+    creates: "{{ mail_opensmtpd__test_pki }}/realm.crt"
