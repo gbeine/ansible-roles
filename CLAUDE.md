@@ -194,7 +194,6 @@ Mixed secrets (the image reads some secrets from files, others only from the env
 - `enabled` is always supported: it is written to UCI and controls the service
   (`true` started and enabled, `false` stopped and disabled), even if the init script does not read it.
 - Before any change the role stores the file and the UCI configuration on the controller in `<playbook_dir>/backups/<inventory_hostname>/`.
-- In check mode the role stops after the installation if the package is missing.
 - Do not restart with `restarted` if the old process may still hold the ports: stop, wait until the process has ended, then start (see `app_coturn`).
 
 ## Modules
@@ -215,6 +214,16 @@ Mixed secrets (the image reads some secrets from files, others only from the env
 - Names are checked with `<role>__name_pattern` unless an allow list exists.
 - Line breaks in values and booleans that are no booleans are rejected.
 
+## Check mode
+
+- Every role runs with `--check` without failing, also on a host where it never ran before.
+- If the packages of a first installation are missing in check mode, the role stops after the installation,
+  there are no files and services to compare.
+- The role detects the missing installation by files or directories of the package (e.g. `/etc/swanctl`, see `security_strongswan`),
+  not only by `ansible_check_mode`: the variable is only set by `--check`, not by `check_mode` of a task.
+- Commands that change something (`command`, `shell`, `raw`, restarts) do not run in check mode, commands that only read run with `check_mode: false`.
+- Files that another role creates only in a real run (e.g. the realm of `pki_easyrsa_deploy`) are reported in check mode, not treated as errors.
+
 ## Documentation
 
 - `README.md` keeps its front matter, the text is "Installs and configures …".
@@ -230,7 +239,8 @@ Mixed secrets (the image reads some secrets from files, others only from the env
 - The VMs are created with tart by `.molecule/tart/create.yml` and `destroy.yml`.
   Two platforms: `molecule-<short>-default` with the mandatory values only and `molecule-<short>` with the options.
 - Test cases live in `test_cases.yml` with `role_vars`, `side_effect.role_vars` and `expect`.
-- Sequence: destroy, syntax, create, prepare, converge, idempotence, side_effect, verify, destroy.
+- Sequence: destroy, syntax, create, prepare, check, converge, idempotence, side_effect, verify, destroy.
+- `check` runs `converge` with `--check` on the VMs where the role never ran (see `security_strongswan`).
 - `prepare` starts the services the role needs, e.g. a database (see `app_bookstack`).
 - `side_effect`:
   - invalid runs are named "(expect ERROR)" and use `tasks/invalid_run.yml`,
