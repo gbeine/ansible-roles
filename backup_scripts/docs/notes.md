@@ -113,8 +113,7 @@ All checks run before any change. The role fails if
 
 ### Check mode
 
-The role runs with `--check`, also on a host where it never ran.
-Without `/etc/backup` and `/usr/local/lib/backup` the role stops after the installation of the packages, there are no files to compare.
+The role runs with `--check`, also on a host where it never ran, and compares the scripts and their configuration files.
 
 ### Pruning
 
@@ -169,7 +168,7 @@ The molecule scenario `default` uses tart with two VMs with Debian 13:
 | `molecule-backup-scripts-default` | No scripts, `prepare` creates files of borg and restic and a script of another role, the role prunes the files of borg and restic and keeps the other script |
 | `molecule-backup-scripts` | borg over ssh and restic with the backend `sftp` to a user on localhost, `prepare` creates the key, the user and both repositories |
 
-`check` runs `converge` with `--check`, on `molecule-backup-scripts` the directories are missing and the role stops after the installation.
+`check` runs `converge` with `--check`, on `molecule-backup-scripts` the packages and the directories are missing.
 `side_effect` runs invalid configurations, they have to fail before the configurations of borg and restic change.
 It runs both scripts with the password on STDIN, then adds an excluded directory and `password` to both.
 `verify` checks the files of the directories and the modes of the password files,
