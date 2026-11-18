@@ -2,13 +2,6 @@
 
 - name: 'Install and configure Icinga 2 agent'
   tags: [ 'monitoring', 'monitoring_icinga_agent' ]
-  vars:
-    monitoring_icinga_agent__changed: >-
-      {{ monitoring_icinga_agent__config_result is changed
-         or monitoring_icinga_agent__certs_result is changed
-         or monitoring_icinga_agent__features_result is changed
-         or monitoring_icinga_agent__disabled_result is changed
-         or monitoring_icinga_agent__override_result is changed }}
   block:
 
     - name: 'Include OS-specific variables'
@@ -40,156 +33,48 @@
               'icinga_cert_source_dir': monitoring_icinga_agent__cert_source_dir}
              | dict2items | selectattr('value', 'eq', '') | map(attribute='key') | list }}
 
+    # certbot issues the certificates only in a real run, in check mode missing certificates are only reported
+    - name: 'Find the certificates'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ monitoring_icinga_agent__cert_source_ca_file }}"
+        - "{{ monitoring_icinga_agent__cert_source_cert_file }}"
+        - "{{ monitoring_icinga_agent__cert_source_key_file }}"
+      register: 'monitoring_icinga_agent__cert_stat'
+
+    - name: 'Validate the certificates'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or monitoring_icinga_agent__cert_missing | length == 0
+        fail_msg: "These certificates do not exist on the host, certbot has to issue them first: {{ monitoring_icinga_agent__cert_missing | join(', ') }}."
+        quiet: true
+      vars:
+        monitoring_icinga_agent__cert_missing: "{{ monitoring_icinga_agent__cert_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}"
+
+    - name: 'Report the missing certificates in check mode'
+      ansible.builtin.debug:
+        msg: "These certificates do not exist on the host, certbot has to issue them first: {{ monitoring_icinga_agent__cert_missing | join(', ') }}."
+      when:
+        - ansible_check_mode
+        - monitoring_icinga_agent__cert_missing | length > 0
+      vars:
+        monitoring_icinga_agent__cert_missing: "{{ monitoring_icinga_agent__cert_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}"
+
     - name: 'Install packages'
       ansible.builtin.apt:
         pkg: "{{ monitoring_icinga_agent__packages }}"
         install_recommends: false
         cache_valid_time: 3600
 
-    - name: 'Create directories'
-      ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: "{{ item.owner | default(monitoring_icinga_agent__user) }}"
-        group: "{{ item.group | default(monitoring_icinga_agent__group) }}"
-        mode: "{{ item.mode | default('0750') }}"
-        state: 'directory'
-      loop:
-        - dest: "{{ monitoring_icinga_agent__local_etc_dir }}"
-          mode: '0755'
-        - dest: "{{ monitoring_icinga_agent__local_plugins_dir }}"
-          owner: 'root'
-          group: 'root'
-          mode: '0755'
-        - dest: "{{ monitoring_icinga_agent__cert_dir }}"
-        - dest: "{{ monitoring_icinga_agent__systemd_override_dir }}"
-          owner: 'root'
-          group: 'root'
-          mode: '0755'
-      loop_control:
-        label: "{{ item.dest }}"
+    # In check mode the packages of a first installation are missing, there is no user nagios and no configuration to compare.
+    # ansible_check_mode is only set by --check, the configuration directory shows the installation in every check mode.
+    - name: 'Find the configuration directory of Icinga 2'
+      ansible.builtin.stat:
+        path: "{{ monitoring_icinga_agent__etc_dir }}"
+      register: 'monitoring_icinga_agent__etc_stat'
+      check_mode: false
 
-    - name: 'Generate configuration'
-      ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ monitoring_icinga_agent__etc_dir }}/{{ item.dest }}"
-        owner: "{{ monitoring_icinga_agent__user }}"
-        group: "{{ monitoring_icinga_agent__group }}"
-        mode: '0400'
-      loop:
-        - src: 'constants.conf.j2'
-          dest: 'constants.conf'
-        - src: 'icinga2.conf.j2'
-          dest: 'icinga2.conf'
-        - src: 'zones.conf.j2'
-          dest: 'zones.conf'
-        - src: 'features-api.conf.j2'
-          dest: 'features-available/api.conf'
-        - src: 'features-checker.conf.j2'
-          dest: 'features-available/checker.conf'
-        - src: 'features-mainlog.conf.j2'
-          dest: 'features-available/mainlog.conf'
-      loop_control:
-        label: "{{ item.dest }}"
-      register: 'monitoring_icinga_agent__config_result'
-
-    # The systemd override installs the certificates on every start, pki_update restarts Icinga 2 after a renewal.
-    # The role only copies missing certificates, icinga2 daemon -C loads them before the first start.
-    - name: 'Copy certificates'
-      ansible.builtin.copy:
-        src: "{{ item.src }}"
-        dest: "{{ monitoring_icinga_agent__cert_dir }}/{{ item.dest }}"
-        remote_src: true
-        force: false
-        owner: "{{ monitoring_icinga_agent__user }}"
-        group: "{{ monitoring_icinga_agent__group }}"
-        mode: "{{ item.mode }}"
-      loop:
-        - src: "{{ monitoring_icinga_agent__cert_source_ca_file }}"
-          dest: 'ca.crt'
-          mode: '0644'
-        - src: "{{ monitoring_icinga_agent__cert_source_cert_file }}"
-          dest: "{{ monitoring_icinga_agent__node_name }}.crt"
-          mode: '0644'
-        - src: "{{ monitoring_icinga_agent__cert_source_key_file }}"
-          dest: "{{ monitoring_icinga_agent__node_name }}.key"
-          mode: '0400'
-      loop_control:
-        label: "{{ item.dest }}"
-      register: 'monitoring_icinga_agent__certs_result'
-
-    - name: 'Enable features'
-      ansible.builtin.file:
-        path: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled/{{ item }}.conf"
-        src: "../features-available/{{ item }}.conf"
-        state: 'link'
-      loop: "{{ monitoring_icinga_agent__features }}"
-      register: 'monitoring_icinga_agent__features_result'
-
-    - name: 'Find enabled features'
-      ansible.builtin.find:
-        paths: "{{ monitoring_icinga_agent__etc_dir }}/features-enabled"
-        file_type: 'any'
-      register: 'monitoring_icinga_agent__enabled_features'
-
-    - name: 'Disable features not managed by the role'
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: 'absent'
-      loop: >-
-        {{ monitoring_icinga_agent__enabled_features.files | map(attribute='path')
-           | reject('in', monitoring_icinga_agent__features
-                          | map('regex_replace', '^', monitoring_icinga_agent__etc_dir + '/features-enabled/')
-                          | map('regex_replace', '$', '.conf') | list)
-           | list }}
-      register: 'monitoring_icinga_agent__disabled_result'
-
-    - name: 'Install systemd override to copy the certificates'
-      ansible.builtin.template:
-        src: 'override.conf.j2'
-        dest: "{{ monitoring_icinga_agent__systemd_override_dir }}/override.conf"
-        owner: 'root'
-        group: 'root'
-        mode: '0644'
-      register: 'monitoring_icinga_agent__override_result'
-
-    - name: 'Check the Icinga 2 configuration'
-      ansible.builtin.command: 'icinga2 daemon -C'
-      register: 'monitoring_icinga_agent__check_result'
-      changed_when: false
-      failed_when: false
-      when: monitoring_icinga_agent__changed | bool
-
-    - name: 'Assert the Icinga 2 configuration is valid'
-      ansible.builtin.assert:
-        that:
-          - monitoring_icinga_agent__check_result.rc == 0
-        fail_msg: "{{ monitoring_icinga_agent__check_result.stdout_lines | select('search', 'critical/|Error') | list | join(' ') }}"
-        quiet: true
-      when: monitoring_icinga_agent__changed | bool
-
-    - name: 'Gathering facts about services...'
-      ansible.builtin.service_facts:
-
-    - name: 'Start and enable Icinga 2'
-      ansible.builtin.systemd_service:
-        name: 'icinga2'
-        daemon_reload: "{{ monitoring_icinga_agent__override_result is changed }}"
-        state: "{{ 'restarted' if monitoring_icinga_agent__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        monitoring_icinga_agent__running: >-
-          {{ (ansible_facts.services['icinga2.service'].state | default('')) == 'running' }}
-        monitoring_icinga_agent__restart: >-
-          {{ monitoring_icinga_agent__running | bool and monitoring_icinga_agent__changed | bool }}
-      when: 'not ansible_check_mode'
-
-    - name: 'Enable the restart after a renewal of the certificate'
-      when:
-        - not ansible_check_mode
-        - monitoring_icinga_agent__pki_update_enabled | bool
-      ansible.builtin.include_role:
-        name: 'pki_update'
-      vars:
-        pki_service: 'icinga2'
-        pki_certificate: "{{ monitoring_icinga_agent__cert_source_cert_file }}"
-        pki_schedule: "{{ monitoring_icinga_agent__pki_update_schedule }}"
+    - name: 'Configure Icinga 2'
+      ansible.builtin.include_tasks: 'configure.yml'
+      when: monitoring_icinga_agent__etc_stat.stat.isdir | default(false)

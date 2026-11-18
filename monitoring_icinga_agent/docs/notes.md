@@ -66,6 +66,15 @@ The role checks the configuration with `icinga2 daemon -C` if the configuration,
 an invalid configuration fails the role before Icinga 2 is restarted.
 Icinga 2 is restarted only if it was running and something changed, otherwise it is started and enabled.
 
+### Check mode
+
+The role runs with `--check`, also on a host where Icinga 2 is not installed yet:
+
+- without the packages there is no user `nagios` and no `/etc/icinga2`, the role stops after the installation,
+  there are no files and services to compare
+- certificates that certbot did not issue yet are only reported, a real run fails before any change
+- `icinga2 daemon -C` does not run, the new configuration is not written in check mode
+
 ### Migration
 
 | Before | Now |
@@ -80,11 +89,18 @@ Icinga 2 is restarted only if it was running and something changed, otherwise it
 
 ### Tests
 
-The molecule scenario `default` uses tart with one VM `molecule-icinga-agent`.
-`prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running) and creates a CA and the certificates of the agent in the layout of certbot.
+The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs with Debian 13.
+`prepare` creates a CA and the certificates of the agents in the layout of certbot.
+`check` runs `converge` with `--check` on the VMs where the role never ran.
+
+| Platform | Test case |
+|---|---|
+| `molecule-icinga-agent-default` | The mandatory values only, Icinga 2 is not installed before, `check` stops after the installation |
+| `molecule-icinga-agent` | `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running), `icinga_parent_host` and an own schedule of `pki_update` |
+
 `side_effect` changes `icinga_main_log_severity` and checks that Icinga 2 was restarted.
-`verify` checks the service, `icinga2 daemon -C`, the enabled features, `zones.conf`, owner and mode of the certificates,
-the `install` lines of the systemd override, the timer of `pki_update` with the path of `fullchain.pem`
+`verify` checks the service, `icinga2 daemon -C`, the enabled features, `zones.conf` with the `host` of the parent, owner and mode of the certificates,
+the `install` lines of the systemd override, the timer of `pki_update` with the path of `fullchain.pem` and the schedule
 and connects to the API with `openssl s_client` to check the certificate of the agent against the CA.
 
 ```

@@ -7,6 +7,8 @@
     - 'test_cases.yml'
 
   vars:
+    monitoring_icinga_agent__test_case: "{{ monitoring_icinga_agent__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icinga_agent__test_vars: "{{ monitoring_icinga_agent__test_case.role_vars }}"
     monitoring_icinga_agent__test_node: "{{ monitoring_icinga_agent__test_vars.icinga_node_name }}"
 
   tasks:
@@ -64,12 +66,15 @@
         src: '/etc/icinga2/zones.conf'
       register: 'monitoring_icinga_agent__test_zones'
 
-    - name: 'Assert the agent does not connect to the parent without icinga_parent_host'
+    - name: 'Assert the zones, the agent connects to the parent only with icinga_parent_host'
       ansible.builtin.assert:
         that:
           - ('object Endpoint "' + monitoring_icinga_agent__test_vars.icinga_parent_name + '"') in monitoring_icinga_agent__test_zones_content
           - ('parent = "' + monitoring_icinga_agent__test_vars.icinga_zone_name + '"') in monitoring_icinga_agent__test_zones_content
-          - monitoring_icinga_agent__test_zones_content is not search('host =')
+          - >-
+            (monitoring_icinga_agent__test_zones_content is search('host = "' ~ monitoring_icinga_agent__test_case.expect.parent_host ~ '"'))
+            if monitoring_icinga_agent__test_case.expect.parent_host | length > 0
+            else (monitoring_icinga_agent__test_zones_content is not search('host ='))
         fail_msg: "{{ monitoring_icinga_agent__test_zones_content }}"
       vars:
         monitoring_icinga_agent__test_zones_content: "{{ monitoring_icinga_agent__test_zones.content | b64decode }}"
@@ -98,6 +103,7 @@
       loop:
         - '/etc/systemd/system/icinga2.service.d/override.conf'
         - '/etc/systemd/system/pki-update@icinga2.service.d/override.conf'
+        - '/etc/systemd/system/pki-update@icinga2.timer.d/override.conf'
       register: 'monitoring_icinga_agent__test_overrides'
 
     - name: 'Read the state of the timer of pki_update'
@@ -116,6 +122,7 @@
           - monitoring_icinga_agent__test_icinga | select('search', '/cp |/chown |/chmod ') | list | length == 0
           - ('Environment=PKI_CERTIFICATE=' ~ monitoring_icinga_agent__test_source ~ '/fullchain.pem') in monitoring_icinga_agent__test_pki_update
           - monitoring_icinga_agent__test_pki_update_timer.stdout == 'active'
+          - ('OnCalendar=' ~ monitoring_icinga_agent__test_case.expect.schedule) in monitoring_icinga_agent__test_pki_update_schedule
         fail_msg: >-
           icinga2: {{ monitoring_icinga_agent__test_icinga }},
           pki_update: {{ monitoring_icinga_agent__test_pki_update }},
@@ -124,6 +131,7 @@
         monitoring_icinga_agent__test_source: "{{ monitoring_icinga_agent__test_cert_source_dir }}/{{ monitoring_icinga_agent__test_node }}"
         monitoring_icinga_agent__test_icinga: "{{ (monitoring_icinga_agent__test_overrides.results[0].content | b64decode).splitlines() }}"
         monitoring_icinga_agent__test_pki_update: "{{ (monitoring_icinga_agent__test_overrides.results[1].content | b64decode).splitlines() }}"
+        monitoring_icinga_agent__test_pki_update_schedule: "{{ (monitoring_icinga_agent__test_overrides.results[2].content | b64decode).splitlines() }}"
 
     - name: 'Wait for the API port of Icinga 2'
       ansible.builtin.wait_for:
