@@ -2,7 +2,8 @@ zot runs in the container image `ghcr.io/project-zot/zot` (`latest` by default, 
 The image is multi-arch, it is built from `distroless` without a shell and runs zot as root.
 zot listens on port 5000, it serves the OCI distribution API, the web interface and the health checks `/livez`, `/readyz` and `/startupz`.
 The configuration and the users are kept in `<zot_home>/etc`, mounted read-only as `/etc/zot`,
-the images in `<zot_home>/data`, mounted as `/var/lib/registry`.
+the images in `<zot_home>/data`, mounted as `/var/lib/registry`, and the temporary files of zot, e.g. of uploads and sync,
+in `<zot_home>/tmp`, mounted as `/tmp`, so they do not grow the layer of the container.
 
 ### Configuration
 
@@ -117,7 +118,17 @@ The keys of the configuration are checked by zot itself, see Validation.
 ### Container
 
 Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `zot_container`, it is merged over the default of the container.
-The merge is not recursive, `zot_container.volumes` replaces the configuration and the storage.
+The merge is not recursive, `zot_container.volumes` replaces the configuration, the storage and the temporary files,
+all three volumes have to be listed then:
+
+```yaml
+zot_container:
+  volumes:
+    - '/opt/zot/etc:/etc/zot:ro,Z'
+    - '/opt/zot/data:/var/lib/registry:Z'
+    - '/opt/zot/tmp:/tmp:Z'
+    - '/mnt/backup:/mnt/backup:ro,Z'
+```
 For a reverse proxy, e.g. Traefik, the labels are set with `zot_labels`, large images need long timeouts and no limit of the size of the body.
 The directories belong to root with the mode `0750`, `config.json` and `htpasswd` with the mode `0600`.
 
