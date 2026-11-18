@@ -17,6 +17,7 @@ backup_scripts:
 | `restic` | `950.backup.restic` | `backup_restic` | `bash`, `restic` |
 | `mariadb` | `910.backup.mariadb` | `backup_mariadb` | `bash`, `xz-utils` |
 | `mysql` | `910.backup.mysql` | `backup_mysql` | `bash`, `xz-utils` |
+| `postgresql` | `910.backup.postgresql` | `backup_postgresql` | `bash` |
 
 The scripts are listed in `vars/main.yml`, the packages in `vars/Debian-13.yml`.
 The external system runs every script on its own, e.g. `/usr/local/lib/backup/950.backup.restic`.
@@ -141,6 +142,36 @@ ssh root@host /usr/local/lib/backup/910.backup.mariadb < password
 `password`, `password_file` and `password_command` keep the password on the host like for restic and the role prints a warning,
 `password` is written to `/etc/backup/mariadb-password` or `/etc/backup/mysql-password` with mode `0400`.
 
+### PostgreSQL
+
+The script `postgresql` dumps every database of PostgreSQL running in a podman container with `pg_dump` into its own file
+`<backup_dir>/<database>-<YYYYMMDD>.dump`, the clients run in the container with `podman exec`.
+`backup_postgresql` is merged into the default:
+
+```yaml
+backup_postgresql:
+  container: 'postgresql'
+  user: 'postgres'
+  ignore_databases:
+    - 'template0'
+    - 'template1'
+```
+
+- `container` is the name of the container (default `postgresql`), e.g. the container of `database_postgresql`.
+- `host` is the host or the directory of the socket the clients connect to in the container (default `/var/run/postgresql`, the socket of the image).
+- `user` is the database user of the backup (default `postgres`), another user needs `pg_read_all_data`.
+- `backup_dir` is the directory of the dumps on the host (default `/var/backups/postgresql`), it is created with mode `0750`.
+- `options` are the options of `pg_dump` (default `--format=custom`), the custom format is compressed and restored with `pg_restore`.
+- `ignore_databases` are the databases that are not dumped (default `template0` and `template1`),
+  databases that do not allow connections are never dumped.
+- `keep_days` removes dumps older than the number of days (default `14`).
+
+The password comes on STDIN like for MariaDB and MySQL, `password`, `password_file` and `password_command` keep it on the host
+(`/etc/backup/postgresql-password`). The script passes the password to every client on STDIN without a password option:
+`psql` and `pg_dump` ask for the password only if the server requires it and read it from STDIN,
+because `podman exec -i` has no terminal. With `trust` (e.g. the socket of `database_postgresql`) the password is not used,
+the script still needs one.
+
 ### Validation
 
 All checks run before any change. The role fails if
@@ -152,9 +183,9 @@ All checks run before any change. The role fails if
 - `include` is no list with at least one path, `exclude` is no list,
 - a value contains a line break, or a value of `/etc/backup/borg` or `/etc/backup/restic` contains a double quote,
 - `pass_enable` is no boolean,
-- `backup_mariadb` or `backup_mysql` has unknown keys, an empty `container`, `host` or `user`, a `backup_dir` that is no absolute path,
+- `backup_mariadb`, `backup_mysql` or `backup_postgresql` has unknown keys, an empty `container`, `host` or `user`, a `backup_dir` that is no absolute path,
   `ignore_databases` is no list or contains spaces, `keep_days` is no positive integer, `compress` or `replication` is no boolean,
-  a value contains a line break or a value of `/etc/backup/mariadb` or `/etc/backup/mysql` contains a double quote.
+  a value contains a line break or a value of `/etc/backup/mariadb` or `/etc/backup/mysql` contains a double quote, `backup_postgresql` has no `compress` and no `replication`.
 
 ### Check mode
 
@@ -168,7 +199,7 @@ Files of other roles in `/usr/local/lib/backup` and `/etc/backup` are not touche
 
 ### Migration
 
-The role replaces the roles `backup`, `backup_borg`, `backup_restic` and `backup_mysql`, the other roles `backup_*` follow one by one.
+The role replaces the roles `backup`, `backup_borg`, `backup_restic`, `backup_mysql` and `backup_postgresql`, the other roles `backup_*` follow one by one.
 `backup_ssh` stays a role of its own for now.
 
 | Before | Now |
@@ -193,6 +224,8 @@ The role replaces the roles `backup`, `backup_borg`, `backup_restic` and `backup
 | `backup_mysql_pass` | `backup_mariadb.password_command` or `backup_mysql.password_command` |
 | `backup_mysql_dump_options` | `backup_mariadb.options` or `backup_mysql.options`, the options replace the default instead of being appended |
 | `backup_mysql_ignore_databases`, `backup_mysql_keep_days`, `backup_mysql_compress`, `backup_mysql_replication` | `.ignore_databases`, `.keep_days`, `.compress`, `.replication` of `backup_mariadb` or `backup_mysql` |
+| `backup_postgresql_use_podman`, `backup_postgresql_podman_backup_dir` | removed, `postgresql` in `backup_scripts`, the script runs the clients in the container `backup_postgresql.container` and writes the dumps on the host |
+| `backup_postgresql_backup_dir`, `backup_postgresql_ignore_databases`, `backup_postgresql_keep_days` | `backup_postgresql.backup_dir`, `.ignore_databases`, `.keep_days` |
 
 Changed behavior:
 
@@ -202,6 +235,9 @@ Changed behavior:
   `/usr/local/lib/backup/910.backup.mariadb-podman` and `/etc/backup/mysql_password`,
 - the scripts of MariaDB and MySQL are split, both run the clients in a podman container, MySQL no longer runs natively,
 - the dumps of MariaDB are written to `/var/backups/mariadb` instead of `/var/backups/mysql`,
+- the dumps of PostgreSQL are files in the custom format instead of directories, written on the host to `backup_dir` and owned by root,
+  the volume `<postgresql_home>/backup` of `database_postgresql` is no longer used by the script,
+- the script of PostgreSQL needs a password, by default on STDIN,
 - the files of restic are named `restic-includes`, `restic-sftp` and `restic-password`, the passphrase of borg is `borg-password` instead of `borg_passphrase`,
 - the name of the archive of borg is configurable with `backup_borg.archive`, the default keeps the former name,
 - only Debian 13 is supported.
@@ -215,7 +251,10 @@ Fixed errors of the old roles:
 - the password of MySQL and MariaDB was passed with `--password=…` and visible in the process list,
 - `backup_mysql_compress` was ignored, the dumps were always compressed,
 - `backup_mysql_replication` ran `mysqladmin stop` and `start`, which are no commands of `mysqladmin`,
-- the databases were read from the table output of `mysqlshow`, a failed dump left a broken file and did not fail the script.
+- the databases were read from the table output of `mysqlshow`, a failed dump left a broken file and did not fail the script,
+- the configuration of PostgreSQL used the undefined variable `backup_postgresql__enable`, the role failed,
+- the dumps of PostgreSQL were written to `<postgresql_home>/backup`, but the old dumps were removed in `backup_postgresql_backup_dir`,
+- the databases of PostgreSQL were read from the table output of `psql`, a failed dump did not fail the script.
 
 ### Tests
 
@@ -224,14 +263,14 @@ The molecule scenario `default` uses tart with two VMs with Debian 13:
 | Platform | Test case |
 |---|---|
 | `molecule-backup-scripts-default` | No scripts, `prepare` creates files of borg, restic, mariadb and mysql and a script of another role, the role prunes the files of the catalog and keeps the other script |
-| `molecule-backup-scripts` | borg over ssh and restic with the backend `sftp` to a user on localhost, `prepare` creates the key, the user and both repositories; mariadb and mysql as `root`, mysql without compression, `prepare` starts the containers `mariadb` (`mariadb:lts`) and `mysql` (`mysql:8.4`) with the database `molecule` and an old dump |
+| `molecule-backup-scripts` | borg over ssh and restic with the backend `sftp` to a user on localhost, `prepare` creates the key, the user and both repositories; mariadb and mysql as `root`, mysql without compression, postgresql as `postgres`, `prepare` starts the containers `mariadb` (`mariadb:lts`), `mysql` (`mysql:8.4`) and `postgresql` (`postgres:18-alpine`, the socket requires the password) with the database `molecule` and an old dump |
 
 `check` runs `converge` with `--check`, on `molecule-backup-scripts` the packages and the directories are missing.
-`side_effect` runs invalid configurations, they have to fail before the configurations of borg, restic, mariadb and mysql change.
+`side_effect` runs invalid configurations, they have to fail before the configurations of the scripts change.
 It runs all scripts with the password on STDIN, then adds an excluded directory to borg and restic and `password` to all scripts.
 `verify` checks the files of the directories and the modes of the password files,
 runs borg and restic with the password files and checks the snapshots and archives: the first one contains the excluded directory, the latest one not.
-It runs mariadb and mysql with the password files and checks that the dump of `molecule` contains its row,
+It runs mariadb, mysql and postgresql with the password files and checks that the dump of `molecule` contains its row,
 the ignored databases are not dumped and the old dump is removed.
 
 ```

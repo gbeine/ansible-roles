@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# postgresql - Dump the databases of PostgreSQL running in a podman container
+#
+# (c) 2011-2025 Gerrit Beine
+#
+# Without a password file or command the script reads the password from STDIN,
+# e.g. passed by the password controller that runs the script.
+# The clients in the container ask for the password if the server requires one and read it from their STDIN,
+# it never appears on a command line or in the environment.
+#
+umask 077
+
+if [ -r /etc/backup/postgresql ]; then
+	. /etc/backup/postgresql
+fi
+
+: ${daily_backup_postgresql_enable="NO"}
+: ${daily_backup_postgresql_podman_container="postgresql"}
+: ${daily_backup_postgresql_host="/var/run/postgresql"}
+: ${daily_backup_postgresql_user="postgres"}
+: ${daily_backup_postgresql_password_command=""}
+: ${daily_backup_postgresql_password_file=""}
+: ${daily_backup_postgresql_backup_dir="/var/backups/postgresql"}
+: ${daily_backup_postgresql_dump_options="--format=custom"}
+: ${daily_backup_postgresql_ignore_databases="template0 template1"}
+: ${daily_backup_postgresql_keep_days="14"}
+
+podman="/usr/bin/podman"
+today=$(date +%Y%m%d)
+
+# Runs a client in the container, the password is passed on STDIN
+run() {
+	local program="$1"
+	shift
+	printf '%s\n' "${password}" | ${podman} exec -i "${daily_backup_postgresql_podman_container}" "${program}" \
+		--username="${daily_backup_postgresql_user}" --host="${daily_backup_postgresql_host}" "$@"
+}
+
+rc=0
+case "${daily_backup_postgresql_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup PostgreSQL databases"
+		if [ -n "${daily_backup_postgresql_password_command}" ]; then
+			password=$(${daily_backup_postgresql_password_command} </dev/null)
+		elif [ -n "${daily_backup_postgresql_password_file}" ]; then
+			password=$(cat "${daily_backup_postgresql_password_file}")
+		else
+			IFS= read -r password
+		fi
+		if [ -z "${password}" ]; then
+			echo "No password of the PostgreSQL user ${daily_backup_postgresql_user}" >&2
+			exit 1
+		fi
+
+		mkdir -p "${daily_backup_postgresql_backup_dir}"
+
+		if ! databases=$(run psql --dbname=postgres --tuples-only --no-align \
+			--command='SELECT datname FROM pg_database WHERE datallowconn'); then
+			echo "Reading the databases failed" >&2
+			exit 1
+		fi
+
+		for db in ${databases}; do
+			if [[ " ${daily_backup_postgresql_ignore_databases} " == *" ${db} "* ]]; then
+				continue
+			fi
+			file="${daily_backup_postgresql_backup_dir}/${db}-${today}.dump"
+			if ! run pg_dump ${daily_backup_postgresql_dump_options} --dbname="${db}" > "${file}"; then
+				echo "Dump of ${db} failed" >&2
+				rm -f "${file}"
+				rc=1
+			fi
+		done
+
+		find "${daily_backup_postgresql_backup_dir}" -type f -mtime "+${daily_backup_postgresql_keep_days}" -delete
+		;;
+esac
+
+exit "${rc}"

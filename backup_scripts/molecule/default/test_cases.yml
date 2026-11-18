@@ -11,34 +11,64 @@ backup_scripts__test_password_file: '/root/molecule-backup-password'
 backup_scripts__test_data_dir: '/srv/molecule'
 backup_scripts__test_excluded_dir: '/srv/molecule/excluded'
 
-# The databases are started in prepare.yml on molecule-backup-scripts, the scripts dump them as root,
-# init.sql creates the database molecule with one row
+# The databases are started in prepare.yml on molecule-backup-scripts, the scripts dump them as the superuser,
+# init_sql creates the database molecule with one row, the clients read the password from STDIN
+#   query:     reads the row, prepare waits until it succeeds
+#   read_dump: prints the dump as SQL, {file} is the dump
 backup_scripts__test_network:
   name: 'podman-molecule'
   address: '10.89.0.0'
   gateway: '10.89.0.1'
   netmask: 24
 backup_scripts__test_database_password: 'molecule-database-password'
-backup_scripts__test_init_sql: '/opt/molecule/init.sql'
+backup_scripts__test_init_dir: '/opt/molecule'
+backup_scripts__test_mysql_init_sql: |
+  CREATE DATABASE molecule;
+  CREATE TABLE molecule.data (id INT PRIMARY KEY, name VARCHAR(32));
+  INSERT INTO molecule.data VALUES (1, 'molecule');
 backup_scripts__test_databases:
   - name: 'mariadb'
     image: 'docker.io/library/mariadb:lts'
-    client: 'mariadb'
-    root_password_variable: 'MARIADB_ROOT_PASSWORD'
+    env:
+      MARIADB_ROOT_PASSWORD: "{{ backup_scripts__test_database_password }}"
+    init_sql: "{{ backup_scripts__test_mysql_init_sql }}"
+    query: [ 'mariadb', '--user=root', '--password', '--batch', '--skip-column-names', '--execute=SELECT name FROM molecule.data' ]
     backup_dir: '/var/backups/mariadb'
     # compress is true by default
     extension: 'sql.xz'
+    read_dump: 'xzcat {file}'
+    row: "INSERT INTO `data` VALUES\\s*\\(1,'molecule'\\)"
   - name: 'mysql'
     image: 'docker.io/library/mysql:8.4'
-    client: 'mysql'
-    root_password_variable: 'MYSQL_ROOT_PASSWORD'
+    env:
+      MYSQL_ROOT_PASSWORD: "{{ backup_scripts__test_database_password }}"
+    init_sql: "{{ backup_scripts__test_mysql_init_sql }}"
+    query: [ 'mysql', '--user=root', '--password', '--batch', '--skip-column-names', '--execute=SELECT name FROM molecule.data' ]
     backup_dir: '/var/backups/mysql'
     # compress is false in the test case
     extension: 'sql'
+    read_dump: 'cat {file}'
+    row: "INSERT INTO `data` VALUES\\s*\\(1,'molecule'\\)"
+  # The socket requires the password, without it the server would not ask for the password on STDIN
+  - name: 'postgresql'
+    image: 'docker.io/library/postgres:18-alpine'
+    env:
+      POSTGRES_PASSWORD: "{{ backup_scripts__test_database_password }}"
+      POSTGRES_INITDB_ARGS: '--auth-local=scram-sha-256 --auth-host=scram-sha-256'
+    init_sql: |
+      CREATE DATABASE molecule;
+      \c molecule
+      CREATE TABLE data (id INT PRIMARY KEY, name VARCHAR(32));
+      INSERT INTO data VALUES (1, 'molecule');
+    query: [ 'psql', '--username=postgres', '--dbname=molecule', '--tuples-only', '--no-align', '--command=SELECT name FROM data' ]
+    backup_dir: '/var/backups/postgresql'
+    extension: 'dump'
+    read_dump: 'podman exec -i postgresql pg_restore --file=- < {file}'
+    row: "COPY public.data \\(id, name\\) FROM stdin;\\n1\\tmolecule"
 
 backup_scripts__test_cases:
 
-  # Without scripts, prepare creates files of borg, restic, mariadb and mysql, they are pruned, and a script of another role, it stays
+  # Without scripts, prepare creates files of the catalog, they are pruned, and a script of another role, it stays
   - name: 'molecule-backup-scripts-default'
     role_vars: {}
     expect:
@@ -47,7 +77,7 @@ backup_scripts__test_cases:
 
   - name: 'molecule-backup-scripts'
     role_vars:
-      backup_scripts: [ 'borg', 'restic', 'mariadb', 'mysql' ]
+      backup_scripts: [ 'borg', 'restic', 'mariadb', 'mysql', 'postgresql' ]
       # A unique archive per run, the default has one archive per day
       backup_borg:
         repository: 'ssh://molecule-backup@localhost/./borg-repository'
@@ -64,10 +94,13 @@ backup_scripts__test_cases:
       backup_mysql:
         user: 'root'
         compress: false
+      backup_postgresql: {}
     # side_effect excludes a directory and keeps the passwords on the host
     side_effect:
       role_vars:
-        backup_scripts: [ 'borg', 'restic', 'mariadb', 'mysql' ]
+        backup_scripts: [ 'borg', 'restic', 'mariadb', 'mysql', 'postgresql' ]
+        backup_postgresql:
+          password: 'molecule-database-password'
         backup_mariadb:
           user: 'root'
           password: 'molecule-database-password'
@@ -90,7 +123,7 @@ backup_scripts__test_cases:
           exclude: [ '/srv/molecule/excluded' ]
           password: 'molecule-backup-password'
     expect:
-      lib_files: [ '910.backup.mariadb', '910.backup.mysql', '950.backup.borgbackup', '950.backup.restic' ]
+      lib_files: [ '910.backup.mariadb', '910.backup.mysql', '910.backup.postgresql', '950.backup.borgbackup', '950.backup.restic' ]
       etc_files:
         - 'borg'
         - 'borg-excludes'
@@ -100,6 +133,8 @@ backup_scripts__test_cases:
         - 'mariadb-password'
         - 'mysql'
         - 'mysql-password'
+        - 'postgresql'
+        - 'postgresql-password'
         - 'restic'
         - 'restic-excludes'
         - 'restic-includes'

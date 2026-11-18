@@ -16,8 +16,8 @@
       loop: [ "{{ backup_scripts__test_etc_dir }}", "{{ backup_scripts__test_lib_dir }}" ]
       when: inventory_hostname == 'molecule-backup-scripts-default'
 
-    # borg, restic, mariadb and mysql are not selected, their files are pruned, the script of another role stays
-    - name: 'Create files of borg, restic, mariadb and mysql and a script of another role'
+    # The scripts of the catalog are not selected, their files are pruned, the script of another role stays
+    - name: 'Create files of the scripts of the catalog and a script of another role'
       ansible.builtin.copy:
         dest: "{{ item }}"
         content: "#!/bin/sh\n"
@@ -27,12 +27,14 @@
         - "{{ backup_scripts__test_lib_dir }}/950.backup.restic"
         - "{{ backup_scripts__test_lib_dir }}/910.backup.mariadb"
         - "{{ backup_scripts__test_lib_dir }}/910.backup.mysql"
+        - "{{ backup_scripts__test_lib_dir }}/910.backup.postgresql"
         - "{{ backup_scripts__test_lib_dir }}/910.backup.molecule"
         - "{{ backup_scripts__test_etc_dir }}/borg"
         - "{{ backup_scripts__test_etc_dir }}/restic"
         - "{{ backup_scripts__test_etc_dir }}/restic-password"
         - "{{ backup_scripts__test_etc_dir }}/mariadb"
         - "{{ backup_scripts__test_etc_dir }}/mysql-password"
+        - "{{ backup_scripts__test_etc_dir }}/postgresql"
       when: inventory_hostname == 'molecule-backup-scripts-default'
 
 - name: 'Prepare the repositories of borg and restic'
@@ -125,7 +127,7 @@
         BORG_PASSCOMMAND: "cat {{ backup_scripts__test_password_file }}"
         BORG_RSH: "ssh -i {{ backup_scripts__test_key }}"
 
-- name: 'Prepare the databases of MariaDB and MySQL'
+- name: 'Prepare the databases of MariaDB, MySQL and PostgreSQL'
   hosts: 'molecule-backup-scripts'
   become: true
 
@@ -145,20 +147,20 @@
 
   tasks:
 
-    - name: 'Create the directory of init.sql'
+    - name: 'Create the directory of the init scripts'
       ansible.builtin.file:
-        path: "{{ backup_scripts__test_init_sql | dirname }}"
+        path: "{{ backup_scripts__test_init_dir }}"
         state: 'directory'
         mode: '0755'
 
-    - name: 'Write init.sql, it creates the database molecule with one row'
+    - name: 'Write the init scripts, they create the database molecule with one row'
       ansible.builtin.copy:
-        dest: "{{ backup_scripts__test_init_sql }}"
-        content: |
-          CREATE DATABASE molecule;
-          CREATE TABLE molecule.data (id INT PRIMARY KEY, name VARCHAR(32));
-          INSERT INTO molecule.data VALUES (1, 'molecule');
+        dest: "{{ backup_scripts__test_init_dir }}/init-{{ item.name }}.sql"
+        content: "{{ item.init_sql }}"
         mode: '0644'
+      loop: "{{ backup_scripts__test_databases }}"
+      loop_control:
+        label: "{{ item.name }}"
 
     - name: 'Pull the images of the databases'
       containers.podman.podman_image:
@@ -172,20 +174,18 @@
         name: "{{ item.name }}"
         image: "{{ item.image }}"
         network: "{{ backup_scripts__test_network.name }}"
-        env:
-          "{{ {item.root_password_variable: backup_scripts__test_database_password} }}"
+        env: "{{ item.env }}"
         volumes:
-          - "{{ backup_scripts__test_init_sql }}:/docker-entrypoint-initdb.d/init.sql:ro,Z"
+          - "{{ backup_scripts__test_init_dir }}/init-{{ item.name }}.sql:/docker-entrypoint-initdb.d/init.sql:ro,Z"
         state: 'started'
       loop: "{{ backup_scripts__test_databases }}"
       loop_control:
         label: "{{ item.name }}"
 
     # The init scripts of the images run before the server listens, the row exists if the query succeeds
-    - name: 'Wait until the databases contain the row of init.sql'
+    - name: 'Wait until the databases contain the row of the init script'
       ansible.builtin.command:
-        argv: [ 'podman', 'exec', '-i', "{{ item.name }}", "{{ item.client }}", '--user=root', '--password',
-                '--batch', '--skip-column-names', '--execute=SELECT name FROM molecule.data' ]
+        argv: "{{ ['podman', 'exec', '-i', item.name] + item.query }}"
         stdin: "{{ backup_scripts__test_database_password }}"
       register: 'backup_scripts__test_database_ready'
       until: backup_scripts__test_database_ready.stdout == 'molecule'

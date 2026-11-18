@@ -10,7 +10,10 @@
   vars:
     backup_scripts__database_var: "backup_{{ backup_scripts__script.name }}"
     backup_scripts__database: "{{ lookup('ansible.builtin.vars', 'backup_scripts__' ~ backup_scripts__script.name) }}"
-    backup_scripts__database_unknown: "{{ backup_scripts__database.keys() | reject('in', backup_scripts__database_keys) | list }}"
+    # The keys of the script, e.g. backup_scripts__postgresql_keys, mariadb and mysql use backup_scripts__database_keys
+    backup_scripts__database_allowed: >-
+      {{ lookup('ansible.builtin.vars', 'backup_scripts__' ~ backup_scripts__script.name ~ '_keys', default=backup_scripts__database_keys) }}
+    backup_scripts__database_unknown: "{{ backup_scripts__database.keys() | reject('in', backup_scripts__database_allowed) | list }}"
     backup_scripts__database_passwords: >-
       {{ backup_scripts__password_keys | select('in', backup_scripts__database.keys()) | list }}
     backup_scripts__database_ignore_is_list: >-
@@ -25,7 +28,7 @@
     backup_scripts__database_errors: >-
       {{ ([] if backup_scripts__database_unknown | length == 0
           else ['Unknown keys in ' ~ backup_scripts__database_var ~ ': ' ~ backup_scripts__database_unknown | join(', ')
-                ~ ', allowed are ' ~ backup_scripts__database_keys | join(', ') ~ '.'])
+                ~ ', allowed are ' ~ backup_scripts__database_allowed | join(', ') ~ '.'])
          + ([] if ['container', 'host', 'user'] | map('extract', backup_scripts__database) | map('string')
                   | select('eq', '') | list | length == 0
             else [backup_scripts__database_var ~ '.container, .host and .user must not be empty.'])
@@ -44,9 +47,9 @@
          + ([] if backup_scripts__database.keep_days is integer and backup_scripts__database.keep_days is not boolean
                   and backup_scripts__database.keep_days > 0
             else [backup_scripts__database_var ~ '.keep_days has to be a positive integer.'])
-         + ([] if backup_scripts__database.compress is boolean
+         + ([] if backup_scripts__database.compress | default(true) is boolean
             else [backup_scripts__database_var ~ '.compress has to be a boolean.'])
-         + ([] if backup_scripts__database.replication is boolean
+         + ([] if backup_scripts__database.replication | default(false) is boolean
             else [backup_scripts__database_var ~ '.replication has to be a boolean.'])
          + ([] if (backup_scripts__database_shell_values + [backup_scripts__database.password | default('') | string])
                   | select('search', '[\n\r]') | list | length == 0
