@@ -14,9 +14,9 @@
       - '--repo'
       - 'sftp:backup:repository'
       - '--option'
-      - "sftp.command=ssh -i {{ backup_scripts__test_restic_key }} {{ backup_scripts__test_restic_user }}@localhost -s sftp"
+      - "sftp.command=ssh -i {{ backup_scripts__test_key }} {{ backup_scripts__test_user }}@localhost -s sftp"
       - '--password-file'
-      - "{{ backup_scripts__test_restic_password_file }}"
+      - "{{ backup_scripts__test_password_file }}"
       - '--no-cache'
 
   tasks:
@@ -60,7 +60,7 @@
         - name: 'Read the state of the password file'
           ansible.builtin.stat:
             path: "{{ backup_scripts__test_etc_dir }}/restic-password"
-          register: 'backup_scripts__test_password'
+          register: 'backup_scripts__test_restic_password_stat'
 
         - name: 'Read the configuration of restic'
           ansible.builtin.slurp:
@@ -70,11 +70,11 @@
         - name: 'Assert the password file is only readable by root and used by the script'
           ansible.builtin.assert:
             that:
-              - backup_scripts__test_password.stat.pw_name == 'root'
-              - backup_scripts__test_password.stat.mode == '0400'
+              - backup_scripts__test_restic_password_stat.stat.pw_name == 'root'
+              - backup_scripts__test_restic_password_stat.stat.mode == '0400'
               - ('daily_backup_restic_password_file="' ~ backup_scripts__test_etc_dir ~ '/restic-password"') in backup_scripts__test_config
               - ('daily_backup_restic_backend="SFTP"') in backup_scripts__test_config
-            fail_msg: "{{ backup_scripts__test_password.stat.mode | default('absent') }}: {{ backup_scripts__test_config }}"
+            fail_msg: "{{ backup_scripts__test_restic_password_stat.stat.mode | default('absent') }}: {{ backup_scripts__test_config }}"
           vars:
             backup_scripts__test_config: "{{ backup_scripts__test_restic_config.content | b64decode }}"
 
@@ -113,14 +113,93 @@
           ansible.builtin.assert:
             that:
               - backup_scripts__test_snapshot_list | length >= 2
-              - backup_scripts__test_snapshot_list | map(attribute='paths') | map('sort') | unique | list == [ [ backup_scripts__test_restic_data_dir ] ]
-              - (backup_scripts__test_restic_data_dir ~ '/data.txt') in backup_scripts__test_ls.results[0].stdout_lines
-              - (backup_scripts__test_restic_excluded_dir ~ '/excluded.txt') in backup_scripts__test_ls.results[0].stdout_lines
-              - (backup_scripts__test_restic_data_dir ~ '/data.txt') in backup_scripts__test_ls.results[1].stdout_lines
-              - (backup_scripts__test_restic_excluded_dir ~ '/excluded.txt') not in backup_scripts__test_ls.results[1].stdout_lines
+              - backup_scripts__test_snapshot_list | map(attribute='paths') | map('sort') | unique | list == [ [ backup_scripts__test_data_dir ] ]
+              - (backup_scripts__test_data_dir ~ '/data.txt') in backup_scripts__test_ls.results[0].stdout_lines
+              - (backup_scripts__test_excluded_dir ~ '/excluded.txt') in backup_scripts__test_ls.results[0].stdout_lines
+              - (backup_scripts__test_data_dir ~ '/data.txt') in backup_scripts__test_ls.results[1].stdout_lines
+              - (backup_scripts__test_excluded_dir ~ '/excluded.txt') not in backup_scripts__test_ls.results[1].stdout_lines
             fail_msg: >-
               snapshots: {{ backup_scripts__test_snapshot_list | map(attribute='paths') | list }},
               first: {{ backup_scripts__test_ls.results[0].stdout_lines }},
               latest: {{ backup_scripts__test_ls.results[1].stdout_lines }}
           vars:
             backup_scripts__test_snapshot_list: "{{ backup_scripts__test_snapshots.stdout | from_json }}"
+
+    - name: 'Verify borg'
+      when: "'borg' in backup_scripts__test_case.role_vars.backup_scripts | default([])"
+      environment:
+        BORG_PASSCOMMAND: "cat {{ backup_scripts__test_password_file }}"
+        BORG_RSH: "ssh -i {{ backup_scripts__test_key }}"
+      vars:
+        backup_scripts__test_borg_repository: "ssh://{{ backup_scripts__test_user }}@localhost/./borg-repository"
+      block:
+
+        - name: 'Read the state of the password file of borg'
+          ansible.builtin.stat:
+            path: "{{ backup_scripts__test_etc_dir }}/borg-password"
+          register: 'backup_scripts__test_borg_password_stat'
+
+        - name: 'Read the configuration of borg'
+          ansible.builtin.slurp:
+            src: "{{ backup_scripts__test_etc_dir }}/borg"
+          register: 'backup_scripts__test_borg_config'
+
+        - name: 'Assert the password file of borg is only readable by root and used by the script'
+          ansible.builtin.assert:
+            that:
+              - backup_scripts__test_borg_password_stat.stat.pw_name == 'root'
+              - backup_scripts__test_borg_password_stat.stat.mode == '0400'
+              - ('daily_backup_borg_password_command="cat ' ~ backup_scripts__test_etc_dir ~ '/borg-password"') in backup_scripts__test_config
+            fail_msg: "{{ backup_scripts__test_borg_password_stat.stat.mode | default('absent') }}: {{ backup_scripts__test_config }}"
+          vars:
+            backup_scripts__test_config: "{{ backup_scripts__test_borg_config.content | b64decode }}"
+
+        # borg reads the password file of side_effect
+        - name: 'Run the borg script with the password file'
+          ansible.builtin.command:
+            argv: [ "{{ backup_scripts__test_lib_dir }}/950.backup.borgbackup" ]
+            stdin: ''
+          register: 'backup_scripts__test_borg_run'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the borg script succeeded'
+          ansible.builtin.assert:
+            that:
+              - backup_scripts__test_borg_run.rc == 0
+            fail_msg: "{{ backup_scripts__test_borg_run.stdout }} {{ backup_scripts__test_borg_run.stderr }}"
+
+        - name: 'Read the archives of the repository'
+          ansible.builtin.command:
+            argv: [ 'borg', 'list', '--json', "{{ backup_scripts__test_borg_repository }}" ]
+          register: 'backup_scripts__test_borg_archives'
+          changed_when: false
+
+        - name: 'List the files of the first and the latest archive'
+          ansible.builtin.command:
+            argv: [ 'borg', 'list', '--format', '{path}{NL}', "{{ backup_scripts__test_borg_repository }}::{{ item }}" ]
+          loop:
+            - "{{ (backup_scripts__test_borg_list | first).name }}"
+            - "{{ (backup_scripts__test_borg_list | last).name }}"
+          register: 'backup_scripts__test_borg_ls'
+          changed_when: false
+          vars:
+            backup_scripts__test_borg_list: "{{ (backup_scripts__test_borg_archives.stdout | from_json).archives }}"
+
+        # The first archive was created in side_effect with the password on STDIN, the latest one with the password file and the exclude,
+        # borg stores the paths without the leading slash
+        - name: 'Assert the archives contain the included directory and the latest one not the excluded directory'
+          ansible.builtin.assert:
+            that:
+              - (backup_scripts__test_borg_archives.stdout | from_json).archives | length >= 2
+              - (backup_scripts__test_data ~ '/data.txt') in backup_scripts__test_borg_ls.results[0].stdout_lines
+              - (backup_scripts__test_excluded ~ '/excluded.txt') in backup_scripts__test_borg_ls.results[0].stdout_lines
+              - (backup_scripts__test_data ~ '/data.txt') in backup_scripts__test_borg_ls.results[1].stdout_lines
+              - (backup_scripts__test_excluded ~ '/excluded.txt') not in backup_scripts__test_borg_ls.results[1].stdout_lines
+            fail_msg: >-
+              archives: {{ (backup_scripts__test_borg_archives.stdout | from_json).archives | map(attribute='name') | list }},
+              first: {{ backup_scripts__test_borg_ls.results[0].stdout_lines }},
+              latest: {{ backup_scripts__test_borg_ls.results[1].stdout_lines }}
+          vars:
+            backup_scripts__test_data: "{{ backup_scripts__test_data_dir | regex_replace('^/', '') }}"
+            backup_scripts__test_excluded: "{{ backup_scripts__test_excluded_dir | regex_replace('^/', '') }}"

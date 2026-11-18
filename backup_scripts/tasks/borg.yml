@@ -1,0 +1,56 @@
+---
+
+- name: 'Copy the borg script'
+  ansible.builtin.copy:
+    src: '950.backup.borgbackup'
+    dest: "{{ backup_scripts__lib_dir }}/950.backup.borgbackup"
+    owner: 'root'
+    group: 'root'
+    mode: '0755'
+
+- name: 'Generate the borg configuration'
+  ansible.builtin.template:
+    src: 'borg.j2'
+    dest: "{{ backup_scripts__etc_dir }}/borg"
+    owner: 'root'
+    group: 'root'
+    mode: '0640'
+
+- name: 'Generate the included directories and the excluded patterns of borg'
+  ansible.builtin.copy:
+    dest: "{{ backup_scripts__etc_dir }}/{{ item.name }}"
+    content: "{{ item.lines | map('string') | map('regex_replace', '$', '\n') | join }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  loop:
+    - name: 'borg-includes'
+      lines: "{{ backup_scripts__borg.include }}"
+    - name: 'borg-excludes'
+      lines: "{{ backup_scripts__borg.exclude }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 'Write the password file of borg'
+  ansible.builtin.copy:
+    dest: "{{ backup_scripts__etc_dir }}/borg-password"
+    content: "{{ backup_scripts__borg.password }}\n"
+    owner: 'root'
+    group: 'root'
+    mode: '0400'
+  no_log: true
+  when: backup_scripts__borg.password is defined
+
+- name: 'Remove the password file of borg'
+  ansible.builtin.file:
+    path: "{{ backup_scripts__etc_dir }}/borg-password"
+    state: 'absent'
+  when: backup_scripts__borg.password is not defined
+
+- name: 'Warn about the password of borg on the host'
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: backup_borg.{{ backup_scripts__password_keys | select('in', backup_scripts__borg.keys()) | first }}
+      keeps the passphrase of the borg repository on the host,
+      by default the password controller passes it to the script on STDIN.
+  when: backup_scripts__password_keys | select('in', backup_scripts__borg.keys()) | list | length > 0

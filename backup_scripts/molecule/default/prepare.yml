@@ -16,20 +16,22 @@
       loop: [ "{{ backup_scripts__test_etc_dir }}", "{{ backup_scripts__test_lib_dir }}" ]
       when: inventory_hostname == 'molecule-backup-scripts-default'
 
-    # restic is not selected, its files are pruned, the script of another role stays
-    - name: 'Create files of restic and a script of another role'
+    # borg and restic are not selected, their files are pruned, the script of another role stays
+    - name: 'Create files of borg and restic and a script of another role'
       ansible.builtin.copy:
         dest: "{{ item }}"
         content: "#!/bin/sh\n"
         mode: '0755'
       loop:
+        - "{{ backup_scripts__test_lib_dir }}/950.backup.borgbackup"
         - "{{ backup_scripts__test_lib_dir }}/950.backup.restic"
         - "{{ backup_scripts__test_lib_dir }}/910.backup.molecule"
+        - "{{ backup_scripts__test_etc_dir }}/borg"
         - "{{ backup_scripts__test_etc_dir }}/restic"
         - "{{ backup_scripts__test_etc_dir }}/restic-password"
       when: inventory_hostname == 'molecule-backup-scripts-default'
 
-- name: 'Prepare the restic repository'
+- name: 'Prepare the repositories of borg and restic'
   hosts: 'molecule-backup-scripts'
   become: true
 
@@ -38,30 +40,30 @@
 
   tasks:
 
-    - name: 'Install restic and the SSH server'
+    - name: 'Install borg, restic and the SSH server'
       ansible.builtin.apt:
-        pkg: [ 'restic', 'openssh-server' ]
+        pkg: [ 'borgbackup', 'restic', 'openssh-server' ]
         install_recommends: false
         update_cache: true
 
     - name: 'Create the user of the repository'
       ansible.builtin.user:
-        name: "{{ backup_scripts__test_restic_user }}"
+        name: "{{ backup_scripts__test_user }}"
         shell: '/bin/sh'
 
     - name: 'Create the key like backup_ssh'
       community.crypto.openssh_keypair:
-        path: "{{ backup_scripts__test_restic_key }}"
+        path: "{{ backup_scripts__test_key }}"
         type: 'ed25519'
 
     - name: 'Read the public key'
       ansible.builtin.slurp:
-        src: "{{ backup_scripts__test_restic_key }}.pub"
+        src: "{{ backup_scripts__test_key }}.pub"
       register: 'backup_scripts__test_public_key'
 
     - name: 'Authorize the key for the user of the repository'
       ansible.posix.authorized_key:
-        user: "{{ backup_scripts__test_restic_user }}"
+        user: "{{ backup_scripts__test_user }}"
         key: "{{ backup_scripts__test_public_key.content | b64decode }}"
 
     - name: 'Read the host keys of localhost'
@@ -80,7 +82,7 @@
         path: "{{ item }}"
         state: 'directory'
         mode: '0755'
-      loop: [ "{{ backup_scripts__test_restic_data_dir }}", "{{ backup_scripts__test_restic_excluded_dir }}" ]
+      loop: [ "{{ backup_scripts__test_data_dir }}", "{{ backup_scripts__test_excluded_dir }}" ]
 
     - name: 'Create the data to back up and the excluded file'
       ansible.builtin.copy:
@@ -88,24 +90,33 @@
         content: "molecule\n"
         mode: '0644'
       loop:
-        - "{{ backup_scripts__test_restic_data_dir }}/data.txt"
-        - "{{ backup_scripts__test_restic_excluded_dir }}/excluded.txt"
+        - "{{ backup_scripts__test_data_dir }}/data.txt"
+        - "{{ backup_scripts__test_excluded_dir }}/excluded.txt"
 
     - name: 'Write the password of the repository for the tests'
       ansible.builtin.copy:
-        dest: "{{ backup_scripts__test_restic_password_file }}"
-        content: "{{ backup_scripts__test_restic_password }}\n"
+        dest: "{{ backup_scripts__test_password_file }}"
+        content: "{{ backup_scripts__test_password }}\n"
         mode: '0400'
 
-    - name: 'Initialize the repository'
+    - name: 'Initialize the repository of restic'
       ansible.builtin.command:
         argv:
           - 'restic'
           - '--repo'
           - 'sftp:backup:repository'
           - '--option'
-          - "sftp.command=ssh -i {{ backup_scripts__test_restic_key }} {{ backup_scripts__test_restic_user }}@localhost -s sftp"
+          - "sftp.command=ssh -i {{ backup_scripts__test_key }} {{ backup_scripts__test_user }}@localhost -s sftp"
           - '--password-file'
-          - "{{ backup_scripts__test_restic_password_file }}"
+          - "{{ backup_scripts__test_password_file }}"
           - 'init'
-        creates: "/home/{{ backup_scripts__test_restic_user }}/repository/config"
+        creates: "/home/{{ backup_scripts__test_user }}/repository/config"
+
+    # borg runs on both sides of ssh, the passphrase comes from the password file of the tests
+    - name: 'Initialize the repository of borg'
+      ansible.builtin.command:
+        argv: [ 'borg', 'init', '--encryption', 'repokey', 'ssh://{{ backup_scripts__test_user }}@localhost/./borg-repository' ]
+        creates: "/home/{{ backup_scripts__test_user }}/borg-repository/config"
+      environment:
+        BORG_PASSCOMMAND: "cat {{ backup_scripts__test_password_file }}"
+        BORG_RSH: "ssh -i {{ backup_scripts__test_key }}"

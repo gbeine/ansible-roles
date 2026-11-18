@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# borg backup - Run borg backup
+#
+# (c) 2017 Gerrit Beine
+#
+# Without a password command borg reads the passphrase from STDIN,
+# e.g. passed by the password controller that runs the script.
+#
+umask 022
+
+if [ -r /etc/backup/borg ]; then
+	. /etc/backup/borg
+fi
+
+: ${daily_backup_borg_enable="NO"}
+: ${daily_backup_borg_repository="/mnt/backup"}
+: ${daily_backup_borg_archive="{hostname}-{now:%Y-%m-%d}"}
+: ${daily_backup_borg_password_command=""}
+: ${daily_backup_borg_rsh=""}
+: ${daily_backup_borg_cache_dir=""}
+: ${daily_backup_borg_options="-s"}
+: ${daily_backup_borg_exclude="/etc/backup/borg-excludes"}
+: ${daily_backup_borg_include="/etc/backup/borg-includes"}
+
+borg="/usr/bin/borg"
+borg_options="${daily_backup_borg_options}"
+[ -r "${daily_backup_borg_exclude}" ] && borg_options="${borg_options} --exclude-from ${daily_backup_borg_exclude}"
+
+include=()
+[ -r "${daily_backup_borg_include}" ] && mapfile -t include < "${daily_backup_borg_include}"
+
+rc=0
+case "${daily_backup_borg_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Running borg backup"
+		if [ -n "${daily_backup_borg_password_command}" ]; then
+			export BORG_PASSCOMMAND="${daily_backup_borg_password_command}"
+		else
+			export BORG_PASSPHRASE_FD=0
+		fi
+		[ -n "${daily_backup_borg_rsh}" ] && export BORG_RSH="${daily_backup_borg_rsh}"
+		[ -n "${daily_backup_borg_cache_dir}" ] && export BORG_CACHE_DIR="${daily_backup_borg_cache_dir}"
+		${borg} create ${borg_options} "${daily_backup_borg_repository}::${daily_backup_borg_archive}" "${include[@]}"
+		rc=$?
+		;;
+esac
+
+exit "${rc}"

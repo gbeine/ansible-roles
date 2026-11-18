@@ -1,0 +1,46 @@
+---
+
+- name: 'Validate the configuration of borg'
+  ansible.builtin.assert:
+    that:
+      - backup_scripts__borg_errors | length == 0
+    fail_msg: "{{ backup_scripts__borg_errors | join(' ') }}"
+    quiet: true
+  vars:
+    backup_scripts__borg_unknown: "{{ backup_scripts__borg.keys() | reject('in', backup_scripts__borg_keys) | list }}"
+    backup_scripts__borg_passwords: >-
+      {{ backup_scripts__password_keys | select('in', backup_scripts__borg.keys()) | list }}
+    # Values written to the shell file /etc/backup/borg, the password and the lists are written to own files
+    backup_scripts__borg_shell_values: >-
+      {{ backup_scripts__borg | dict2items | rejectattr('key', 'in', ['password', 'include', 'exclude'])
+         | map(attribute='value') | map('string') | list }}
+    backup_scripts__borg_line_values: >-
+      {{ backup_scripts__borg_shell_values
+         + [backup_scripts__borg.password | default('') | string]
+         + (backup_scripts__borg.include if backup_scripts__borg.include is sequence
+            and backup_scripts__borg.include is not string else []) | map('string') | list
+         + (backup_scripts__borg.exclude if backup_scripts__borg.exclude is sequence
+            and backup_scripts__borg.exclude is not string else []) | map('string') | list }}
+    backup_scripts__borg_errors: >-
+      {{ ([] if backup_scripts__borg_unknown | length == 0
+          else ['Unknown keys in backup_borg: ' ~ backup_scripts__borg_unknown | join(', ')
+                ~ ', allowed are ' ~ backup_scripts__borg_keys | join(', ') ~ '.'])
+         + ([] if backup_scripts__borg.repository | default('') | string | length > 0
+            else ['backup_borg.repository is mandatory.'])
+         + ([] if backup_scripts__borg.archive | default('') | string | length > 0
+            else ['backup_borg.archive must not be empty.'])
+         + ([] if backup_scripts__borg_passwords | length <= 1
+            else ['Only one of backup_borg.' ~ backup_scripts__password_keys | join(', backup_borg.')
+                  ~ ' can be set, set are ' ~ backup_scripts__borg_passwords | join(', ') ~ '.'])
+         + ([] if backup_scripts__borg.password_file is not defined or backup_scripts__borg.password_file | string is match('/')
+            else ['backup_borg.password_file has to be an absolute path.'])
+         + ([] if backup_scripts__borg.include is sequence and backup_scripts__borg.include is not string
+                  and backup_scripts__borg.include is not mapping and backup_scripts__borg.include | length > 0
+            else ['backup_borg.include has to be a list of paths.'])
+         + ([] if backup_scripts__borg.exclude is sequence and backup_scripts__borg.exclude is not string
+                  and backup_scripts__borg.exclude is not mapping
+            else ['backup_borg.exclude has to be a list of patterns.'])
+         + ([] if backup_scripts__borg_line_values | select('search', '[\n\r]') | list | length == 0
+            else ['The values of backup_borg must not contain line breaks.'])
+         + ([] if backup_scripts__borg_shell_values | select('search', '"') | list | length == 0
+            else ['The values of backup_borg must not contain double quotes.']) }}

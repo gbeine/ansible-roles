@@ -9,9 +9,12 @@
   vars:
     backup_scripts__test_case: "{{ backup_scripts__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     backup_scripts__test_restic: "{{ backup_scripts__test_case.role_vars.backup_restic }}"
+    backup_scripts__test_borg: "{{ backup_scripts__test_case.role_vars.backup_borg }}"
     backup_scripts__test_checked_files:
       - "{{ backup_scripts__test_etc_dir }}/restic"
       - "{{ backup_scripts__test_etc_dir }}/restic-includes"
+      - "{{ backup_scripts__test_etc_dir }}/borg"
+      - "{{ backup_scripts__test_etc_dir }}/borg-includes"
 
   # Like every playbook, common_filters and common_globals come first
   roles:
@@ -42,7 +45,7 @@
         backup_scripts: [ 'restic', 'molecule' ]
         backup_scripts__test_invalid:
           message: 'an unknown script'
-          search: 'Unknown scripts in backup_scripts: molecule, allowed are restic\.'
+          search: 'Unknown scripts in backup_scripts: molecule, allowed are borg, restic\.'
 
     - name: 'Run backup_scripts with an unknown key in backup_restic (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -76,20 +79,40 @@
           message: 'a line break in the repository'
           search: 'The values of backup_restic must not contain line breaks\.'
 
-    # Without password in the configuration restic reads it from STDIN, like the password controller passes it
-    - name: 'Run the restic script with the password on STDIN'
+    - name: 'Run backup_scripts with an unknown key in backup_borg (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_borg: "{{ backup_scripts__test_borg | combine({'passphrase': 'molecule'}) }}"
+        backup_scripts__test_invalid:
+          message: 'an unknown key in backup_borg'
+          search: 'Unknown keys in backup_borg: passphrase, allowed are repository, rsh, '
+
+    - name: 'Run backup_scripts with password and password_command in backup_borg (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_borg: "{{ backup_scripts__test_borg | combine({'password': 'molecule', 'password_command': 'cat /dev/null'}) }}"
+        backup_scripts__test_invalid:
+          message: 'password and password_command in backup_borg'
+          search: 'Only one of backup_borg\.password, backup_borg\.password_command, backup_borg\.password_file can be set, set are password, password_command\.'
+
+    # Without password in the configuration the scripts read it from STDIN, like the password controller passes it
+    - name: 'Run the scripts with the password on STDIN'
       ansible.builtin.command:
-        argv: [ "{{ backup_scripts__test_lib_dir }}/950.backup.restic" ]
-        stdin: "{{ backup_scripts__test_restic_password }}"
+        argv: [ "{{ backup_scripts__test_lib_dir }}/{{ item }}" ]
+        stdin: "{{ backup_scripts__test_password }}"
+      loop: [ '950.backup.borgbackup', '950.backup.restic' ]
       register: 'backup_scripts__test_stdin_run'
       changed_when: true
       failed_when: false
 
-    - name: 'Assert the restic script read the password from STDIN'
+    - name: 'Assert the scripts read the password from STDIN'
       ansible.builtin.assert:
         that:
-          - backup_scripts__test_stdin_run.rc == 0
-        fail_msg: "{{ backup_scripts__test_stdin_run.stdout }} {{ backup_scripts__test_stdin_run.stderr }}"
+          - item.rc == 0
+        fail_msg: "{{ item.stdout }} {{ item.stderr }}"
+      loop: "{{ backup_scripts__test_stdin_run.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: 'Set the changed role variables, an excluded directory and the password on the host'
       ansible.builtin.set_fact:
