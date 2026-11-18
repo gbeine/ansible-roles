@@ -149,6 +149,11 @@ The role checks before any change:
 If `traefik_container` or `traefik_config` is no dictionary, merging it with the default fails before anything changes.
 Traefik itself checks the values at the start, the role waits until the entry points on all addresses (e.g. `:80`) accept connections and shows the journal otherwise.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares `traefik.yml`, the dynamic configuration and the quadlet unit.
+The start of Traefik and the wait for the entry points do not run in check mode.
+
 ### Restart and updates
 
 Traefik is restarted if it was running and `traefik.yml` or the quadlet unit changed, otherwise it is started and enabled.
@@ -184,6 +189,7 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 
 `prepare` sets up podman with the socket and the network `podman-molecule` with the role `container_podman`, pulls the images
 and starts the container `molecule-whoami` (`docker.io/traefik/whoami`) with the labels of the docker provider as backend of the routes.
+`check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `traefik_container` and `traefik_config` not a dictionary, unknown options and sections, options of the wrong type and line breaks,
 an invalid dynamic configuration, `traefik_dynamic` not a dictionary, the former variable `traefik_secrets`, `TRAEFIK_LOG_LEVEL` in `traefik_environment`
 and an unknown variable in `traefik_container.environment` and checks that it fails with the expected message and the quadlet unit and `traefik.yml` are unchanged
