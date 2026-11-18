@@ -142,9 +142,9 @@ A rejected configuration stops the role with the messages of `smtpd`, `smtpd.con
 
 ### Check mode
 
-In check mode a new home directory is not created, the role stops after the validation, there are no files to compare.
+The role runs with `--check`, also on a host where it never ran, and compares `smtpd.conf`, the secret and the quadlet unit.
 A realm of `opensmtpd_tls` that does not exist yet is only reported, `pki_easyrsa_deploy` and `pki_certbot` create it only in a real run.
-`smtpd -n` does not run in check mode.
+`smtpd -n`, the start and the wait for the listeners do not run in check mode.
 
 ### Restart and updates
 
