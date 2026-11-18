@@ -1,0 +1,103 @@
+#!/bin/bash
+#
+# mariadb - Dump the databases of MariaDB running in a podman container
+#
+# (c) 2011-2025 Gerrit Beine
+#
+# Without a password file or command the script reads the password from STDIN,
+# e.g. passed by the password controller that runs the script.
+# The clients in the container read the password with --password from their STDIN,
+# it never appears on a command line or in the environment.
+#
+umask 077
+
+if [ -r /etc/backup/mariadb ]; then
+	. /etc/backup/mariadb
+fi
+
+: ${daily_backup_mariadb_enable="NO"}
+: ${daily_backup_mariadb_podman_container="mariadb"}
+: ${daily_backup_mariadb_host="localhost"}
+: ${daily_backup_mariadb_user="_backup_"}
+: ${daily_backup_mariadb_password_command=""}
+: ${daily_backup_mariadb_password_file=""}
+: ${daily_backup_mariadb_backup_dir="/var/backups/mariadb"}
+: ${daily_backup_mariadb_dump_options="--flush-logs --add-locks --lock-tables --triggers --routines --events"}
+: ${daily_backup_mariadb_ignore_databases="information_schema performance_schema sys"}
+: ${daily_backup_mariadb_keep_days="14"}
+: ${daily_backup_mariadb_compress="YES"}
+: ${daily_backup_mariadb_replication="NO"}
+
+podman="/usr/bin/podman"
+client="mariadb"
+dump="mariadb-dump"
+xz="/usr/bin/xz"
+today=$(date +%Y%m%d)
+
+# Runs a client in the container, the password is passed on STDIN
+run() {
+	local program="$1"
+	shift
+	printf '%s\n' "${password}" | ${podman} exec -i "${daily_backup_mariadb_podman_container}" "${program}" \
+		--user="${daily_backup_mariadb_user}" --host="${daily_backup_mariadb_host}" --password "$@"
+}
+
+rc=0
+case "${daily_backup_mariadb_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Backup MariaDB databases"
+		if [ -n "${daily_backup_mariadb_password_command}" ]; then
+			password=$(${daily_backup_mariadb_password_command} </dev/null)
+		elif [ -n "${daily_backup_mariadb_password_file}" ]; then
+			password=$(cat "${daily_backup_mariadb_password_file}")
+		else
+			IFS= read -r password
+		fi
+		if [ -z "${password}" ]; then
+			echo "No password of the MariaDB user ${daily_backup_mariadb_user}" >&2
+			exit 1
+		fi
+
+		mkdir -p "${daily_backup_mariadb_backup_dir}"
+
+		if ! databases=$(run "${client}" --batch --skip-column-names --execute='SHOW DATABASES'); then
+			echo "Reading the databases failed" >&2
+			exit 1
+		fi
+
+		case "${daily_backup_mariadb_replication}" in
+			[Yy][Ee][Ss])
+				run "${client}" --execute='STOP REPLICA' || rc=1
+				;;
+		esac
+
+		for db in ${databases}; do
+			if [[ " ${daily_backup_mariadb_ignore_databases} " == *" ${db} "* ]]; then
+				continue
+			fi
+			file="${daily_backup_mariadb_backup_dir}/${db}-${today}.sql"
+			if run "${dump}" ${daily_backup_mariadb_dump_options} "${db}" > "${file}"; then
+				case "${daily_backup_mariadb_compress}" in
+					[Yy][Ee][Ss])
+						${xz} -f "${file}" || rc=1
+						;;
+				esac
+			else
+				echo "Dump of ${db} failed" >&2
+				rm -f "${file}"
+				rc=1
+			fi
+		done
+
+		case "${daily_backup_mariadb_replication}" in
+			[Yy][Ee][Ss])
+				run "${client}" --execute='START REPLICA' || rc=1
+				;;
+		esac
+
+		find "${daily_backup_mariadb_backup_dir}" -type f -mtime "+${daily_backup_mariadb_keep_days}" -delete
+		;;
+esac
+
+exit "${rc}"

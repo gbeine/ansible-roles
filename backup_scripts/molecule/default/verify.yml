@@ -203,3 +203,90 @@
           vars:
             backup_scripts__test_data: "{{ backup_scripts__test_data_dir | regex_replace('^/', '') }}"
             backup_scripts__test_excluded: "{{ backup_scripts__test_excluded_dir | regex_replace('^/', '') }}"
+
+    - name: 'Verify MariaDB and MySQL'
+      when: "'mariadb' in backup_scripts__test_case.role_vars.backup_scripts | default([])"
+      block:
+
+        - name: 'Read the state of the password files of MariaDB and MySQL'
+          ansible.builtin.stat:
+            path: "{{ backup_scripts__test_etc_dir }}/{{ item.name }}-password"
+          loop: "{{ backup_scripts__test_databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'backup_scripts__test_database_password_stat'
+
+        - name: 'Read the configurations of MariaDB and MySQL'
+          ansible.builtin.slurp:
+            src: "{{ backup_scripts__test_etc_dir }}/{{ item.name }}"
+          loop: "{{ backup_scripts__test_databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'backup_scripts__test_database_config'
+
+        - name: 'Assert the password files are only readable by root and used by the scripts'
+          ansible.builtin.assert:
+            that:
+              - item.0.stat.pw_name == 'root'
+              - item.0.stat.mode == '0400'
+              - ('daily_backup_' ~ item.0.item.name ~ '_password_file="' ~ item.0.stat.path ~ '"') in backup_scripts__test_config
+            fail_msg: "{{ item.0.stat.mode | default('absent') }}: {{ backup_scripts__test_config }}"
+          loop: "{{ backup_scripts__test_database_password_stat.results | zip(backup_scripts__test_database_config.results) | list }}"
+          loop_control:
+            label: "{{ item.0.item.name }}"
+          vars:
+            backup_scripts__test_config: "{{ item.1.content | b64decode }}"
+
+        # The scripts read the password files of side_effect
+        - name: 'Run the scripts of MariaDB and MySQL with the password files'
+          ansible.builtin.command:
+            argv: [ "{{ backup_scripts__test_lib_dir }}/910.backup.{{ item.name }}" ]
+            stdin: ''
+          loop: "{{ backup_scripts__test_databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'backup_scripts__test_database_run'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the scripts of MariaDB and MySQL succeeded'
+          ansible.builtin.assert:
+            that:
+              - item.rc == 0
+            fail_msg: "{{ item.stdout }} {{ item.stderr }}"
+          loop: "{{ backup_scripts__test_database_run.results }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+
+        - name: 'Find the dumps'
+          ansible.builtin.find:
+            paths: "{{ item.backup_dir }}"
+          loop: "{{ backup_scripts__test_databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'backup_scripts__test_dumps'
+
+        - name: 'Read the dump of the database molecule'
+          ansible.builtin.shell:
+            cmd: "set -o pipefail; xzcat -f {{ item.backup_dir }}/molecule-*.{{ item.extension }}"
+            executable: '/bin/bash'
+          loop: "{{ backup_scripts__test_databases }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: 'backup_scripts__test_dump'
+          changed_when: false
+
+        # The old dump of prepare is older than keep_days, the ignored databases are not dumped
+        - name: 'Assert the dumps contain the row of init.sql, the old dump is removed and the ignored databases are not dumped'
+          ansible.builtin.assert:
+            that:
+              - backup_scripts__test_files | select('match', '^molecule-[0-9]{8}\.' ~ item.0.item.extension ~ '$') | list | length == 1
+              - "'old-20000101.' ~ item.0.item.extension not in backup_scripts__test_files"
+              - backup_scripts__test_files | select('match', '^(information_schema|performance_schema|sys)-') | list | length == 0
+              - item.1.stdout is search("INSERT INTO `data` VALUES\\s*\\(1,'molecule'\\)")
+            fail_msg: "{{ backup_scripts__test_files }}"
+          loop: "{{ backup_scripts__test_dumps.results | zip(backup_scripts__test_dump.results) | list }}"
+          loop_control:
+            label: "{{ item.0.item.name }}"
+          vars:
+            backup_scripts__test_files: "{{ item.0.files | map(attribute='path') | map('basename') | list }}"

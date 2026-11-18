@@ -15,6 +15,8 @@ backup_scripts:
 |---|---|---|---|
 | `borg` | `950.backup.borgbackup` | `backup_borg` | `bash`, `borgbackup` |
 | `restic` | `950.backup.restic` | `backup_restic` | `bash`, `restic` |
+| `mariadb` | `910.backup.mariadb` | `backup_mariadb` | `bash`, `xz-utils` |
+| `mysql` | `910.backup.mysql` | `backup_mysql` | `bash`, `xz-utils` |
 
 The scripts are listed in `vars/main.yml`, the packages in `vars/Debian-13.yml`.
 The external system runs every script on its own, e.g. `/usr/local/lib/backup/950.backup.restic`.
@@ -99,6 +101,46 @@ and borg reads the passphrase from STDIN.
 `password`, `password_file` and `password_command` keep the passphrase on the host like for restic and the role prints a warning:
 `password` is written to `/etc/backup/borg-password` with mode `0400`, the script reads the file or runs the command with `BORG_PASSCOMMAND`.
 
+### MariaDB and MySQL
+
+The scripts `mariadb` and `mysql` dump every database of MariaDB or MySQL running in a podman container into its own file
+`<backup_dir>/<database>-<YYYYMMDD>.sql`, the clients run in the container with `podman exec`.
+`backup_mariadb` and `backup_mysql` are merged into the default:
+
+```yaml
+backup_mariadb:
+  container: 'mariadb'
+  user: '_backup_'
+  ignore_databases:
+    - 'information_schema'
+    - 'performance_schema'
+    - 'sys'
+    - 'test'
+```
+
+- `container` is the name of the container (default `mariadb` and `mysql`), e.g. the container of `database_mariadb`,
+  `host` is the host the client connects to in the container (default `localhost`, the socket).
+- `user` is the database user of the backup (default `_backup_`), it needs `SELECT`, `SHOW VIEW`, `TRIGGER`, `EVENT`,
+  `LOCK TABLES` and `RELOAD` for `--flush-logs`, with `replication` also `REPLICATION SLAVE ADMIN` (MariaDB) or `REPLICATION_SLAVE_ADMIN` (MySQL).
+- `backup_dir` is the directory of the dumps (default `/var/backups/mariadb` and `/var/backups/mysql`), it is created with mode `0750`.
+- `options` are the options of `mariadb-dump` or `mysqldump` (default `--flush-logs --add-locks --lock-tables --triggers --routines --events`).
+- `ignore_databases` are the databases that are not dumped (default `information_schema`, `performance_schema` and `sys`).
+- `compress` compresses the dumps with `xz` (default `true`).
+- `keep_days` removes dumps older than the number of days (default `14`).
+- `replication` stops the replica with `STOP REPLICA` before the dumps and starts it with `START REPLICA` afterwards (default `false`).
+
+By default the password of the database user is not stored on the host.
+The external system passes it on STDIN, the script reads it once and passes it to every client in the container on STDIN:
+the clients run with `--password` without value and `podman exec -i` without a terminal, so they read the password from STDIN.
+The password never appears on a command line or in the environment.
+
+```
+ssh root@host /usr/local/lib/backup/910.backup.mariadb < password
+```
+
+`password`, `password_file` and `password_command` keep the password on the host like for restic and the role prints a warning,
+`password` is written to `/etc/backup/mariadb-password` or `/etc/backup/mysql-password` with mode `0400`.
+
 ### Validation
 
 All checks run before any change. The role fails if
@@ -109,7 +151,10 @@ All checks run before any change. The role fails if
 - more than one of `password`, `password_file` and `password_command` is set, or `password_file` is no absolute path,
 - `include` is no list with at least one path, `exclude` is no list,
 - a value contains a line break, or a value of `/etc/backup/borg` or `/etc/backup/restic` contains a double quote,
-- `pass_enable` is no boolean.
+- `pass_enable` is no boolean,
+- `backup_mariadb` or `backup_mysql` has unknown keys, an empty `container`, `host` or `user`, a `backup_dir` that is no absolute path,
+  `ignore_databases` is no list or contains spaces, `keep_days` is no positive integer, `compress` or `replication` is no boolean,
+  a value contains a line break or a value of `/etc/backup/mariadb` or `/etc/backup/mysql` contains a double quote.
 
 ### Check mode
 
@@ -123,7 +168,7 @@ Files of other roles in `/usr/local/lib/backup` and `/etc/backup` are not touche
 
 ### Migration
 
-The role replaces the roles `backup`, `backup_borg` and `backup_restic`, the other roles `backup_*` follow one by one.
+The role replaces the roles `backup`, `backup_borg`, `backup_restic` and `backup_mysql`, the other roles `backup_*` follow one by one.
 `backup_ssh` stays a role of its own for now.
 
 | Before | Now |
@@ -142,12 +187,21 @@ The role replaces the roles `backup`, `backup_borg` and `backup_restic`, the oth
 | `backup_restic_password_command` | `backup_restic.password_command` |
 | `backup_restic_pass_enable`, `backup_restic_pass_command` | `backup_restic.pass_enable`, `backup_restic.pass_command` |
 | `backup_restic_options`, `backup_restic_cache_dir`, `backup_restic_include`, `backup_restic_exclude` | `backup_restic.options`, `.cache_dir`, `.include`, `.exclude` |
+| `backup_mysql_use_podman` | removed, `mariadb` or `mysql` in `backup_scripts`, both scripts run the clients in the container `backup_mariadb.container` or `backup_mysql.container` |
+| `backup_mysql_user`, `backup_mysql_host`, `backup_mysql_backup_dir` | `backup_mariadb.user`, `.host`, `.backup_dir` and the same keys of `backup_mysql` |
+| `backup_mysql_password` | `backup_mariadb.password` or `backup_mysql.password`, by default the password comes on STDIN |
+| `backup_mysql_pass` | `backup_mariadb.password_command` or `backup_mysql.password_command` |
+| `backup_mysql_dump_options` | `backup_mariadb.options` or `backup_mysql.options`, the options replace the default instead of being appended |
+| `backup_mysql_ignore_databases`, `backup_mysql_keep_days`, `backup_mysql_compress`, `backup_mysql_replication` | `.ignore_databases`, `.keep_days`, `.compress`, `.replication` of `backup_mariadb` or `backup_mysql` |
 
 Changed behavior:
 
 - there is no daily run on the host anymore, the external system runs the scripts, the main script `900.backup` is gone,
 - the role does not remove the files of the former roles, e.g. `/etc/cron.daily/backup`, `/etc/backup/backup`, `/usr/local/lib/backup/900.backup`,
-  `/etc/backup/restic-directories`, `/etc/backup/restic-ssh` and `/etc/backup/restic_password`,
+  `/etc/backup/restic-directories`, `/etc/backup/restic-ssh`, `/etc/backup/restic_password`,
+  `/usr/local/lib/backup/910.backup.mariadb-podman` and `/etc/backup/mysql_password`,
+- the scripts of MariaDB and MySQL are split, both run the clients in a podman container, MySQL no longer runs natively,
+- the dumps of MariaDB are written to `/var/backups/mariadb` instead of `/var/backups/mysql`,
 - the files of restic are named `restic-includes`, `restic-sftp` and `restic-password`, the passphrase of borg is `borg-password` instead of `borg_passphrase`,
 - the name of the archive of borg is configurable with `backup_borg.archive`, the default keeps the former name,
 - only Debian 13 is supported.
@@ -157,7 +211,11 @@ Fixed errors of the old roles:
 - the password file was written but never read by the script, restic only got a password with `backup_restic_password_command`,
 - `backup_restic_password` was not mapped to a variable of the role,
 - the entries of `backup_restic_exclude` and `backup_borg_exclude` were appended to the options and became additional paths of the backup, now they are excluded,
-- the passphrase file of borg was written but never read by the script.
+- the passphrase file of borg was written but never read by the script,
+- the password of MySQL and MariaDB was passed with `--password=…` and visible in the process list,
+- `backup_mysql_compress` was ignored, the dumps were always compressed,
+- `backup_mysql_replication` ran `mysqladmin stop` and `start`, which are no commands of `mysqladmin`,
+- the databases were read from the table output of `mysqlshow`, a failed dump left a broken file and did not fail the script.
 
 ### Tests
 
@@ -165,14 +223,16 @@ The molecule scenario `default` uses tart with two VMs with Debian 13:
 
 | Platform | Test case |
 |---|---|
-| `molecule-backup-scripts-default` | No scripts, `prepare` creates files of borg and restic and a script of another role, the role prunes the files of borg and restic and keeps the other script |
-| `molecule-backup-scripts` | borg over ssh and restic with the backend `sftp` to a user on localhost, `prepare` creates the key, the user and both repositories |
+| `molecule-backup-scripts-default` | No scripts, `prepare` creates files of borg, restic, mariadb and mysql and a script of another role, the role prunes the files of the catalog and keeps the other script |
+| `molecule-backup-scripts` | borg over ssh and restic with the backend `sftp` to a user on localhost, `prepare` creates the key, the user and both repositories; mariadb and mysql as `root`, mysql without compression, `prepare` starts the containers `mariadb` (`mariadb:lts`) and `mysql` (`mysql:8.4`) with the database `molecule` and an old dump |
 
 `check` runs `converge` with `--check`, on `molecule-backup-scripts` the packages and the directories are missing.
-`side_effect` runs invalid configurations, they have to fail before the configurations of borg and restic change.
-It runs both scripts with the password on STDIN, then adds an excluded directory and `password` to both.
+`side_effect` runs invalid configurations, they have to fail before the configurations of borg, restic, mariadb and mysql change.
+It runs all scripts with the password on STDIN, then adds an excluded directory to borg and restic and `password` to all scripts.
 `verify` checks the files of the directories and the modes of the password files,
-runs both scripts with the password files and checks the snapshots and archives: the first one contains the excluded directory, the latest one not.
+runs borg and restic with the password files and checks the snapshots and archives: the first one contains the excluded directory, the latest one not.
+It runs mariadb and mysql with the password files and checks that the dump of `molecule` contains its row,
+the ignored databases are not dumped and the old dump is removed.
 
 ```
 cd backup_scripts

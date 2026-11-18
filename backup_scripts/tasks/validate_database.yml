@@ -1,0 +1,55 @@
+---
+
+# Validates backup_mariadb or backup_mysql, the name of the script is the name of the variable
+- name: "Validate the configuration of {{ backup_scripts__script.name }}"
+  ansible.builtin.assert:
+    that:
+      - backup_scripts__database_errors | length == 0
+    fail_msg: "{{ backup_scripts__database_errors | join(' ') }}"
+    quiet: true
+  vars:
+    backup_scripts__database_var: "backup_{{ backup_scripts__script.name }}"
+    backup_scripts__database: "{{ lookup('ansible.builtin.vars', 'backup_scripts__' ~ backup_scripts__script.name) }}"
+    backup_scripts__database_unknown: "{{ backup_scripts__database.keys() | reject('in', backup_scripts__database_keys) | list }}"
+    backup_scripts__database_passwords: >-
+      {{ backup_scripts__password_keys | select('in', backup_scripts__database.keys()) | list }}
+    backup_scripts__database_ignore_is_list: >-
+      {{ backup_scripts__database.ignore_databases is sequence and backup_scripts__database.ignore_databases is not string
+         and backup_scripts__database.ignore_databases is not mapping }}
+    backup_scripts__database_ignore: >-
+      {{ (backup_scripts__database.ignore_databases if backup_scripts__database_ignore_is_list | bool else []) | map('string') | list }}
+    # Values written to the shell file /etc/backup/<name>, the password is written to its own file
+    backup_scripts__database_shell_values: >-
+      {{ backup_scripts__database | dict2items | rejectattr('key', 'in', ['password', 'ignore_databases', 'compress', 'replication'])
+         | map(attribute='value') | map('string') | list + backup_scripts__database_ignore }}
+    backup_scripts__database_errors: >-
+      {{ ([] if backup_scripts__database_unknown | length == 0
+          else ['Unknown keys in ' ~ backup_scripts__database_var ~ ': ' ~ backup_scripts__database_unknown | join(', ')
+                ~ ', allowed are ' ~ backup_scripts__database_keys | join(', ') ~ '.'])
+         + ([] if ['container', 'host', 'user'] | map('extract', backup_scripts__database) | map('string')
+                  | select('eq', '') | list | length == 0
+            else [backup_scripts__database_var ~ '.container, .host and .user must not be empty.'])
+         + ([] if backup_scripts__database.backup_dir | string is match('/')
+            else [backup_scripts__database_var ~ '.backup_dir has to be an absolute path.'])
+         + ([] if backup_scripts__database_passwords | length <= 1
+            else ['Only one of ' ~ backup_scripts__database_var ~ '.'
+                  ~ backup_scripts__password_keys | join(', ' ~ backup_scripts__database_var ~ '.')
+                  ~ ' can be set, set are ' ~ backup_scripts__database_passwords | join(', ') ~ '.'])
+         + ([] if backup_scripts__database.password_file is not defined or backup_scripts__database.password_file | string is match('/')
+            else [backup_scripts__database_var ~ '.password_file has to be an absolute path.'])
+         + ([] if backup_scripts__database_ignore_is_list | bool
+            else [backup_scripts__database_var ~ '.ignore_databases has to be a list.'])
+         + ([] if backup_scripts__database_ignore | select('search', '\s') | list | length == 0
+            else ['The databases of ' ~ backup_scripts__database_var ~ '.ignore_databases must not contain spaces.'])
+         + ([] if backup_scripts__database.keep_days is integer and backup_scripts__database.keep_days is not boolean
+                  and backup_scripts__database.keep_days > 0
+            else [backup_scripts__database_var ~ '.keep_days has to be a positive integer.'])
+         + ([] if backup_scripts__database.compress is boolean
+            else [backup_scripts__database_var ~ '.compress has to be a boolean.'])
+         + ([] if backup_scripts__database.replication is boolean
+            else [backup_scripts__database_var ~ '.replication has to be a boolean.'])
+         + ([] if (backup_scripts__database_shell_values + [backup_scripts__database.password | default('') | string])
+                  | select('search', '[\n\r]') | list | length == 0
+            else ['The values of ' ~ backup_scripts__database_var ~ ' must not contain line breaks.'])
+         + ([] if backup_scripts__database_shell_values | select('search', '"') | list | length == 0
+            else ['The values of ' ~ backup_scripts__database_var ~ ' must not contain double quotes.']) }}

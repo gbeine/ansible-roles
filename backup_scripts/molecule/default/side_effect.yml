@@ -15,6 +15,8 @@
       - "{{ backup_scripts__test_etc_dir }}/restic-includes"
       - "{{ backup_scripts__test_etc_dir }}/borg"
       - "{{ backup_scripts__test_etc_dir }}/borg-includes"
+      - "{{ backup_scripts__test_etc_dir }}/mariadb"
+      - "{{ backup_scripts__test_etc_dir }}/mysql"
 
   # Like every playbook, common_filters and common_globals come first
   roles:
@@ -45,7 +47,7 @@
         backup_scripts: [ 'restic', 'molecule' ]
         backup_scripts__test_invalid:
           message: 'an unknown script'
-          search: 'Unknown scripts in backup_scripts: molecule, allowed are borg, restic\.'
+          search: 'Unknown scripts in backup_scripts: molecule, allowed are borg, restic, mariadb, mysql\.'
 
     - name: 'Run backup_scripts with an unknown key in backup_restic (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -95,12 +97,42 @@
           message: 'password and password_command in backup_borg'
           search: 'Only one of backup_borg\.password, backup_borg\.password_command, backup_borg\.password_file can be set, set are password, password_command\.'
 
+    - name: 'Run backup_scripts with an unknown key in backup_mariadb (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_mariadb: { user: 'root', container_name: 'mariadb' }
+        backup_scripts__test_invalid:
+          message: 'an unknown key in backup_mariadb'
+          search: 'Unknown keys in backup_mariadb: container_name, allowed are container, host, '
+
+    - name: 'Run backup_scripts with password and password_command in backup_mariadb (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_mariadb: { user: 'root', password: 'molecule', password_command: 'cat /dev/null' }
+        backup_scripts__test_invalid:
+          message: 'password and password_command in backup_mariadb'
+          search: 'Only one of backup_mariadb\.password, backup_mariadb\.password_command, backup_mariadb\.password_file can be set, set are password, password_command\.'
+
+    - name: 'Run backup_scripts with compress no boolean in backup_mysql (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_mysql: { user: 'root', compress: 'no' }
+        backup_scripts__test_invalid:
+          message: 'compress no boolean in backup_mysql'
+          search: 'backup_mysql\.compress has to be a boolean\.'
+
     # Without password in the configuration the scripts read it from STDIN, like the password controller passes it
     - name: 'Run the scripts with the password on STDIN'
       ansible.builtin.command:
-        argv: [ "{{ backup_scripts__test_lib_dir }}/{{ item }}" ]
-        stdin: "{{ backup_scripts__test_password }}"
-      loop: [ '950.backup.borgbackup', '950.backup.restic' ]
+        argv: [ "{{ backup_scripts__test_lib_dir }}/{{ item.script }}" ]
+        stdin: "{{ item.password }}"
+      loop:
+        - { script: '950.backup.borgbackup', password: "{{ backup_scripts__test_password }}" }
+        - { script: '950.backup.restic', password: "{{ backup_scripts__test_password }}" }
+        - { script: '910.backup.mariadb', password: "{{ backup_scripts__test_database_password }}" }
+        - { script: '910.backup.mysql', password: "{{ backup_scripts__test_database_password }}" }
+      loop_control:
+        label: "{{ item.script }}"
       register: 'backup_scripts__test_stdin_run'
       changed_when: true
       failed_when: false
@@ -112,9 +144,9 @@
         fail_msg: "{{ item.stdout }} {{ item.stderr }}"
       loop: "{{ backup_scripts__test_stdin_run.results }}"
       loop_control:
-        label: "{{ item.item }}"
+        label: "{{ item.item.script }}"
 
-    - name: 'Set the changed role variables, an excluded directory and the password on the host'
+    - name: 'Set the changed role variables, an excluded directory and the passwords on the host'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
       loop: "{{ backup_scripts__test_case.side_effect.role_vars | dict2items }}"

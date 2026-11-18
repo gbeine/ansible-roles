@@ -1,0 +1,56 @@
+---
+
+# Configures the script of MariaDB or MySQL, the name of the script is the name of the variable
+- name: "Configure the {{ backup_scripts__script.name }} script"
+  vars:
+    backup_scripts__database: "{{ lookup('ansible.builtin.vars', 'backup_scripts__' ~ backup_scripts__script.name) }}"
+    backup_scripts__database_password_file: "{{ backup_scripts__etc_dir }}/{{ backup_scripts__script.name }}-password"
+  block:
+
+    - name: "Copy the {{ backup_scripts__script.name }} script"
+      ansible.builtin.copy:
+        src: "910.backup.{{ backup_scripts__script.name }}"
+        dest: "{{ backup_scripts__lib_dir }}/910.backup.{{ backup_scripts__script.name }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+
+    - name: "Generate the {{ backup_scripts__script.name }} configuration"
+      ansible.builtin.template:
+        src: 'database.j2'
+        dest: "{{ backup_scripts__etc_dir }}/{{ backup_scripts__script.name }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0640'
+
+    - name: "Create the backup directory of {{ backup_scripts__script.name }}"
+      ansible.builtin.file:
+        path: "{{ backup_scripts__database.backup_dir }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+
+    - name: "Write the password file of {{ backup_scripts__script.name }}"
+      ansible.builtin.copy:
+        dest: "{{ backup_scripts__database_password_file }}"
+        content: "{{ backup_scripts__database.password }}\n"
+        owner: 'root'
+        group: 'root'
+        mode: '0400'
+      no_log: true
+      when: backup_scripts__database.password is defined
+
+    - name: "Remove the password file of {{ backup_scripts__script.name }}"
+      ansible.builtin.file:
+        path: "{{ backup_scripts__database_password_file }}"
+        state: 'absent'
+      when: backup_scripts__database.password is not defined
+
+    - name: "Warn about the password of {{ backup_scripts__script.name }} on the host"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: backup_{{ backup_scripts__script.name }}.{{ backup_scripts__password_keys | select('in', backup_scripts__database.keys()) | first }}
+          keeps the password of the database user on the host,
+          by default the password controller passes it to the script on STDIN.
+      when: backup_scripts__password_keys | select('in', backup_scripts__database.keys()) | list | length > 0
