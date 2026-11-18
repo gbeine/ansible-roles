@@ -1,0 +1,69 @@
+#!/bin/bash
+#
+# restic - Run restic backup
+#
+# (c) 2017 Gerrit Beine
+#
+# Without a password file or command restic reads the password from STDIN,
+# e.g. passed by the password controller that runs the script.
+#
+umask 022
+
+if [ -r /etc/backup/restic ]; then
+	. /etc/backup/restic
+fi
+
+: ${daily_backup_restic_enable="NO"}
+: ${daily_backup_restic_pass_enable="NO"}
+: ${daily_backup_restic_pass_command="pass"}
+: ${daily_backup_restic_password_command=""}
+: ${daily_backup_restic_password_file=""}
+: ${daily_backup_restic_repository="backup"}
+: ${daily_backup_restic_backend=""}
+: ${daily_backup_restic_sftp_command="ssh -F /etc/backup/restic-sftp backup -s sftp"}
+: ${daily_backup_restic_cache_dir=""}
+: ${daily_backup_restic_options="--compression max --one-file-system"}
+: ${daily_backup_restic_exclude="/etc/backup/restic-excludes"}
+: ${daily_backup_restic_include="/etc/backup/restic-includes"}
+
+restic="/usr/bin/restic"
+restic_options="${daily_backup_restic_options}"
+[ -r "${daily_backup_restic_exclude}" ] && restic_options="${restic_options} --exclude-file ${daily_backup_restic_exclude}"
+
+rc=0
+case "${daily_backup_restic_enable}" in
+	[Yy][Ee][Ss])
+		echo
+		echo "Running restic backup"
+		export RESTIC_REPOSITORY=${daily_backup_restic_repository}
+		case "${daily_backup_restic_pass_enable}" in
+			[Yy][Ee][Ss])
+				case "${daily_backup_restic_backend}" in
+					[Rr][Ee][Ss][Tt])
+						export RESTIC_REST_USERNAME=`${daily_backup_restic_pass_command} restic/rest_username </dev/null |tr -d '\r'`
+						export RESTIC_REST_PASSWORD=`${daily_backup_restic_pass_command} restic/rest_password </dev/null |tr -d '\r'`
+						;;
+				esac
+				;;
+		esac
+		[ -n "${daily_backup_restic_password_file}" ] && export RESTIC_PASSWORD_FILE="${daily_backup_restic_password_file}"
+		[ -n "${daily_backup_restic_password_command}" ] && export RESTIC_PASSWORD_COMMAND="${daily_backup_restic_password_command}"
+		[ -n "${daily_backup_restic_cache_dir}" ] && export RESTIC_CACHE_DIR="${daily_backup_restic_cache_dir}"
+		case "${daily_backup_restic_backend}" in
+			[Rr][Cc][Ll][Oo][Nn][Ee])
+				echo "rclone backend is not yet supported"
+				# ${restic} backup ${restic_options} --files-from-verbatim ${daily_backup_restic_include}
+				;;
+			[Ss][Ff][Tt][Pp])
+				${restic} backup ${restic_options} -o sftp.command="${daily_backup_restic_sftp_command}" --files-from-verbatim ${daily_backup_restic_include}
+				rc=$?
+				;;
+			[Rr][Ee][Ss][Tt] | *)
+				${restic} backup ${restic_options} --files-from-verbatim ${daily_backup_restic_include}
+				rc=$?
+				;;
+		esac
+		;;
+esac
+
+exit "${rc}"

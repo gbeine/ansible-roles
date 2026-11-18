@@ -1,1 +1,0 @@
-- The backup configuration will be written under `/etc/backup`.

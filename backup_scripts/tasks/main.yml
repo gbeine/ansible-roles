@@ -1,0 +1,74 @@
+---
+
+- name: 'Install and configure backup scripts'
+  tags: [ 'backup', 'backup_scripts' ]
+  block:
+
+    - name: 'Include OS-specific variables'
+      ansible.builtin.include_vars: "{{ item }}"
+      loop: "{{ query('ansible.builtin.first_found', backup_scripts__os_vars) }}"
+      vars:
+        backup_scripts__os_vars:
+          - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+          - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+
+    - name: 'Validate the scripts'
+      ansible.builtin.assert:
+        that:
+          - backup_scripts__errors | length == 0
+        fail_msg: "{{ backup_scripts__errors | join(' ') }}"
+        quiet: true
+      vars:
+        backup_scripts__is_list: >-
+          {{ backup_scripts__scripts is sequence and backup_scripts__scripts is not string and backup_scripts__scripts is not mapping }}
+        backup_scripts__unknown: >-
+          {{ (backup_scripts__scripts if backup_scripts__is_list | bool else [])
+             | reject('in', backup_scripts__catalog | map(attribute='name') | list) | list }}
+        backup_scripts__errors: >-
+          {{ ([] if backup_scripts__is_list | bool else ['backup_scripts has to be a list.'])
+             + ([] if backup_scripts__unknown | length == 0
+                else ['Unknown scripts in backup_scripts: ' ~ backup_scripts__unknown | join(', ') ~ ', allowed are '
+                      ~ backup_scripts__catalog | map(attribute='name') | join(', ') ~ '.'])
+             + ([] if backup_scripts__prune is boolean else ['backup_scripts_prune has to be a boolean.']) }}
+
+    # All scripts are validated before any change
+    - name: 'Validate the configuration of the scripts'
+      ansible.builtin.include_tasks: "validate_{{ backup_scripts__script.name }}.yml"
+      loop: "{{ backup_scripts__selected }}"
+      loop_control:
+        loop_var: 'backup_scripts__script'
+        label: "{{ backup_scripts__script.name }}"
+
+    - name: 'Install packages of the scripts'
+      ansible.builtin.apt:
+        pkg: >-
+          {{ backup_scripts__packages | dict2items | selectattr('key', 'in', backup_scripts__scripts)
+             | map(attribute='value') | flatten | unique }}
+        install_recommends: false
+        cache_valid_time: 3600
+      when: backup_scripts__scripts | length > 0
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+      loop:
+        - "{{ backup_scripts__etc_dir }}"
+        - "{{ backup_scripts__lib_dir }}"
+
+    # In check mode the directories of a first run are missing, there are no files to compare
+    - name: 'Find the directories'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ backup_scripts__etc_dir }}"
+        - "{{ backup_scripts__lib_dir }}"
+      register: 'backup_scripts__dir_stat'
+      check_mode: false
+
+    - name: 'Configure the scripts'
+      ansible.builtin.include_tasks: 'configure.yml'
+      when: backup_scripts__dir_stat.results | map(attribute='stat.isdir', default=false) | select | list | length == 2

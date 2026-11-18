@@ -1,0 +1,51 @@
+---
+
+- name: 'Validate the configuration of restic'
+  ansible.builtin.assert:
+    that:
+      - backup_scripts__restic_errors | length == 0
+    fail_msg: "{{ backup_scripts__restic_errors | join(' ') }}"
+    quiet: true
+  vars:
+    backup_scripts__restic_unknown: "{{ backup_scripts__restic.keys() | reject('in', backup_scripts__restic_keys) | list }}"
+    backup_scripts__restic_passwords: >-
+      {{ backup_scripts__restic_password_keys | select('in', backup_scripts__restic.keys()) | list }}
+    # Values written to the shell file /etc/backup/restic, the password and the lists are written to own files
+    backup_scripts__restic_shell_values: >-
+      {{ backup_scripts__restic | dict2items | rejectattr('key', 'in', ['password', 'include', 'exclude', 'pass_enable'])
+         | map(attribute='value') | map('string') | list }}
+    backup_scripts__restic_line_values: >-
+      {{ backup_scripts__restic_shell_values
+         + [backup_scripts__restic.password | default('') | string]
+         + (backup_scripts__restic.include if backup_scripts__restic.include is sequence
+            and backup_scripts__restic.include is not string else []) | map('string') | list
+         + (backup_scripts__restic.exclude if backup_scripts__restic.exclude is sequence
+            and backup_scripts__restic.exclude is not string else []) | map('string') | list }}
+    backup_scripts__restic_errors: >-
+      {{ ([] if backup_scripts__restic_unknown | length == 0
+          else ['Unknown keys in backup_restic: ' ~ backup_scripts__restic_unknown | join(', ')
+                ~ ', allowed are ' ~ backup_scripts__restic_keys | join(', ') ~ '.'])
+         + ([] if backup_scripts__restic.repository | default('') | string | length > 0
+            else ['backup_restic.repository is mandatory.'])
+         + ([] if backup_scripts__restic.backend in backup_scripts__restic_backends
+            else ['backup_restic.backend has to be one of ' ~ backup_scripts__restic_backends | join(', ') ~ '.'])
+         + ([] if backup_scripts__restic.backend != 'sftp'
+               or (backup_scripts__restic.host | default('') | string | length > 0
+                   and backup_scripts__restic.user | default('') | string | length > 0)
+            else ['backup_restic.backend sftp needs host and user.'])
+         + ([] if backup_scripts__restic_passwords | length <= 1
+            else ['Only one of backup_restic.' ~ backup_scripts__restic_password_keys | join(', backup_restic.')
+                  ~ ' can be set, set are ' ~ backup_scripts__restic_passwords | join(', ') ~ '.'])
+         + ([] if backup_scripts__restic.password_file is not defined or backup_scripts__restic.password_file | string is match('/')
+            else ['backup_restic.password_file has to be an absolute path.'])
+         + ([] if backup_scripts__restic.include is sequence and backup_scripts__restic.include is not string
+                  and backup_scripts__restic.include is not mapping and backup_scripts__restic.include | length > 0
+            else ['backup_restic.include has to be a list of paths.'])
+         + ([] if backup_scripts__restic.exclude is sequence and backup_scripts__restic.exclude is not string
+                  and backup_scripts__restic.exclude is not mapping
+            else ['backup_restic.exclude has to be a list of patterns.'])
+         + ([] if backup_scripts__restic_line_values | select('search', '[\n\r]') | list | length == 0
+            else ['The values of backup_restic must not contain line breaks.'])
+         + ([] if backup_scripts__restic_shell_values | select('search', '"') | list | length == 0
+            else ['The values of backup_restic must not contain double quotes.'])
+         + ([] if backup_scripts__restic.pass_enable is boolean else ['backup_restic.pass_enable has to be a boolean.']) }}

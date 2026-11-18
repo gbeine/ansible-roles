@@ -1,0 +1,103 @@
+---
+- name: 'Side effect'
+  hosts: 'molecule-backup-scripts'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    backup_scripts__test_case: "{{ backup_scripts__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    backup_scripts__test_restic: "{{ backup_scripts__test_case.role_vars.backup_restic }}"
+    backup_scripts__test_checked_files:
+      - "{{ backup_scripts__test_etc_dir }}/restic"
+      - "{{ backup_scripts__test_etc_dir }}/restic-includes"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ backup_scripts__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ backup_scripts__test_checked_files }}"
+      register: 'backup_scripts__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run backup_scripts with an unknown script (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_scripts: [ 'restic', 'molecule' ]
+        backup_scripts__test_invalid:
+          message: 'an unknown script'
+          search: 'Unknown scripts in backup_scripts: molecule, allowed are restic\.'
+
+    - name: 'Run backup_scripts with an unknown key in backup_restic (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_restic: "{{ backup_scripts__test_restic | combine({'hostname': 'localhost'}) }}"
+        backup_scripts__test_invalid:
+          message: 'an unknown key in backup_restic'
+          search: 'Unknown keys in backup_restic: hostname, allowed are repository, backend, '
+
+    - name: 'Run backup_scripts with the backend sftp without host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_restic: "{{ backup_scripts__test_restic | dict2items | rejectattr('key', 'eq', 'host') | items2dict }}"
+        backup_scripts__test_invalid:
+          message: 'the backend sftp without host'
+          search: 'backup_restic\.backend sftp needs host and user\.'
+
+    - name: 'Run backup_scripts with password and password_command (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_restic: "{{ backup_scripts__test_restic | combine({'password': 'molecule', 'password_command': 'cat /dev/null'}) }}"
+        backup_scripts__test_invalid:
+          message: 'password and password_command'
+          search: 'Only one of backup_restic\.password, backup_restic\.password_command, backup_restic\.password_file can be set, set are password, password_command\.'
+
+    - name: 'Run backup_scripts with a line break in the repository (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        backup_restic: "{{ backup_scripts__test_restic | combine({'repository': 'sftp:backup:repository\nrm -rf /'}) }}"
+        backup_scripts__test_invalid:
+          message: 'a line break in the repository'
+          search: 'The values of backup_restic must not contain line breaks\.'
+
+    # Without password in the configuration restic reads it from STDIN, like the password controller passes it
+    - name: 'Run the restic script with the password on STDIN'
+      ansible.builtin.command:
+        argv: [ "{{ backup_scripts__test_lib_dir }}/950.backup.restic" ]
+        stdin: "{{ backup_scripts__test_restic_password }}"
+      register: 'backup_scripts__test_stdin_run'
+      changed_when: true
+      failed_when: false
+
+    - name: 'Assert the restic script read the password from STDIN'
+      ansible.builtin.assert:
+        that:
+          - backup_scripts__test_stdin_run.rc == 0
+        fail_msg: "{{ backup_scripts__test_stdin_run.stdout }} {{ backup_scripts__test_stdin_run.stderr }}"
+
+    - name: 'Set the changed role variables, an excluded directory and the password on the host'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ backup_scripts__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run backup_scripts with the changed variables, it warns about the password on the host'
+      ansible.builtin.include_role:
+        name: 'backup_scripts'

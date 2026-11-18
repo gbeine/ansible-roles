@@ -1,0 +1,111 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Create the directories of the scripts'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'directory'
+        mode: '0755'
+      loop: [ "{{ backup_scripts__test_etc_dir }}", "{{ backup_scripts__test_lib_dir }}" ]
+      when: inventory_hostname == 'molecule-backup-scripts-default'
+
+    # restic is not selected, its files are pruned, the script of another role stays
+    - name: 'Create files of restic and a script of another role'
+      ansible.builtin.copy:
+        dest: "{{ item }}"
+        content: "#!/bin/sh\n"
+        mode: '0755'
+      loop:
+        - "{{ backup_scripts__test_lib_dir }}/950.backup.restic"
+        - "{{ backup_scripts__test_lib_dir }}/910.backup.molecule"
+        - "{{ backup_scripts__test_etc_dir }}/restic"
+        - "{{ backup_scripts__test_etc_dir }}/restic-password"
+      when: inventory_hostname == 'molecule-backup-scripts-default'
+
+- name: 'Prepare the restic repository'
+  hosts: 'molecule-backup-scripts'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  tasks:
+
+    - name: 'Install restic and the SSH server'
+      ansible.builtin.apt:
+        pkg: [ 'restic', 'openssh-server' ]
+        install_recommends: false
+        update_cache: true
+
+    - name: 'Create the user of the repository'
+      ansible.builtin.user:
+        name: "{{ backup_scripts__test_restic_user }}"
+        shell: '/bin/sh'
+
+    - name: 'Create the key like backup_ssh'
+      community.crypto.openssh_keypair:
+        path: "{{ backup_scripts__test_restic_key }}"
+        type: 'ed25519'
+
+    - name: 'Read the public key'
+      ansible.builtin.slurp:
+        src: "{{ backup_scripts__test_restic_key }}.pub"
+      register: 'backup_scripts__test_public_key'
+
+    - name: 'Authorize the key for the user of the repository'
+      ansible.posix.authorized_key:
+        user: "{{ backup_scripts__test_restic_user }}"
+        key: "{{ backup_scripts__test_public_key.content | b64decode }}"
+
+    - name: 'Read the host keys of localhost'
+      ansible.builtin.command: 'ssh-keyscan localhost'
+      register: 'backup_scripts__test_host_keys'
+      changed_when: false
+
+    - name: 'Trust the host keys of localhost'
+      ansible.builtin.copy:
+        dest: '/root/.ssh/known_hosts'
+        content: "{{ backup_scripts__test_host_keys.stdout }}\n"
+        mode: '0644'
+
+    - name: 'Create the directories of the data'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'directory'
+        mode: '0755'
+      loop: [ "{{ backup_scripts__test_restic_data_dir }}", "{{ backup_scripts__test_restic_excluded_dir }}" ]
+
+    - name: 'Create the data to back up and the excluded file'
+      ansible.builtin.copy:
+        dest: "{{ item }}"
+        content: "molecule\n"
+        mode: '0644'
+      loop:
+        - "{{ backup_scripts__test_restic_data_dir }}/data.txt"
+        - "{{ backup_scripts__test_restic_excluded_dir }}/excluded.txt"
+
+    - name: 'Write the password of the repository for the tests'
+      ansible.builtin.copy:
+        dest: "{{ backup_scripts__test_restic_password_file }}"
+        content: "{{ backup_scripts__test_restic_password }}\n"
+        mode: '0400'
+
+    - name: 'Initialize the repository'
+      ansible.builtin.command:
+        argv:
+          - 'restic'
+          - '--repo'
+          - 'sftp:backup:repository'
+          - '--option'
+          - "sftp.command=ssh -i {{ backup_scripts__test_restic_key }} {{ backup_scripts__test_restic_user }}@localhost -s sftp"
+          - '--password-file'
+          - "{{ backup_scripts__test_restic_password_file }}"
+          - 'init'
+        creates: "/home/{{ backup_scripts__test_restic_user }}/repository/config"

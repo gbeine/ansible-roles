@@ -1,0 +1,71 @@
+---
+
+- name: 'Copy the restic script'
+  ansible.builtin.copy:
+    src: '950.backup.restic'
+    dest: "{{ backup_scripts__lib_dir }}/950.backup.restic"
+    owner: 'root'
+    group: 'root'
+    mode: '0755'
+
+- name: 'Generate the restic configuration'
+  ansible.builtin.template:
+    src: 'restic.j2'
+    dest: "{{ backup_scripts__etc_dir }}/restic"
+    owner: 'root'
+    group: 'root'
+    mode: '0640'
+
+- name: 'Generate the SSH configuration of restic'
+  ansible.builtin.template:
+    src: 'restic-sftp.j2'
+    dest: "{{ backup_scripts__etc_dir }}/restic-sftp"
+    owner: 'root'
+    group: 'root'
+    mode: '0640'
+  when: backup_scripts__restic.backend == 'sftp'
+
+- name: 'Remove the SSH configuration of restic'
+  ansible.builtin.file:
+    path: "{{ backup_scripts__etc_dir }}/restic-sftp"
+    state: 'absent'
+  when: backup_scripts__restic.backend != 'sftp'
+
+- name: 'Generate the included directories and the excluded patterns of restic'
+  ansible.builtin.copy:
+    dest: "{{ backup_scripts__etc_dir }}/{{ item.name }}"
+    content: "{{ item.lines | map('string') | map('regex_replace', '$', '\n') | join }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  loop:
+    - name: 'restic-includes'
+      lines: "{{ backup_scripts__restic.include }}"
+    - name: 'restic-excludes'
+      lines: "{{ backup_scripts__restic.exclude }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 'Write the password file of restic'
+  ansible.builtin.copy:
+    dest: "{{ backup_scripts__etc_dir }}/restic-password"
+    content: "{{ backup_scripts__restic.password }}\n"
+    owner: 'root'
+    group: 'root'
+    mode: '0400'
+  no_log: true
+  when: backup_scripts__restic.password is defined
+
+- name: 'Remove the password file of restic'
+  ansible.builtin.file:
+    path: "{{ backup_scripts__etc_dir }}/restic-password"
+    state: 'absent'
+  when: backup_scripts__restic.password is not defined
+
+- name: 'Warn about the password of restic on the host'
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: backup_restic.{{ backup_scripts__restic_password_keys | select('in', backup_scripts__restic.keys()) | first }}
+      keeps the password of the restic repository on the host,
+      by default the password controller passes it to the script on STDIN.
+  when: backup_scripts__restic_password_keys | select('in', backup_scripts__restic.keys()) | list | length > 0

@@ -1,0 +1,126 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    backup_scripts__test_case: "{{ backup_scripts__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    backup_scripts__test_expect: "{{ backup_scripts__test_case.expect }}"
+    backup_scripts__test_restic_argv:
+      - 'restic'
+      - '--repo'
+      - 'sftp:backup:repository'
+      - '--option'
+      - "sftp.command=ssh -i {{ backup_scripts__test_restic_key }} {{ backup_scripts__test_restic_user }}@localhost -s sftp"
+      - '--password-file'
+      - "{{ backup_scripts__test_restic_password_file }}"
+      - '--no-cache'
+
+  tasks:
+
+    - name: 'Find the files of the library and configuration directories'
+      ansible.builtin.find:
+        paths: [ "{{ backup_scripts__test_lib_dir }}", "{{ backup_scripts__test_etc_dir }}" ]
+        file_type: 'any'
+      register: 'backup_scripts__test_found'
+
+    - name: 'Assert exactly the expected scripts and configurations exist'
+      ansible.builtin.assert:
+        that:
+          - backup_scripts__test_found.files | map(attribute='path') | sort == backup_scripts__test_paths | sort
+        fail_msg: "{{ backup_scripts__test_found.files | map(attribute='path') | sort | join(', ') }}"
+      vars:
+        backup_scripts__test_paths: >-
+          {{ backup_scripts__test_expect.lib_files | map('regex_replace', '^', backup_scripts__test_lib_dir + '/') | list
+             + backup_scripts__test_expect.etc_files | map('regex_replace', '^', backup_scripts__test_etc_dir + '/') | list }}
+
+    - name: 'Read the state of the scripts'
+      ansible.builtin.stat:
+        path: "{{ backup_scripts__test_lib_dir }}/{{ item }}"
+      loop: "{{ backup_scripts__test_expect.lib_files }}"
+      register: 'backup_scripts__test_scripts'
+
+    - name: 'Assert the scripts are executable'
+      ansible.builtin.assert:
+        that:
+          - item.stat.executable
+        fail_msg: "{{ item.item }}"
+        quiet: true
+      loop: "{{ backup_scripts__test_scripts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Verify restic'
+      when: "'restic' in backup_scripts__test_case.role_vars.backup_scripts | default([])"
+      block:
+
+        - name: 'Read the state of the password file'
+          ansible.builtin.stat:
+            path: "{{ backup_scripts__test_etc_dir }}/restic-password"
+          register: 'backup_scripts__test_password'
+
+        - name: 'Read the configuration of restic'
+          ansible.builtin.slurp:
+            src: "{{ backup_scripts__test_etc_dir }}/restic"
+          register: 'backup_scripts__test_restic_config'
+
+        - name: 'Assert the password file is only readable by root and used by the script'
+          ansible.builtin.assert:
+            that:
+              - backup_scripts__test_password.stat.pw_name == 'root'
+              - backup_scripts__test_password.stat.mode == '0400'
+              - ('daily_backup_restic_password_file="' ~ backup_scripts__test_etc_dir ~ '/restic-password"') in backup_scripts__test_config
+              - ('daily_backup_restic_backend="SFTP"') in backup_scripts__test_config
+            fail_msg: "{{ backup_scripts__test_password.stat.mode | default('absent') }}: {{ backup_scripts__test_config }}"
+          vars:
+            backup_scripts__test_config: "{{ backup_scripts__test_restic_config.content | b64decode }}"
+
+        # restic reads the password file of side_effect
+        - name: 'Run the restic script with the password file'
+          ansible.builtin.command:
+            argv: [ "{{ backup_scripts__test_lib_dir }}/950.backup.restic" ]
+            stdin: ''
+          register: 'backup_scripts__test_main'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the restic script succeeded'
+          ansible.builtin.assert:
+            that:
+              - backup_scripts__test_main.rc == 0
+            fail_msg: "{{ backup_scripts__test_main.stdout }} {{ backup_scripts__test_main.stderr }}"
+
+        - name: 'Read the snapshots of the repository'
+          ansible.builtin.command:
+            argv: "{{ backup_scripts__test_restic_argv + ['snapshots', '--json'] }}"
+          register: 'backup_scripts__test_snapshots'
+          changed_when: false
+
+        - name: 'List the files of the first and the latest snapshot'
+          ansible.builtin.command:
+            argv: "{{ backup_scripts__test_restic_argv + ['ls', item] }}"
+          loop:
+            - "{{ (backup_scripts__test_snapshots.stdout | from_json | first).id }}"
+            - 'latest'
+          register: 'backup_scripts__test_ls'
+          changed_when: false
+
+        # The first snapshot was taken in side_effect with the password on STDIN, the latest one with the password file and the exclude
+        - name: 'Assert the snapshots contain the included directory and the latest one not the excluded directory'
+          ansible.builtin.assert:
+            that:
+              - backup_scripts__test_snapshot_list | length >= 2
+              - backup_scripts__test_snapshot_list | map(attribute='paths') | map('sort') | unique | list == [ [ backup_scripts__test_restic_data_dir ] ]
+              - (backup_scripts__test_restic_data_dir ~ '/data.txt') in backup_scripts__test_ls.results[0].stdout_lines
+              - (backup_scripts__test_restic_excluded_dir ~ '/excluded.txt') in backup_scripts__test_ls.results[0].stdout_lines
+              - (backup_scripts__test_restic_data_dir ~ '/data.txt') in backup_scripts__test_ls.results[1].stdout_lines
+              - (backup_scripts__test_restic_excluded_dir ~ '/excluded.txt') not in backup_scripts__test_ls.results[1].stdout_lines
+            fail_msg: >-
+              snapshots: {{ backup_scripts__test_snapshot_list | map(attribute='paths') | list }},
+              first: {{ backup_scripts__test_ls.results[0].stdout_lines }},
+              latest: {{ backup_scripts__test_ls.results[1].stdout_lines }}
+          vars:
+            backup_scripts__test_snapshot_list: "{{ backup_scripts__test_snapshots.stdout | from_json }}"
