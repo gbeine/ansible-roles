@@ -117,7 +117,7 @@ The keys of the configuration are checked by zot itself, see Validation.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `zot_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies of the quadlet unit (`requires`, `wants`, `after`, `part_of`, `binds_to`, `requires_mounts_for`) are changed with `zot_container`, it is merged over the default of the container.
 The merge is not recursive, `zot_container.volumes` replaces the configuration, the storage and the temporary files,
 all three volumes have to be listed then:
 
@@ -152,6 +152,12 @@ If zot rejects the configuration, the role shows the last lines of zot.
 If `zot_config` or `zot_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares the quadlet unit, `config.json` and the secrets.
+`zot verify`, the start and the wait for `/readyz` do not run in check mode,
+the users are not compared while `python3-bcrypt` is not installed yet.
+
 ### Restart and updates
 
 zot is restarted if it was running and a secret, `config.json` or the quadlet unit changed, otherwise it is started and enabled.
@@ -176,6 +182,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-zot` | IPv6, labels, access control with a reader and anonymous reading of `public`, the keys of the sessions and the metrics |
 
 `prepare` creates the podman network, installs `curl`, `skopeo` and `python3-bcrypt` and pulls the image.
+`check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `zot_config` not a dictionary, a secret without `target`, without login, `zot_login` no boolean,
 `zot_login: false` with users, the port in `zot_config`,
 a client secret in `zot_config`, LDAP without its secret, an unknown secret, an unknown variable, a colon in the name of a user,

@@ -1,6 +1,6 @@
 ---
 title: zot
-permalink: /roles/app-zot/
+permalink: /roles/zot/
 project_link: https://zotregistry.dev/
 project_repository: https://github.com/project-zot/zot
 container_link: https://github.com/project-zot/zot/pkgs/container/zot
