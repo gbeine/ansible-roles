@@ -73,7 +73,7 @@ The configuration references them with `certs = host.pem` and `cacerts = <ca_nam
 `ca` is a file on the controller, the files of certbot and acme only contain the intermediate certificates.
 A realm of `pki_easyrsa_deploy` contains the CA, `ca` is not allowed with the source `realm`.
 `<realms_dir>` is `common_globals__pki_realms_dir` (default `/etc/pki/realms`).
-`pki_certbot`, `pki_easyrsa_deploy` and `bootstrap_openwrt` issue or deploy the certificates on their own, the role only deploys them and fails if they do not exist yet.
+`pki_certbot`, `pki_easyrsa_deploy` and `bootstrap_openwrt` issue or deploy the certificates on their own, the role only deploys them and fails if they do not exist yet (in check mode they are only reported).
 
 ```yaml
 strongswan_certificate:
@@ -150,6 +150,8 @@ The role checks before any change:
 - with the source `realm` the name of the realm consists of letters, digits, `_`, `.` and `-`
   and the certificate, the key, the CA and the CRL of the realm exist on the host,
   in check mode missing files are only reported, `pki_easyrsa_deploy` creates a new realm only in a real run
+- with the source `certbot` the certificate of `pki_certbot` exists on the host,
+  in check mode a missing certificate is only reported, `pki_certbot` issues it only in a real run
 
 If `strongswan_config` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.

@@ -78,6 +78,9 @@
   when: security_strongswan__certificate_merged.source | default('') == 'certbot'
   vars:
     security_strongswan__live_dir: "{{ security_strongswan__certificate_merged.home }}/etc/live/{{ security_strongswan__certificate_merged.realm }}"
+    security_strongswan__certbot_message: >-
+      {{ security_strongswan__live_dir }}/cert.pem does not exist, pki_certbot has to issue the certificate
+      of the realm {{ security_strongswan__certificate_merged.realm }} first.
   block:
 
     - name: 'Find the certificate of pki_certbot'
@@ -85,19 +88,28 @@
         path: "{{ security_strongswan__live_dir }}/cert.pem"
       register: 'security_strongswan__certbot_cert'
 
+    # In check mode pki_certbot does not issue a new certificate, the missing certificate is only reported
     - name: 'Assert the certificate of pki_certbot'
       ansible.builtin.assert:
         that:
-          - security_strongswan__certbot_cert.stat.exists
-        fail_msg: >-
-          {{ security_strongswan__live_dir }}/cert.pem does not exist, pki_certbot has to issue the certificate
-          of the realm {{ security_strongswan__certificate_merged.realm }} first.
+          - ansible_check_mode or security_strongswan__certbot_cert.stat.exists
+        fail_msg: "{{ security_strongswan__certbot_message }}"
         quiet: true
+
+    - name: 'Report the missing certificate of pki_certbot in check mode'
+      ansible.builtin.debug:
+        msg: "{{ security_strongswan__certbot_message }}"
+      when:
+        - ansible_check_mode
+        - not security_strongswan__certbot_cert.stat.exists
 
     # The files of certbot are symlinks to the archive, the copies contain the files they point to
     - name: 'Copy the certificate of pki_certbot'
       # Only in check mode, the directories of swanctl are missing without the packages
-      when: security_strongswan__swanctl_stat.stat.isdir | default(false)
+      # and the certificate is missing before pki_certbot issued it
+      when:
+        - security_strongswan__swanctl_stat.stat.isdir | default(false)
+        - security_strongswan__certbot_cert.stat.exists
       ansible.builtin.copy:
         src: "{{ security_strongswan__live_dir }}/{{ item.src }}"
         dest: "{{ item.dest }}"
