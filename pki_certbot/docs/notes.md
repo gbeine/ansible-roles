@@ -1,4 +1,4 @@
-Certbot runs in the container image `c0d3.sh/container/certbot` as podman quadlet.
+Certbot runs in the container image `c0d3cr.io/container/certbot` as podman quadlet.
 The container idles, certbot is run with `podman exec certbot certbot …`, e.g. by the role and by the renew timer.
 The configuration, accounts and certificates are in `<certbot_home>/etc` (mounted as `/etc/letsencrypt`),
 the certificates of a realm are in `<certbot_home>/etc/live/<realm>`.
@@ -25,6 +25,19 @@ The role writes the bundle `<certbot_home>/ca/ca-certificates.crt`: first `/etc/
 so Certbot trusts the public CAs of the host and the private CAs.
 The bundle is written on every run of the role. A change of the CAs of the host reaches the bundle with the next run of the role, the container needs no restart.
 Without `certbot_ca_certificates` the role removes `<certbot_home>/ca` and uses the bundle of the host as before.
+
+### Secrets
+
+The credentials of the DNS plugins are files of the configuration of Certbot, `certonly` gets them with `--dns-<name>-credentials`
+and the renewal configuration of every certificate (`<certbot_home>/etc/renewal/<realm>.conf`) stores their path.
+They are written to `<certbot_home>/etc/<plugin>` with mode `0600` and are no podman secrets,
+a secret would change the path and every renewal configuration would have to be rewritten.
+
+### Allowed variables
+
+`certbot_environment` and `certbot_container.environment` only take the variables of `pki_certbot__environment_allowed`:
+`REQUESTS_CA_BUNDLE` and the proxies `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` read by requests and `CONTAINER_HOST` read by podman-remote.
+Certbot itself reads no options from the environment. The lists prevent unexpected behavior by accident.
 
 ### Container
 
@@ -102,10 +115,6 @@ certbot_realms:
     post_hook: 'podman restart traefik'
 ```
 
-The role fails before it changes anything if `certbot_plugins` is not a dict of `dns-*` plugins with credentials,
-if `certbot_provider` is not in `certbot_provider_server`, if a realm has no `realm` or uses a DNS plugin that is not configured.
-It also fails if `certbot_ca_certificates` is no dictionary, a name does not consist of letters, digits, `_`, `.` and `-`,
-a value is no certificate in PEM format or contains a private key.
 
 ### Restarting containers in a post_hook
 
@@ -115,12 +124,32 @@ The podman socket must be enabled, e.g. with `podman_socket_enabled: true` of `c
 
 ### Standalone authenticator
 
-The `standalone` authenticator answers the HTTP challenge in the container on port 80, publish the port with `certbot_publish` if the ACME server cannot reach the address of the container:
+The `standalone` authenticator answers the HTTP challenge in the container on port 80, publish the port with `certbot_container` if the ACME server cannot reach the address of the container:
 
 ```yaml
-certbot_publish:
-  - '80:80'
+certbot_container:
+  publish:
+    - '80:80'
 ```
+
+### Validation
+
+The role checks before any change:
+
+- `certbot_container`, `certbot_environment` and `certbot_provider_server` are dictionaries, merging them with the default fails otherwise
+- the former variables `certbot_publish` and `certbot_volumes` are not set
+- `certbot_plugins` is a dictionary of `dns-<name>` plugins with a non-empty dictionary of credentials without line breaks
+- `certbot_provider` is in `certbot_provider_server`
+- `certbot_realms` is a list, every realm has `realm` and only known keys, no line breaks, and its DNS plugin is configured
+- `certbot_podman_socket` and `certbot_autoupdate_enabled` are booleans, the values of `certbot_environment` contain no line breaks
+- `certbot_ca_certificates` is a dictionary, the names consist of letters, digits, `_`, `.` and `-`,
+  the values are certificates in PEM format without private keys
+- only allowed variables are set in the environment of the container
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares the files, the bundle of the CAs, the quadlet unit and the renew units.
+The start of the container, the accounts, the certificates and the start of the renew timer do not run in check mode.
 
 ### Renewal, restart and updates
 
@@ -136,6 +165,9 @@ without `certbot_autoupdate_schedule` the schedule of `container_update` is used
 | `certbot_use_podman` | removed, Certbot always runs in podman |
 | `pki_certbot___certificates_only` | removed, the role is idempotent, use the tag `pki_certbot` |
 | `podman___update_mode` | `certbot_autoupdate_enabled` |
+| `certbot_publish` | `certbot_container.publish` |
+| `certbot_volumes` | `certbot_container.volumes`, the list replaces all volumes of the role |
+| tag `pki_certbot` | tags `pki` and `pki_certbot` |
 | `certbot_plugins` as list, `certbot_dns_hetzner_api_token`, `certbot_dns_powerdns_api_url`, `certbot_dns_powerdns_api_key` | `certbot_plugins` as dict with the credentials |
 | `authenticator_options: "{{ pki_certbot__authenticator['dns-hetzner'] }}"` | not needed, the credentials are added by the role |
 | accounts for all providers | accounts for the servers used |
@@ -146,13 +178,24 @@ without `certbot_autoupdate_schedule` the schedule of `container_update` is used
 
 ### Tests
 
-The molecule scenario `default` uses tart with one VM `molecule-certbot`.
-`prepare` starts [Pebble](https://github.com/letsencrypt/pebble) as ACME server and copies its TLS root to the host, the host does not trust it.
-`converge` passes the TLS root with `certbot_ca_certificates` and dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`),
-registers an account and requests a certificate from Pebble, which only works with the bundle of the role. `idempotence` checks that nothing is repeated.
-`side_effect` checks the credentials of `dns-hetzner`, then enables the podman socket and removes the plugin, Certbot has to be restarted.
-`verify` checks the quadlet unit with the dependencies and the mount of the bundle, the bundle with the CAs of the host and the private CA, the podman socket in the container, the issuer of the certificate, that the credentials were removed and runs the renew service.
-The VM needs access to `c0d3.sh` and `ghcr.io`.
+The molecule scenario `default` uses tart with two VMs with Debian 13, the VMs need access to `c0d3cr.io`, `ghcr.io` and Let's Encrypt staging.
+
+| Platform | Test case |
+|---|---|
+| `molecule-certbot-default` | The mandatory values only, an account at Let's Encrypt staging without email, no realm |
+| `molecule-certbot` | [Pebble](https://github.com/letsencrypt/pebble) as ACME server with its TLS root in `certbot_ca_certificates`, a realm, `dns-hetzner` and the dependencies `wants`, `after` and `requires_mounts_for` |
+
+`prepare` starts pebble on `molecule-certbot` and copies its TLS root to the host, the host does not trust it.
+`check` runs `converge` with `--check` on the VMs where the role never ran.
+`converge` registers the accounts and requests the certificate from pebble, which only works with the bundle of the role. `idempotence` checks that nothing is repeated.
+`side_effect` checks the credentials of `dns-hetzner`, runs the role with `certbot_container` not a dictionary, a plugin without `dns-`,
+a line break in the credentials, a realm without `realm`, an unknown key of a realm, a DNS plugin of a realm that is not configured,
+an unknown provider, the former variable `certbot_publish`, `certbot_podman_socket` no boolean, an unknown variable in `certbot_environment`
+and a private key in `certbot_ca_certificates` and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`).
+Then it enables the podman socket and removes the plugin on `molecule-certbot`, Certbot has to restart,
+on `molecule-certbot-default` the role runs again without a change and Certbot must not restart.
+`verify` checks the quadlet unit with the dependencies and the mounts, the bundle with the CAs of the host and the private CA,
+the podman socket in the container, the issuer of the certificate, that the credentials were removed and runs the renew service.
 
 ```
 cd pki_certbot

@@ -27,42 +27,47 @@
         force: false
         mode: '0644'
 
-    - name: 'Pull the images, so the first start of the services does not time out'
+    - name: 'Pull the image of Certbot, so the first start of the service does not time out'
       containers.podman.podman_image:
-        name: "{{ item }}"
-      loop:
-        - "{{ pki_certbot__test_image }}"
-        - "{{ pki_certbot__test_pebble.image }}"
+        name: "{{ pki_certbot__test_image }}"
 
-    - name: 'Start pebble'
-      containers.podman.podman_container:
-        name: "{{ pki_certbot__test_pebble.name }}"
-        image: "{{ pki_certbot__test_pebble.image }}"
-        network: "{{ pki_certbot__test_network.name }}"
-        ip: "{{ pki_certbot__test_pebble.ip }}"
-        env:
-          PEBBLE_VA_ALWAYS_VALID: '1'
-          PEBBLE_VA_NOSLEEP: '1'
-        state: 'started'
+    - name: 'Start pebble as ACME server'
+      when: inventory_hostname == 'molecule-certbot'
+      block:
 
-    - name: 'Create the directory of the TLS root of pebble'
-      ansible.builtin.file:
-        path: "{{ pki_certbot__test_pebble.host_root | dirname }}"
-        mode: '0755'
-        state: 'directory'
+        - name: 'Pull the image of pebble'
+          containers.podman.podman_image:
+            name: "{{ pki_certbot__test_pebble.image }}"
 
-    # The host does not trust pebble, Certbot reaches it only with the private CA of certbot_ca_certificates
-    - name: 'Copy the TLS root of pebble to the host'
-      ansible.builtin.command:
-        argv: [ 'podman', 'cp', "{{ pki_certbot__test_pebble.name }}:{{ pki_certbot__test_pebble.root }}",
-                "{{ pki_certbot__test_pebble.host_root }}" ]
-        creates: "{{ pki_certbot__test_pebble.host_root }}"
+        - name: 'Start pebble'
+          containers.podman.podman_container:
+            name: "{{ pki_certbot__test_pebble.name }}"
+            image: "{{ pki_certbot__test_pebble.image }}"
+            network: "{{ pki_certbot__test_network.name }}"
+            ip: "{{ pki_certbot__test_pebble.ip }}"
+            env:
+              PEBBLE_VA_ALWAYS_VALID: '1'
+              PEBBLE_VA_NOSLEEP: '1'
+            state: 'started'
 
-    - name: 'Wait for the ACME directory of pebble'
-      ansible.builtin.uri:
-        url: "https://{{ pki_certbot__test_pebble.ip }}:14000/dir"
-        validate_certs: false
-      register: 'pki_certbot__test_pebble_ready'
-      until: pki_certbot__test_pebble_ready.status == 200
-      retries: 30
-      delay: 2
+        - name: 'Create the directory of the TLS root of pebble'
+          ansible.builtin.file:
+            path: "{{ pki_certbot__test_pebble.host_root | dirname }}"
+            mode: '0755'
+            state: 'directory'
+
+        # The host does not trust pebble, Certbot reaches it only with the private CA of certbot_ca_certificates
+        - name: 'Copy the TLS root of pebble to the host'
+          ansible.builtin.command:
+            argv: [ 'podman', 'cp', "{{ pki_certbot__test_pebble.name }}:{{ pki_certbot__test_pebble.root }}",
+                    "{{ pki_certbot__test_pebble.host_root }}" ]
+            creates: "{{ pki_certbot__test_pebble.host_root }}"
+
+        - name: 'Wait for the ACME directory of pebble'
+          ansible.builtin.uri:
+            url: "https://{{ pki_certbot__test_pebble.ip }}:14000/dir"
+            validate_certs: false
+          register: 'pki_certbot__test_pebble_ready'
+          until: pki_certbot__test_pebble_ready.status == 200
+          retries: 30
+          delay: 2

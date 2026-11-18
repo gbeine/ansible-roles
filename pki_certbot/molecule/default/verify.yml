@@ -7,6 +7,9 @@
     - 'test_cases.yml'
 
   vars:
+    pki_certbot__test_case: "{{ pki_certbot__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_certbot__test_vars: "{{ pki_certbot__test_case.role_vars }}"
+    pki_certbot__test_expect: "{{ pki_certbot__test_case.expect }}"
     pki_certbot__test_etc_dir: "{{ pki_certbot__test_vars.certbot_home }}/etc"
     pki_certbot__test_ca_dir: "{{ pki_certbot__test_vars.certbot_home }}/ca"
 
@@ -14,7 +17,7 @@
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/certbot.container'
+        src: "{{ pki_certbot__test_quadlet_path }}"
       register: 'pki_certbot__test_quadlet'
 
     - name: 'Assert the quadlet unit'
@@ -24,22 +27,36 @@
           - ('Network=' + pki_certbot__test_vars.certbot_network) in pki_certbot__test_lines
           - ('Volume=' + pki_certbot__test_etc_dir + ':/etc/letsencrypt') in pki_certbot__test_lines
           - "'Volume=/etc/ssl/certs:/etc/ssl/host-certs:ro' in pki_certbot__test_lines"
-          - "'Volume=/run/podman/podman.sock:/run/podman/podman.sock' in pki_certbot__test_lines"
+          - ('Volume=/run/podman/podman.sock:/run/podman/podman.sock' in pki_certbot__test_lines) == pki_certbot__test_expect.podman_socket
           - >-
-            pki_certbot__test_lines | select('match', 'Environment=.*REQUESTS_CA_BUNDLE=/etc/ssl/certbot-ca/ca-certificates.crt')
+            pki_certbot__test_lines | select('match', 'Environment=.*REQUESTS_CA_BUNDLE=' + pki_certbot__test_bundle_mount + '/ca-certificates.crt')
             | list | length == 1
-          - ('Volume=' + pki_certbot__test_ca_dir + ':/etc/ssl/certbot-ca:ro') in pki_certbot__test_lines
-          - "'Wants=network-online.target' in pki_certbot__test_lines"
-          - "'After=network-online.target' in pki_certbot__test_lines"
-          - ('RequiresMountsFor=' + pki_certbot__test_vars.certbot_home) in pki_certbot__test_lines
-          - pki_certbot__test_lines | select('match', 'Environment=.*CONTAINER_HOST=unix:///run/podman/podman.sock') | list | length == 1
+          - (('Volume=' + pki_certbot__test_ca_dir + ':/etc/ssl/certbot-ca:ro') in pki_certbot__test_lines) == pki_certbot__test_expect.private_ca
+          - pki_certbot__test_expect.unit_lines | reject('in', pki_certbot__test_lines) | list | length == 0
+          - >-
+            (pki_certbot__test_lines | select('match', 'Environment=.*CONTAINER_HOST=unix:///run/podman/podman.sock') | list | length == 1)
+            == pki_certbot__test_expect.podman_socket
           - pki_certbot__test_lines | select('match', 'Label=') | list | length == 0
           - pki_certbot__test_lines | select('match', 'IP6=') | list | length == 0
         fail_msg: "Quadlet: {{ pki_certbot__test_quadlet.content | b64decode }}"
       vars:
         pki_certbot__test_lines: "{{ (pki_certbot__test_quadlet.content | b64decode).splitlines() }}"
+        pki_certbot__test_bundle_mount: "{{ '/etc/ssl/certbot-ca' if pki_certbot__test_expect.private_ca else '/etc/ssl/host-certs' }}"
+
+    - name: 'Read the state of the directory of the private CAs'
+      ansible.builtin.stat:
+        path: "{{ pki_certbot__test_ca_dir }}"
+      register: 'pki_certbot__test_ca_dir_stat'
+
+    # Without certbot_ca_certificates the role removes the directory and uses the bundle of the host
+    - name: 'Assert the directory of the private CAs exists only with private CAs'
+      ansible.builtin.assert:
+        that:
+          - pki_certbot__test_ca_dir_stat.stat.exists == pki_certbot__test_expect.private_ca
+        fail_msg: "{{ pki_certbot__test_ca_dir }}: exists={{ pki_certbot__test_ca_dir_stat.stat.exists }}"
 
     - name: 'Read the bundle, the private CA and the CA certificates of the host'
+      when: pki_certbot__test_expect.private_ca
       ansible.builtin.slurp:
         src: "{{ item }}"
       loop:
@@ -50,6 +67,7 @@
       register: 'pki_certbot__test_ca_files'
 
     - name: 'Assert the bundle starts with the CAs of the host and contains the private CA'
+      when: pki_certbot__test_expect.private_ca
       ansible.builtin.assert:
         that:
           - pki_certbot__test_bundle.startswith(pki_certbot__test_host_bundle | trim)
@@ -80,24 +98,28 @@
         fail_msg: "Service: {{ pki_certbot__test_service.stdout }}"
 
     - name: 'List the containers of the host through the podman socket'
+      when: pki_certbot__test_expect.podman_socket
       ansible.builtin.command:
         argv: [ 'podman', 'exec', 'certbot', 'podman', 'ps', '--format', '{{ "{{" }}.Names{{ "}}" }}' ]
       register: 'pki_certbot__test_remote_ps'
       changed_when: false
 
     - name: 'Assert the podman socket of the host is used in the container'
+      when: pki_certbot__test_expect.podman_socket
       ansible.builtin.assert:
         that:
           - pki_certbot__test_pebble.name in pki_certbot__test_remote_ps.stdout_lines
         fail_msg: "Containers: {{ pki_certbot__test_remote_ps.stdout_lines }} {{ pki_certbot__test_remote_ps.stderr }}"
 
     - name: 'Read the issuer of the certificate'
+      when: pki_certbot__test_expect.realm
       ansible.builtin.command:
         argv: [ 'openssl', 'x509', '-noout', '-issuer', '-in', "{{ pki_certbot__test_etc_dir }}/live/{{ pki_certbot__test_realm }}/fullchain.pem" ]
       register: 'pki_certbot__test_issuer'
       changed_when: false
 
     - name: 'Assert the certificate was issued by pebble'
+      when: pki_certbot__test_expect.realm
       ansible.builtin.assert:
         that:
           - pki_certbot__test_issuer.stdout is search('Pebble')
@@ -112,12 +134,12 @@
         - "renewal/{{ pki_certbot__test_realm }}.conf"
       register: 'pki_certbot__test_files'
 
-    - name: 'Assert the removed plugin and the renewal configuration'
+    - name: 'Assert the removed plugin and the renewal configuration of the realm'
       ansible.builtin.assert:
         that:
           - not pki_certbot__test_files.results[0].stat.exists
           - not pki_certbot__test_files.results[1].stat.exists
-          - pki_certbot__test_files.results[2].stat.exists
+          - pki_certbot__test_files.results[2].stat.exists == pki_certbot__test_expect.realm
         fail_msg: >-
           {{ pki_certbot__test_files.results
              | map(attribute='item') | zip(pki_certbot__test_files.results | map(attribute='stat.exists'))

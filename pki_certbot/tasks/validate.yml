@@ -1,24 +1,98 @@
 ---
 
-- name: 'Validate plugins, provider and realms'
+# A failing template in the variables (e.g. certbot_container, certbot_environment or certbot_provider_server not a dictionary)
+# stops the role here before anything changes
+- name: 'Render the configuration'
   ansible.builtin.assert:
     that:
-      - pki_certbot__plugins is mapping
-      - pki_certbot__plugins | dict2items | rejectattr('key', 'match', 'dns-') | list | length == 0
-      - pki_certbot__plugins | dict2items | rejectattr('value', 'mapping') | list | length == 0
-      - pki_certbot__plugins | dict2items | map(attribute='value') | map('length') | select('eq', 0) | list | length == 0
-      - pki_certbot__provider in pki_certbot__provider_server
-      - pki_certbot__realms | rejectattr('realm', 'defined') | list | length == 0
-      - pki_certbot__plugins_missing | length == 0
-    fail_msg: >-
-      Configuration: certbot_plugins has to be a dict of DNS plugins (dns-<name>) with their credentials,
-      certbot_provider '{{ pki_certbot__provider }}' has to be one of {{ pki_certbot__provider_server.keys() | join(', ') }},
-      every realm needs 'realm', plugins used by realms but not configured: {{ pki_certbot__plugins_missing | join(', ') | default('none', true) }}.
+      - pki_certbot__container | length > 0
+      - pki_certbot__environment | length > 0
+      - pki_certbot__provider_server | length > 0
+    quiet: true
+
+- name: 'Validate the configuration'
+  ansible.builtin.assert:
+    that:
+      - pki_certbot__errors | length == 0
+    # Only the failing checks are reported
+    fail_msg: "{{ pki_certbot__errors | join(' ') }}"
     quiet: true
   vars:
-    pki_certbot__plugins_missing: >-
-      {{ pki_certbot__realms | map(attribute='authenticator', default='standalone') | select('match', 'dns-')
-         | reject('in', (pki_certbot__plugins.keys() | list) if pki_certbot__plugins is mapping else []) | unique | list }}
+    pki_certbot__former: >-
+      {{ pki_certbot__former_variables | dict2items
+         | selectattr('key', 'in', query('ansible.builtin.varnames', '^(' ~ (pki_certbot__former_variables.keys() | join('|')) ~ ')$')) | list }}
+    pki_certbot__plugin_items: "{{ pki_certbot__plugins | dict2items if pki_certbot__plugins is mapping else [] }}"
+    pki_certbot__realm_list: "{{ pki_certbot__realms if pki_certbot__realms is sequence and pki_certbot__realms is not string else [] }}"
+    pki_certbot__realm_entries: "{{ pki_certbot__realm_list | select('mapping') | list }}"
+    pki_certbot__errors: >-
+      {%- set errors = [] -%}
+      {%- for former in pki_certbot__former -%}
+      {%-   set _ = errors.append(former.value ~ ': ' ~ former.key ~ '.') -%}
+      {%- endfor -%}
+      {%- if pki_certbot__plugins is not mapping -%}
+      {%-   set _ = errors.append('certbot_plugins has to be a dictionary of DNS plugins (dns-<name>) and their credentials.') -%}
+      {%- endif -%}
+      {%- set names = pki_certbot__plugin_items | map(attribute='key') | map('string') | reject('match', '^dns-[a-z0-9]+$') | list -%}
+      {%- if names | length > 0 -%}
+      {%-   set _ = errors.append('The plugins of certbot_plugins are named dns-<name>: ' ~ (names | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- set empty = pki_certbot__plugin_items | rejectattr('value', 'mapping') | map(attribute='key') | list
+                      + pki_certbot__plugin_items | selectattr('value', 'mapping') | selectattr('value', 'eq', {}) | map(attribute='key') | list -%}
+      {%- if empty | length > 0 -%}
+      {%-   set _ = errors.append('The credentials of certbot_plugins are a non-empty dictionary: ' ~ (empty | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- set lines = [] -%}
+      {%- for plugin in pki_certbot__plugin_items | selectattr('value', 'mapping') -%}
+      {%-   for option in plugin.value | dict2items if option.value is string and option.value is search('[\r\n]') -%}
+      {%-     set _ = lines.append(plugin.key ~ '.' ~ option.key) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- if lines | length > 0 -%}
+      {%-   set _ = errors.append('The credentials of certbot_plugins must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__provider not in pki_certbot__provider_server -%}
+      {%-   set _ = errors.append('certbot_provider ' ~ pki_certbot__provider ~ ' has to be one of ' ~ (pki_certbot__provider_server.keys() | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__realms is string or pki_certbot__realms is not sequence -%}
+      {%-   set _ = errors.append('certbot_realms has to be a list of realms.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__realm_list | reject('mapping') | list | length > 0
+             or pki_certbot__realm_entries | rejectattr('realm', 'defined') | list | length > 0 -%}
+      {%-   set _ = errors.append('Every entry of certbot_realms needs realm.') -%}
+      {%- endif -%}
+      {%- set unknown = pki_certbot__realm_entries | map('list') | flatten | map('string') | reject('in', pki_certbot__realm_keys) | unique | list -%}
+      {%- if unknown | length > 0 -%}
+      {%-   set _ = errors.append('Unknown keys in certbot_realms: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (pki_certbot__realm_keys | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- set lines = [] -%}
+      {%- for entry in pki_certbot__realm_entries -%}
+      {%-   for option in entry | dict2items -%}
+      {%-     set values = option.value if option.value is sequence and option.value is not string else [ option.value ] -%}
+      {%-     if values | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+      {%-       set _ = lines.append(entry.realm | default('?') ~ '.' ~ option.key) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- if lines | length > 0 -%}
+      {%-   set _ = errors.append('The values of certbot_realms must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- set missing = pki_certbot__realm_entries | map(attribute='authenticator', default='standalone') | select('match', 'dns-')
+                        | reject('in', pki_certbot__plugin_items | map(attribute='key') | list) | unique | list -%}
+      {%- if missing | length > 0 -%}
+      {%-   set _ = errors.append('The DNS plugins of certbot_realms have to be configured in certbot_plugins: ' ~ (missing | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__podman_socket is not boolean -%}
+      {%-   set _ = errors.append('certbot_podman_socket has to be a boolean.') -%}
+      {%- endif -%}
+      {%- if pki_certbot__autoupdate_enabled is not boolean -%}
+      {%-   set _ = errors.append('certbot_autoupdate_enabled has to be a boolean.') -%}
+      {%- endif -%}
+      {%- set lines = pki_certbot__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]')
+                      | map(attribute='key') | list -%}
+      {%- if lines | length > 0 -%}
+      {%-   set _ = errors.append('Values of certbot_environment must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+      {%- endif -%}
+      {{ errors }}
 
 - name: 'Validate the CA certificates'
   ansible.builtin.assert:
@@ -53,3 +127,18 @@
       {%-   set _ = errors.append('certbot_ca_certificates must not contain private keys: ' ~ (pki_certbot__ca_private_keys | join(', ')) ~ '.') -%}
       {%- endif -%}
       {{ errors }}
+
+# Checks the environment of the container after merging certbot_container,
+# unknown variables would change the behavior unexpectedly
+- name: 'Validate the allowed environment variables'
+  when: pki_certbot__container.environment | default(none) is mapping
+  ansible.builtin.assert:
+    that:
+      - pki_certbot__unknown | length == 0
+    fail_msg: >-
+      Unknown environment variables: {{ pki_certbot__unknown | join(', ') }}.
+      Allowed are {{ pki_certbot__environment_allowed | join(', ') }}.
+    quiet: true
+  vars:
+    pki_certbot__unknown: >-
+      {{ pki_certbot__container.environment.keys() | map('string') | reject('in', pki_certbot__environment_allowed) | list }}

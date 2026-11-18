@@ -6,52 +6,192 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    pki_certbot__test_case: "{{ pki_certbot__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_certbot__test_vars: "{{ pki_certbot__test_case.role_vars }}"
+    pki_certbot__test_checked_files:
+      - "{{ pki_certbot__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
-    - name: 'Read the credentials of the DNS plugin created by converge'
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ pki_certbot__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Set the TLS root of pebble as private CA'
+      when: pki_certbot__test_case.private_ca
+      block:
+
+        - name: 'Read the TLS root of pebble'
+          ansible.builtin.slurp:
+            src: "{{ pki_certbot__test_pebble.host_root }}"
+          register: 'pki_certbot__test_pebble_root'
+
+        - name: 'Set the private CA'
+          ansible.builtin.set_fact:
+            certbot_ca_certificates:
+              pebble: "{{ pki_certbot__test_pebble_root.content | b64decode }}"
+
+    - name: 'Check the credentials of the DNS plugin created by converge'
+      when: pki_certbot__test_case.expect.plugin
+      block:
+
+        - name: 'Read the credentials of the DNS plugin'
+          ansible.builtin.stat:
+            path: "{{ pki_certbot__test_vars.certbot_home }}/etc/dns-hetzner"
+          register: 'pki_certbot__test_plugin'
+
+        - name: 'Read the content of the credentials'
+          ansible.builtin.slurp:
+            src: "{{ pki_certbot__test_vars.certbot_home }}/etc/dns-hetzner"
+          register: 'pki_certbot__test_plugin_content'
+          when: pki_certbot__test_plugin.stat.exists
+
+        - name: 'Assert the credentials of the DNS plugin'
+          ansible.builtin.assert:
+            that:
+              - pki_certbot__test_plugin.stat.exists
+              - pki_certbot__test_plugin.stat.mode == '0600'
+              - >-
+                (pki_certbot__test_plugin_content.content | b64decode | trim)
+                == 'dns_hetzner_api_token = ' + pki_certbot__test_vars.certbot_plugins['dns-hetzner'].dns_hetzner_api_token
+            fail_msg: "Plugin file: exists={{ pki_certbot__test_plugin.stat.exists }} mode={{ pki_certbot__test_plugin.stat.mode | default('-') }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
       ansible.builtin.stat:
-        path: "{{ pki_certbot__test_vars.certbot_home }}/etc/dns-hetzner"
-      register: 'pki_certbot__test_plugin'
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_certbot__test_checked_files }}"
+      register: 'pki_certbot__test_md5_before'
 
-    - name: 'Read the content of the credentials'
-      ansible.builtin.slurp:
-        src: "{{ pki_certbot__test_vars.certbot_home }}/etc/dns-hetzner"
-      register: 'pki_certbot__test_plugin_content'
-      when: pki_certbot__test_plugin.stat.exists
+    # Include parameters take precedence over set_fact and only exist inside the include
 
-    - name: 'Assert the credentials of the DNS plugin'
-      ansible.builtin.assert:
-        that:
-          - pki_certbot__test_plugin.stat.exists
-          - pki_certbot__test_plugin.stat.mode == '0600'
-          - >-
-            (pki_certbot__test_plugin_content.content | b64decode | trim)
-            == 'dns_hetzner_api_token = ' + pki_certbot__test_vars.certbot_plugins['dns-hetzner'].dns_hetzner_api_token
-        fail_msg: "Plugin file: exists={{ pki_certbot__test_plugin.stat.exists }} mode={{ pki_certbot__test_plugin.stat.mode | default('-') }}"
+    - name: 'Run pki_certbot with certbot_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_container: [ 'publish' ]
+        pki_certbot__test_invalid:
+          message: 'certbot_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run pki_certbot with a plugin without dns- (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_plugins:
+          hetzner:
+            dns_hetzner_api_token: 'molecule'
+        pki_certbot__test_invalid:
+          message: 'a plugin without dns-'
+          search: '^The plugins of certbot_plugins are named dns-<name>: hetzner\.$'
+
+    - name: 'Run pki_certbot with a line break in the credentials of a plugin (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_plugins:
+          dns-hetzner:
+            dns_hetzner_api_token: "molecule\ntoken"
+        pki_certbot__test_invalid:
+          message: 'a line break in the credentials of a plugin'
+          search: '^The credentials of certbot_plugins must not contain line breaks: dns-hetzner\.dns_hetzner_api_token\.$'
+
+    - name: 'Run pki_certbot with a realm without realm (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_realms:
+          - domains: [ 'www.example.test' ]
+        pki_certbot__test_invalid:
+          message: 'a realm without realm'
+          search: '^Every entry of certbot_realms needs realm\.$'
+
+    - name: 'Run pki_certbot with an unknown key of a realm (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_realms:
+          - realm: 'example.test'
+            domain: 'www.example.test'
+        pki_certbot__test_invalid:
+          message: 'an unknown key of a realm'
+          search: '^Unknown keys in certbot_realms: domain, allowed are '
+
+    - name: 'Run pki_certbot with a DNS plugin of a realm that is not configured (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_realms:
+          - realm: 'example.test'
+            authenticator: 'dns-powerdns'
+        pki_certbot__test_invalid:
+          message: 'a DNS plugin of a realm that is not configured'
+          search: '^The DNS plugins of certbot_realms have to be configured in certbot_plugins: dns-powerdns\.$'
+
+    - name: 'Run pki_certbot with an unknown provider (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_provider: 'molecule'
+        pki_certbot__test_invalid:
+          message: 'an unknown provider'
+          search: '^certbot_provider molecule has to be one of '
+
+    - name: 'Run pki_certbot with the former variable certbot_publish (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_publish: [ '80:80' ]
+        pki_certbot__test_invalid:
+          message: 'the former variable certbot_publish'
+          search: '^Ports are published with certbot_container\.publish now: certbot_publish\.$'
+
+    - name: 'Run pki_certbot with certbot_podman_socket no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_podman_socket: 'yes'
+        pki_certbot__test_invalid:
+          message: 'certbot_podman_socket no boolean'
+          search: '^certbot_podman_socket has to be a boolean\.$'
+
+    - name: 'Run pki_certbot with an unknown variable in certbot_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_environment:
+          CERTBOT_EMAIL: 'admin@example.test'
+        pki_certbot__test_invalid:
+          message: 'an unknown variable in certbot_environment'
+          search: '^Unknown environment variables: CERTBOT_EMAIL\.'
+
+    - name: 'Run pki_certbot with a private key in certbot_ca_certificates (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        certbot_ca_certificates:
+          molecule: |
+            -----BEGIN CERTIFICATE-----
+            TW9sZWN1bGU=
+            -----END CERTIFICATE-----
+            -----BEGIN PRIVATE KEY-----
+            TW9sZWN1bGU=
+            -----END PRIVATE KEY-----
+        pki_certbot__test_invalid:
+          message: 'a private key in certbot_ca_certificates'
+          search: 'certbot_ca_certificates must not contain private keys: molecule\.'
 
     - name: 'Read the main PID of Certbot before the change'
       ansible.builtin.command: 'systemctl show --property=MainPID --value certbot'
       register: 'pki_certbot__test_pid_before'
       changed_when: false
 
-    - name: 'Set the role variables with the podman socket and without plugins'
+    - name: 'Set the role variables of the change'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
-      loop: "{{ pki_certbot__test_vars | combine(pki_certbot__test_side_effect_vars) | dict2items }}"
+      loop: "{{ pki_certbot__test_case.side_effect.role_vars | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the TLS root of pebble'
-      ansible.builtin.slurp:
-        src: "{{ pki_certbot__test_pebble.host_root }}"
-      register: 'pki_certbot__test_pebble_root'
-
-    - name: 'Set the TLS root of pebble as private CA'
-      ansible.builtin.set_fact:
-        certbot_ca_certificates:
-          pebble: "{{ pki_certbot__test_pebble_root.content | b64decode }}"
-
-    - name: 'Run pki_certbot with the podman socket'
+    - name: 'Run pki_certbot with the change'
       ansible.builtin.include_role:
         name: 'pki_certbot'
 
@@ -60,9 +200,9 @@
       register: 'pki_certbot__test_pid_after'
       changed_when: false
 
-    - name: 'Assert Certbot was restarted'
+    - name: 'Assert Certbot was restarted only after a change'
       ansible.builtin.assert:
         that:
           - pki_certbot__test_pid_after.stdout != '0'
-          - pki_certbot__test_pid_after.stdout != pki_certbot__test_pid_before.stdout
+          - (pki_certbot__test_pid_after.stdout != pki_certbot__test_pid_before.stdout) == pki_certbot__test_case.expect.restart
         fail_msg: "PID {{ pki_certbot__test_pid_before.stdout }} -> {{ pki_certbot__test_pid_after.stdout }}"

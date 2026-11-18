@@ -6,9 +6,10 @@ pki_certbot__test_network:
   gateway: '10.89.0.1'
   netmask: 24
 
-pki_certbot__test_image: 'c0d3.sh/container/certbot:latest'
+pki_certbot__test_image: 'c0d3cr.io/container/certbot:latest'
+pki_certbot__test_quadlet_path: '/etc/containers/systemd/certbot.container'
 
-# ACME test server, started in prepare.yml, its TLS root is added to the CA certificates of the host
+# ACME test server, started in prepare.yml on molecule-certbot
 pki_certbot__test_pebble:
   name: 'pebble'
   image: 'ghcr.io/letsencrypt/pebble:latest'
@@ -19,27 +20,62 @@ pki_certbot__test_pebble:
 
 pki_certbot__test_realm: 'molecule.example.test'
 
-pki_certbot__test_vars:
-  certbot_home: '/opt/certbot-molecule'
-  certbot_ip: '10.89.0.50'
-  certbot_network: 'podman-molecule'
-  certbot_hostname: 'certbot-molecule'
-  certbot_timezone: 'Europe/Berlin'
-  certbot_email: 'admin@example.test'
-  certbot_provider_server:
-    pebble: 'https://pebble:14000/dir'
-  certbot_provider: 'pebble'
-  certbot_realms:
-    - realm: 'molecule.example.test'
-  certbot_plugins:
-    dns-hetzner:
-      dns_hetzner_api_token: 'molecule-dummy-token'
-  certbot_container:
-    wants: [ 'network-online.target' ]
-    after: [ 'network-online.target' ]
-    requires_mounts_for: [ '/opt/certbot-molecule' ]
+pki_certbot__test_cases:
 
-# Changed in side_effect.yml: the podman socket changes the quadlet, the plugin is removed
-pki_certbot__test_side_effect_vars:
-  certbot_podman_socket: true
-  certbot_plugins: {}
+  # Only the mandatory variables, the role registers an account at Let's Encrypt staging without email,
+  # side_effect runs the role again without a change
+  - name: 'molecule-certbot-default'
+    role_vars:
+      certbot_home: '/opt/certbot'
+      certbot_ip: '10.89.0.51'
+      certbot_network: 'podman-molecule'
+      certbot_hostname: 'certbot-default'
+      certbot_timezone: 'Europe/Berlin'
+    private_ca: false
+    side_effect:
+      role_vars: {}
+    expect:
+      plugin: false
+      realm: false
+      private_ca: false
+      podman_socket: false
+      restart: false
+      unit_lines: []
+
+  # pebble as provider with its TLS root as private CA, a realm, a DNS plugin and dependencies of the quadlet unit,
+  # side_effect enables the podman socket and removes the plugin, Certbot has to restart
+  - name: 'molecule-certbot'
+    role_vars:
+      certbot_home: '/opt/certbot-molecule'
+      certbot_ip: '10.89.0.50'
+      certbot_network: 'podman-molecule'
+      certbot_hostname: 'certbot-molecule'
+      certbot_timezone: 'Europe/Berlin'
+      certbot_email: 'admin@example.test'
+      certbot_provider_server:
+        pebble: 'https://pebble:14000/dir'
+      certbot_provider: 'pebble'
+      certbot_realms:
+        - realm: 'molecule.example.test'
+      certbot_plugins:
+        dns-hetzner:
+          dns_hetzner_api_token: 'molecule-dummy-token'
+      certbot_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/opt/certbot-molecule' ]
+    private_ca: true
+    side_effect:
+      role_vars:
+        certbot_podman_socket: true
+        certbot_plugins: {}
+    expect:
+      plugin: true
+      realm: true
+      private_ca: true
+      podman_socket: true
+      restart: true
+      unit_lines:
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/opt/certbot-molecule'
