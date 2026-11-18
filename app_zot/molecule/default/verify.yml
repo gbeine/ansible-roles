@@ -93,6 +93,7 @@
       register: 'app_zot__test_hashes'
       changed_when: false
       no_log: true
+      when: app_zot__expect.login
 
     # The configuration has the values of the role and the path of the keys of the sessions, not the keys
     - name: 'Assert the files and the configuration of zot'
@@ -100,11 +101,14 @@
         that:
           - app_zot__test_files.results | map(attribute='stat.mode') | unique | list == [ '0600' ]
           - app_zot__test_files.results | map(attribute='stat.pw_name') | unique | list == [ 'root' ]
-          - app_zot__test_hashes.stdout | from_json | reject | list | length == 0
+          - not app_zot__expect.login or app_zot__test_hashes.stdout | from_json | reject | list | length == 0
           - app_zot__test_config_json.http.address == '0.0.0.0'
           - app_zot__test_config_json.http.port | string == '5000'
           - app_zot__test_config_json.storage.rootDirectory == '/var/lib/registry'
-          - app_zot__test_config_json.http.auth.htpasswd.path == '/etc/zot/htpasswd'
+          # Without login the configuration has no http.auth
+          - >-
+            (app_zot__test_config_json.http.auth.htpasswd.path == '/etc/zot/htpasswd')
+            if app_zot__expect.login else (app_zot__test_config_json.http.auth is not defined)
           - app_zot__test_config_json.log.level == app_zot__expect.config.log_level
           - (app_zot__test_config_json.http.auth.sessionKeysFile | default('')) == ('/run/secrets/zot_session_keys.json' if app_zot__expect.config.session_keys else '')
           - app_zot__test_plain | select('in', app_zot__test_config.content | b64decode) | list | length == 0
@@ -122,17 +126,18 @@
       loop: [ '/readyz', '/' ]
       register: 'app_zot__test_health'
 
-    # Pushes the image as administrator, to molecule and to public on molecule-zot
-    - name: 'Copy an image into the registry as administrator'
+    # Pushes the image as administrator, to molecule and to public on molecule-zot, without login without credentials
+    - name: 'Copy an image into the registry as administrator or without login'
       ansible.builtin.command:
-        argv: "{{ app_zot__test_skopeo + [ 'copy', '--retry-times', '3', '--dest-tls-verify=false', '--dest-creds', app_zot__expect.admin.name ~ ':' ~ app_zot__expect.admin.password,
-                 app_zot__test_source, 'docker://' ~ app_zot__test_registry ~ '/' ~ item ~ '/busybox:latest' ] }}"
+        argv: "{{ app_zot__test_skopeo + [ 'copy', '--retry-times', '3', '--dest-tls-verify=false' ]
+                 + ([ '--dest-creds', app_zot__expect.admin.name ~ ':' ~ app_zot__expect.admin.password ] if app_zot__expect.login else [])
+                 + [ app_zot__test_source, 'docker://' ~ app_zot__test_registry ~ '/' ~ item ~ '/busybox:latest' ] }}"
       loop: "{{ [ 'molecule' ] + ([ 'public' ] if app_zot__test_case.access_control else []) }}"
       register: 'app_zot__test_push'
       changed_when: false
       no_log: true
 
-    # Without login and with a wrong password zot answers 401
+    # Without login and with a wrong password zot answers 401, if zot runs without login 200
     - name: 'Read the tags with the administrator, without login and with a wrong password'
       ansible.builtin.uri:
         url: "{{ app_zot__test_url }}/v2/molecule/busybox/tags/list"
@@ -163,7 +168,7 @@
       ansible.builtin.assert:
         that:
           - app_zot__test_health.results | map(attribute='status') | list == [ 200, 200 ]
-          - app_zot__test_tags.results | map(attribute='status') | list == [ 200, 401, 401 ]
+          - app_zot__test_tags.results | map(attribute='status') | list == ([ 200, 401, 401 ] if app_zot__expect.login else [ 200, 200, 200 ])
           - "'latest' in app_zot__test_tags.results[0].json.tags"
           - "'molecule/busybox' in app_zot__test_catalog.json.repositories"
         fail_msg: >-

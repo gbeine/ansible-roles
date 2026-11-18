@@ -45,6 +45,14 @@ they must not be set in `zot_config`.
 
 The login is mandatory: `zot_users` has users or `zot_config.http.auth` has `ldap`, `openid`, `bearer` or `mtls`.
 Reading without login is allowed with `anonymousPolicy` of the repositories.
+
+With `zot_login: false` zot runs without login, `zot_users` and `zot_config.http.auth` must not be set then.
+Everyone who reaches zot may read, push and delete, `accessControl` may only use `anonymousPolicy` to restrict this,
+or a reverse proxy in front of zot, e.g. Traefik, protects it:
+
+```yaml
+zot_login: false
+```
 Without `accessControl` every user who logs in may read, push and delete.
 With `accessControl` only the users in `accessControl.metrics.users` may read the metrics, `adminPolicy` does not include them.
 
@@ -118,7 +126,8 @@ The directories belong to root with the mode `0750`, `config.json` and `htpasswd
 The role checks before any change:
 
 - `zot_secrets` is a list of entries with `name`, `data` and `target` and unique names
-- a login is configured, LDAP and OpenID have their secrets
+- `zot_login` is a boolean, a login is configured unless `zot_login` is `false`, without login neither `zot_users` nor `zot_config.http.auth` is set
+- LDAP and OpenID have their secrets
 - `zot_config` contains no key set by the role and no secret
 - the environment contains no secret and no line breaks
 - the users have valid names and passwords of 8 to 72 characters
@@ -152,19 +161,23 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 | Platform | Test case |
 |---|---|
-| `molecule-zot-default` | Only the mandatory variables and one user |
+| `molecule-zot-default` | Only the mandatory variables and one user, `side_effect` switches the login off |
 | `molecule-zot` | IPv6, labels, access control with a reader and anonymous reading of `public`, the keys of the sessions and the metrics |
 
 `prepare` creates the podman network, installs `curl`, `skopeo` and `python3-bcrypt` and pulls the image.
-`side_effect` runs the role with `zot_config` not a dictionary, a secret without `target`, without login, the port in `zot_config`,
+`side_effect` runs the role with `zot_config` not a dictionary, a secret without `target`, without login, `zot_login` no boolean,
+`zot_login: false` with users, the port in `zot_config`,
 a client secret in `zot_config`, LDAP without its secret, an unknown secret, an unknown variable, a colon in the name of a user,
 a short password and an unknown key of zot rejected by `zot verify`
 and checks that it fails with the expected message and the quadlet unit, `config.json` and `htpasswd` are unchanged (tasks marked `expect ERROR`),
-then it changes the log level and the password of the reader on `molecule-zot`, `config.json` and `htpasswd` change and zot has to restart.
+then it changes the log level and the password of the reader on `molecule-zot`, `config.json` and `htpasswd` change and zot has to restart,
+on `molecule-zot-default` it sets `zot_login: false` without users, `config.json` changes and zot has to restart.
 `verify` checks the quadlet unit with the secret, the service, the addresses, the environment, the files with their modes,
 the bcrypt hashes of `htpasswd` matching the passwords, the values of the role in `config.json` without secrets,
 the health check and the web interface, copies `busybox` into the registry with skopeo as administrator,
 reads its tags as administrator (200), without login and with a wrong password (401) and the catalog.
+Without login on `molecule-zot-default` the configuration has no `http.auth`, skopeo pushes without credentials
+and the tags are read without login and with a wrong password as well (200).
 On `molecule-zot` the reader reads the image with its password but not with its former one and must not push,
 `public/busybox` is read without login, `molecule/busybox` not, and the metrics answer.
 
