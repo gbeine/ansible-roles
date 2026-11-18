@@ -6,11 +6,16 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    security_pass__test_case: "{{ security_pass__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_pass__test_vars: "{{ security_pass__test_case.role_vars }}"
+    security_pass__test_expect: "{{ security_pass__test_case.expect }}"
+
   tasks:
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/pass.container'
+        src: "{{ security_pass__test_quadlet_path }}"
       register: 'security_pass__test_quadlet'
 
     - name: 'Assert the quadlet unit'
@@ -18,11 +23,12 @@
         that:
           - "'Network=none' in security_pass__test_lines"
           - ('Volume=' + security_pass__test_vars.pass_home + ':/config') in security_pass__test_lines
-          - security_pass__test_lines | select('match', 'Environment=.*PUID=911') | list | length == 1
-          - security_pass__test_lines | select('match', 'Environment=.*PGID=911') | list | length == 1
+          - security_pass__test_lines | select('match', 'Environment=.*PUID=' + security_pass__test_expect.puid) | list | length == 1
+          - security_pass__test_lines | select('match', 'Environment=.*PGID=' + security_pass__test_expect.puid) | list | length == 1
           - >-
-            security_pass__test_lines | select('match', 'Environment=.*GNUPAGENT_MAX_CACHE_TTL=' + security_pass__test_side_effect_ttl)
-            | list | length == 1
+            (security_pass__test_lines | select('match', 'Environment=.*GNUPAGENT_MAX_CACHE_TTL=' + security_pass__test_expect.ttl) | list | length == 1)
+            == security_pass__test_expect.ttl_in_unit
+          - security_pass__test_expect.unit_lines | reject('in', security_pass__test_lines) | list | length == 0
           - security_pass__test_lines | select('match', 'Label=') | list | length == 0
           - security_pass__test_lines | select('match', 'Secret=') | list | length == 0
           - security_pass__test_lines | select('match', 'IP6?=') | list | length == 0
@@ -61,22 +67,25 @@
       vars:
         security_pass__test_container_networks: "{{ security_pass__test_networks.stdout | from_json }}"
 
-    - name: 'Read the environment and the version of pass in the container'
+    # The base image changes the owner of /config to PUID at the start
+    - name: 'Read the environment, the owner of /config and the version of pass in the container'
       ansible.builtin.command:
         argv: "{{ item }}"
       loop:
         - [ 'podman', 'exec', 'pass', 'printenv', 'PASSWORD_STORE_DIR' ]
         - [ 'podman', 'exec', 'pass', 'printenv', 'GNUPAGENT_MAX_CACHE_TTL' ]
+        - [ 'podman', 'exec', 'pass', 'stat', '-c', '%u', '/config' ]
         - [ 'podman', 'exec', 'pass', 'pass', 'version' ]
       loop_control:
         label: "{{ item | join(' ') }}"
       register: 'security_pass__test_exec'
       changed_when: false
 
-    - name: 'Assert the environment and pass in the container'
+    - name: 'Assert the environment, the owner of /config and pass in the container'
       ansible.builtin.assert:
         that:
           - security_pass__test_exec.results[0].stdout == '/config/.password-store'
-          - security_pass__test_exec.results[1].stdout == security_pass__test_side_effect_ttl
-          - security_pass__test_exec.results[2].stdout is search('password manager')
+          - security_pass__test_exec.results[1].stdout == security_pass__test_expect.ttl
+          - security_pass__test_exec.results[2].stdout == security_pass__test_expect.puid
+          - security_pass__test_exec.results[3].stdout is search('password manager')
         fail_msg: "{{ security_pass__test_exec.results | map(attribute='stdout') | list }}"

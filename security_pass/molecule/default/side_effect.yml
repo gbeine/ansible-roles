@@ -6,24 +6,99 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    security_pass__test_case: "{{ security_pass__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_pass__test_checked_files:
+      - "{{ security_pass__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ security_pass__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ security_pass__test_checked_files }}"
+      register: 'security_pass__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run security_pass with pass_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pass_environment: [ 'PUID' ]
+        security_pass__test_invalid:
+          message: 'pass_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run security_pass with an unknown variable in pass_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pass_environment:
+          PASSWORD_STORE_DIR: '/tmp'
+        security_pass__test_invalid:
+          message: 'an unknown variable in pass_environment'
+          search: '^Unknown environment variables: PASSWORD_STORE_DIR\.'
+
+    - name: 'Run security_pass with a line break in pass_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pass_environment:
+          GNUPAGENT_MAX_CACHE_TTL: "3600\n7200"
+        security_pass__test_invalid:
+          message: 'a line break in pass_environment'
+          search: '^Values of pass_environment must not contain line breaks: GNUPAGENT_MAX_CACHE_TTL\.$'
+
+    - name: 'Run security_pass with the former variable pass_uid (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pass_uid: 1000
+        security_pass__test_invalid:
+          message: 'the former variable pass_uid'
+          search: '^PUID is set with pass_environment now: pass_uid\.$'
+
+    - name: 'Run security_pass with pass_autoupdate_enabled no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pass_autoupdate_enabled: 'yes'
+        security_pass__test_invalid:
+          message: 'pass_autoupdate_enabled no boolean'
+          search: '^pass_autoupdate_enabled has to be a boolean\.$'
+
+    - name: 'Run security_pass with an unknown variable in pass_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pass_container:
+          environment:
+            GNUPGHOME: '/tmp'
+        security_pass__test_invalid:
+          message: 'an unknown variable in pass_container.environment'
+          search: '^Unknown environment variables: GNUPGHOME\.'
 
     - name: 'Read the main PID of pass before the change'
       ansible.builtin.command: 'systemctl show --property=MainPID --value pass'
       register: 'security_pass__test_pid_before'
       changed_when: false
 
-    - name: 'Set the role variables with a changed environment'
+    - name: 'Set the role variables of the change'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ security_pass__test_vars
-           | combine({'pass_environment': {'GNUPAGENT_MAX_CACHE_TTL': security_pass__test_side_effect_ttl}}, recursive=true)
-           | dict2items }}
+      loop: "{{ security_pass__test_case.side_effect.role_vars | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Run security_pass with changed environment'
+    - name: 'Run security_pass with the change'
       ansible.builtin.include_role:
         name: 'security_pass'
 
@@ -32,9 +107,9 @@
       register: 'security_pass__test_pid_after'
       changed_when: false
 
-    - name: 'Assert pass was restarted'
+    - name: 'Assert pass was restarted only after a change'
       ansible.builtin.assert:
         that:
           - security_pass__test_pid_after.stdout != '0'
-          - security_pass__test_pid_after.stdout != security_pass__test_pid_before.stdout
+          - (security_pass__test_pid_after.stdout != security_pass__test_pid_before.stdout) == security_pass__test_case.expect.restart
         fail_msg: "PID {{ security_pass__test_pid_before.stdout }} -> {{ security_pass__test_pid_after.stdout }}"

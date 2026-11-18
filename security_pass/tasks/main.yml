@@ -1,8 +1,58 @@
 ---
 
 - name: 'Install pass'
-  tags: [ 'security_pass' ]
+  tags: [ 'security', 'security_pass' ]
   block:
+
+    # A failing template in the variables (e.g. pass_environment or pass_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_pass__container | length > 0
+          - security_pass__environment | length > 0
+        quiet: true
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - security_pass__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pass__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_pass__former: >-
+          {{ security_pass__former_variables | dict2items
+             | selectattr('key', 'in', query('ansible.builtin.varnames', '^(' ~ (security_pass__former_variables.keys() | join('|')) ~ ')$')) | list }}
+        security_pass__errors: >-
+          {%- set errors = [] -%}
+          {%- for former in security_pass__former -%}
+          {%-   set _ = errors.append(former.value ~ ': ' ~ former.key ~ '.') -%}
+          {%- endfor -%}
+          {%- set lines = security_pass__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]')
+                          | map(attribute='key') | list -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('Values of pass_environment must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pass__autoupdate_enabled is not boolean -%}
+          {%-   set _ = errors.append('pass_autoupdate_enabled has to be a boolean.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging pass_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      when: security_pass__container.environment | default(none) is mapping
+      ansible.builtin.assert:
+        that:
+          - security_pass__unknown | length == 0
+        fail_msg: >-
+          Unknown environment variables: {{ security_pass__unknown | join(', ') }}.
+          Allowed are {{ security_pass__environment_allowed | join(', ') }}.
+        quiet: true
+      vars:
+        security_pass__unknown: >-
+          {{ security_pass__container.environment.keys() | map('string') | reject('in', security_pass__environment_allowed) | list }}
 
     - name: 'Create directories'
       ansible.builtin.file:
@@ -31,6 +81,26 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if security_pass__container.requires is defined %}
+          Requires={{ security_pass__container.requires | join(' ') }}
+          {% endif %}
+          {% if security_pass__container.wants is defined %}
+          Wants={{ security_pass__container.wants | join(' ') }}
+          {% endif %}
+          {% if security_pass__container.after is defined %}
+          After={{ security_pass__container.after | join(' ') }}
+          {% endif %}
+          {% if security_pass__container.part_of is defined %}
+          PartOf={{ security_pass__container.part_of | join(' ') }}
+          {% endif %}
+          {% if security_pass__container.binds_to is defined %}
+          BindsTo={{ security_pass__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if security_pass__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ security_pass__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'security_pass__quadlet_result'

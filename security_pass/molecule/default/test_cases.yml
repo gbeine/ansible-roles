@@ -6,14 +6,51 @@ security_pass__test_network:
   gateway: '10.89.0.1'
   netmask: 24
 
-security_pass__test_image: 'c0d3.sh/container/pass-docker:latest'
+security_pass__test_image: 'c0d3cr.io/container/pass:latest'
+security_pass__test_quadlet_path: '/etc/containers/systemd/pass.container'
 
-security_pass__test_vars:
-  pass_home: '/opt/pass-molecule'
-  pass_hostname: 'pass-molecule'
-  pass_timezone: 'Europe/Berlin'
-  pass_environment:
-    GNUPAGENT_MAX_CACHE_TTL: '3600'
+security_pass__test_cases:
 
-# Environment changed in side_effect.yml, the running service must be restarted
-security_pass__test_side_effect_ttl: '7200'
+  # Only the mandatory variables, the image keeps its default of GNUPAGENT_MAX_CACHE_TTL
+  - name: 'molecule-pass-default'
+    role_vars:
+      pass_home: '/opt/pass'
+      pass_hostname: 'pass-default'
+      pass_timezone: 'Europe/Berlin'
+    side_effect:
+      role_vars: {}
+    expect:
+      puid: '911'
+      ttl: '7776000'
+      ttl_in_unit: false
+      restart: false
+      unit_lines: []
+
+  # Own user and group, a cache duration of the gpg-agent and dependencies of the quadlet unit,
+  # side_effect changes the cache duration, pass has to restart
+  - name: 'molecule-pass'
+    role_vars:
+      pass_home: '/opt/pass-molecule'
+      pass_hostname: 'pass-molecule'
+      pass_timezone: 'Europe/Berlin'
+      pass_environment:
+        PUID: '1000'
+        PGID: '1000'
+        GNUPAGENT_MAX_CACHE_TTL: '3600'
+      pass_container:
+        requires_mounts_for: [ '/opt' ]
+        after: [ 'network-online.target' ]
+    side_effect:
+      role_vars:
+        pass_environment:
+          PUID: '1000'
+          PGID: '1000'
+          GNUPAGENT_MAX_CACHE_TTL: '7200'
+    expect:
+      puid: '1000'
+      ttl: '7200'
+      ttl_in_unit: true
+      restart: true
+      unit_lines:
+        - 'RequiresMountsFor=/opt'
+        - 'After=network-online.target'
