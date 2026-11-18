@@ -1,0 +1,89 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_update__test_case: "{{ pki_update__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_update__test_checked_files:
+      - "/etc/systemd/system/pki-update@{{ pki_update__test_service }}.service.d/override.conf"
+      - "/etc/systemd/system/pki-update@{{ pki_update__test_service }}.timer.d/override.conf"
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ pki_update__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ pki_update__test_checked_files }}"
+      register: 'pki_update__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run pki_update with an invalid name of the service (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pki_service: 'molecule pki'
+        pki_update__test_invalid:
+          message: 'an invalid name of the service'
+          search: '^pki_service is the name of a systemd service'
+
+    - name: 'Run pki_update with a relative path of the certificate (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pki_certificate: 'etc/pki/molecule/cert.pem'
+        pki_update__test_invalid:
+          message: 'a relative path of the certificate'
+          search: '^pki_certificate has to be an absolute path'
+
+    - name: 'Run pki_update with a line break in the schedule (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pki_schedule: "daily\nhourly"
+        pki_update__test_invalid:
+          message: 'a line break in the schedule'
+          search: '^pki_schedule has to be an OnCalendar expression'
+
+    - name: 'Run pki_update with the changed schedule'
+      when: pki_update__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start of the timer before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', "pki-update@{{ pki_update__test_service }}.timer" ]
+          register: 'pki_update__test_timer_before'
+          changed_when: false
+
+        - name: 'Set the changed schedule'
+          ansible.builtin.set_fact:
+            pki_schedule: "{{ pki_update__test_case.side_effect.pki_schedule }}"
+
+        - name: 'Run pki_update with the changed schedule'
+          ansible.builtin.include_role:
+            name: 'pki_update'
+
+        - name: 'Read the start of the timer after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', "pki-update@{{ pki_update__test_service }}.timer" ]
+          register: 'pki_update__test_timer_after'
+          changed_when: false
+
+        - name: 'Assert the changed override and the restart of the timer'
+          ansible.builtin.assert:
+            that:
+              - pki_update__overrides_result is changed
+              - pki_update__units_result is not changed
+              - pki_update__test_timer_after.stdout != pki_update__test_timer_before.stdout
+            fail_msg: >-
+              overrides changed: {{ pki_update__overrides_result is changed }},
+              units changed: {{ pki_update__units_result is changed }},
+              timer started {{ pki_update__test_timer_before.stdout }} -> {{ pki_update__test_timer_after.stdout }}

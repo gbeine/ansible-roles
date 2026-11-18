@@ -1,0 +1,155 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_update__test_case: "{{ pki_update__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_update__test_expect: "{{ pki_update__test_case.expect }}"
+    pki_update__test_unit: "pki-update@{{ pki_update__test_service }}"
+    pki_update__test_pid_command: [ 'systemctl', 'show', '--property=MainPID', '--value', "{{ pki_update__test_service }}" ]
+
+  tasks:
+
+    - name: 'Read the overrides'
+      ansible.builtin.slurp:
+        src: "/etc/systemd/system/{{ pki_update__test_unit }}.{{ item }}.d/override.conf"
+      loop: [ 'service', 'timer' ]
+      register: 'pki_update__test_overrides'
+
+    - name: 'Assert the overrides'
+      ansible.builtin.assert:
+        that:
+          - ('Environment=PKI_SERVICE=' ~ pki_update__test_service ~ '.service') in pki_update__test_lines[0]
+          - ('Environment=PKI_CERTIFICATE=' ~ pki_update__test_expect.certificate) in pki_update__test_lines[0]
+          - pki_update__test_lines[1] | select('match', '^OnCalendar=') | list == [ 'OnCalendar=', 'OnCalendar=' ~ pki_update__test_expect.schedule ]
+        fail_msg: "{{ pki_update__test_lines | to_json }}"
+      vars:
+        pki_update__test_lines: "{{ pki_update__test_overrides.results | map(attribute='content') | map('b64decode') | map('split', '\n') | list }}"
+
+    - name: 'Read the state of the timer'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=UnitFileState,ActiveState', "{{ pki_update__test_unit }}.timer" ]
+      register: 'pki_update__test_timer'
+      changed_when: false
+
+    - name: 'Assert the timer is enabled and active'
+      ansible.builtin.assert:
+        that:
+          - "'UnitFileState=enabled' in pki_update__test_timer.stdout_lines"
+          - "'ActiveState=active' in pki_update__test_timer.stdout_lines"
+        fail_msg: "{{ pki_update__test_timer.stdout_lines }}"
+
+    # The certificate is older than the start of the service, the condition skips the restart
+    - name: 'Run the check with a certificate older than the service'
+      block:
+
+        - name: 'Make the certificate older than the start of the service'
+          ansible.builtin.command:
+            argv: [ 'touch', '-d', '-1 day', "{{ pki_update__test_expect.certificate }}" ]
+          changed_when: true
+
+        - name: 'Read the main PID of the service before the check'
+          ansible.builtin.command:
+            argv: "{{ pki_update__test_pid_command }}"
+          register: 'pki_update__test_pid_old_before'
+          changed_when: false
+
+        - name: 'Run the check'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'start', "{{ pki_update__test_unit }}.service" ]
+          changed_when: true
+
+        - name: 'Read the main PID of the service after the check'
+          ansible.builtin.command:
+            argv: "{{ pki_update__test_pid_command }}"
+          register: 'pki_update__test_pid_old_after'
+          changed_when: false
+
+    # The renewed certificate is newer than the start of the service, the service restarts
+    - name: 'Run the check with a renewed certificate'
+      block:
+
+        - name: 'Renew the certificate'
+          ansible.builtin.command:
+            argv: [ 'touch', "{{ pki_update__test_expect.certificate }}" ]
+          changed_when: true
+
+        - name: 'Run the check'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'start', "{{ pki_update__test_unit }}.service" ]
+          changed_when: true
+
+        - name: 'Read the main PID of the service after the check'
+          ansible.builtin.command:
+            argv: "{{ pki_update__test_pid_command }}"
+          register: 'pki_update__test_pid_new_after'
+          changed_when: false
+
+        - name: 'Run the check again'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'start', "{{ pki_update__test_unit }}.service" ]
+          changed_when: true
+
+        - name: 'Read the main PID of the service after the second check'
+          ansible.builtin.command:
+            argv: "{{ pki_update__test_pid_command }}"
+          register: 'pki_update__test_pid_new_again'
+          changed_when: false
+
+    - name: 'Assert the restart only after the renewal'
+      ansible.builtin.assert:
+        that:
+          - pki_update__test_pid_old_before.stdout != '0'
+          - pki_update__test_pid_old_after.stdout == pki_update__test_pid_old_before.stdout
+          - pki_update__test_pid_new_after.stdout not in [ '0', pki_update__test_pid_old_after.stdout ]
+          - pki_update__test_pid_new_again.stdout == pki_update__test_pid_new_after.stdout
+        fail_msg: >-
+          old certificate: PID {{ pki_update__test_pid_old_before.stdout }} -> {{ pki_update__test_pid_old_after.stdout }},
+          renewed certificate: PID {{ pki_update__test_pid_new_after.stdout }}, second check: PID {{ pki_update__test_pid_new_again.stdout }}
+
+    # A missing certificate fails the unit, so it is visible in systemctl --failed
+    - name: 'Run the check with a missing certificate'
+      block:
+
+        - name: 'Move the certificate away'
+          ansible.builtin.command:
+            argv: [ 'mv', "{{ pki_update__test_expect.certificate }}", "{{ pki_update__test_expect.certificate }}.molecule" ]
+          changed_when: true
+
+        - name: 'Run the check, it has to fail (expect ERROR)'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'start', "{{ pki_update__test_unit }}.service" ]
+          register: 'pki_update__test_missing'
+          changed_when: true
+          failed_when: false
+
+        - name: 'Read the state of the check'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'is-failed', "{{ pki_update__test_unit }}.service" ]
+          register: 'pki_update__test_missing_state'
+          changed_when: false
+          failed_when: false
+
+      always:
+
+        - name: 'Move the certificate back'
+          ansible.builtin.command:
+            argv: [ 'mv', "{{ pki_update__test_expect.certificate }}.molecule", "{{ pki_update__test_expect.certificate }}" ]
+          changed_when: true
+
+        - name: 'Reset the failed check'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'reset-failed', "{{ pki_update__test_unit }}.service" ]
+          changed_when: true
+          failed_when: false
+
+    - name: 'Assert the failed check with a missing certificate'
+      ansible.builtin.assert:
+        that:
+          - pki_update__test_missing.rc != 0
+          - pki_update__test_missing_state.stdout == 'failed'
+        fail_msg: "rc {{ pki_update__test_missing.rc }}, state {{ pki_update__test_missing_state.stdout }}"

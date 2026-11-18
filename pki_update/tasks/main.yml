@@ -1,0 +1,71 @@
+---
+
+- name: 'Install the restart after a renewal of the certificate'
+  tags: [ 'pki', 'pki_update' ]
+  block:
+
+    - name: 'Validate the variables'
+      ansible.builtin.assert:
+        that:
+          - pki_update__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ pki_update__errors | join(' ') }}"
+        quiet: true
+      vars:
+        pki_update__errors: >-
+          {%- set errors = [] -%}
+          {%- if not (pki_update__service is string and pki_update__service is match(pki_update__name_pattern)) -%}
+          {%-   set _ = errors.append('pki_service is the name of a systemd service without .service of letters, digits, _, . and -.') -%}
+          {%- endif -%}
+          {%- if not (pki_update__certificate is string and pki_update__certificate is match(pki_update__path_pattern)) -%}
+          {%-   set _ = errors.append('pki_certificate has to be an absolute path of letters, digits, _, ., @, +, / and -.') -%}
+          {%- endif -%}
+          {%- if not (pki_update__schedule is string and pki_update__schedule | length > 0 and pki_update__schedule is not search('[\\n\\r]')) -%}
+          {%-   set _ = errors.append('pki_schedule has to be an OnCalendar expression of systemd without line breaks.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the systemd unit templates'
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ pki_update__systemd_dir }}/{{ item | regex_replace('\\.(service|timer)$', '@.\\1') }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      loop: "{{ pki_update__units }}"
+      register: 'pki_update__units_result'
+
+    - name: 'Create the directories of the overrides'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'directory'
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+      loop:
+        - "{{ pki_update__service_override_dir }}"
+        - "{{ pki_update__timer_override_dir }}"
+
+    - name: 'Create the overrides of the service and the timer'
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dir }}/override.conf"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      loop:
+        - { src: 'service.override.conf.j2', dir: "{{ pki_update__service_override_dir }}" }
+        - { src: 'timer.override.conf.j2', dir: "{{ pki_update__timer_override_dir }}" }
+      loop_control:
+        label: "{{ item.dir }}"
+      register: 'pki_update__overrides_result'
+
+    - name: 'Start and enable the timer'
+      when: not ansible_check_mode
+      ansible.builtin.systemd_service:
+        name: "pki-update@{{ pki_update__service }}.timer"
+        daemon_reload: "{{ pki_update__changed | bool }}"
+        state: "{{ 'restarted' if pki_update__changed | bool else 'started' }}"
+        enabled: true
+      vars:
+        pki_update__changed: "{{ pki_update__units_result is changed or pki_update__overrides_result is changed }}"

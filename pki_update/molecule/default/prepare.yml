@@ -1,0 +1,51 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    pki_update__test_case: "{{ pki_update__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    pki_update__test_certificate: "{{ pki_update__test_case.expect.archive | default(pki_update__test_case.expect.certificate) }}"
+
+  tasks:
+
+    - name: 'Create the service restarted by the timer'
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ pki_update__test_service }}.service"
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Service of the molecule tests of pki_update
+
+          [Service]
+          ExecStart=/usr/bin/sleep infinity
+
+    - name: 'Start the service restarted by the timer'
+      ansible.builtin.systemd_service:
+        name: "{{ pki_update__test_service }}"
+        daemon_reload: true
+        state: 'started'
+
+    - name: 'Create the directories of the certificate'
+      ansible.builtin.file:
+        path: "{{ item | dirname }}"
+        state: 'directory'
+        mode: '0755'
+      loop: "{{ [ pki_update__test_case.expect.certificate, pki_update__test_certificate ] | unique }}"
+
+    - name: 'Create the certificate'
+      ansible.builtin.copy:
+        dest: "{{ pki_update__test_certificate }}"
+        content: "molecule\n"
+        mode: '0644'
+
+    # The structure of certbot, live links to the archive
+    - name: 'Create the link of certbot'
+      when: pki_update__test_case.expect.archive is defined
+      ansible.builtin.file:
+        src: "../../archive/{{ pki_update__test_case.expect.archive | dirname | basename }}/{{ pki_update__test_case.expect.archive | basename }}"
+        dest: "{{ pki_update__test_case.expect.certificate }}"
+        state: 'link'
