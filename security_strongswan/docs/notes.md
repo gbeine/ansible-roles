@@ -134,7 +134,7 @@ The renewal of certbot and acme is deployed without Ansible:
 the other options of the UCI configuration stay with the package.
 The init script generates `/var/swanctl/swanctl.conf` from the UCI configuration, `/etc/swanctl/swanctl.conf` includes it besides `conf.d/*.conf`.
 Before a change the role stores `ansible.conf` and `/etc/config/ipsec` on the controller in `<playbook_dir>/backups/<inventory_hostname>/`,
-a run without changes writes no backup. In check mode the role stops after the installation if strongSwan is missing.
+a run without changes writes no backup. In check mode the role stops after the installation if strongSwan is missing, the UCI configuration does not exist then.
 The firewall has to accept IKE (UDP 500 and 4500) and ESP from the peers, e.g. in the zone `lan`.
 
 ### Validation
@@ -158,9 +158,11 @@ the role fails with the messages of `swanctl` then.
 
 ### Check mode
 
-In check mode the role stops after the installation if strongSwan is missing on Debian and OpenWrt,
-the directories of `swanctl` do not exist then and there is no configuration to compare.
-On Debian the role detects this by the missing `/etc/swanctl`, so it works with `--check` and with `check_mode` of a task.
+On Debian the role runs with `--check` also on a host without strongSwan and compares `ansible.conf`, the certificates from the controller
+and the deployment of the certificate of `pki_certbot`. Only the copies of the certificates of the host (the realm of `pki_easyrsa_deploy`
+and the certificate of `pki_certbot`) are skipped, they need the directories of `/etc/swanctl` of the package.
+The role detects the missing package by the missing `/etc/swanctl`, so it works with `--check` and with `check_mode` of a task.
+On OpenWrt the role stops after the installation if strongSwan is missing, the UCI configuration of strongSwan does not exist then.
 
 ### Restart and reload
 
@@ -185,7 +187,7 @@ On `molecule-strongswan-default` it creates the realm `molecule-strongswan-defau
 with the second certificate and a CRL of the CA created with `openssl ca -gencrl`.
 The NAT of tart isolates the VMs from each other, `prepare` routes the address of the other VM through the host and ignores ICMP redirects,
 the host forwards the packets unchanged. Then `prepare` pings the other VM without IPsec and fails if the VMs cannot reach each other.
-The scenario `default` runs `check` after `prepare`: `converge` with `--check` on the VMs without strongSwan, the role has to stop after the installation.
+The scenario `default` runs `check` after `prepare`: `converge` with `--check` on the VMs without strongSwan.
 
 | Platform | Test case |
 |---|---|
