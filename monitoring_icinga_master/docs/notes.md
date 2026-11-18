@@ -155,8 +155,10 @@ The plugins of `<icinga_master_home>/plugins` are mounted read-only to `/usr/loc
 ### Certificates
 
 The certificates come from `icinga_cert_source_dir`: `<node name>/chain.pem` (or `icinga_cert_ca_file`), `<node name>/fullchain.pem` and `<node name>/privkey.pem`.
-`ExecStartPre` of the quadlet unit copies them on every start to `<icinga_master_home>/lib/certs` (`/var/lib/icinga2/certs`) as `ca.crt`, `<node name>.crt` and `<node name>.key`
-for the user of Icinga (5665), a renewed certificate is used after the next restart.
+`ExecStartPre` of the quadlet unit installs them with `install` on every start to `<icinga_master_home>/lib/certs` (`/var/lib/icinga2/certs`) as `ca.crt`, `<node name>.crt` and `<node name>.key`
+for the user of Icinga (5665), `install` follows the links of certbot and sets owner and mode, the key has mode `0400`.
+A renewed certificate is used after the next restart: the timer of `pki_update` restarts Icinga if `fullchain.pem` is newer than the start of Icinga,
+every four hours by default (`icinga_master_pki_update_schedule`), `icinga_master_pki_update_enabled: false` disables it.
 The image runs its node setup only without `ca.crt`, so it never runs, the role configures the node itself.
 
 ### Validation
@@ -183,6 +185,7 @@ If the start fails, the role shows the journal of the service. With the feature 
 Icinga exits if the configuration is invalid.
 Updates of the image are done by `container_update` with `icinga_master_autoupdate_enabled: true` and `icinga_master_autoupdate_schedule`,
 without `icinga_master_autoupdate_schedule` the schedule of `container_update` is used.
+A renewed certificate restarts Icinga by `pki_update` with `icinga_master_pki_update_enabled` and `icinga_master_pki_update_schedule`.
 
 ### Migration
 
@@ -224,6 +227,8 @@ Changed behavior:
 - the mail notifications use `mail` of the image (msmtp), they need `/var/lib/icinga2/.msmtprc` (`<icinga_master_home>/lib/.msmtprc`),
   the role does not manage it yet
 - Icinga is restarted if the configuration changed, the handler is removed, the tags are `monitoring` and `monitoring_icinga_master`
+- `ExecStartPre` uses `install` instead of `cp -uL`, `chown` and `chmod`, it does not depend on the timestamps anymore,
+  the timer of `pki_update` restarts Icinga after a renewal of the certificate
 
 Fixed bugs:
 
@@ -240,7 +245,7 @@ an unknown secret, the secret of a missing API user and of a disabled feature, a
 `icinga_master_hosts` not a list and an unknown environment variable and checks that it fails with the expected message
 and the quadlet unit, `mainlog.conf` and `api-users.conf` are unchanged (tasks marked `expect ERROR`),
 then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes, Icinga has to restart and the container has to mount the new file.
-`verify` checks the quadlet unit, the enabled features and their files, the lines of the configuration with the constants of the secrets,
+`verify` checks the quadlet unit with the `install` lines of `ExecStartPre`, owner and mode of the key, the timer of `pki_update`, the enabled features and their files, the lines of the configuration with the constants of the secrets,
 that no password is part of the files, the quadlet unit or the environment, the mounted podman secret, the service,
 `icinga2 daemon -C` in the container, the scripts of the mail notifications and `features-available` of the image in the container, the API without login (401), the hosts of the API with the API user and the secret password
 and the objects that Icinga writes to Redis with the password of `icingadb`.

@@ -186,3 +186,35 @@
         that:
           - monitoring_icinga_master__test_redis_hosts.stdout_lines | length > 0
         fail_msg: "Redis: {{ monitoring_icinga_master__test_redis_hosts.stdout }} {{ monitoring_icinga_master__test_redis_hosts.stderr }}"
+
+    - name: 'Read the overrides of pki_update'
+      ansible.builtin.slurp:
+        src: "/etc/systemd/system/pki-update@icinga-master.{{ item }}.d/override.conf"
+      loop: [ 'service', 'timer' ]
+      register: 'monitoring_icinga_master__test_pki_update'
+
+    - name: 'Read the state of the timer of pki_update'
+      ansible.builtin.command: 'systemctl is-active pki-update@icinga-master.timer'
+      register: 'monitoring_icinga_master__test_pki_update_timer'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the owner and mode of the key'
+      ansible.builtin.stat:
+        path: "{{ monitoring_icinga_master__test_expect.home }}/lib/certs/{{ monitoring_icinga_master__test_vars.icinga_master_node_name }}.key"
+      register: 'monitoring_icinga_master__test_key'
+
+    # install of ExecStartPre sets owner and mode, pki_update restarts Icinga after a renewal of fullchain.pem
+    - name: 'Assert the key and the timer of pki_update'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__test_key.stat.uid == 5665
+          - monitoring_icinga_master__test_key.stat.mode == '0400'
+          - monitoring_icinga_master__test_pki_update_timer.stdout == 'active'
+          - ('Environment=PKI_CERTIFICATE=' ~ monitoring_icinga_master__test_expect.pki_certificate) in monitoring_icinga_master__test_lines[0]
+          - ('OnCalendar=' ~ monitoring_icinga_master__test_expect.schedule) in monitoring_icinga_master__test_lines[1]
+        fail_msg: >-
+          key {{ monitoring_icinga_master__test_key.stat.uid | default('absent') }} {{ monitoring_icinga_master__test_key.stat.mode | default('') }},
+          timer {{ monitoring_icinga_master__test_pki_update_timer.stdout }}, overrides {{ monitoring_icinga_master__test_lines }}
+      vars:
+        monitoring_icinga_master__test_lines: "{{ monitoring_icinga_master__test_pki_update.results | map(attribute='content') | map('b64decode') | map('split', '\n') | list }}"
