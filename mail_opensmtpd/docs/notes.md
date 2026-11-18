@@ -87,7 +87,8 @@ The files of the realm may be links (e.g. to `archive` of certbot), the copies c
 The listeners use it with `pki <realm>`. OpenSMTPD reads the key only owned by root with at most `0740`,
 the realm is not mounted: the image changes the mode of `/config/tls/privkey.pem`, a mounted realm would lose the group `ssl-cert`,
 and the links of certbot point outside of a mounted directory.
-A renewed certificate is used after the next restart of OpenSMTPD, e.g. `systemctl restart opensmtpd` in a deploy hook of certbot.
+A renewed certificate is used after the next restart of OpenSMTPD: the timer of `pki_update` restarts OpenSMTPD if `fullchain.pem` of the realm
+is newer than the start of OpenSMTPD, every four hours by default (`opensmtpd_pki_update_schedule`), `opensmtpd_pki_update_enabled: false` disables it.
 A changed realm or `dir` changes the quadlet unit and restarts OpenSMTPD.
 
 ### Secrets
@@ -148,7 +149,8 @@ A realm of `opensmtpd_tls` that does not exist yet is only reported, `pki_easyrs
 ### Restart and updates
 
 OpenSMTPD is started and enabled. It is restarted only if it was running and `smtpd.conf`, the secret or the quadlet unit changed,
-smtpd reads them only at the start. Updates of the image are done by `container_update` with `opensmtpd_autoupdate_enabled` and `opensmtpd_autoupdate_schedule`.
+smtpd reads them only at the start. Updates of the image are done by `container_update` with `opensmtpd_autoupdate_enabled` and `opensmtpd_autoupdate_schedule`,
+a renewed certificate restarts OpenSMTPD by `pki_update` with `opensmtpd_pki_update_enabled` and `opensmtpd_pki_update_schedule`.
 
 ### Migration
 
@@ -171,7 +173,8 @@ and a line break, the table `secrets` in `opensmtpd_config`, an unknown target, 
 an unknown environment variable and an option that `smtpd -n` rejects, and checks that it fails with the expected message
 and the quadlet unit and `smtpd.conf` are unchanged (tasks marked `expect ERROR`).
 On `molecule-opensmtpd` it changes `smtp` and switches to the certificate of certbot with `opensmtpd_tls.dir`, OpenSMTPD has to restart.
-`verify` checks the quadlet unit, `smtpd.conf`, the files and modes of the home directory, the service and the secret in the container,
+`verify` checks the quadlet unit, `smtpd.conf`, the files and modes of the home directory, the timer of `pki_update` with the certificate of certbot,
+the service and the secret in the container,
 and talks to OpenSMTPD with the module `mail_opensmtpd_test_smtp`: the banner and the refused relay on port 25 (with STARTTLS on `molecule-opensmtpd`),
 AUTH with a wrong and the right password on port 587 and a mail that stays in the queue.
 

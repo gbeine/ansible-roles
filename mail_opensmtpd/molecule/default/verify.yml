@@ -70,6 +70,40 @@
           {%- endfor -%}
           {{ modes }}
 
+    # pki_update restarts OpenSMTPD after a renewal of the certificate of the realm, only with TLS
+    - name: 'Read the override of pki_update'
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/pki-update@opensmtpd.service.d/override.conf'
+      register: 'mail_opensmtpd__test_pki_update'
+
+    - name: 'Read the override and the timer of pki_update'
+      when: mail_opensmtpd__expect.tls
+      block:
+
+        - name: 'Read the override of the service of pki_update'
+          ansible.builtin.slurp:
+            src: '/etc/systemd/system/pki-update@opensmtpd.service.d/override.conf'
+          register: 'mail_opensmtpd__test_pki_update_override'
+
+        - name: 'Read the state of the timer of pki_update'
+          ansible.builtin.command: 'systemctl is-active pki-update@opensmtpd.timer'
+          register: 'mail_opensmtpd__test_pki_update_timer'
+          changed_when: false
+          failed_when: false
+
+    - name: 'Assert the timer of pki_update'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_pki_update.stat.exists == mail_opensmtpd__expect.tls
+          - not mail_opensmtpd__expect.tls or mail_opensmtpd__test_pki_update_timer.stdout == 'active'
+          - >-
+            not mail_opensmtpd__expect.tls
+            or ('Environment=PKI_CERTIFICATE=' ~ mail_opensmtpd__expect.pki_certificate) in (mail_opensmtpd__test_pki_update_override.content | b64decode)
+        fail_msg: >-
+          override exists: {{ mail_opensmtpd__test_pki_update.stat.exists }},
+          timer: {{ mail_opensmtpd__test_pki_update_timer.stdout | default('') }},
+          override: {{ mail_opensmtpd__test_pki_update_override.content | default('') | b64decode }}
+
     - name: 'Read the state of the opensmtpd service'
       ansible.builtin.command: 'systemctl is-active opensmtpd'
       register: 'mail_opensmtpd__test_service'
