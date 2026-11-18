@@ -8,7 +8,7 @@ Additional plugins and their `CheckCommand`s are installed by `monitoring_plugin
 | `/etc/icinga2/icinga2.conf` | ITL, plugins, enabled features and everything below `/usr/local/etc/icinga2` |
 | `/etc/icinga2/zones.conf` | Endpoint and zone of the parent, endpoint and zone of the agent, global zones `global-templates` and `director-global` |
 | `/etc/icinga2/features-available/{api,checker,mainlog}.conf` | The features of the agent |
-| `/etc/systemd/system/icinga2.service.d/override.conf` | Copies the certificates before every start |
+| `/etc/systemd/system/icinga2.service.d/override.conf` | Installs the certificates with `install` before every start |
 
 ### Required settings
 
@@ -33,9 +33,17 @@ The certificates are expected in the layout of certbot below `icinga_cert_source
 | `<icinga_cert_source_dir>/<icinga_node_name>/fullchain.pem` (`icinga_cert_cert_file`) | `<icinga_node_name>.crt` |
 | `<icinga_cert_source_dir>/<icinga_node_name>/privkey.pem` (`icinga_cert_key_file`) | `<icinga_node_name>.key` |
 
-The role copies the certificates to check the configuration before Icinga 2 starts,
-the systemd override copies newer certificates on every start of Icinga 2, so a restart after the renewal is enough.
-The certificates belong to the Icinga user, the key has mode `0400`.
+The systemd override installs the certificates with `install` on every start of Icinga 2, `install` follows the links of certbot
+and sets owner and mode. The certificates belong to the Icinga user, the key has mode `0400`.
+The role only copies missing certificates, `icinga2 daemon -C` loads them before the first start of Icinga 2.
+
+A renewed certificate is used after the next restart: the timer of `pki_update` restarts Icinga 2 if `fullchain.pem` (`icinga_cert_cert_file`)
+is newer than the start of Icinga 2, every four hours by default:
+
+```yaml
+icinga_pki_update_enabled: true                  # default
+icinga_pki_update_schedule: '*-*-* 00/4:00:00'   # default, OnCalendar of systemd
+```
 
 ### Connection to the parent
 
@@ -54,7 +62,7 @@ e.g. the feature `notification` enabled by the Debian package.
 
 ### Restart
 
-The role checks the configuration with `icinga2 daemon -C` if the configuration, the certificates, the features or the systemd override changed,
+The role checks the configuration with `icinga2 daemon -C` if the configuration, the copied certificates, the features or the systemd override changed,
 an invalid configuration fails the role before Icinga 2 is restarted.
 Icinga 2 is restarted only if it was running and something changed, otherwise it is started and enabled.
 
@@ -67,13 +75,16 @@ Icinga 2 is restarted only if it was running and something changed, otherwise it
 | fixed list of disabled features | all features except `api`, `checker` and `mainlog` are disabled |
 | Debian 12 | only Debian 13 |
 | handler `Restart Icinga` | restart in the role after `icinga2 daemon -C` |
+| the systemd override copies with `cp -uL`, `chown` and `chmod` | the systemd override uses `install`, independent of the timestamps |
+| the role copies renewed certificates and restarts Icinga 2 | the role only copies missing certificates, the timer of `pki_update` restarts Icinga 2 after a renewal |
 
 ### Tests
 
 The molecule scenario `default` uses tart with one VM `molecule-icinga-agent`.
 `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running) and creates a CA and the certificates of the agent in the layout of certbot.
 `side_effect` changes `icinga_main_log_severity` and checks that Icinga 2 was restarted.
-`verify` checks the service, `icinga2 daemon -C`, the enabled features, `zones.conf`, owner and mode of the certificates
+`verify` checks the service, `icinga2 daemon -C`, the enabled features, `zones.conf`, owner and mode of the certificates,
+the `install` lines of the systemd override, the timer of `pki_update` with the path of `fullchain.pem`
 and connects to the API with `openssl s_client` to check the certificate of the agent against the CA.
 
 ```

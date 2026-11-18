@@ -1,7 +1,7 @@
 ---
 
 - name: 'Install and configure Icinga 2 agent'
-  tags: [ 'monitoring_icinga_agent' ]
+  tags: [ 'monitoring', 'monitoring_icinga_agent' ]
   vars:
     monitoring_icinga_agent__changed: >-
       {{ monitoring_icinga_agent__config_result is changed
@@ -25,10 +25,11 @@
           - monitoring_icinga_agent__missing | length == 0
           - monitoring_icinga_agent__api_bind_port | string is match('^[0-9]+$')
           - monitoring_icinga_agent__parent_port | string is match('^[0-9]+$')
+          - monitoring_icinga_agent__pki_update_enabled is boolean
         fail_msg: >-
           The Icinga 2 agent needs icinga_node_name, icinga_zone_name, icinga_parent_name, icinga_ticket_salt and icinga_cert_source_dir,
           missing: {{ monitoring_icinga_agent__missing | join(', ') | default('none', true) }}.
-          icinga_api_bind_port and icinga_parent_port must be numbers.
+          icinga_api_bind_port and icinga_parent_port must be numbers, icinga_pki_update_enabled must be a boolean.
         quiet: true
       vars:
         monitoring_icinga_agent__missing: >-
@@ -91,13 +92,14 @@
         label: "{{ item.dest }}"
       register: 'monitoring_icinga_agent__config_result'
 
-    # The systemd override copies the certificates on every start, e.g. after a renewal,
-    # the role copies them as well to check the configuration before the first start
+    # The systemd override installs the certificates on every start, pki_update restarts Icinga 2 after a renewal.
+    # The role only copies missing certificates, icinga2 daemon -C loads them before the first start.
     - name: 'Copy certificates'
       ansible.builtin.copy:
         src: "{{ item.src }}"
         dest: "{{ monitoring_icinga_agent__cert_dir }}/{{ item.dest }}"
         remote_src: true
+        force: false
         owner: "{{ monitoring_icinga_agent__user }}"
         group: "{{ monitoring_icinga_agent__group }}"
         mode: "{{ item.mode }}"
@@ -180,3 +182,14 @@
         monitoring_icinga_agent__restart: >-
           {{ monitoring_icinga_agent__running | bool and monitoring_icinga_agent__changed | bool }}
       when: 'not ansible_check_mode'
+
+    - name: 'Enable the restart after a renewal of the certificate'
+      when:
+        - not ansible_check_mode
+        - monitoring_icinga_agent__pki_update_enabled | bool
+      ansible.builtin.include_role:
+        name: 'pki_update'
+      vars:
+        pki_service: 'icinga2'
+        pki_certificate: "{{ monitoring_icinga_agent__cert_source_cert_file }}"
+        pki_schedule: "{{ monitoring_icinga_agent__pki_update_schedule }}"

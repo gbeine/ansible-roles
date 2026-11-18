@@ -92,6 +92,39 @@
       loop_control:
         label: "{{ item.item }}"
 
+    - name: 'Read the systemd overrides of Icinga 2 and of pki_update'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - '/etc/systemd/system/icinga2.service.d/override.conf'
+        - '/etc/systemd/system/pki-update@icinga2.service.d/override.conf'
+      register: 'monitoring_icinga_agent__test_overrides'
+
+    - name: 'Read the state of the timer of pki_update'
+      ansible.builtin.command: 'systemctl is-active pki-update@icinga2.timer'
+      register: 'monitoring_icinga_agent__test_pki_update_timer'
+      changed_when: false
+      failed_when: false
+
+    # install sets owner and mode of the copies, pki_update restarts Icinga 2 after a renewal of fullchain.pem
+    - name: 'Assert the installation of the certificates and the timer of pki_update'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__test_icinga | select('match', '^ExecStartPre=/usr/bin/install -o nagios -g nagios ') | list | length == 3
+          - ('-m 0400 ' ~ monitoring_icinga_agent__test_source ~ '/privkey.pem /var/lib/icinga2/certs/' ~ monitoring_icinga_agent__test_node ~ '.key')
+            in (monitoring_icinga_agent__test_icinga | join('\n'))
+          - monitoring_icinga_agent__test_icinga | select('search', '/cp |/chown |/chmod ') | list | length == 0
+          - ('Environment=PKI_CERTIFICATE=' ~ monitoring_icinga_agent__test_source ~ '/fullchain.pem') in monitoring_icinga_agent__test_pki_update
+          - monitoring_icinga_agent__test_pki_update_timer.stdout == 'active'
+        fail_msg: >-
+          icinga2: {{ monitoring_icinga_agent__test_icinga }},
+          pki_update: {{ monitoring_icinga_agent__test_pki_update }},
+          timer: {{ monitoring_icinga_agent__test_pki_update_timer.stdout }}
+      vars:
+        monitoring_icinga_agent__test_source: "{{ monitoring_icinga_agent__test_cert_source_dir }}/{{ monitoring_icinga_agent__test_node }}"
+        monitoring_icinga_agent__test_icinga: "{{ (monitoring_icinga_agent__test_overrides.results[0].content | b64decode).splitlines() }}"
+        monitoring_icinga_agent__test_pki_update: "{{ (monitoring_icinga_agent__test_overrides.results[1].content | b64decode).splitlines() }}"
+
     - name: 'Wait for the API port of Icinga 2'
       ansible.builtin.wait_for:
         host: '127.0.0.1'
