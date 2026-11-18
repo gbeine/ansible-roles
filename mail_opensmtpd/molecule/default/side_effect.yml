@@ -92,7 +92,23 @@
         opensmtpd_tls: { realm: 'molecule-missing' }
         mail_opensmtpd__test_invalid:
           message: 'a realm missing on the host'
-          search: '^These files of the realm molecule-missing do not exist on the host, pki_easyrsa_deploy has to deploy the realm first: '
+          search: '^These files of the realm molecule-missing do not exist on the host, pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: '
+
+    - name: 'Run mail_opensmtpd with opensmtpd_tls.dir without the realm (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_tls: { realm: "{{ mail_opensmtpd__test_realm }}", dir: '/opt/certbot-missing' }
+        mail_opensmtpd__test_invalid:
+          message: 'opensmtpd_tls.dir without the realm'
+          search: 'deploy the certificate first: /opt/certbot-missing/mx\.molecule\.test/fullchain\.pem, '
+
+    - name: 'Run mail_opensmtpd with a relative opensmtpd_tls.dir and an unknown key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        opensmtpd_tls: { realm: "{{ mail_opensmtpd__test_realm }}", dir: 'certbot/etc/live', ca: 'ca.pem' }
+        mail_opensmtpd__test_invalid:
+          message: 'a relative opensmtpd_tls.dir and an unknown key'
+          search: '^Unknown keys in opensmtpd_tls: ca, allowed are realm and dir\. opensmtpd_tls\.dir has to be an absolute path'
 
     - name: 'Run mail_opensmtpd with an unknown variable in opensmtpd_environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -120,9 +136,11 @@
           register: 'mail_opensmtpd__test_pid_before'
           changed_when: false
 
-        - name: 'Set the changed configuration'
+        # The certificate of certbot changes ExecStartPre of the quadlet unit
+        - name: 'Set the changed configuration and the certificate of certbot'
           ansible.builtin.set_fact:
             opensmtpd_config: "{{ mail_opensmtpd__test_config | combine(mail_opensmtpd__test_case.side_effect.config) }}"
+            opensmtpd_tls: "{{ mail_opensmtpd__test_case.side_effect.tls }}"
 
         - name: 'Run mail_opensmtpd with the changed configuration'
           ansible.builtin.include_role:
@@ -137,7 +155,7 @@
           ansible.builtin.assert:
             that:
               - mail_opensmtpd__config_result is changed
-              - mail_opensmtpd__quadlet_result is not changed
+              - mail_opensmtpd__quadlet_result is changed
               - mail_opensmtpd__test_pid_after.stdout != '0'
               - mail_opensmtpd__test_pid_after.stdout != mail_opensmtpd__test_pid_before.stdout
             fail_msg: >-

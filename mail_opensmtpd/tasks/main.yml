@@ -121,15 +121,18 @@
           {%- elif tls | length > 0 -%}
           {%-   set unknown = tls.keys() | map('string') | reject('in', mail_opensmtpd__tls_keys) | list -%}
           {%-   if unknown | length > 0 -%}
-          {%-     set _ = errors.append('Unknown keys in opensmtpd_tls: ' ~ (unknown | join(', ')) ~ ', allowed is realm.') -%}
+          {%-     set _ = errors.append('Unknown keys in opensmtpd_tls: ' ~ (unknown | join(', ')) ~ ', allowed are realm and dir.') -%}
           {%-   endif -%}
-          {%-   if not mail_opensmtpd__tls_valid | bool -%}
-          {%-     set _ = errors.append('opensmtpd_tls.realm is the name of a realm of pki_easyrsa_deploy of letters, digits, _, . and -.') -%}
+          {%-   if not (mail_opensmtpd__tls_realm is string and mail_opensmtpd__tls_realm is match(mail_opensmtpd__name_pattern)) -%}
+          {%-     set _ = errors.append('opensmtpd_tls.realm is the name of a realm of letters, digits, _, . and -.') -%}
+          {%-   endif -%}
+          {%-   if not mail_opensmtpd__tls_dir_valid | bool -%}
+          {%-     set _ = errors.append('opensmtpd_tls.dir has to be an absolute path without line breaks, e.g. /opt/certbot/etc/live.') -%}
           {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
-    # The realm is deployed on the host by pki_easyrsa_deploy
+    # The realm is deployed on the host by pki_easyrsa_deploy or pki_certbot
     - name: 'Find the certificate of the realm'
       ansible.builtin.stat:
         path: "{{ item.src }}"
@@ -138,7 +141,7 @@
         label: "{{ item.src }}"
       register: 'mail_opensmtpd__tls_stat'
 
-    # In check mode pki_easyrsa_deploy does not create a new realm, the missing files are only reported
+    # In check mode pki_easyrsa_deploy and pki_certbot do not create a new realm, the missing files are only reported
     - name: 'Validate the certificate of the realm'
       ansible.builtin.assert:
         that:
@@ -149,13 +152,13 @@
         mail_opensmtpd__tls_missing: "{{ mail_opensmtpd__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
         mail_opensmtpd__tls_message: >-
           These files of the realm {{ mail_opensmtpd__tls_realm }} do not exist on the host,
-          pki_easyrsa_deploy has to deploy the realm first: {{ mail_opensmtpd__tls_missing | join(', ') }}.
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ mail_opensmtpd__tls_missing | join(', ') }}.
 
     - name: 'Report the missing certificate of the realm in check mode'
       ansible.builtin.debug:
         msg: >-
           These files of the realm {{ mail_opensmtpd__tls_realm }} do not exist on the host,
-          pki_easyrsa_deploy has to deploy the realm first: {{ mail_opensmtpd__tls_missing | join(', ') }}.
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ mail_opensmtpd__tls_missing | join(', ') }}.
       when:
         - ansible_check_mode
         - mail_opensmtpd__tls_missing | length > 0

@@ -19,6 +19,8 @@ mail_opensmtpd__test_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_
 mail_opensmtpd__test_realm: 'mx.molecule.test'
 mail_opensmtpd__test_realms_dir: '/etc/pki/realms'
 mail_opensmtpd__test_tls_ip: '10.89.0.11'
+# The certificate of the realm in the structure of pki_certbot, used by side_effect with opensmtpd_tls.dir
+mail_opensmtpd__test_certbot_dir: '/opt/certbot/etc'
 
 # The user of AUTH, the table contains the SHA-512 crypt of the password (openssl passwd -6 -salt moleculesalt)
 mail_opensmtpd__test_user: 'molecule'
@@ -46,6 +48,7 @@ mail_opensmtpd__test_cases:
       quadlet_absent:
         - 'Secret='
         - 'Environment='
+        - 'ExecStartPre='
       config:
         - 'listen on 0.0.0.0'
         - 'action "relay" relay'
@@ -81,15 +84,21 @@ mail_opensmtpd__test_cases:
           - 'from local for any action "relay"'
         smtp: [ 'max-message-size 10M' ]
     side_effect:
-      # A changed statement restarts OpenSMTPD
+      # A changed statement and the certificate of certbot restart OpenSMTPD
       config:
         smtp: [ 'max-message-size 20M' ]
+      tls:
+        realm: "{{ mail_opensmtpd__test_realm }}"
+        dir: "{{ mail_opensmtpd__test_certbot_dir }}/live"
     expect:
       ip: '10.89.0.11'
       quadlet:
         - 'Volume=/opt/opensmtpd-molecule:/config'
         - 'Secret=opensmtpd-molecule,type=mount,target=/config/secrets,uid=0,gid=100,mode=0440'
         - 'Environment=TZ=Europe/Berlin'
+        # The certificate of certbot of side_effect
+        - 'ExecStartPre=install -o root -g root -m 0644 /opt/certbot/etc/live/mx.molecule.test/fullchain.pem /opt/opensmtpd-molecule/tls/fullchain.pem'
+        - 'ExecStartPre=install -o root -g root -m 0600 /opt/certbot/etc/live/mx.molecule.test/privkey.pem /opt/opensmtpd-molecule/tls/privkey.pem'
       quadlet_absent: []
       config:
         - 'pki "mx.molecule.test" cert "/config/tls/fullchain.pem"'

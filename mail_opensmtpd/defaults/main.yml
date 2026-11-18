@@ -20,8 +20,8 @@ mail_opensmtpd__config: >-
   {{ mail_opensmtpd__config_default
      | combine(mail_opensmtpd__config_tls, mail_opensmtpd__config_secrets, opensmtpd_config | default({}), recursive=true) }}
 
-# The certificate of the host: { realm: <name> } copies fullchain.pem and privkey.pem of the realm of pki_easyrsa_deploy
-# to <home>/tls and writes the pki <name>, empty without TLS
+# The certificate of the host: { realm: <name> } copies fullchain.pem and privkey.pem of <dir>/<name> to <home>/tls
+# on every start of the container and writes the pki <name>, empty without TLS; dir defaults to the realms of common_globals, e.g. /opt/certbot/etc/live for pki_certbot
 mail_opensmtpd__tls: "{{ opensmtpd_tls | default({}) }}"
 
 # One secret with name, data and the target secrets: the table mounted as /config/secrets, written as table secrets
@@ -109,17 +109,22 @@ mail_opensmtpd__listen_ports: >-
   {%- endfor -%}
   {{ ports | map('int') | unique | list }}
 
-# The certificate of the realm of pki_easyrsa_deploy, the links of certbot of the realm point to the files
+# The certificate of the realm in the realms of common_globals (pki_easyrsa_deploy) or in opensmtpd_tls.dir (e.g. pki_certbot),
+# ExecStartPre of the quadlet unit copies the files to <home>/tls
 mail_opensmtpd__realms_dir: "{{ common_globals__pki_realms_dir }}"
-mail_opensmtpd__tls_keys: [ 'realm' ]
+mail_opensmtpd__tls_keys: [ 'realm', 'dir' ]
 mail_opensmtpd__tls_realm: "{{ mail_opensmtpd__tls.realm | default('') if mail_opensmtpd__tls is mapping else '' }}"
-mail_opensmtpd__tls_valid: "{{ mail_opensmtpd__tls_realm is string and mail_opensmtpd__tls_realm is match(mail_opensmtpd__name_pattern) }}"
+mail_opensmtpd__tls_dir: "{{ mail_opensmtpd__tls.dir | default(mail_opensmtpd__realms_dir) if mail_opensmtpd__tls is mapping else mail_opensmtpd__realms_dir }}"
+mail_opensmtpd__tls_dir_valid: "{{ mail_opensmtpd__tls_dir is string and mail_opensmtpd__tls_dir is match('/') and mail_opensmtpd__tls_dir is not search('[\\n\\r]') }}"
+mail_opensmtpd__tls_valid: >-
+  {{ mail_opensmtpd__tls_realm is string and mail_opensmtpd__tls_realm is match(mail_opensmtpd__name_pattern)
+     and mail_opensmtpd__tls_dir_valid | bool }}
 mail_opensmtpd__tls_files:
-  - src: "{{ mail_opensmtpd__realms_dir }}/{{ mail_opensmtpd__tls_realm }}/fullchain.pem"
+  - src: "{{ mail_opensmtpd__tls_dir }}/{{ mail_opensmtpd__tls_realm }}/fullchain.pem"
     dest: "{{ mail_opensmtpd__podman_tls_dir }}/fullchain.pem"
     mode: '0644'
   # OpenSMTPD reads keys of root with at most 0740
-  - src: "{{ mail_opensmtpd__realms_dir }}/{{ mail_opensmtpd__tls_realm }}/privkey.pem"
+  - src: "{{ mail_opensmtpd__tls_dir }}/{{ mail_opensmtpd__tls_realm }}/privkey.pem"
     dest: "{{ mail_opensmtpd__podman_tls_dir }}/privkey.pem"
     mode: '0600'
 mail_opensmtpd__config_tls: >-
@@ -172,3 +177,9 @@ mail_opensmtpd__podman_container_default:
   # opensmtpd_container.volumes replaces the list completely, /config contains smtpd.conf, tls and the spool
   volumes:
     - "{{ mail_opensmtpd__podman_home }}:/config"
+  # Copies the certificate of the realm on every start, a renewed certificate is used after the next restart.
+  # install follows the links of the realm, the image changes the mode of a mounted key on the host.
+  exec_start_pre: >-
+    {{ mail_opensmtpd__tls_files | map(attribute='mode') | zip(mail_opensmtpd__tls_files | map(attribute='src'), mail_opensmtpd__tls_files | map(attribute='dest'))
+       | map('join', ' ') | map('regex_replace', '^', 'install -o root -g root -m ') | list
+       if mail_opensmtpd__tls_valid | bool else [] }}
