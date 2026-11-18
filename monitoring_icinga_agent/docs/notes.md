@@ -70,8 +70,8 @@ Icinga 2 is restarted only if it was running and something changed, otherwise it
 
 The role runs with `--check`, also on a host where Icinga 2 is not installed yet:
 
-- without the packages there is no user `nagios` and no `/etc/icinga2`, the role stops after the installation,
-  there are no files and services to compare
+- without the packages the configuration, the directories, the systemd override and the timer of `pki_update` are compared,
+  only the links of the features are skipped, they point to `features-available` of the package
 - certificates that certbot did not issue yet are only reported, a real run fails before any change
 - `icinga2 daemon -C` does not run, the new configuration is not written in check mode
 
@@ -95,7 +95,7 @@ The molecule scenario `default` runs the role in two [tart](https://tart.run) VM
 
 | Platform | Test case |
 |---|---|
-| `molecule-icinga-agent-default` | The mandatory values only, Icinga 2 is not installed before, `check` stops after the installation |
+| `molecule-icinga-agent-default` | The mandatory values only, Icinga 2 is not installed before, `check` runs without the packages |
 | `molecule-icinga-agent` | `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running), `icinga_parent_host` and an own schedule of `pki_update` |
 
 `side_effect` changes `icinga_main_log_severity` and checks that Icinga 2 was restarted.
