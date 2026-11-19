@@ -6,6 +6,10 @@ The database servers are not part of the role.
 
 phpMyAdmin is configured completely with environment variables in `phpmyadmin_environment`, merged over the default of the role.
 The default sets `TZ` to `phpmyadmin_timezone`, the passwords are passed with `phpmyadmin_secrets` (see Secrets). Values are strings, e.g. `'3306'`.
+The image sets `TZ=UTC` itself and writes `date.timezone=${TZ}` into the configuration of PHP,
+the `/etc/localtime` set by podman is not enough, so unlike other roles this role keeps `TZ` in the default.
+phpMyAdmin keeps no data and needs no other files, so the role has no home directory and configures it with the environment
+instead of an own `config.user.inc.php`, the entrypoint of the image writes the configuration from the variables.
 
 phpMyAdmin needs a server, one of `PMA_HOST`, `PMA_HOSTS`, `PMA_SOCKET`, `PMA_SOCKETS` or `PMA_ARBITRARY` has to be set,
 the role checks it before it changes anything.
@@ -110,11 +114,16 @@ The role checks before any change:
 - `phpmyadmin_secrets` is a list of entries with `name`, `data` and `target` and unique names
 - one of the variables of the server is set in `phpmyadmin_environment`
 - neither a secret nor its file variable is set in `phpmyadmin_environment`
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables and secrets are set in the container, the values contain no line breaks
 
 If `phpmyadmin_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 After the start the role waits until phpMyAdmin shows the login form (on `APACHE_PORT`, default 80), a failed start shows the journal of the service.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares the secrets and the quadlet unit.
+The start of phpMyAdmin and the wait for the login form do not run in check mode.
 
 ### Restart and updates
 
@@ -157,12 +166,14 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-phpmyadmin` | IPv6, labels, `PMA_PORT`, `PMA_ABSOLUTE_URI`, the configuration storage with `PMA_PMADB`, `PMA_CONTROLUSER` and its password from a secret with the target `PMA_CONTROLPASS`, a user configuration from a secret with the target `PMA_USER_CONFIG_BASE64` and dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
 `prepare` installs curl, creates the podman network, pulls the images and starts a MariaDB container with a database and a user.
+`check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `phpmyadmin_container` not a dictionary, a secret without `target`, without a server,
 the password of the control user and its file variable in the environment, an unknown environment variable in `phpmyadmin_environment` and in `phpmyadmin_container.environment`, an unknown secret,
-`PMA_USER_CONFIG_BASE64` in `phpmyadmin_environment` and `PMA_SSL_KEY_BASE64` in `phpmyadmin_container.environment`
+`PMA_USER_CONFIG_BASE64` in `phpmyadmin_environment`, `PMA_SSL_KEY_BASE64` in `phpmyadmin_container.environment` and a line break in the environment
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes `MEMORY_LIMIT` on `molecule-phpmyadmin`, the quadlet unit changes and phpMyAdmin has to restart.
-`verify` checks the quadlet unit with the mounted secret, the secret in the environment without its value and the dependencies, the service, the addresses and the environment of the container
+then it changes `MEMORY_LIMIT` on `molecule-phpmyadmin`, the quadlet unit changes and phpMyAdmin has to restart,
+`molecule-phpmyadmin-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the mounted secret, the secret in the environment without its value and the dependencies, the service, the addresses, the time zone and the environment of the container with `TZ`
 with the file variable set by the role and without passwords, the file of the secret and the password exported by the entrypoint, `config.user.inc.php` written by the entrypoint from the secret,
 logs in with the user of the database using curl with a cookie file and checks the list of the databases.
 

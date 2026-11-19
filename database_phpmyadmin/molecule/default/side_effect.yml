@@ -12,6 +12,11 @@
     database_phpmyadmin__test_checked_files:
       - "{{ database_phpmyadmin__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -121,35 +126,44 @@
           message: 'a private key in phpmyadmin_container'
           search: '^Unknown environment variables: PMA_SSL_KEY_BASE64\.'
 
-    - name: 'Run database_phpmyadmin with the changed environment'
-      when: database_phpmyadmin__test_case.side_effect | default(false)
-      block:
+    - name: 'Run database_phpmyadmin with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpmyadmin_environment: { PMA_HOST: '10.89.0.20', PMA_ABSOLUTE_URI: "http://10.89.0.61/\nhttp://evil/" }
+        database_phpmyadmin__test_invalid:
+          message: 'a line break in the environment'
+          search: '^The environment variables must not contain line breaks: PMA_ABSOLUTE_URI\.$'
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpmyadmin' ]
-          register: 'database_phpmyadmin__test_started_before'
-          changed_when: false
+    # molecule-phpmyadmin changes the environment and has to restart, molecule-phpmyadmin-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpmyadmin' ]
+      register: 'database_phpmyadmin__test_started_before'
+      changed_when: false
 
-        - name: 'Set the changed environment'
-          ansible.builtin.set_fact:
-            phpmyadmin_environment: "{{ database_phpmyadmin__test_vars.phpmyadmin_environment | combine(database_phpmyadmin__test_side_effect_environment) }}"
+    - name: 'Set the role variables of the change'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_phpmyadmin__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-        - name: 'Run database_phpmyadmin with the changed environment'
-          ansible.builtin.include_role:
-            name: 'database_phpmyadmin'
+    - name: 'Run database_phpmyadmin with the changed variables'
+      ansible.builtin.include_role:
+        name: 'database_phpmyadmin'
 
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpmyadmin' ]
-          register: 'database_phpmyadmin__test_started_after'
-          changed_when: false
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpmyadmin' ]
+      register: 'database_phpmyadmin__test_started_after'
+      changed_when: false
 
-        - name: 'Assert the changed quadlet unit and the restart of the service'
-          ansible.builtin.assert:
-            that:
-              - database_phpmyadmin__quadlet_result is changed
-              - database_phpmyadmin__test_started_after.stdout | int > database_phpmyadmin__test_started_before.stdout | int
-            fail_msg: >-
-              quadlet changed: {{ database_phpmyadmin__quadlet_result is changed }},
-              start before {{ database_phpmyadmin__test_started_before.stdout }}, after {{ database_phpmyadmin__test_started_after.stdout }}
+    - name: 'Assert the quadlet unit and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (database_phpmyadmin__quadlet_result is changed) == database_phpmyadmin__test_case.expect.restart
+          - (database_phpmyadmin__test_started_after.stdout | int > database_phpmyadmin__test_started_before.stdout | int)
+            == database_phpmyadmin__test_case.expect.restart
+        fail_msg: >-
+          quadlet changed: {{ database_phpmyadmin__quadlet_result is changed }},
+          start before {{ database_phpmyadmin__test_started_before.stdout }}, after {{ database_phpmyadmin__test_started_after.stdout }}
