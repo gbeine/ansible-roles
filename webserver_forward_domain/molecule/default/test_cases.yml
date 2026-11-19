@@ -1,0 +1,96 @@
+---
+# Network created by container_podman in prepare.yml
+webserver_forward_domain__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+webserver_forward_domain__test_image: 'ghcr.io/willnode/forward-domain:latest'
+webserver_forward_domain__test_quadlet_path: '/etc/containers/systemd/forward-domain.container'
+webserver_forward_domain__test_config_path: '/opt/forward-domain/.env'
+
+webserver_forward_domain__test_cases:
+
+  # Only the mandatory variables, HOME_DOMAIN is the hostname
+  - name: 'molecule-forward-domain-default'
+    role_vars:
+      forward_domain_home: '/opt/forward-domain'
+      forward_domain_ip: '10.89.0.100'
+      forward_domain_network: 'podman-molecule'
+      forward_domain_hostname: 'forward-domain-default'
+      forward_domain_timezone: 'Europe/Berlin'
+    # Runs again without a change, forward-domain must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      ip: '10.89.0.100'
+      ip6: ~
+      home_domain: 'forward-domain-default'
+      quadlet:
+        - 'Volume=/opt/forward-domain:/app/.certs'
+        - 'Volume=/opt/forward-domain/.env:/app/.env:ro'
+        - 'PublishPort=8080:8080'
+        - 'PublishPort=[::]:8080:8080'
+        - 'PublishPort=8443:8443'
+        - 'PublishPort=[::]:8443:8443'
+      env: []
+      config:
+        - "HOME_DOMAIN='forward-domain-default'"
+
+  # IPv6, labels, dependencies, the options in .env and the environment
+  - name: 'molecule-forward-domain'
+    role_vars:
+      forward_domain_home: '/opt/forward-domain'
+      forward_domain_ip: '10.89.0.101'
+      forward_domain_ipv6: 'fd00:89::101'
+      forward_domain_network: 'podman-molecule'
+      forward_domain_hostname: 'forward-domain-molecule'
+      forward_domain_timezone: 'Europe/Berlin'
+      forward_domain_labels:
+        traefik.enable: 'false'
+      forward_domain_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
+      forward_domain_environment:
+        NODE_OPTIONS: '--max-old-space-size=256'
+      forward_domain_config:
+        HOME_DOMAIN: 'fwd.example.org'
+        BLACKLIST_HOSTS: [ 'bad.example', 'evil.example' ]
+        BLACKLIST_REDIRECT: 'https://example.org/blocked#reason'
+        USE_LOCAL_DNS: true
+        DEBUG_LEVEL: 1
+    # DEBUG_LEVEL changes and forward-domain has to restart
+    side_effect:
+      role_vars:
+        forward_domain_config:
+          HOME_DOMAIN: 'fwd.example.org'
+          BLACKLIST_HOSTS: [ 'bad.example', 'evil.example' ]
+          BLACKLIST_REDIRECT: 'https://example.org/blocked#reason'
+          USE_LOCAL_DNS: true
+          DEBUG_LEVEL: 2
+    expect:
+      restart: true
+      ip: '10.89.0.101'
+      ip6: 'fd00:89::101'
+      home_domain: 'fwd.example.org'
+      quadlet:
+        - 'Volume=/opt/forward-domain:/app/.certs'
+        - 'Volume=/opt/forward-domain/.env:/app/.env:ro'
+        - 'Label=traefik.enable=false'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      env:
+        - 'NODE_OPTIONS=--max-old-space-size=256'
+      config:
+        - "HOME_DOMAIN='fwd.example.org'"
+        - "BLACKLIST_HOSTS='bad.example,evil.example'"
+        - "BLACKLIST_REDIRECT='https://example.org/blocked#reason'"
+        - "USE_LOCAL_DNS='true'"
+        - "DEBUG_LEVEL='2'"

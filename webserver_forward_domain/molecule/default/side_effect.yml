@@ -1,0 +1,166 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    webserver_forward_domain__test_case: "{{ webserver_forward_domain__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_forward_domain__test_vars: "{{ webserver_forward_domain__test_case.role_vars }}"
+    webserver_forward_domain__test_config: "{{ webserver_forward_domain__test_vars.forward_domain_config | default({}) }}"
+    webserver_forward_domain__test_checked_files:
+      - "{{ webserver_forward_domain__test_quadlet_path }}"
+      - "{{ webserver_forward_domain__test_config_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ webserver_forward_domain__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ webserver_forward_domain__test_checked_files }}"
+      register: 'webserver_forward_domain__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run webserver_forward_domain with forward_domain_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_container: [ 'environment' ]
+        webserver_forward_domain__test_invalid:
+          message: 'forward_domain_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run webserver_forward_domain with forward_domain_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: [ 'HOME_DOMAIN' ]
+        webserver_forward_domain__test_invalid:
+          message: 'forward_domain_config not a dictionary'
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run webserver_forward_domain with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: "{{ webserver_forward_domain__test_config | combine({ 'WHITELIST_HOST': 'example.org' }) }}"
+        webserver_forward_domain__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in forward_domain_config: WHITELIST_HOST\. Allowed are WHITELIST_HOSTS'
+
+    - name: 'Run webserver_forward_domain with HTTP_PORT (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: "{{ webserver_forward_domain__test_config | combine({ 'HTTP_PORT': 80 }) }}"
+        webserver_forward_domain__test_invalid:
+          message: 'HTTP_PORT'
+          search: '^The options HTTP_PORT are set by the role and must not be set in forward_domain_config'
+
+    - name: 'Run webserver_forward_domain with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: "{{ webserver_forward_domain__test_config | combine({ 'BLACKLIST_REDIRECT': \"https://example.org/\nblocked\" }) }}"
+        webserver_forward_domain__test_invalid:
+          message: 'a line break in a value'
+          search: '^The values of forward_domain_config must not contain single quotes or line breaks: BLACKLIST_REDIRECT\.$'
+
+    - name: 'Run webserver_forward_domain with a single quote in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: "{{ webserver_forward_domain__test_config | combine({ 'WHITELIST_HOSTS': [ 'example.org', \"it's.example\" ] }) }}"
+        webserver_forward_domain__test_invalid:
+          message: 'a single quote in a value'
+          search: '^The values of forward_domain_config must not contain single quotes or line breaks: WHITELIST_HOSTS\.$'
+
+    - name: 'Run webserver_forward_domain with DEBUG_LEVEL 5 (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: "{{ webserver_forward_domain__test_config | combine({ 'DEBUG_LEVEL': 5 }) }}"
+        webserver_forward_domain__test_invalid:
+          message: 'DEBUG_LEVEL 5'
+          search: '^These options are numbers, DEBUG_LEVEL is 0 to 3: DEBUG_LEVEL\.$'
+
+    - name: 'Run webserver_forward_domain with USE_LOCAL_DNS yes (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_config: "{{ webserver_forward_domain__test_config | combine({ 'USE_LOCAL_DNS': 'yes' }) }}"
+        webserver_forward_domain__test_invalid:
+          message: 'USE_LOCAL_DNS yes'
+          search: '^These options are booleans, allowed are true and false: USE_LOCAL_DNS\.$'
+
+    - name: 'Run webserver_forward_domain with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_environment: { HOME_DOMAIN: 'fwd.example.org' }
+        webserver_forward_domain__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: HOME_DOMAIN\. Allowed are TZ, NODE_OPTIONS'
+
+    - name: 'Run webserver_forward_domain with a line break in forward_domain_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_container:
+          environment:
+            NODE_OPTIONS: "--max-old-space-size=256\n--inspect"
+        webserver_forward_domain__test_invalid:
+          message: 'a line break in forward_domain_container.environment'
+          search: 'The environment variables must not contain line breaks: NODE_OPTIONS\.'
+
+    - name: 'Run webserver_forward_domain with a relative home (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forward_domain_home: 'opt/forward-domain'
+        webserver_forward_domain__test_invalid:
+          message: 'a relative home'
+          search: '^forward_domain_home has to be an absolute path$'
+
+    # molecule-forward-domain changes DEBUG_LEVEL and has to restart, molecule-forward-domain-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forward-domain' ]
+      register: 'webserver_forward_domain__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ webserver_forward_domain__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run webserver_forward_domain with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'webserver_forward_domain'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forward-domain' ]
+      register: 'webserver_forward_domain__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the restart'
+      ansible.builtin.assert:
+        that:
+          - (webserver_forward_domain__config_result is changed) == webserver_forward_domain__test_case.expect.restart
+          - webserver_forward_domain__quadlet_result is not changed
+          - >-
+            (webserver_forward_domain__test_started_after.stdout | int > webserver_forward_domain__test_started_before.stdout | int)
+            == webserver_forward_domain__test_case.expect.restart
+        fail_msg: >-
+          config changed: {{ webserver_forward_domain__config_result is changed }},
+          quadlet changed: {{ webserver_forward_domain__quadlet_result is changed }},
+          start before {{ webserver_forward_domain__test_started_before.stdout }}, after {{ webserver_forward_domain__test_started_after.stdout }}

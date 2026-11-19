@@ -1,0 +1,225 @@
+---
+
+- name: 'Install forward-domain'
+  tags: [ 'webserver', 'webserver_forward_domain' ]
+  block:
+
+    # A failing template in the variables (e.g. forward_domain_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - webserver_forward_domain__container | length > 0
+          - webserver_forward_domain__config_lines is sequence
+        quiet: true
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_forward_domain__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_forward_domain__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = webserver_forward_domain__config -%}
+          {%- set role = config.keys() | select('in', webserver_forward_domain__config_role) | list -%}
+          {%- if role | length > 0 -%}
+          {%-   set _ = errors.append('The options ' ~ (role | join(', ')) ~ ' are set by the role and must not be set in forward_domain_config,'
+                                    ~ ' the ports of the host are set with forward_domain_container.publish.') -%}
+          {%- endif -%}
+          {%- set unknown = config.keys() | reject('in', webserver_forward_domain__config_allowed) | reject('in', webserver_forward_domain__config_role) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in forward_domain_config: ' ~ (unknown | join(', ')) ~ '. Allowed are '
+                                    ~ (webserver_forward_domain__config_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set options = config | dict2items | rejectattr('value', 'none') | rejectattr('value', 'sameas', false) | list -%}
+          {%- set booleans = options | selectattr('key', 'in', webserver_forward_domain__config_booleans) | rejectattr('value', 'sameas', true)
+                             | map(attribute='key') | list -%}
+          {%- if booleans | length > 0 -%}
+          {%-   set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set invalid = [] -%}
+          {%- for option in options if option.key in webserver_forward_domain__config_numbers -%}
+          {%-   if option.value is boolean or option.value is not number and (option.value is not string or option.value is not match('^[0-9]+$')) -%}
+          {%-     set _ = invalid.append(option.key) -%}
+          {%-   elif option.key == 'DEBUG_LEVEL' and (option.value | int) > 3 -%}
+          {%-     set _ = invalid.append(option.key) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if invalid | length > 0 -%}
+          {%-   set _ = errors.append('These options are numbers, DEBUG_LEVEL is 0 to 3: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set types = [] -%}
+          {%- set quotes = [] -%}
+          {%- for option in options -%}
+          {%-   set values = option.value if option.value is sequence and option.value is not string and option.value is not mapping else [ option.value ] -%}
+          {%-   if option.value is mapping or values | select('mapping') | list | length > 0
+                   or values | select('sequence') | reject('string') | list | length > 0 -%}
+          {%-     set _ = types.append(option.key) -%}
+          {%-   elif values | map('string') | select('search', "['\n\r]") | list | length > 0 -%}
+          {%-     set _ = quotes.append(option.key) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if types | length > 0 -%}
+          {%-   set _ = errors.append('The values of forward_domain_config are strings, numbers, booleans or lists of them: ' ~ (types | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if quotes | length > 0 -%}
+          {%-   set _ = errors.append('The values of forward_domain_config must not contain single quotes or line breaks: ' ~ (quotes | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__home is string
+          - webserver_forward_domain__home is match('^/')
+        fail_msg: 'forward_domain_home has to be an absolute path'
+        quiet: true
+
+    # Checks the environment after merging forward_domain_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_forward_domain__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_forward_domain__environment_checked: >-
+          {{ webserver_forward_domain__container.environment if webserver_forward_domain__container.environment is mapping else {} }}
+        webserver_forward_domain__environment_unknown: >-
+          {{ webserver_forward_domain__environment_checked.keys() | reject('in', webserver_forward_domain__environment_allowed) | list }}
+        webserver_forward_domain__environment_line_breaks: >-
+          {{ webserver_forward_domain__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        webserver_forward_domain__errors: >-
+          {%- set errors = [] -%}
+          {%- if webserver_forward_domain__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (webserver_forward_domain__environment_unknown | join(', '))
+                                    ~ '. Allowed are ' ~ (webserver_forward_domain__environment_allowed | join(', '))
+                                    ~ ', the options of forward-domain are set with forward_domain_config.') -%}
+          {%- endif -%}
+          {%- if webserver_forward_domain__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (webserver_forward_domain__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the home directory'
+      ansible.builtin.file:
+        path: "{{ webserver_forward_domain__home }}"
+        owner: "{{ webserver_forward_domain__uid }}"
+        group: "{{ webserver_forward_domain__gid }}"
+        mode: '0750'
+        state: 'directory'
+
+    # A changed file restarts the service, the bind mount of a single file does not see a replaced file
+    - name: 'Write .env'
+      ansible.builtin.copy:
+        # Double quotes, so \n is a line break
+        content: "{{ '#\n# Ansible managed\n#\n\n' ~ (webserver_forward_domain__config_lines | map('regex_replace', '$', '\n') | join) }}"
+        dest: "{{ webserver_forward_domain__config_file }}"
+        owner: 'root'
+        group: "{{ webserver_forward_domain__gid }}"
+        mode: '0640'
+      register: 'webserver_forward_domain__config_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ webserver_forward_domain__container.name }}"
+        hostname: "{{ webserver_forward_domain__container.hostname }}"
+        image: "{{ webserver_forward_domain__container.image }}"
+        ip: "{{ webserver_forward_domain__container.ip }}"
+        ip6: "{{ webserver_forward_domain__container.ipv6 | default(omit) }}"
+        network: "{{ webserver_forward_domain__container.network }}"
+        timezone: "{{ webserver_forward_domain__container.timezone }}"
+        command: "{{ webserver_forward_domain__container.command | default(omit) }}"
+        env: "{{ webserver_forward_domain__container.environment | default(omit) }}"
+        etc_hosts: "{{ webserver_forward_domain__container.etc_hosts | default(omit) }}"
+        expose: "{{ webserver_forward_domain__container.expose | default(omit) }}"
+        label: "{{ webserver_forward_domain__container.labels | default(omit) }}"
+        publish: "{{ webserver_forward_domain__container.publish | default(omit) }}"
+        volume: "{{ webserver_forward_domain__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if webserver_forward_domain__container.requires is defined %}
+          Requires={{ webserver_forward_domain__container.requires | join(' ') }}
+          {% endif %}
+          {% if webserver_forward_domain__container.wants is defined %}
+          Wants={{ webserver_forward_domain__container.wants | join(' ') }}
+          {% endif %}
+          {% if webserver_forward_domain__container.after is defined %}
+          After={{ webserver_forward_domain__container.after | join(' ') }}
+          {% endif %}
+          {% if webserver_forward_domain__container.part_of is defined %}
+          PartOf={{ webserver_forward_domain__container.part_of | join(' ') }}
+          {% endif %}
+          {% if webserver_forward_domain__container.binds_to is defined %}
+          BindsTo={{ webserver_forward_domain__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if webserver_forward_domain__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ webserver_forward_domain__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'webserver_forward_domain__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start forward-domain'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ webserver_forward_domain__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if webserver_forward_domain__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            webserver_forward_domain__running: >-
+              {{ (ansible_facts.services[webserver_forward_domain__container.name + '.service'].state | default('')) == 'running' }}
+            webserver_forward_domain__restart: >-
+              {{ webserver_forward_domain__running | bool
+                 and (webserver_forward_domain__config_result is changed
+                      or webserver_forward_domain__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ webserver_forward_domain__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'webserver_forward_domain__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ webserver_forward_domain__container.name ~ ' did not start' ] + webserver_forward_domain__start_journal.stdout_lines }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'webserver_forward_domain__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ webserver_forward_domain__container.name }}"
+        container_image: "{{ webserver_forward_domain__container.image }}"
+        container_schedule: "{{ webserver_forward_domain__autoupdate_schedule }}"

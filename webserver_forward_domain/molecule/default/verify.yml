@@ -1,0 +1,136 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    webserver_forward_domain__test_case: "{{ webserver_forward_domain__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_forward_domain__expect: "{{ webserver_forward_domain__test_case.expect }}"
+    webserver_forward_domain__test_url: "http://{{ webserver_forward_domain__expect.ip }}:8080"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ webserver_forward_domain__test_quadlet_path }}"
+      register: 'webserver_forward_domain__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + webserver_forward_domain__test_image) in webserver_forward_domain__test_quadlet_lines
+          - ('IP=' + webserver_forward_domain__expect.ip) in webserver_forward_domain__test_quadlet_lines
+          - webserver_forward_domain__expect.ip6 is none or ('IP6=' + webserver_forward_domain__expect.ip6) in webserver_forward_domain__test_quadlet_lines
+          - webserver_forward_domain__expect.ip6 is not none or webserver_forward_domain__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - webserver_forward_domain__expect.quadlet | reject('in', webserver_forward_domain__test_quadlet_lines) | list | length == 0
+          - webserver_forward_domain__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - webserver_forward_domain__expect.env | length > 0 or webserver_forward_domain__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
+          - ('Timezone=' + webserver_forward_domain__test_case.role_vars.forward_domain_timezone) in webserver_forward_domain__test_quadlet_lines
+        fail_msg: "{{ webserver_forward_domain__test_quadlet.content | b64decode }}"
+      vars:
+        webserver_forward_domain__test_quadlet_lines: "{{ (webserver_forward_domain__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read .env'
+      ansible.builtin.slurp:
+        src: "{{ webserver_forward_domain__test_config_path }}"
+      register: 'webserver_forward_domain__test_config'
+
+    - name: 'Read the permissions of .env and the home directory'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ webserver_forward_domain__test_config_path }}"
+        - "{{ webserver_forward_domain__test_case.role_vars.forward_domain_home }}"
+        - "{{ webserver_forward_domain__test_case.role_vars.forward_domain_home }}/db.sqlite"
+      register: 'webserver_forward_domain__test_stat'
+
+    - name: 'Assert .env, the home directory and the database of the certificates'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__expect.config | reject('in', webserver_forward_domain__test_config_lines) | list | length == 0
+          - webserver_forward_domain__test_config_lines | select('match', 'HTTPS?_PORT=') | list | length == 0
+          - webserver_forward_domain__test_stat.results[0].stat.mode == '0640'
+          - webserver_forward_domain__test_stat.results[0].stat.pw_name == 'root'
+          - webserver_forward_domain__test_stat.results[0].stat.gid == 65534
+          - webserver_forward_domain__test_stat.results[1].stat.mode == '0750'
+          - webserver_forward_domain__test_stat.results[1].stat.uid == 65534
+          - webserver_forward_domain__test_stat.results[2].stat.exists
+        fail_msg: >-
+          {{ webserver_forward_domain__test_config_lines }},
+          {{ webserver_forward_domain__test_stat.results | map(attribute='stat') | map('dict2items') | map('selectattr', 'key', 'in', [ 'exists', 'mode', 'uid', 'gid' ]) | map('items2dict') | list }}
+      vars:
+        webserver_forward_domain__test_config_lines: "{{ (webserver_forward_domain__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the forward-domain service'
+      ansible.builtin.command: 'systemctl is-active forward-domain'
+      register: 'webserver_forward_domain__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the forward-domain container'
+      ansible.builtin.command: 'podman inspect forward-domain'
+      register: 'webserver_forward_domain__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__test_service.stdout == 'active'
+          - webserver_forward_domain__test_net.IPAddress == webserver_forward_domain__expect.ip
+          - webserver_forward_domain__expect.ip6 is none or webserver_forward_domain__test_net.GlobalIPv6Address == webserver_forward_domain__expect.ip6
+          - webserver_forward_domain__expect.env | reject('in', webserver_forward_domain__test_env) | list | length == 0
+          - webserver_forward_domain__test_env | select('match', '(HOME_DOMAIN|BLACKLIST_HOSTS)=.') | list | length == 0
+          - webserver_forward_domain__test_container.Config.Timezone == webserver_forward_domain__test_case.role_vars.forward_domain_timezone
+        fail_msg: >-
+          service {{ webserver_forward_domain__test_service.stdout }}, time zone {{ webserver_forward_domain__test_container.Config.Timezone | default('') }},
+          IPv4 {{ webserver_forward_domain__test_net.IPAddress }}, IPv6 {{ webserver_forward_domain__test_net.GlobalIPv6Address }},
+          environment {{ webserver_forward_domain__test_env | join(', ') }}
+      vars:
+        webserver_forward_domain__test_container: "{{ (webserver_forward_domain__test_inspect.stdout | from_json)[0] }}"
+        webserver_forward_domain__test_net: >-
+          {{ webserver_forward_domain__test_container.NetworkSettings.Networks[webserver_forward_domain__test_case.role_vars.forward_domain_network] }}
+        webserver_forward_domain__test_env: "{{ webserver_forward_domain__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'forward-domain' ]
+      register: 'webserver_forward_domain__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'forward-domain', '-n', '80', '--no-pager' ]
+      register: 'webserver_forward_domain__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ webserver_forward_domain__test_restarts.stdout ] + webserver_forward_domain__test_journal.stdout_lines | default([]) }}"
+
+    # forward-domain answers /health and /stat only for HOME_DOMAIN, the full test case sets it in .env
+    - name: 'Read /health and /stat of the home domain'
+      ansible.builtin.uri:
+        url: "{{ webserver_forward_domain__test_url }}/{{ item }}"
+        headers:
+          Host: "{{ webserver_forward_domain__expect.home_domain }}"
+        return_content: true
+      loop: [ 'health', 'stat' ]
+      register: 'webserver_forward_domain__test_requests'
+      until: webserver_forward_domain__test_requests is succeeded
+      retries: 15
+      delay: 2
+
+    - name: 'Assert /health and /stat'
+      ansible.builtin.assert:
+        that:
+          - webserver_forward_domain__test_requests.results[0].content == 'ok'
+          - webserver_forward_domain__test_requests.results[1].content | from_json is mapping
+        fail_msg: "{{ webserver_forward_domain__test_requests.results | map(attribute='content', default='') | list }}"
