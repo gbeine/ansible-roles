@@ -26,6 +26,9 @@
           - app_evcc__expect.ip6 is none or ('IP6=' + app_evcc__expect.ip6) in app_evcc__test_quadlet_lines
           - app_evcc__expect.ip6 is not none or app_evcc__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - app_evcc__expect.quadlet | reject('in', app_evcc__test_quadlet_lines) | list | length == 0
+          - ('Timezone=' + app_evcc__test_case.role_vars.evcc_timezone) in app_evcc__test_quadlet_lines
+          # The absent lines are prefixes, e.g. Secret=
+          - app_evcc__test_quadlet_lines | select('match', '(' ~ (app_evcc__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
         fail_msg: "{{ app_evcc__test_quadlet.content | b64decode }}"
       vars:
         app_evcc__test_quadlet_lines: "{{ (app_evcc__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -54,13 +57,46 @@
       register: 'app_evcc__test_inspect'
       changed_when: false
 
-    - name: 'Read the secrets'
+    # evcc.yaml only exists in the container, it is mounted from the podman secret
+    - name: 'Read evcc.yaml in the container'
       ansible.builtin.command:
-        argv: [ 'podman', 'secret', 'exists', "{{ item }}" ]
-      loop: "{{ app_evcc__expect.secrets }}"
+        argv: [ 'podman', 'exec', 'evcc', 'cat', '/etc/evcc.yaml' ]
+      register: 'app_evcc__test_config'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the secret of evcc.yaml'
+      ansible.builtin.command:
+        argv: [ 'podman', 'secret', 'exists', 'evcc-config' ]
       register: 'app_evcc__test_secret'
       changed_when: false
       failed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'evcc' ]
+      register: 'app_evcc__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'evcc', '-n', '80', '--no-pager' ]
+      register: 'app_evcc__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert evcc.yaml and the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_evcc__test_restarts.stdout | int == 0
+          - (app_evcc__expect.config is none) == (app_evcc__test_config.rc != 0)
+          - (app_evcc__expect.config is none) == (app_evcc__test_secret.rc != 0)
+          - app_evcc__expect.config is none or app_evcc__expect.config | reject('in', app_evcc__test_config.stdout_lines) | list | length == 0
+        fail_msg: >-
+          {{ [ 'automatic restarts: ' ~ app_evcc__test_restarts.stdout, 'secret evcc-config: ' ~ app_evcc__test_secret.rc,
+               'evcc.yaml: ' ~ (app_evcc__test_config.stdout_lines | reject('search', 'password') | list) ]
+             + app_evcc__test_journal.stdout_lines | default([]) }}
 
     - name: 'Assert the container addresses, environment and secrets'
       ansible.builtin.assert:
@@ -68,11 +104,11 @@
           - app_evcc__test_net.IPAddress == app_evcc__expect.ip
           - app_evcc__expect.ip6 is none or app_evcc__test_net.GlobalIPv6Address == app_evcc__expect.ip6
           - app_evcc__expect.env | reject('in', app_evcc__test_env) | list | length == 0
-          - app_evcc__test_secret.results | rejectattr('rc', 'eq', 0) | list | length == 0
+          - app_evcc__test_container.Config.Timezone == app_evcc__test_case.role_vars.evcc_timezone
         fail_msg: >-
           IPv4 {{ app_evcc__test_net.IPAddress }}, IPv6 {{ app_evcc__test_net.GlobalIPv6Address }},
-          environment {{ app_evcc__test_env | join(', ') }},
-          missing secrets {{ app_evcc__test_secret.results | rejectattr('rc', 'eq', 0) | map(attribute='item') | join(', ') }}
+          time zone {{ app_evcc__test_container.Config.Timezone | default('') }},
+          environment {{ app_evcc__test_env | join(', ') }}
       vars:
         app_evcc__test_container: "{{ (app_evcc__test_inspect.stdout | from_json)[0] }}"
         app_evcc__test_net: "{{ app_evcc__test_container.NetworkSettings.Networks[app_evcc__test_case.role_vars.evcc_network] }}"
@@ -103,6 +139,9 @@
         that:
           - app_evcc__test_published.json is defined
           - app_evcc__test_database.stat.exists
+          # The interval of evcc.yaml is used, the state shows it in seconds
+          - app_evcc__expect.interval is none or (app_evcc__test_ready.json.interval | default(0) | float) in [ app_evcc__expect.interval, app_evcc__expect.interval * 1000000000 ]
         fail_msg: >-
           published port {{ app_evcc__test_published.status }},
-          database exists {{ app_evcc__test_database.stat.exists }}
+          database exists {{ app_evcc__test_database.stat.exists }},
+          interval {{ app_evcc__test_ready.json.interval | default('') }}

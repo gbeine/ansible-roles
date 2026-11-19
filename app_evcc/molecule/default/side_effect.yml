@@ -9,6 +9,11 @@
   vars:
     app_evcc__test_case: "{{ app_evcc__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -60,27 +65,61 @@
           message: 'a relative data directory'
           search: '^evcc_home has to be an absolute path$'
 
-    - name: 'Run app_evcc with a secret target set in the environment (expect ERROR)'
+    - name: 'Run app_evcc with evcc_config not a dictionary (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        evcc_environment:
-          EVCC_MQTT_PASSWORD: 'molecule-secret'
+        evcc_config: [ 'log' ]
+        app_evcc__test_invalid:
+          message: 'evcc_config is not a dictionary'
+          search: '(failed to combine variables, expected dicts|evcc_config has to be a dictionary)'
+
+    - name: 'Run app_evcc with an unknown key in evcc_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        evcc_config:
+          intervall: '20s'
+        app_evcc__test_invalid:
+          message: 'an unknown key in evcc_config'
+          search: 'Unknown keys in evcc_config: intervall\.'
+
+    - name: 'Run app_evcc with the password of MQTT in evcc_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        evcc_config:
+          mqtt:
+            password: 'molecule-secret'
+        app_evcc__test_invalid:
+          message: 'a secret in evcc_config'
+          search: 'Secrets must not be set in evcc_config, set them with evcc_secrets: mqtt\.password\.'
+
+    - name: 'Run app_evcc with a former variable as target of a secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
         evcc_secrets:
           - name: 'evcc_molecule_mqtt_password'
             data: 'molecule-secret'
             target: 'EVCC_MQTT_PASSWORD'
         app_evcc__test_invalid:
-          message: 'a secret target set in the environment'
-          search: 'must not be set in evcc_environment:\s+EVCC_MQTT_PASSWORD\.'
+          message: 'an unknown secret'
+          search: 'Unknown secrets: EVCC_MQTT_PASSWORD\.'
 
-    - name: 'Run app_evcc with an unknown environment variable (expect ERROR)'
+    - name: 'Run app_evcc with an option of evcc in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         evcc_environment:
-          MOLECULE: 'true'
+          EVCC_LOG: 'debug'
         app_evcc__test_invalid:
-          message: 'an unknown environment variable'
-          search: 'Unknown environment variables: MOLECULE\.'
+          message: 'an option of evcc in the environment'
+          search: 'Unknown environment variables: EVCC_LOG\.'
+
+    - name: 'Run app_evcc with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        evcc_environment:
+          EVCC_CUSTOM_BRAND: "Molecule\nevcc"
+        app_evcc__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: EVCC_CUSTOM_BRAND\.'
 
     - name: 'Run app_evcc with an unknown environment variable in evcc_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -92,49 +131,37 @@
           message: 'an unknown environment variable in evcc_container'
           search: 'Unknown environment variables: FOO\.'
 
-    - name: 'Run app_evcc with an unknown secret (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        evcc_secrets:
-          - name: 'evcc_molecule_secret'
-            data: 'molecule-secret'
-            target: 'MOLECULE_SECRET'
-        app_evcc__test_invalid:
-          message: 'an unknown secret'
-          search: 'Unknown secrets: MOLECULE_SECRET\.'
+    # molecule-evcc changes the interval and has to restart, molecule-evcc-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'evcc' ]
+      register: 'app_evcc__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_evcc__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
     - name: 'Run app_evcc with the changed role variables'
-      when: app_evcc__test_case.side_effect is defined
-      block:
+      ansible.builtin.include_role:
+        name: 'app_evcc'
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'evcc' ]
-          register: 'app_evcc__test_started_before'
-          changed_when: false
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'evcc' ]
+      register: 'app_evcc__test_started_after'
+      changed_when: false
 
-        - name: 'Set the changed role variables'
-          ansible.builtin.set_fact:
-            "{{ item.key }}": "{{ item.value }}"
-          loop: "{{ app_evcc__test_case.side_effect.role_vars | dict2items }}"
-          loop_control:
-            label: "{{ item.key }}"
-
-        - name: 'Run app_evcc with the changed role variables'
-          ansible.builtin.include_role:
-            name: 'app_evcc'
-
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'evcc' ]
-          register: 'app_evcc__test_started_after'
-          changed_when: false
-
-        - name: 'Assert the changed quadlet unit and the restart of the service'
-          ansible.builtin.assert:
-            that:
-              - app_evcc__quadlet_result is changed
-              - app_evcc__test_started_after.stdout | int > app_evcc__test_started_before.stdout | int
-            fail_msg: >-
-              quadlet changed: {{ app_evcc__quadlet_result is changed }},
-              start before {{ app_evcc__test_started_before.stdout }}, after {{ app_evcc__test_started_after.stdout }}
+    - name: 'Assert the changed evcc.yaml and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_evcc__config_result is changed) == app_evcc__test_case.expect.restart
+          - app_evcc__quadlet_result is not changed
+          - (app_evcc__test_started_after.stdout | int > app_evcc__test_started_before.stdout | int) == app_evcc__test_case.expect.restart
+        fail_msg: >-
+          evcc.yaml changed: {{ app_evcc__config_result is changed }},
+          quadlet changed: {{ app_evcc__quadlet_result is changed }},
+          start before {{ app_evcc__test_started_before.stdout }}, after {{ app_evcc__test_started_after.stdout }}

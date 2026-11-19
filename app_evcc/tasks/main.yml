@@ -11,6 +11,7 @@
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - app_evcc__container | length > 0
+          - app_evcc__config is not defined or app_evcc__config | to_json | length > 0
         quiet: true
 
     - name: 'Validate the secrets'
@@ -36,7 +37,10 @@
           {%- endif -%}
           {{ errors }}
 
-    - name: 'Validate environment and secrets'
+    # evcc_config has no default and is not combined, so the role checks that it is a dictionary,
+    # without evcc_config there is nothing to check
+    - name: 'Validate the configuration'
+      when: app_evcc__config is defined
       ansible.builtin.assert:
         that:
           - app_evcc__errors | length == 0
@@ -44,27 +48,33 @@
         fail_msg: "{{ app_evcc__errors | join(' ') }}"
         quiet: true
       vars:
-        app_evcc__environment_missing: >-
-          {{ app_evcc__environment_required
-             | reject('in', app_evcc__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
-             | list }}
-        app_evcc__secrets_missing: >-
-          {{ app_evcc__secrets_required
-             | reject('in', app_evcc__secrets | selectattr('target', 'defined') | map(attribute='target') | list)
-             | list }}
-        app_evcc__secrets_in_environment: >-
-          {{ app_evcc__secrets | selectattr('target', 'defined') | map(attribute='target')
-             | select('in', app_evcc__environment.keys() | list) | list }}
         app_evcc__errors: >-
           {%- set errors = [] -%}
-          {%- if app_evcc__environment_missing | length > 0 -%}
-          {%-   set _ = errors.append('evcc needs the environment variables ' ~ (app_evcc__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_evcc__environment_missing | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if app_evcc__secrets_missing | length > 0 -%}
-          {%-   set _ = errors.append('evcc needs the secrets ' ~ (app_evcc__secrets_required | join(', ')) ~ ', missing: ' ~ (app_evcc__secrets_missing | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if app_evcc__secrets_in_environment | length > 0 -%}
-          {%-   set _ = errors.append('Secret targets must not be set in evcc_environment: ' ~ (app_evcc__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- set config = app_evcc__config -%}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('evcc_config has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set unknown = config.keys() | map('string') | map('lower') | reject('in', app_evcc__config_allowed) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in evcc_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the keys of evcc.yaml (app_evcc__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   set secrets = [] -%}
+          {%-   for target in app_evcc__secrets_allowed -%}
+          {%-     set option = namespace(value=config, found=true) -%}
+          {%-     for key in target.split('.') -%}
+          {%-       if option.found and option.value is mapping and key in option.value -%}
+          {%-         set option.value = option.value[key] -%}
+          {%-       else -%}
+          {%-         set option.found = false -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-     if option.found -%}
+          {%-       set _ = secrets.append(target) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if secrets | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not be set in evcc_config, set them with evcc_secrets: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
@@ -83,7 +93,7 @@
           {%- endif -%}
           {{ errors }}
 
-    # Checks the environment and the secrets of the container after merging evcc_container,
+    # Checks the environment and the secrets after merging evcc_container,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
@@ -93,16 +103,15 @@
         fail_msg: "{{ app_evcc__errors | join(' ') }}"
         quiet: true
       vars:
-        # The secrets of the container are omit without secrets
-        app_evcc__container_secrets: >-
-          {{ app_evcc__container.secrets
-             if app_evcc__container.secrets is sequence and app_evcc__container.secrets is not string
-             else [] }}
+        app_evcc__environment_checked: >-
+          {{ app_evcc__container.environment if app_evcc__container.environment is mapping else {} }}
         app_evcc__environment_unknown: >-
-          {{ (app_evcc__container.environment | default({})).keys() | reject('in', app_evcc__environment_allowed) | list }}
+          {{ app_evcc__environment_checked.keys() | reject('in', app_evcc__environment_allowed) | list }}
+        app_evcc__environment_line_breaks: >-
+          {{ app_evcc__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_evcc__secrets_unknown: >-
-          {{ app_evcc__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
-             | reject('in', app_evcc__secrets_allowed) | list }}
+          {{ app_evcc__secrets_valid | map(attribute='target') | map('string') | reject('in', app_evcc__secrets_allowed) | list }}
         app_evcc__errors: >-
           {%- set errors = [] -%}
           {%- if app_evcc__environment_unknown | length > 0 -%}
@@ -111,8 +120,11 @@
           {%- if app_evcc__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (app_evcc__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_evcc__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_evcc__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- if app_evcc__environment_unknown | length > 0 or app_evcc__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_evcc__environment_allowed | join(', ')) ~ ', the options of evcc are set with evcc_config, and the secrets ' ~ (app_evcc__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_evcc__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (app_evcc__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -123,14 +135,15 @@
         mode: '0700'
         state: 'directory'
 
-    - name: 'Create secrets'
+    # evcc.yaml cannot read files and evcc has no file variables, so the whole file with the passwords is a podman secret
+    - name: 'Create the secret of evcc.yaml'
       no_log: true
       containers.podman.podman_secret:
-        state: 'present'
-        name: "{{ item.name }}"
-        data: "{{ item.data }}"
-      loop: "{{ app_evcc__secrets }}"
-      register: 'app_evcc__secrets_result'
+        state: "{{ 'present' if app_evcc__config_enabled | bool else 'absent' }}"
+        name: "{{ app_evcc__config_secret }}"
+        # Double quotes, so \n is a line break
+        data: "{{ '#\n# Ansible managed\n#\n\n' ~ (app_evcc__config_file | to_nice_yaml(indent=2)) if app_evcc__config_enabled | bool else omit }}"
+      register: 'app_evcc__config_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -164,24 +177,55 @@
           {% if app_evcc__container.requires is defined %}
           Requires={{ app_evcc__container.requires | join(' ') }}
           {% endif %}
+          {% if app_evcc__container.wants is defined %}
+          Wants={{ app_evcc__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_evcc__container.after is defined %}
+          After={{ app_evcc__container.after | join(' ') }}
+          {% endif %}
+          {% if app_evcc__container.part_of is defined %}
+          PartOf={{ app_evcc__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_evcc__container.binds_to is defined %}
+          BindsTo={{ app_evcc__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_evcc__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_evcc__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_evcc__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_evcc__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_evcc__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_evcc__running: >-
-          {{ (ansible_facts.services[app_evcc__container.name + '.service'].state | default('')) == 'running' }}
-        app_evcc__restart: >-
-          {{ app_evcc__running | bool
-             and (app_evcc__secrets_result is changed
-                  or app_evcc__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start evcc'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_evcc__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_evcc__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_evcc__running: >-
+              {{ (ansible_facts.services[app_evcc__container.name + '.service'].state | default('')) == 'running' }}
+            app_evcc__restart: >-
+              {{ app_evcc__running | bool
+                 and (app_evcc__config_result is changed
+                      or app_evcc__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_evcc__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_evcc__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_evcc__container.name ~ ' did not start' ] + app_evcc__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'app_evcc__autoupdate_enabled | bool'

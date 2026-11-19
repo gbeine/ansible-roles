@@ -16,9 +16,16 @@ app_evcc__labels: "{{ evcc_labels }}"
 
 app_evcc__version: "{{ evcc_version | default('latest') }}"
 
-app_evcc__container: "{{ app_evcc__podman_container_default | combine(evcc_container | default({})) }}"
+# The content of evcc.yaml, the whole file is a podman secret
+app_evcc__config: "{{ evcc_config }}"
+
+# Only the variables of the image, the options of evcc are set with evcc_config
 app_evcc__environment: "{{ app_evcc__environment_default | combine(evcc_environment | default({})) }}"
+
+# Secrets with name, data and target, the target is the path of the option, e.g. mqtt.password
 app_evcc__secrets: "{{ evcc_secrets | default([]) }}"
+
+app_evcc__container: "{{ app_evcc__podman_container_default | combine(evcc_container | default({})) }}"
 
 app_evcc__autoupdate_enabled: "{{ evcc_autoupdate_enabled | default(false) }}"
 app_evcc__autoupdate_schedule: "{{ evcc_autoupdate_schedule }}"
@@ -33,27 +40,59 @@ app_evcc__podman_tag: "{{ app_evcc__version }}"
 
 app_evcc__podman_home: "{{ app_evcc__home }}"
 
-app_evcc__environment_default: {}
+# evcc.yaml with the passwords is the podman secret <container name>-config, evcc runs as root
+app_evcc__config_secret: "{{ app_evcc__podman_name }}-config"
+app_evcc__config_target: '/etc/evcc.yaml'
 
-app_evcc__environment_required: []
+# The image sets ENV TZ=Europe/Berlin, Go prefers TZ to /etc/localtime, so TZ follows evcc_timezone
+app_evcc__environment_default:
+  TZ: "{{ app_evcc__timezone }}"
 
-app_evcc__secrets_required: []
+# Generated from api/globalconfig/types.go of evcc 0.319.1, the keys of evcc.yaml,
+# evcc checks the keys below them itself
+app_evcc__config_allowed:
+  - 'network'
+  - 'ocpp'
+  - 'log'
+  - 'sponsortoken'
+  - 'plant'
+  - 'telemetry'
+  - 'mcp'
+  - 'metrics'
+  - 'profile'
+  - 'levels'
+  - 'interval'
+  - 'database'
+  - 'mqtt'
+  - 'modbusproxy'
+  - 'javascript'
+  - 'go'
+  - 'influx'
+  - 'eebus'
+  - 'hems'
+  - 'shm'
+  - 'messaging'
+  - 'messagingevents'
+  - 'meters'
+  - 'chargers'
+  - 'vehicles'
+  - 'tariffs'
+  - 'site'
+  - 'loadpoints'
+  - 'circuits'
+  - 'curtailers'
 
-# Environment variables read by evcc, EVCC_ and the key of evcc.yaml
+# The targets of evcc_secrets, the paths of the password options of evcc.yaml
+app_evcc__secrets_allowed:
+  - 'sponsortoken'
+  - 'mqtt.password'
+  - 'mqtt.clientkey'
+  - 'influx.password'
+  - 'influx.token'
+
+# Generated from cmd/root.go of evcc 0.319.1, the variables evcc reads with os.Getenv, the options (EVCC_*) are set with evcc_config
 app_evcc__environment_allowed:
-  - 'EVCC_LOG'
-  - 'EVCC_INTERVAL'
-  - 'EVCC_PLANT'
-  - 'EVCC_TELEMETRY'
-  - 'EVCC_METRICS'
-  - 'EVCC_PROFILE'
-  - 'EVCC_NETWORK_SCHEMA'
-  - 'EVCC_NETWORK_HOST'
-  - 'EVCC_NETWORK_PORT'
-  - 'EVCC_DATABASE_DSN'
-  - 'EVCC_MQTT_BROKER'
-  - 'EVCC_MQTT_TOPIC'
-  - 'EVCC_MQTT_USER'
+  - 'TZ'
   - 'EVCC_CUSTOM_CSS'
   - 'EVCC_CUSTOM_LOGO_LIGHT'
   - 'EVCC_CUSTOM_LOGO_DARK'
@@ -64,10 +103,28 @@ app_evcc__environment_allowed:
   - 'EVCC_CUSTOM_PHONE'
   - 'EVCC_CUSTOM_THEME'
 
-# Targets of the secrets in evcc_secrets
-app_evcc__secrets_allowed:
-  - 'EVCC_SPONSORTOKEN'
-  - 'EVCC_MQTT_PASSWORD'
+# Entries without name, data or target are left out, the validation of the secrets reports them
+app_evcc__secrets_valid: >-
+  {{ (app_evcc__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('data', 'defined')
+      | selectattr('target', 'defined') | list)
+     if (app_evcc__secrets is sequence and app_evcc__secrets is not string) else [] }}
+
+# The configuration with the secrets, every target is a path, e.g. mqtt.password is { mqtt: { password: … } },
+# without evcc_config only the secrets are written, evcc_config that is no dictionary is reported by the validation
+app_evcc__config_file: >-
+  {%- set options = [ app_evcc__config if app_evcc__config is defined and app_evcc__config is mapping else {} ] -%}
+  {%- for secret in app_evcc__secrets_valid -%}
+  {%-   set keys = (secret.target | string).split('.') -%}
+  {%-   set prefix = [] -%}
+  {%-   for key in keys -%}
+  {%-     set _ = prefix.append('{' ~ (key | to_json) ~ ': ') -%}
+  {%-   endfor -%}
+  {%-   set _ = options.append((prefix | join) ~ (secret.data | to_json) ~ ('}' * (keys | length))) -%}
+  {%- endfor -%}
+  {{ ([ options[0] ] + (options[1:] | map('from_json') | list)) | combine(recursive=true) }}
+
+# Without configuration and secrets there is no evcc.yaml, evcc runs in the database-only mode
+app_evcc__config_enabled: "{{ app_evcc__config_file | length > 0 }}"
 
 app_evcc__podman_container_default:
   name: "{{ app_evcc__podman_name }}"
@@ -77,22 +134,16 @@ app_evcc__podman_container_default:
   ipv6: "{{ app_evcc__ipv6 | default(omit) }}"
   network: "{{ app_evcc__network }}"
   timezone: "{{ app_evcc__timezone }}"
-  # Set with evcc_environment, merged over the default
   environment: "{{ app_evcc__environment }}"
   labels: "{{ app_evcc__labels | default(omit) }}"
-  # Entries without name or target are left out, the validation of the secrets reports them
+  # evcc.yaml is mounted from the podman secret, it never exists on the host
   secrets: >-
-    {{ (app_evcc__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='name')
-        | zip(app_evcc__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='target'))
-        | map('join', ',type=env,target=') | list)
-      if (app_evcc__secrets is sequence and app_evcc__secrets is not string and app_evcc__secrets | length > 0)
-      else omit }}
+    {{ [ app_evcc__config_secret ~ ',type=mount,target=' ~ app_evcc__config_target ~ ',mode=0400' ]
+       if app_evcc__config_enabled | bool else omit }}
   # evcc_container.publish replaces the list completely
   publish:
     - '7070:7070'
     - '8887:8887'
   # evcc_container.volumes replaces the list completely
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
     - "{{ app_evcc__podman_home }}:/root/.evcc"
