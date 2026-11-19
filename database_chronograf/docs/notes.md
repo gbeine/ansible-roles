@@ -6,8 +6,9 @@ InfluxDB and Kapacitor are not part of the role.
 
 ### Configuration
 
-Chronograf is configured completely with environment variables in `chronograf_environment`, merged over the default of the role.
-The default sets `TZ` to `chronograf_timezone`, the passwords, tokens and client secrets are passed with `chronograf_secrets` (see Secrets).
+Chronograf has no configuration file, it is configured completely with environment variables in `chronograf_environment`.
+There is no default, without `chronograf_environment` the quadlet unit has no environment.
+`chronograf_timezone` sets the time zone of the container, the passwords, tokens and client secrets are passed with `chronograf_secrets` (see Secrets).
 Every option of Chronograf has an environment variable, see `chronograf --help` or the
 [configuration options](https://docs.influxdata.com/chronograf/v1/administration/config-options/), e.g. `INFLUXDB_URL`, `KAPACITOR_URL`,
 `BASE_PATH`, `LOG_LEVEL` or the OAuth 2.0 providers `GH_*`, `GOOGLE_*` and `GENERIC_*`. Values are strings, e.g. `'true'`.
@@ -71,6 +72,16 @@ The merge is not recursive, `chronograf_container.volumes` replaces the data dir
 `chronograf_container.environment` replaces the environment including `chronograf_environment`, use `chronograf_environment` instead.
 For a reverse proxy, e.g. Traefik, the labels are set with `chronograf_labels`, the web interface listens on port 8888.
 
+The dependencies of the quadlet unit are set with `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for`
+in `chronograf_container`, the role writes them to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`:
+
+```yaml
+chronograf_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/opt/chronograf' ]
+```
+
 ### Validation
 
 The role checks before any change:
@@ -79,6 +90,7 @@ The role checks before any change:
 - no secret is set in `chronograf_environment`
 - `TOKEN_SECRET` is only set with an OAuth 2.0 provider, a started provider has all of its options
 - only allowed environment variables and secrets are set in the container
+- the environment variables contain no line breaks
 
 If `chronograf_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
@@ -89,9 +101,16 @@ Chronograf is restarted if it was running and a secret or the quadlet unit chang
 Updates of the image are done by `container_update` with `chronograf_autoupdate_enabled: true` and `chronograf_autoupdate_schedule`,
 without `chronograf_autoupdate_schedule` the schedule of `container_update` is used.
 
+### Check mode
+
+The role runs with `--check` also on a host where it never ran before and compares the directories, the secrets and the quadlet unit.
+Chronograf is not started or restarted in check mode.
+
 ### Migration
 
-The role is new, there is nothing to migrate.
+- `TZ` is no longer set by default, `chronograf_timezone` sets the time zone of the container.
+  Set `TZ` in `chronograf_environment` if it is needed.
+- Without `chronograf_environment` the quadlet unit has no environment.
 
 ### Tests
 
@@ -100,16 +119,19 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 | Platform | Test case |
 |---|---|
-| `molecule-chronograf-default` | Only the mandatory variables, Chronograf without a source |
-| `molecule-chronograf` | IPv6, labels, `LOG_LEVEL`, InfluxDB as source with `INFLUXDB_URL`, `INFLUXDB_USERNAME` and the password from a secret |
+| `molecule-chronograf-default` | Only the mandatory variables, Chronograf without a source and without environment |
+| `molecule-chronograf` | IPv6, labels, dependencies, `LOG_LEVEL`, InfluxDB as source with `INFLUXDB_URL`, `INFLUXDB_USERNAME` and the password from a secret |
 
 `prepare` creates the podman network, pulls the images and starts InfluxDB 1.8 with authentication.
+`check` runs `converge` with `--check` on the fresh VMs.
 `side_effect` runs the role with `chronograf_container` not a dictionary, a secret without `target`, `INFLUXDB_PASSWORD` in the environment,
-`TOKEN_SECRET` without an OAuth 2.0 provider, an incomplete OAuth 2.0 provider,
+`TOKEN_SECRET` without an OAuth 2.0 provider, an incomplete OAuth 2.0 provider, a line break in the environment,
 an unknown environment variable in `chronograf_environment` and in `chronograf_container.environment` and an unknown secret
-and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it waits until Chronograf answers on `molecule-chronograf`, shows the log of the service otherwise, and changes `LOG_LEVEL`, the quadlet unit changes and Chronograf has to restart.
-`verify` checks the quadlet unit with the volume and the secrets, the service, the addresses and the environment of the container,
+and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`).
+Then it waits until Chronograf answers, shows the log of the service otherwise, and runs the role with `side_effect.role_vars` of the test case:
+`molecule-chronograf` changes `LOG_LEVEL`, the quadlet unit changes and Chronograf has to restart,
+`molecule-chronograf-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the volume, the secrets and the dependencies, no environment on `molecule-chronograf-default`, the service, the addresses and the environment of the container,
 the data directory owned by the user `chronograf` of the image with the database, the sources of Chronograf
 and the health of the source of InfluxDB, which connects with the password of the secret.
 

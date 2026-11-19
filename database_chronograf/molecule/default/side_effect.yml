@@ -14,6 +14,11 @@
     database_chronograf__test_checked_files:
       - "{{ database_chronograf__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -81,6 +86,14 @@
           message: 'an unknown environment variable'
           search: '^Unknown environment variables: INFLUXDB_HOST\.'
 
+    - name: 'Run database_chronograf with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        chronograf_environment: "{{ database_chronograf__test_env | combine({'LOG_LEVEL': 'info\ndebug'}) }}"
+        database_chronograf__test_invalid:
+          message: 'a line break in the environment'
+          search: '^The environment variables must not contain line breaks: LOG_LEVEL\.$'
+
     - name: 'Run database_chronograf with an unknown environment variable in chronograf_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
@@ -97,8 +110,8 @@
           message: 'an unknown secret'
           search: '^Unknown secrets: INFLUXDB_SECRET\.'
 
-    - name: 'Run database_chronograf with the changed environment'
-      when: database_chronograf__test_case.side_effect | default(false)
+    # molecule-chronograf changes LOG_LEVEL and has to restart, molecule-chronograf-default runs again without a change
+    - name: 'Run database_chronograf with the changed variables'
       block:
 
         # The change is only a restart if Chronograf runs
@@ -131,11 +144,14 @@
           register: 'database_chronograf__test_started_before'
           changed_when: false
 
-        - name: 'Set the changed environment'
+        - name: 'Set the role variables of the change'
           ansible.builtin.set_fact:
-            chronograf_environment: "{{ database_chronograf__test_env | combine(database_chronograf__test_side_effect_environment) }}"
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ database_chronograf__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
 
-        - name: 'Run database_chronograf with the changed environment'
+        - name: 'Run database_chronograf with the changed variables'
           ansible.builtin.include_role:
             name: 'database_chronograf'
 
@@ -145,11 +161,12 @@
           register: 'database_chronograf__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed quadlet unit and the restart of the service'
+        - name: 'Assert the quadlet unit and the restart of the service'
           ansible.builtin.assert:
             that:
-              - database_chronograf__quadlet_result is changed
-              - database_chronograf__test_started_after.stdout | int > database_chronograf__test_started_before.stdout | int
+              - (database_chronograf__quadlet_result is changed) == database_chronograf__test_case.expect.restart
+              - (database_chronograf__test_started_after.stdout | int > database_chronograf__test_started_before.stdout | int)
+                == database_chronograf__test_case.expect.restart
             fail_msg: >-
               quadlet changed: {{ database_chronograf__quadlet_result is changed }},
               start before {{ database_chronograf__test_started_before.stdout }}, after {{ database_chronograf__test_started_after.stdout }}

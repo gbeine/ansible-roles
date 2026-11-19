@@ -20,10 +20,6 @@ database_chronograf__test_influxdb:
   user: 'molecule'
   password: 'molecule-influxdb-password'
 
-# A valid change of the side effect, the quadlet unit changes and Chronograf has to restart
-database_chronograf__test_side_effect_environment:
-  LOG_LEVEL: 'debug'
-
 database_chronograf__test_cases:
 
   # Only the mandatory variables, Chronograf starts without a source
@@ -34,16 +30,22 @@ database_chronograf__test_cases:
       chronograf_network: 'podman-molecule'
       chronograf_hostname: 'chronograf-default'
       chronograf_timezone: 'Europe/Berlin'
+    # Runs again without a change, Chronograf must not restart
+    side_effect:
+      role_vars: {}
     expect:
       ip: '10.89.0.60'
       ip6: ~
       quadlet:
         - 'Volume=/opt/chronograf/data:/var/lib/chronograf'
-      env:
-        - 'TZ=Europe/Berlin'
+      # Without chronograf_environment the quadlet unit has no environment
+      quadlet_absent:
+        - 'Environment='
+      env: []
       source: ~
+      restart: false
 
-  # IPv6, labels, InfluxDB as source with the password from a secret
+  # IPv6, labels, dependencies, InfluxDB as source with the password from a secret
   - name: 'molecule-chronograf'
     role_vars:
       chronograf_home: '/opt/chronograf'
@@ -54,6 +56,10 @@ database_chronograf__test_cases:
       chronograf_timezone: 'Europe/Berlin'
       chronograf_labels:
         traefik.enable: 'true'
+      chronograf_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/opt/chronograf' ]
       chronograf_environment:
         INFLUXDB_URL: 'http://10.89.0.20:8086'
         INFLUXDB_USERNAME: 'molecule'
@@ -62,7 +68,13 @@ database_chronograf__test_cases:
         - name: 'chronograf_influxdb_password'
           data: 'molecule-influxdb-password'
           target: 'INFLUXDB_PASSWORD'
-    side_effect: true
+    # Changes LOG_LEVEL, Chronograf has to restart
+    side_effect:
+      role_vars:
+        chronograf_environment:
+          INFLUXDB_URL: 'http://10.89.0.20:8086'
+          INFLUXDB_USERNAME: 'molecule'
+          LOG_LEVEL: 'debug'
     expect:
       ip: '10.89.0.61'
       ip6: 'fd00:89::61'
@@ -70,9 +82,15 @@ database_chronograf__test_cases:
         - 'Volume=/opt/chronograf/data:/var/lib/chronograf'
         - 'Secret=chronograf_influxdb_password,type=env,target=INFLUXDB_PASSWORD'
         - 'Label=traefik.enable=true'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/opt/chronograf'
+      # TZ is no longer set by default
+      quadlet_absent:
+        - 'Environment=TZ='
       env:
-        - 'TZ=Europe/Berlin'
         - 'INFLUXDB_URL=http://10.89.0.20:8086'
         - 'INFLUXDB_USERNAME=molecule'
         - 'LOG_LEVEL=debug'
       source: 'http://10.89.0.20:8086'
+      restart: true

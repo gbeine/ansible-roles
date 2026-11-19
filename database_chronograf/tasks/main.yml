@@ -44,9 +44,12 @@
         fail_msg: "{{ database_chronograf__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without chronograf_environment there is no environment to check
+        database_chronograf__environment_set: >-
+          {{ database_chronograf__environment if database_chronograf__environment is defined and database_chronograf__environment is mapping else {} }}
         database_chronograf__environment_missing: >-
           {{ database_chronograf__environment_required
-             | reject('in', database_chronograf__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | reject('in', database_chronograf__environment_set | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
              | list }}
         database_chronograf__secrets_missing: >-
           {{ database_chronograf__secrets_required
@@ -54,10 +57,10 @@
              | list }}
         database_chronograf__secrets_in_environment: >-
           {{ (database_chronograf__secrets | selectattr('target', 'defined') | map(attribute='target') | list + database_chronograf__secret_variables)
-             | select('in', database_chronograf__environment.keys() | list) | unique | list }}
+             | select('in', database_chronograf__environment_set.keys() | list) | unique | list }}
         # The options set in chronograf_environment and the targets of chronograf_secrets
         database_chronograf__options_set: >-
-          {{ database_chronograf__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list
+          {{ database_chronograf__environment_set | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list
              + database_chronograf__secrets | selectattr('target', 'defined') | map(attribute='target') | list }}
         database_chronograf__errors: >-
           {%- set errors = [] -%}
@@ -99,20 +102,29 @@
           {{ database_chronograf__container.secrets
              if database_chronograf__container.secrets is sequence and database_chronograf__container.secrets is not string
              else [] }}
+        # Without chronograf_environment and chronograf_container.environment the environment is omitted, there is nothing to check
+        database_chronograf__environment_container: >-
+          {{ database_chronograf__container.environment if database_chronograf__container.environment is mapping else {} }}
         database_chronograf__environment_unknown: >-
-          {{ (database_chronograf__container.environment | default({})).keys() | reject('in', database_chronograf__environment_allowed) | list }}
+          {{ database_chronograf__environment_container.keys() | reject('in', database_chronograf__environment_allowed) | list }}
+        database_chronograf__environment_line_breaks: >-
+          {{ database_chronograf__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_chronograf__secrets_unknown: >-
           {{ database_chronograf__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
              | reject('in', database_chronograf__secrets_allowed) | list }}
         database_chronograf__errors: >-
           {%- set errors = [] -%}
+          {%- if database_chronograf__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_chronograf__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if database_chronograf__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_chronograf__environment_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if database_chronograf__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_chronograf__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
+          {%- if database_chronograf__environment_unknown | length > 0 or database_chronograf__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the options of Chronograf (database_chronograf__environment_allowed) and the secrets ' ~ (database_chronograf__secrets_allowed | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
@@ -177,6 +189,21 @@
           [Unit]
           {% if database_chronograf__container.requires is defined %}
           Requires={{ database_chronograf__container.requires | join(' ') }}
+          {% endif %}
+          {% if database_chronograf__container.wants is defined %}
+          Wants={{ database_chronograf__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_chronograf__container.after is defined %}
+          After={{ database_chronograf__container.after | join(' ') }}
+          {% endif %}
+          {% if database_chronograf__container.part_of is defined %}
+          PartOf={{ database_chronograf__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_chronograf__container.binds_to is defined %}
+          BindsTo={{ database_chronograf__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_chronograf__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_chronograf__container.requires_mounts_for | join(' ') }}
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
