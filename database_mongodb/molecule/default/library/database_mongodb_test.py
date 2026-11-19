@@ -62,6 +62,20 @@ requirements:
   - pymongo
 '''
 
+EXAMPLES = r'''
+- name: 'Read the state of MongoDB and try the accounts'
+  database_mongodb_test:
+    login_host: '10.89.0.91'
+    login_port: 27017
+    root:
+      name: 'admin'
+      password: 'molecule-root-password'
+    parameters: [ 'diagnosticDataCollectionEnabled' ]
+    accounts:
+      - { name: 'app', database: 'app', password: 'molecule-app-password' }
+  register: 'database_mongodb__test_result'
+'''
+
 RETURN = r'''
 version:
   description: The version of MongoDB.

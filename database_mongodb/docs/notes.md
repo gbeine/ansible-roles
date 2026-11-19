@@ -8,13 +8,14 @@ MongoDB listens on port 27017 of the address of the container.
 
 The role writes `<mongodb_home>/etc/mongod.conf` and starts `mongod --config /etc/mongo/mongod.conf`.
 `mongodb_config` is a dictionary of the sections of the [configuration file](https://www.mongodb.com/docs/manual/reference/configuration-options/),
-it is merged recursively over the default of the role.
+the role adds the options it depends on when it writes mongod.conf.
 
 - a dictionary is a section, e.g. `storage.wiredTiger.engineConfig`
 - a string, a number, a boolean or a list is written as value of the option
 - `null` removes the option
 
 mongod.conf is YAML, booleans are values of the options (e.g. `net.ipv6: false`), so `false` does not remove an option like in the roles writing `key=value` files.
+The allowed options have no types, the role does not check booleans, mongod rejects a value of the wrong type at the start.
 
 ```yaml
 mongodb_config:
@@ -130,10 +131,19 @@ The lists are generated for every release from the sources of MongoDB (7.0.48, 8
 The image only reads `TZ` besides the variables of the initialization, `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_DATABASE` are rejected,
 the initialization is managed by the role.
 The check uses the container after merging `mongodb_container`, so variables set with `mongodb_container.environment` are checked as well.
+Without `mongodb_environment` the quadlet unit has no environment.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `mongodb_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies of the quadlet unit (`requires`, `wants`, `after`, `part_of`, `binds_to`,
+`requires_mounts_for`) are changed with `mongodb_container`, it is merged over the default of the container:
+
+```yaml
+mongodb_container:
+  requires_mounts_for:
+    - '/opt'
+```
+
 The merge is not recursive, `mongodb_container.volumes` replaces the volumes of the databases and mongod.conf.
 The role waits until MongoDB answers a `ping` in the container, shows the log of the service otherwise, and manages the replica set and the accounts afterwards.
 
@@ -148,10 +158,16 @@ The role checks before any change:
 - a replica set has the secret `MONGO_KEYFILE`
 - `mongodb_accounts` is a list of entries with valid and unique names, valid databases and roles, root is not an account
 - every account has a password in `mongodb_passwords`, `mongodb_passwords` has no passwords of unknown accounts and no empty passwords
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables and secrets are set in the container, the environment variables contain no line breaks
 
 If `mongodb_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares mongod.conf, the secrets and the quadlet unit.
+On an initialized host with the installed packages it also compares the replica set and the accounts.
+The initialization and the start of MongoDB do not run in check mode.
 
 ### Restart and updates
 
@@ -184,16 +200,17 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-mongodb-default` | Only the mandatory variables and the root password, release 8.0 |
-| `molecule-mongodb` | Release 9.0, IPv6, labels, another root user, options and a server parameter, a replica set with keyfile, accounts with roles |
+| `molecule-mongodb` | Release 9.0, IPv6, labels, the dependencies `wants`, `after` and `requires_mounts_for`, another root user, options and a server parameter, a replica set with keyfile, accounts with roles |
 
-`prepare` creates the podman network and pulls the image.
+`prepare` creates the podman network and pulls the image, `check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `mongodb_container` not a dictionary, an unknown release, a secret without `target`, without the root password,
 the root password and a variable of the initialization in the environment, an unknown option and server parameter, the option `net.port` set by the role,
 a line break in a value, a replica set without keyfile, an account without password, the password of an unknown account
-and an unknown environment variable in `mongodb_container.environment`
+an unknown environment variable in `mongodb_container.environment` and a line break in `mongodb_environment`
 and checks that it fails with the expected message and the quadlet unit and mongod.conf are unchanged (tasks marked `expect ERROR`),
-then it changes `operationProfiling.slowOpThresholdMs` on `molecule-mongodb`, mongod.conf changes, MongoDB has to restart and the initialization must not run again.
-`verify` checks the quadlet unit without the variables of the initialization and with the keyfile as file, the service, the addresses and the environment of the container,
+then it changes `operationProfiling.slowOpThresholdMs` on `molecule-mongodb`, mongod.conf changes and MongoDB has to restart,
+on `molecule-mongodb-default` the role runs again without a change and MongoDB must not restart, on both the initialization must not run again.
+`verify` checks the quadlet unit without the variables of the initialization, with the keyfile as file and the dependencies, without environment on `molecule-mongodb-default`, the service, the addresses and the environment of the container,
 that `mongodb-init` is removed, mongod.conf without passwords, the version and the login of root, that a login is required, the primary of the replica set,
 the server parameter, that `app` may write, `reader` may only read and that a wrong password is rejected,
 it connects with the module `database_mongodb_test` of `molecule/default/library/` from the VM to the address of the container.

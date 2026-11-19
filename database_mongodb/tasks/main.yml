@@ -67,13 +67,16 @@
         quiet: true
       vars:
         database_mongodb__secret_targets: "{{ database_mongodb__secrets | map(attribute='target') | list }}"
+        # Without mongodb_environment there is no environment to check
+        database_mongodb__environment_set: >-
+          {{ database_mongodb__environment if database_mongodb__environment is defined and database_mongodb__environment is mapping else {} }}
         database_mongodb__secrets_missing: >-
           {{ database_mongodb__secrets_required | reject('in', database_mongodb__secret_targets) | list }}
         database_mongodb__secrets_in_environment: >-
           {{ (database_mongodb__secret_targets + database_mongodb__secret_variables + database_mongodb__secret_files.values() | list)
-             | select('in', database_mongodb__environment.keys() | list) | unique | list }}
+             | select('in', database_mongodb__environment_set.keys() | list) | unique | list }}
         database_mongodb__environment_managed_set: >-
-          {{ database_mongodb__environment_managed | select('in', database_mongodb__environment.keys() | list) | list }}
+          {{ database_mongodb__environment_managed | select('in', database_mongodb__environment_set.keys() | list) | list }}
         database_mongodb__errors: >-
           {%- set errors = [] -%}
           {%- if database_mongodb__secrets_missing | length > 0 -%}
@@ -243,14 +246,23 @@
         fail_msg: "{{ database_mongodb__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without mongodb_environment and mongodb_container.environment the environment is omitted, there is nothing to check
+        database_mongodb__environment_container: >-
+          {{ database_mongodb__container.environment if database_mongodb__container.environment is mapping else {} }}
         database_mongodb__environment_unknown: >-
-          {{ (database_mongodb__container.environment | default({})).keys()
+          {{ database_mongodb__environment_container.keys()
              | reject('in', database_mongodb__environment_allowed)
              | reject('in', database_mongodb__environment_managed) | list }}
+        database_mongodb__environment_line_breaks: >-
+          {{ database_mongodb__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_mongodb__secrets_unknown: >-
           {{ database_mongodb__secrets | map(attribute='target') | reject('in', database_mongodb__secret_variables) | list }}
         database_mongodb__errors: >-
           {%- set errors = [] -%}
+          {%- if database_mongodb__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_mongodb__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if database_mongodb__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_mongodb__environment_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
@@ -267,6 +279,7 @@
         pkg: "{{ database_mongodb__packages }}"
         install_recommends: false
         cache_valid_time: 3600
+      register: 'database_mongodb__packages_result'
 
     # The entrypoint of the image changes the owner of the files in /data/db and /data/configdb to mongodb
     - name: 'Create the directories of MongoDB'
@@ -310,6 +323,14 @@
         file_type: 'any'
       register: 'database_mongodb__initialized'
 
+    # A fresh host has neither the data of MongoDB nor pymongo, in check mode the replica set and the accounts
+    # are only compared on an initialized host with the installed packages
+    - name: 'Decide whether the replica set and the accounts are compared'
+      ansible.builtin.set_fact:
+        database_mongodb__manage: >-
+          {{ not ansible_check_mode
+             or (database_mongodb__initialized.matched > 0 and database_mongodb__packages_result is not changed) }}
+
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
@@ -334,7 +355,7 @@
             state: 'started'
           vars:
             database_mongodb__init_environment: >-
-              {{ (database_mongodb__container.environment | default({}))
+              {{ (database_mongodb__container.environment if database_mongodb__container.environment is mapping else {})
                  | combine({ 'MONGO_INITDB_ROOT_USERNAME': database_mongodb__root_username | string })
                  | combine(database_mongodb__environment_secrets_files) }}
           register: 'database_mongodb__init_result'
@@ -376,7 +397,7 @@
         network: "{{ database_mongodb__container.network }}"
         timezone: "{{ database_mongodb__container.timezone }}"
         command: "{{ database_mongodb__container.command | default(omit) }}"
-        env: "{{ database_mongodb__container.environment if database_mongodb__container.environment | default({}) | length > 0 else omit }}"
+        env: "{{ database_mongodb__container.environment | default(omit) }}"
         etc_hosts: "{{ database_mongodb__container.etc_hosts | default(omit) }}"
         expose: "{{ database_mongodb__container.expose | default(omit) }}"
         label: "{{ database_mongodb__container.labels | default(omit) }}"
@@ -394,6 +415,21 @@
           [Unit]
           {% if database_mongodb__container.requires is defined %}
           Requires={{ database_mongodb__container.requires | join(' ') }}
+          {% endif %}
+          {% if database_mongodb__container.wants is defined %}
+          Wants={{ database_mongodb__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_mongodb__container.after is defined %}
+          After={{ database_mongodb__container.after | join(' ') }}
+          {% endif %}
+          {% if database_mongodb__container.part_of is defined %}
+          PartOf={{ database_mongodb__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_mongodb__container.binds_to is defined %}
+          BindsTo={{ database_mongodb__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_mongodb__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_mongodb__container.requires_mounts_for | join(' ') }}
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
@@ -425,19 +461,21 @@
       delay: 2
       changed_when: false
       failed_when: false
-      when: 'not ansible_check_mode'
+      check_mode: false
+      when: database_mongodb__manage | bool
 
     - name: 'Read the log of MongoDB'
       when:
-        - not ansible_check_mode
+        - database_mongodb__manage | bool
         - database_mongodb__ready.stdout | default('') | trim != '1'
       ansible.builtin.command:
         argv: [ 'journalctl', '-u', "{{ database_mongodb__container.name }}", '-n', '50', '--no-pager' ]
       register: 'database_mongodb__journal'
       changed_when: false
+      check_mode: false
 
     - name: 'Assert that MongoDB answers'
-      when: 'not ansible_check_mode'
+      when: database_mongodb__manage | bool
       ansible.builtin.assert:
         that:
           - database_mongodb__ready.stdout | default('') | trim == '1'
@@ -445,7 +483,7 @@
         quiet: true
 
     - name: 'Manage the replica set and the accounts'
-      when: 'not ansible_check_mode'
+      when: database_mongodb__manage | bool
       block:
 
         # The module of the role only returns the names of the accounts that cannot log in

@@ -16,6 +16,11 @@
       - "{{ database_mongodb__test_quadlet_path }}"
       - "{{ database_mongodb__test_vars.mongodb_home }}/etc/mongod.conf"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -152,8 +157,15 @@
           message: 'an unknown environment variable in mongodb_container'
           search: '^Unknown environment variables: FOO\.'
 
-    - name: 'Run database_mongodb with the changed configuration'
-      when: database_mongodb__test_case.side_effect is defined
+    - name: 'Run database_mongodb with a line break in mongodb_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mongodb_environment: { TZ: "Europe/Berlin\nUTC" }
+        database_mongodb__test_invalid:
+          message: 'a line break in mongodb_environment'
+          search: 'The environment variables must not contain line breaks: TZ\.'
+
+    - name: 'Run database_mongodb with the change of the test case'
       block:
 
         - name: 'Read the start time of the service before the change'
@@ -162,11 +174,14 @@
           register: 'database_mongodb__test_started_before'
           changed_when: false
 
-        - name: 'Set the changed configuration'
+        - name: 'Set the role variables of the change'
           ansible.builtin.set_fact:
-            mongodb_config: "{{ database_mongodb__test_config | combine(database_mongodb__test_case.side_effect.config, recursive=true) }}"
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ database_mongodb__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
 
-        - name: 'Run database_mongodb with the changed configuration'
+        - name: 'Run database_mongodb with the change'
           ansible.builtin.include_role:
             name: 'database_mongodb'
 
@@ -176,14 +191,17 @@
           register: 'database_mongodb__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed mongod.conf, the restart of the service and no second initialization'
+        # Only mongod.conf changes, without a change nothing changes and MongoDB must not restart
+        - name: 'Assert mongod.conf changed, MongoDB was restarted only after a change and not initialized again'
           ansible.builtin.assert:
             that:
-              - database_mongodb__config_result is changed
+              - (database_mongodb__config_result is changed) == database_mongodb__test_case.expect.restart
               - database_mongodb__quadlet_result is not changed
               - database_mongodb__initialized.matched > 0
               - database_mongodb__init_result is skipped
-              - database_mongodb__test_started_after.stdout | int > database_mongodb__test_started_before.stdout | int
+              - >-
+                (database_mongodb__test_started_after.stdout | int > database_mongodb__test_started_before.stdout | int)
+                == database_mongodb__test_case.expect.restart
             fail_msg: >-
               mongod.conf changed: {{ database_mongodb__config_result is changed }},
               quadlet changed: {{ database_mongodb__quadlet_result is changed }},
