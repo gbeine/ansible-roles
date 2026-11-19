@@ -50,14 +50,13 @@ turnserver has no check of the configuration, an option turnserver does not know
 ### OpenWrt
 
 The package `coturn` is part of the feed `telephony`, the role installs it with `apk` or `opkg` if `/usr/bin/turnserver` is missing.
-In check mode the role stops after the installation then.
 
 The role writes `/etc/turnserver.conf` with owner `root` and mode `0600`, turnserver reads it as `root` and changes to the user `turnserver` afterwards.
 The init script `/etc/init.d/turnserver` starts turnserver only with `enabled '1'` in the section `general` of `/etc/config/turnserver`,
 the role sets it from `enabled`. `log_stderr`, `log_stdout` and `options` stay with the package,
 `options` starts turnserver with `--log-file syslog --no-cli --proc-user turnserver --proc-group turnserver`.
 
-- Before the role changes `/etc/turnserver.conf` it stores the file before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/turnserver.conf`,
+- Before the role changes an existing `/etc/turnserver.conf` it stores the file before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/turnserver.conf`,
   before a commit of the UCI configuration in `<playbook_dir>/backups/<inventory_hostname>/turnserver`.
 - After a change of the file, the UCI configuration or the installation the role stops `turnserver`, waits until the process has ended and starts it again,
   `/etc/init.d/turnserver restart` starts the new process while the former one still holds the ports.
@@ -68,6 +67,12 @@ The role checks before any change that the options of `coturn_config` consist of
 with strings, numbers, booleans or lists of them as values without line breaks and that `enabled` is a boolean.
 If `coturn_config` is no dictionary, merging it with the default of the platform (`vars/Debian.yml`, `vars/OpenWrt.yml`) fails before anything changes.
 The failure message names only the failing checks.
+
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the installation of the package and the changes of `/etc/turnserver.conf`, the service is neither started, stopped nor restarted.
+On OpenWrt without the package `/etc/config/turnserver` does not exist, the role skips the UCI configuration then, `uci` fails without the file.
 
 ### Migration
 
@@ -87,6 +92,7 @@ The former template always wrote `listening-port=3478`, `tls-listening-port=5349
 these are the defaults of turnserver and not written anymore.
 The file belonged to `root:root` with mode `0640` on Debian, the service running as `turnserver` could not read it, now it belongs to `root:turnserver`.
 The handler `Restart coturn` and the tag `coturn` are gone, the tags are `app` and `app_coturn`.
+On OpenWrt the role configures coturn in check mode also without the package, former versions stopped after the installation.
 
 ### Tests
 
@@ -98,10 +104,12 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-coturn-default` | Without variables, the configuration of the package on port 3478 |
 | `molecule-coturn` | Port 3479, `realm`, `use-auth-secret` with `static-auth-secret`, `no-multicast-peers`, `denied-peer-ip` as list and `syslog` removed |
 
+`check` runs `converge` with `--check` on the new VMs.
 `prepare` updates the package cache.
 `side_effect` runs the role with `coturn_config` not a dictionary, an invalid option name, a dictionary as value, a line break and an invalid boolean
 and checks that it fails with the expected message and `turnserver.conf` is unchanged (tasks marked `expect ERROR`),
-then it changes `realm` on `molecule-coturn`, coturn has to restart.
+then it changes `realm` on `molecule-coturn`, coturn has to restart,
+`molecule-coturn-default` runs again without a change and must not restart.
 `verify` checks the lines, owner, group and mode of `turnserver.conf`, the service, the UDP and TCP sockets on the port
 and sends a STUN binding request with `turnutils_stunclient`.
 
@@ -124,8 +132,10 @@ the VMs need access to the package feeds including `telephony`.
 | `molecule-coturn-openwrt-default` | Without variables, the role installs coturn and enables it in UCI |
 | `molecule-coturn-openwrt` | The same options as `molecule-coturn` |
 
+`check` runs `converge` with `--check` on the new VMs without coturn, the role reports the installation and the file.
 `side_effect` runs the same invalid configurations and checks that `/etc/turnserver.conf` and `/etc/config/turnserver` are unchanged,
-then it changes `realm` on `molecule-coturn-openwrt`, `turnserver` has to run with a new process.
+then it changes `realm` on `molecule-coturn-openwrt`, `turnserver` has to run with a new process,
+`molecule-coturn-openwrt-default` runs again without a change and keeps its process.
 `verify` checks the lines and the mode of `/etc/turnserver.conf`, `enabled` in UCI, the running and enabled service, the sockets on the port,
 a STUN binding request and the backup of `turnserver.conf` on the controller with the former realm.
 

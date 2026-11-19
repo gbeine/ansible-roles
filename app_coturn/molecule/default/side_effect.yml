@@ -9,6 +9,11 @@
   vars:
     app_coturn__test_case: "{{ app_coturn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -70,30 +75,30 @@
           message: 'an invalid boolean'
           search: '^enabled has to be a boolean: yes$'
 
-    - name: 'Run app_coturn with the changed configuration'
-      when: app_coturn__test_case.side_effect is defined
-      block:
+    # molecule-coturn changes the realm and has to restart, molecule-coturn-default runs again without a change
+    - name: 'Read the start time of coturn before the change'
+      ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value coturn'
+      register: 'app_coturn__test_start_before'
+      changed_when: false
 
-        - name: 'Read the start time of coturn before the change'
-          ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value coturn'
-          register: 'app_coturn__test_start_before'
-          changed_when: false
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_coturn__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-        - name: 'Set the changed configuration'
-          ansible.builtin.set_fact:
-            coturn_config: "{{ app_coturn__test_case.role_vars.coturn_config | combine(app_coturn__test_case.side_effect) }}"
+    - name: 'Run app_coturn with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_coturn'
 
-        - name: 'Run app_coturn with the changed configuration'
-          ansible.builtin.include_role:
-            name: 'app_coturn'
+    - name: 'Read the start time of coturn after the change'
+      ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value coturn'
+      register: 'app_coturn__test_start_after'
+      changed_when: false
 
-        - name: 'Read the start time of coturn after the change'
-          ansible.builtin.command: 'systemctl show --property=ExecMainStartTimestampMonotonic --value coturn'
-          register: 'app_coturn__test_start_after'
-          changed_when: false
-
-        - name: 'Assert coturn restarted'
-          ansible.builtin.assert:
-            that:
-              - app_coturn__test_start_after.stdout | int > app_coturn__test_start_before.stdout | int
-            fail_msg: "{{ app_coturn__test_start_before.stdout }} -> {{ app_coturn__test_start_after.stdout }}"
+    - name: 'Assert the restart of coturn'
+      ansible.builtin.assert:
+        that:
+          - (app_coturn__test_start_after.stdout | int > app_coturn__test_start_before.stdout | int) == app_coturn__test_case.expect.restart
+        fail_msg: "{{ app_coturn__test_start_before.stdout }} -> {{ app_coturn__test_start_after.stdout }}, expected restart: {{ app_coturn__test_case.expect.restart }}"

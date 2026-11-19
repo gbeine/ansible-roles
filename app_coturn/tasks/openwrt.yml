@@ -49,21 +49,31 @@
         - app_coturn__openwrt_missing | bool
         - "'manager=opkg' in app_coturn__openwrt_tools.stdout_lines | map('trim')"
 
-    # In check mode the package of a first installation is missing, there is no configuration to compare
+    # In check mode the package of a first installation is missing, the files of the package do not exist then
+    - name: 'Check the files of coturn'
+      ansible.builtin.raw: >-
+        test -f {{ app_coturn__config_file }} && echo 'config=yes' || echo 'config=no';
+        test -f {{ app_coturn__openwrt_uci_config }} && echo 'uci=yes' || echo 'uci=no'
+      register: 'app_coturn__openwrt_files'
+      changed_when: false
+      check_mode: false
+
     - name: 'Configure coturn'
-      when: not (ansible_check_mode and app_coturn__openwrt_missing | bool)
+      vars:
+        app_coturn__openwrt_config_exists: "{{ 'config=yes' in app_coturn__openwrt_files.stdout_lines | map('trim') }}"
+        app_coturn__openwrt_uci_exists: "{{ 'uci=yes' in app_coturn__openwrt_files.stdout_lines | map('trim') }}"
+        app_coturn__openwrt_config_current: >-
+          {{ (app_coturn__openwrt_current_config.content | b64decode) if app_coturn__openwrt_config_exists | bool else '' }}
       block:
 
-        - name: 'Read the current configurations of coturn'
+        - name: 'Read the current configuration of coturn'
           community.openwrt.slurp:
-            src: "{{ item }}"
-          loop:
-            - "{{ app_coturn__config_file }}"
-            - "{{ app_coturn__openwrt_uci_config }}"
-          register: 'app_coturn__openwrt_current'
+            src: "{{ app_coturn__config_file }}"
+          register: 'app_coturn__openwrt_current_config'
           check_mode: false
+          when: app_coturn__openwrt_config_exists | bool
 
-        # The backup contains the file before this change, it is only written if the file changes
+        # The backup contains the file before this change, it is only written if the file existed and changes
         - name: 'Create the backup directory on the controller'
           ansible.builtin.file:
             path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
@@ -71,17 +81,21 @@
             mode: '0700'
           delegate_to: 'localhost'
           check_mode: false
-          when: app_coturn__openwrt_current.results[0].content | b64decode != app_coturn__openwrt_content
+          when:
+            - app_coturn__openwrt_config_exists | bool
+            - app_coturn__openwrt_config_current != app_coturn__openwrt_content
 
         - name: 'Store the backup of turnserver.conf on the controller'
           ansible.builtin.copy:
-            content: "{{ app_coturn__openwrt_current.results[0].content | b64decode }}"
+            content: "{{ app_coturn__openwrt_config_current }}"
             dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/turnserver.conf"
             mode: '0600'
           delegate_to: 'localhost'
           check_mode: false
           diff: false
-          when: app_coturn__openwrt_current.results[0].content | b64decode != app_coturn__openwrt_content
+          when:
+            - app_coturn__openwrt_config_exists | bool
+            - app_coturn__openwrt_config_current != app_coturn__openwrt_content
 
         # turnserver reads the file as root and changes to the user turnserver afterwards
         - name: 'Write the configuration'
@@ -93,44 +107,55 @@
           diff: false
           register: 'app_coturn__openwrt_config_result'
 
-        # The init script starts turnserver only with enabled '1', log_stderr, log_stdout and options stay with the package
-        - name: 'Set enabled of the UCI configuration of coturn'
-          community.openwrt.uci:
-            command: 'set'
-            key: 'turnserver.general.enabled'
-            value: "{{ '1' if app_coturn__openwrt_enabled | bool else '0' }}"
+        # The UCI configuration is part of the package, uci fails without it (check mode without the installation)
+        - name: 'Configure the UCI configuration of coturn'
+          when: app_coturn__openwrt_uci_exists | bool
+          block:
 
-        - name: 'Read the pending changes of the UCI configuration of coturn'
-          community.openwrt.uci:
-            command: 'changes'
-            config: 'turnserver'
-          register: 'app_coturn__openwrt_pending'
-          check_mode: false
+            - name: 'Read the current UCI configuration of coturn'
+              community.openwrt.slurp:
+                src: "{{ app_coturn__openwrt_uci_config }}"
+              register: 'app_coturn__openwrt_current_uci'
+              check_mode: false
 
-        - name: 'Create the backup directory on the controller for the UCI configuration'
-          ansible.builtin.file:
-            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
-            state: 'directory'
-            mode: '0700'
-          delegate_to: 'localhost'
-          check_mode: false
-          when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+            # The init script starts turnserver only with enabled '1', log_stderr, log_stdout and options stay with the package
+            - name: 'Set enabled of the UCI configuration of coturn'
+              community.openwrt.uci:
+                command: 'set'
+                key: 'turnserver.general.enabled'
+                value: "{{ '1' if app_coturn__openwrt_enabled | bool else '0' }}"
 
-        - name: 'Store the backup of the UCI configuration on the controller'
-          ansible.builtin.copy:
-            content: "{{ app_coturn__openwrt_current.results[1].content | b64decode }}"
-            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/turnserver"
-            mode: '0600'
-          delegate_to: 'localhost'
-          check_mode: false
-          when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+            - name: 'Read the pending changes of the UCI configuration of coturn'
+              community.openwrt.uci:
+                command: 'changes'
+                config: 'turnserver'
+              register: 'app_coturn__openwrt_pending'
+              check_mode: false
 
-        - name: 'Commit the UCI configuration of coturn'
-          community.openwrt.uci:
-            command: 'commit'
-            config: 'turnserver'
-          register: 'app_coturn__openwrt_commit_result'
-          when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+            - name: 'Create the backup directory on the controller for the UCI configuration'
+              ansible.builtin.file:
+                path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+                state: 'directory'
+                mode: '0700'
+              delegate_to: 'localhost'
+              check_mode: false
+              when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+
+            - name: 'Store the backup of the UCI configuration on the controller'
+              ansible.builtin.copy:
+                content: "{{ app_coturn__openwrt_current_uci.content | b64decode }}"
+                dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/turnserver"
+                mode: '0600'
+              delegate_to: 'localhost'
+              check_mode: false
+              when: app_coturn__openwrt_pending.changes | default({}) | length > 0
+
+            - name: 'Commit the UCI configuration of coturn'
+              community.openwrt.uci:
+                command: 'commit'
+                config: 'turnserver'
+              register: 'app_coturn__openwrt_commit_result'
+              when: app_coturn__openwrt_pending.changes | default({}) | length > 0
 
         # /etc/init.d/turnserver restart starts the new process while the former one still holds the ports,
         # the role stops turnserver and waits until the process has ended before it starts it again

@@ -10,6 +10,11 @@
   vars:
     app_coturn__test_case: "{{ app_coturn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -70,40 +75,40 @@
           message: 'an invalid boolean'
           search: '^enabled has to be a boolean: yes$'
 
-    - name: 'Run app_coturn with the changed configuration'
-      when: app_coturn__test_case.side_effect is defined
-      block:
+    # molecule-coturn-openwrt changes the realm and has to restart, molecule-coturn-openwrt-default runs again without a change
+    - name: 'Read the process of coturn before the change'
+      ansible.builtin.raw: 'pidof turnserver'
+      register: 'app_coturn__test_pid_before'
+      changed_when: false
 
-        - name: 'Read the process of coturn before the change'
-          ansible.builtin.raw: 'pidof turnserver'
-          register: 'app_coturn__test_pid_before'
-          changed_when: false
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_coturn__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-        - name: 'Set the changed configuration'
-          ansible.builtin.set_fact:
-            coturn_config: "{{ app_coturn__test_case.role_vars.coturn_config | combine(app_coturn__test_case.side_effect) }}"
+    - name: 'Run app_coturn with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_coturn'
 
-        - name: 'Run app_coturn with the changed configuration'
-          ansible.builtin.include_role:
-            name: 'app_coturn'
+    # The role stops turnserver, waits until it has ended and starts it again, the process has a new PID
+    - name: 'Read the process of coturn after the change'
+      ansible.builtin.raw: 'pidof turnserver'
+      register: 'app_coturn__test_pid_after'
+      until: app_coturn__test_pid_after.rc == 0
+      retries: 5
+      delay: 1
+      changed_when: false
+      failed_when: false
 
-        # The role stops turnserver, waits until it has ended and starts it again, the process has a new PID
-        - name: 'Read the process of coturn after the change'
-          ansible.builtin.raw: 'pidof turnserver'
-          register: 'app_coturn__test_pid_after'
-          until: app_coturn__test_pid_after.rc == 0
-          retries: 5
-          delay: 1
-          changed_when: false
-          failed_when: false
-
-        - name: 'Assert coturn restarted'
-          vars:
-            app_coturn__test_pids_before: "{{ app_coturn__test_pid_before.stdout | regex_findall('[0-9]+') }}"
-            app_coturn__test_pids_after: "{{ app_coturn__test_pid_after.stdout | regex_findall('[0-9]+') }}"
-          ansible.builtin.assert:
-            that:
-              - app_coturn__test_pids_before | length > 0
-              - app_coturn__test_pids_after | length > 0
-              - app_coturn__test_pids_after | intersect(app_coturn__test_pids_before) | length == 0
-            fail_msg: "{{ app_coturn__test_pids_before }} -> {{ app_coturn__test_pids_after }}"
+    - name: 'Assert the restart of coturn'
+      vars:
+        app_coturn__test_pids_before: "{{ app_coturn__test_pid_before.stdout | regex_findall('[0-9]+') }}"
+        app_coturn__test_pids_after: "{{ app_coturn__test_pid_after.stdout | regex_findall('[0-9]+') }}"
+      ansible.builtin.assert:
+        that:
+          - app_coturn__test_pids_before | length > 0
+          - app_coturn__test_pids_after | length > 0
+          - (app_coturn__test_pids_after | intersect(app_coturn__test_pids_before) | length == 0) == app_coturn__test_case.expect.restart
+        fail_msg: "{{ app_coturn__test_pids_before }} -> {{ app_coturn__test_pids_after }}, expected restart: {{ app_coturn__test_case.expect.restart }}"
