@@ -25,14 +25,14 @@
           {%- set errors = [] -%}
           {%- set secrets = app_freescout__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('freescout_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`freescout_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('freescout_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`freescout_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of freescout_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `freescout_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -54,8 +54,21 @@
         app_freescout__secrets_in_environment: >-
           {{ (app_freescout__secret_targets + app_freescout__secret_variables + app_freescout__secret_files.values() | list)
              | select('in', app_freescout__environment.keys() | list) | unique | list }}
+        app_freescout__environment_line_breaks: >-
+          {{ app_freescout__environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_freescout__environment_booleans: >-
+          {{ app_freescout__environment | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list }}
         app_freescout__errors: >-
           {%- set errors = [] -%}
+          {%- if app_freescout__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_freescout__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_freescout__environment_booleans | length > 0 -%}
+          {%-   set _ = errors.append('These environment variables are YAML booleans, use the strings \'TRUE\' or \'FALSE\': '
+                                    ~ (app_freescout__environment_booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if app_freescout__environment_missing | length > 0 -%}
           {%-   set _ = errors.append('FreeScout needs the environment variables ' ~ (app_freescout__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_freescout__environment_missing | join(', ')) ~ '.') -%}
           {%- endif -%}
@@ -70,6 +83,7 @@
     # Checks the environment and the secrets of the container after merging freescout_container,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
+      when: 'app_freescout__container.environment is mapping'
       ansible.builtin.assert:
         that:
           - app_freescout__errors | length == 0
@@ -78,7 +92,10 @@
         quiet: true
       vars:
         app_freescout__environment_unknown: >-
-          {{ (app_freescout__container.environment | default({})).keys() | reject('in', app_freescout__environment_allowed) | list }}
+          {{ app_freescout__container.environment.keys() | reject('in', app_freescout__environment_allowed) | list }}
+        app_freescout__environment_line_breaks: >-
+          {{ app_freescout__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_freescout__secrets_unknown: >-
           {{ app_freescout__secrets | map(attribute='target') | reject('in', app_freescout__secret_files.keys() | list) | list }}
         app_freescout__errors: >-
@@ -91,6 +108,10 @@
           {%- endif -%}
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of the image and the keys of FreeScout as FREESCOUT_<KEY> (app_freescout__environment_allowed) and the secrets ' ~ (app_freescout__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_freescout__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_freescout__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -149,24 +170,61 @@
           {% if app_freescout__container.requires is defined %}
           Requires={{ app_freescout__container.requires | join(' ') }}
           {% endif %}
+          {% if app_freescout__container.wants is defined %}
+          Wants={{ app_freescout__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_freescout__container.after is defined %}
+          After={{ app_freescout__container.after | join(' ') }}
+          {% endif %}
+          {% if app_freescout__container.part_of is defined %}
+          PartOf={{ app_freescout__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_freescout__container.binds_to is defined %}
+          BindsTo={{ app_freescout__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_freescout__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_freescout__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_freescout__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_freescout__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_freescout__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_freescout__running: >-
-          {{ (ansible_facts.services[app_freescout__container.name + '.service'].state | default('')) == 'running' }}
-        app_freescout__restart: >-
-          {{ app_freescout__running | bool
-             and (app_freescout__secrets_result is changed
-                  or app_freescout__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start FreeScout'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_freescout__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_freescout__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_freescout__running: >-
+              {{ (ansible_facts.services[app_freescout__container.name + '.service'].state | default('')) == 'running' }}
+            app_freescout__restart: >-
+              {{ app_freescout__running | bool
+                 and (app_freescout__secrets_result is changed
+                      or app_freescout__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ app_freescout__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'app_freescout__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_freescout__container.name ~ ' did not start' ] + app_freescout__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'app_freescout__autoupdate_enabled | bool'

@@ -8,7 +8,12 @@ FreeScout needs a MySQL, MariaDB or PostgreSQL database, the role does not creat
 
 FreeScout is configured completely with environment variables in `freescout_environment`, merged over the default of the role.
 The default sets `TIMEZONE` to `freescout_timezone`, the passwords are passed with `freescout_secrets` (see Secrets).
-Values are strings, e.g. `'TRUE'`.
+Values are strings, e.g. `'TRUE'`, YAML booleans are rejected because podman would pass them as `True`.
+
+FreeScout reads the `.env` file of Laravel, but the file belongs to the image: with `SETUP_TYPE=AUTO` the initialization of the image
+(`init.d/40-freescout` of nfrastack/container-freescout) generates it at every start from the variables of the image and `FREESCOUT_<KEY>`.
+The role therefore never writes the file and passes the options with the environment.
+The time zone of the container is set by podman with `freescout_timezone`, `TZ` is not needed.
 
 The role requires the following variables and checks them before it changes anything:
 
@@ -100,7 +105,17 @@ New versions of FreeScout may add keys, the list in `defaults/main.yml` is gener
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `freescout_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `freescout_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+
+```yaml
+freescout_container:
+  publish: [ '8080:80' ]
+  requires: [ 'mariadb.service' ]
+  after: [ 'mariadb.service' ]
+```
+
 The merge is not recursive, `publish` and `volumes` replace the values of the default completely,
 `freescout_container.environment` replaces the environment including `freescout_environment`, use `freescout_environment` instead.
 For a reverse proxy, e.g. Traefik, the labels are set with `freescout_labels`.
@@ -108,14 +123,21 @@ For a reverse proxy, e.g. Traefik, the labels are set with `freescout_labels`.
 ### Validation
 
 The role checks before any change that only allowed environment variables and secrets are set in the container,
+that the values of the environment contain no line breaks and are no YAML booleans,
 that the required environment variables are set and not empty, that `freescout_secrets` is a list of entries with `name`, `data` and `target` and unique names,
 that the secrets `ADMIN_PASS` and `DB_PASS` exist and that neither a secret nor its file variable is set in `freescout_environment`.
 If `freescout_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the changes of the directories, the secrets and the quadlet unit, the service is neither started nor restarted.
+
 ### Restart and updates
 
 FreeScout is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `freescout_environment`, otherwise it is started and enabled.
+If the start fails, the role stops with the last lines of the journal of the service.
 Updates of the image are done by `container_update` with `freescout_autoupdate_enabled: true` and `freescout_autoupdate_schedule`,
 without `freescout_autoupdate_schedule` the schedule of `container_update` is used.
 
@@ -140,6 +162,9 @@ Now `TIMEZONE` is set to `freescout_timezone`, the image writes it as `APP_TIMEZ
 The environment in `freescout_container.environment` is replaced by `freescout_environment`.
 `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
 The tag `app_freescout` stays, the tag `app` is added.
+`/etc/timezone` and `/etc/localtime` of the host are not mounted anymore, the time zone is set by podman with `freescout_timezone`.
+The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` in `freescout_container` are new.
+YAML booleans and line breaks in the environment are rejected now, use `'TRUE'` and `'FALSE'`.
 
 ### Tests
 
@@ -149,15 +174,19 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-freescout-default` | Only the mandatory variables and the secrets of the admin and the database |
-| `molecule-freescout` | IPv6, labels, `ADMIN_FIRST_NAME`, `FREESCOUT_APP_LOCALE`, the mail server and its password from a secret with the target `FREESCOUT_MAIL_PASSWORD` |
+| `molecule-freescout` | IPv6, labels, dependencies, `ADMIN_FIRST_NAME`, `FREESCOUT_APP_LOCALE`, the mail server and its password from a secret with the target `FREESCOUT_MAIL_PASSWORD` |
 
 `prepare` creates the podman network, pulls the images and starts a MariaDB container as database.
-`side_effect` runs the role with `freescout_container` not a dictionary, an empty `APP_URL`, a secret without `target`, without the secret of the database password,
-the admin password and the file variable of the database password in the environment, an unknown environment variable in `freescout_environment` and in `freescout_container.environment` and an unknown secret
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `freescout_container` not a dictionary, an empty `APP_URL`, `freescout_secrets` not a list, a secret without `target`,
+without the secret of the database password, the admin password and the file variable of the database password in the environment,
+an unknown environment variable in `freescout_environment` and in `freescout_container.environment`, an unknown secret,
+a line break and a YAML boolean in the environment
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it waits until the first start of FreeScout on `molecule-freescout` has finished and changes `FREESCOUT_APP_LOCALE`,
-the quadlet unit changes and FreeScout has to restart.
-`verify` checks the quadlet unit with the mounted secrets, the service, the directories, the addresses and the environment of the container
+then it waits until the first start of FreeScout has finished, changes `FREESCOUT_APP_LOCALE` on `molecule-freescout`,
+the quadlet unit changes and FreeScout has to restart, `molecule-freescout-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the mounted secrets and the dependencies and without the time zone files of the host,
+the service without automatic restarts, the directories, the addresses, the time zone and the environment of the container
 with the file variables set by the role and without passwords,
 waits until the login page is served, logs in as admin and checks the `.env` file of FreeScout, e.g. `APP_TIMEZONE`, `APP_LOCALE` and `MAIL_PASSWORD`.
 

@@ -11,6 +11,11 @@
     app_freescout__test_checked_files:
       - "{{ app_freescout__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -53,7 +58,7 @@
             data: 'molecule-admin-password'
         app_freescout__test_invalid:
           message: 'a secret without target'
-          search: '^freescout_secrets entries need name, data and target$'
+          search: '^`freescout_secrets` entries need name, data and target$'
 
     - name: 'Run app_freescout without the secret of the database password (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -105,8 +110,32 @@
           message: 'an unknown secret'
           search: 'Unknown secrets: FREESCOUT_MAIL_USERNAME\.'
 
+    - name: 'Run app_freescout with freescout_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freescout_secrets: 'freescout_admin_password'
+        app_freescout__test_invalid:
+          message: 'freescout_secrets not a list'
+          search: '^`freescout_secrets` has to be a list$'
+
+    - name: 'Run app_freescout with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freescout_environment: "{{ app_freescout__test_case.role_vars.freescout_environment | combine({'ADMIN_FIRST_NAME': 'Mole\ncule'}) }}"
+        app_freescout__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: ADMIN_FIRST_NAME\.'
+
+    - name: 'Run app_freescout with a YAML boolean in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freescout_environment: "{{ app_freescout__test_case.role_vars.freescout_environment | combine({'ENABLE_AUTO_UPDATE': true}) }}"
+        app_freescout__test_invalid:
+          message: 'a YAML boolean in the environment'
+          search: 'use the strings .TRUE. or .FALSE.: ENABLE_AUTO_UPDATE\.'
+
+    # molecule-freescout changes the locale and has to restart, molecule-freescout-default runs again without a change
     - name: 'Run app_freescout with the changed role variables'
-      when: app_freescout__test_case.side_effect is defined
       block:
 
         # The first start creates the admin after migrating the database,
@@ -145,8 +174,8 @@
         - name: 'Assert the changed quadlet unit and the restart of the service'
           ansible.builtin.assert:
             that:
-              - app_freescout__quadlet_result is changed
-              - app_freescout__test_started_after.stdout | int > app_freescout__test_started_before.stdout | int
+              - (app_freescout__quadlet_result is changed) == app_freescout__test_case.expect.restart
+              - (app_freescout__test_started_after.stdout | int > app_freescout__test_started_before.stdout | int) == app_freescout__test_case.expect.restart
             fail_msg: >-
               quadlet changed: {{ app_freescout__quadlet_result is changed }},
               start before {{ app_freescout__test_started_before.stdout }}, after {{ app_freescout__test_started_after.stdout }}

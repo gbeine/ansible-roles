@@ -30,6 +30,9 @@
           - app_freescout__expect.quadlet | reject('in', app_freescout__test_quadlet_lines) | list | length == 0
           # The passwords are mounted as files, they are never part of the environment
           - app_freescout__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - ('Timezone=' + app_freescout__test_case.role_vars.freescout_timezone) in app_freescout__test_quadlet_lines
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - app_freescout__test_quadlet_lines | select('match', '(' ~ (app_freescout__test_quadlet_absent | join('|')) ~ ')') | list | length == 0
         fail_msg: "{{ app_freescout__test_quadlet.content | b64decode }}"
       vars:
         app_freescout__test_quadlet_lines: "{{ (app_freescout__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -69,8 +72,11 @@
           - app_freescout__expect.ip6 is none or app_freescout__test_net.GlobalIPv6Address == app_freescout__expect.ip6
           - app_freescout__expect.env | reject('in', app_freescout__test_env) | list | length == 0
           - app_freescout__test_env | select('match', '(ADMIN_PASS|DB_PASS|FREESCOUT_MAIL_PASSWORD)=') | list | length == 0
+          - app_freescout__test_env | select('match', 'TZ=') | list | length == 0
+          - app_freescout__test_container.Config.Timezone == app_freescout__test_case.role_vars.freescout_timezone
         fail_msg: >-
           IPv4 {{ app_freescout__test_net.IPAddress }}, IPv6 {{ app_freescout__test_net.GlobalIPv6Address }},
+          time zone {{ app_freescout__test_container.Config.Timezone | default('') }},
           environment {{ app_freescout__test_env | reject('search', 'PASS') | join(', ') }}
       vars:
         app_freescout__test_container: "{{ (app_freescout__test_inspect.stdout | from_json)[0] }}"
@@ -125,3 +131,23 @@
         app_freescout__test_config_lines: "{{ (app_freescout__test_config.content | b64decode | regex_replace('\"', '')).splitlines() | map('trim') | list }}"
         app_freescout__test_config_set: >-
           {{ app_freescout__test_config_lines | select('match', '^[A-Z0-9_]+=.+$') | map('regex_replace', '=.*$', '') | list }}
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'freescout' ]
+      register: 'app_freescout__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'freescout', '-n', '80', '--no-pager' ]
+      register: 'app_freescout__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_freescout__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_freescout__test_restarts.stdout ] + app_freescout__test_journal.stdout_lines | default([]) }}"
