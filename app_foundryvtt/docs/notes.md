@@ -51,7 +51,7 @@ foundryvtt_container:
 The role checks before any change:
 
 - `foundryvtt_container` is a dictionary, merging it with the default fails otherwise
-- `foundryvtt_home` is an absolute path and `foundryvtt_container.name` matches `app_foundryvtt__name_pattern`
+- `foundryvtt_home` is an absolute path
 - only allowed environment variables are set in the container, their values contain no line breaks
 
 ### Check mode
@@ -140,7 +140,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 `check` runs `converge` with `--check` on the new VMs.
 `prepare` creates the podman network and pulls the image.
 `side_effect` runs the role with `foundryvtt_container` not a dictionary, an unknown environment variable, `FOUNDRY_DATA`,
-a line break in the environment, a relative home and an invalid container name
+a line break in the environment and a relative home
 and checks that it fails with the expected message and the quadlet unit and `options.json` are unchanged (tasks marked `expect ERROR`),
 then it changes `NODE_OPTIONS` on `molecule-foundryvtt`, Foundry VTT has to restart,
 `molecule-foundryvtt-default` runs again without a change and must not restart.
