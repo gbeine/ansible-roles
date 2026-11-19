@@ -93,7 +93,6 @@ This prevents unexpected behavior by accident, e.g. by a typo or an option that 
 
 The allowed options are generated from `src/config.c` of [Redis](https://github.com/redis/redis) 8.10.3, without the hidden options,
 plus `rename-command` and `loadmodule`, and from the configurations of RediSearch, RedisTimeSeries and RedisBloom v8.10.1, the modules of the image.
-Former names of options, e.g. `slaveof`, are rejected together with the current name, e.g. `replicaof`.
 New versions of Redis may add options, the list is generated again.
 
 The environment of the container only allows the variables of `docker-entrypoint.sh` of the image, `SKIP_FIX_PERMS` and `SKIP_DROP_PRIVS`,
@@ -121,7 +120,7 @@ The role checks before any change:
 
 - `redis_container` and `redis_config` are dictionaries, merging them with the default fails otherwise
 - `redis_secrets` is a list of entries with `name`, `data` and `target`, unique names and data without line breaks
-- the options of `redis_config` are known, are neither set by the role nor passwords, have no former name, are no `true`, contain no line breaks
+- the options of `redis_config` are known, are neither set by the role nor passwords, are no `true`, contain no line breaks
   and the port is a number
 - `redis_users` is a list of entries with unique and valid names, rules as list without passwords, `nopass`, `on` and `off`, `enabled` as boolean,
   every user except `default` has a password in `redis_passwords`, `redis_passwords` has no passwords of unknown users and no empty passwords
@@ -195,7 +194,7 @@ redis_instances:
 
 - `redis_config` was a string, written to `<redis_home>/data/redis.conf`, but never passed to `redis-server`, Redis always ran with its defaults.
   Now `redis_config` is a dictionary of options and Redis reads `<redis_home>/redis.conf`, convert the former string, e.g. `maxmemory 64mb` to `maxmemory: '64mb'`.
-  The role removes the unused `<redis_home>/data/redis.conf`.
+  Remove the unused `<redis_home>/data/redis.conf`, with an unknown file in `/data` the entrypoint does not fix the permissions of the data.
 - `redis_port` is replaced by `redis_config.port`, `redis_podman_tag` by `redis_version`.
 - `redis_use_podman` was never evaluated and is removed.
 - The user `default` stays without password, users and passwords are new with `redis_users` and `redis_passwords`.
@@ -217,14 +216,14 @@ The scenario `default` uses two VMs:
 | `molecule-redis` | IPv6, labels, the dependencies `wants`, `after` and `requires_mounts_for`, options with a list, the users `default` and `app` with passwords, a disabled user and the secret `masterauth` with a backslash and a double quote |
 
 `prepare` creates the podman network and pulls the image of Redis, `check` runs `converge` with `--check` on the VMs where the role never ran.
-`side_effect` runs the role with `redis_container` and `redis_config` no dictionaries, an unknown option, the former name `slaveof`,
+`side_effect` runs the role with `redis_container` and `redis_config` no dictionaries, an unknown option, the alias `slaveof` as unknown option,
 the option `dir` set by the role, `requirepass`, `masterauth` in `redis_config`, `true` as value, a secret without `target`, an unknown secret,
 a user without password, a password in the rules of a user, an unknown environment variable in `redis_container.environment` and a line break in `redis_environment`
 and checks that it fails with the expected message and the quadlet unit, `redis.conf` and the ACL file are unchanged (tasks marked `expect ERROR`),
 then it waits until Redis answers, shows the log of the service otherwise, and changes `maxmemory` on `molecule-redis`,
 `redis.conf` changes and Redis has to restart, on `molecule-redis-default` the role runs again without a change and Redis must not restart.
 `verify` checks the quadlet unit with the command, the volumes, the mounted secret, the dependencies and no environment on `molecule-redis-default`, the service and the addresses of the container,
-the owner and the permissions of the files, the lines of `redis.conf` and the ACL file without passwords in plain text and the removed file of the former role.
+the owner and the permissions of the files, the lines of `redis.conf` and the ACL file without passwords in plain text.
 With `redis-cli` in the container it checks `PING` without password, on `molecule-redis` it has to fail,
 the number of databases, `masterauth` read from the secret and the loaded module `search` as the user `default`,
 that the user `app` may write its keys `app:*` but neither other keys nor `FLUSHALL` and that the disabled user cannot authenticate.
