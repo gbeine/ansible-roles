@@ -67,7 +67,7 @@ The password of the database (`docspell.server.backend.jdbc.password`) is requir
 `docspell.server.integration-endpoint.http-header.header-value`, `docspell.server.admin-endpoint.secret`,
 `docspell.server.full-text-search.postgresql.jdbc.password`, `docspell.server.backend.jdbc.password`,
 `docspell.server.backend.signup.new-invite-password` and `docspell.server.backend.files.stores.minio.secret-key`.
-A target must not be set in `docspell_config`. The names of the secrets are part of the paths, they consist of letters, digits, `_`, `.` and `-`.
+A target must not be set in `docspell_config`. The names of the secrets are part of the paths.
 
 Without `docspell.server.auth.server-secret` Docspell creates a random secret at every start and the sessions end with every restart.
 
@@ -149,7 +149,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 `prepare` creates the podman network, pulls the images and starts PostgreSQL 17 with a password.
 `check` runs `converge` with `--check` on the new VMs.
-`side_effect` runs the role with `docspell_container` and `docspell_config` not a dictionary, a secret without target, an invalid name of a secret,
+`side_effect` runs the role with `docspell_container` and `docspell_config` not a dictionary, a secret without target,
 without the password of the database, with an unknown secret, the password in the configuration, an unknown option, a changed `bind.address`,
 without `base-url`, a line break in an option and in the environment and an unknown environment variable
 and checks that it fails with the expected message and `docspell.conf` and the quadlet unit are unchanged (tasks marked `expect ERROR`),
