@@ -16,7 +16,9 @@ database_postgresql__hostname: "{{ postgresql_hostname | mandatory }}"
 database_postgresql__timezone: "{{ postgresql_timezone | mandatory }}"
 database_postgresql__labels: "{{ postgresql_labels }}"
 
-database_postgresql__password: "{{ postgresql_password | default('') }}"
+# Secrets with name, data and target, POSTGRES_PASSWORD is the password of the user postgres,
+# only mounted in the container of the initialization
+database_postgresql__secrets: "{{ postgresql_secrets | default([]) }}"
 database_postgresql__passwords: "{{ postgresql_passwords | default({}) }}"
 
 database_postgresql__accounts: "{{ postgresql_accounts | default([]) }}"
@@ -24,7 +26,8 @@ database_postgresql__databases: "{{ postgresql_databases | default([]) }}"
 database_postgresql__privileges: "{{ postgresql_privileges | default([]) }}"
 database_postgresql__slots: "{{ postgresql_slots | default([]) }}"
 
-database_postgresql__settings: "{{ database_postgresql__settings_default | combine(postgresql_settings | default({})) }}"
+# The parameters of postgresql.conf
+database_postgresql__config: "{{ database_postgresql__config_default | combine(postgresql_config | default({})) }}"
 database_postgresql__server_hba: "{{ postgresql_hba | default(database_postgresql__server_hba_default) }}"
 
 # Standby: the configuration and the data are replicated from the primary
@@ -32,8 +35,8 @@ database_postgresql__configure_from_primary: "{{ postgresql_configure_from_prima
 
 database_postgresql__container: "{{ database_postgresql__podman_container_default | combine(postgresql_container | default({})) }}"
 
-# Variables of the image, e.g. POSTGRES_INITDB_ARGS, the role sets POSTGRES_PASSWORD_FILE itself
-database_postgresql__environment: "{{ database_postgresql__environment_default | combine(postgresql_environment | default({})) }}"
+# The variables of the initialization, e.g. POSTGRES_INITDB_ARGS, only passed to the container of the initialization, there is no default
+database_postgresql__environment: "{{ postgresql_environment }}"
 
 database_postgresql__autoupdate_enabled: "{{ postgresql_autoupdate_enabled | default(false) }}"
 database_postgresql__autoupdate_schedule: "{{ postgresql_autoupdate_schedule }}"
@@ -51,8 +54,8 @@ database_postgresql__versions:
     tag: '19rc1-alpine'
     prerelease: true
 
-# The settings initdb writes into a new postgresql.conf of the image
-database_postgresql__settings_default:
+# The parameters initdb writes into a new postgresql.conf of the image
+database_postgresql__config_default:
   listen_addresses: '*'
   max_connections: 100
   shared_buffers: '128MB'
@@ -74,21 +77,42 @@ database_postgresql__gid: 70
 
 database_postgresql__port: 5432
 
-database_postgresql__environment_default: {}
-
-# The password of postgres is mounted as file, the image reads POSTGRES_PASSWORD from the file variable
-database_postgresql__secret_name: 'postgres_password'
+# The password of postgres is mounted as file in the container of the initialization, the image reads POSTGRES_PASSWORD from the file variable
 database_postgresql__secret_files:
   POSTGRES_PASSWORD: 'POSTGRES_PASSWORD_FILE'
+database_postgresql__secret_variables: "{{ database_postgresql__secret_files.keys() | list }}"
+database_postgresql__secrets_required: [ 'POSTGRES_PASSWORD' ]
 database_postgresql__secrets_dir: '/run/secrets'
 
-# Variables of the image (docker-entrypoint.sh of docker-library/postgres) that can be set with postgresql_environment,
-# the other variables (POSTGRES_USER, POSTGRES_DB, PGDATA, …) are set by the role or would break it
+# The data of a secret by its target, the role manages accounts and databases as postgres
+database_postgresql__secret_data: >-
+  {%- set data = {} -%}
+  {%- if database_postgresql__secrets is sequence and database_postgresql__secrets is not string and database_postgresql__secrets is not mapping -%}
+  {%-   for secret in database_postgresql__secrets if secret is mapping and secret.target is defined and secret.data is defined -%}
+  {%-     set _ = data.update({ secret.target: secret.data }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ data }}
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+database_postgresql__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- if database_postgresql__secrets is sequence and database_postgresql__secrets is not string and database_postgresql__secrets is not mapping -%}
+  {%-   for secret in database_postgresql__secrets
+          if secret is mapping and secret.name is defined and secret.target is defined and secret.target in database_postgresql__secret_files -%}
+  {%-     set _ = environment.update({ database_postgresql__secret_files[secret.target]: database_postgresql__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ environment }}
+
+# Variables of the initialization of the image (docker-entrypoint.sh of docker-library/postgres) that can be set with postgresql_environment,
+# the other variables (POSTGRES_USER, POSTGRES_DB, PGDATA, …) are set by the role or would break it, the image reads no variable after the initialization
 database_postgresql__environment_allowed:
   - 'POSTGRES_INITDB_ARGS'
   - 'POSTGRES_INITDB_WALDIR'
-  # The file variables of the secrets, set by the role
-  - 'POSTGRES_PASSWORD_FILE'
+
+# The names of accounts, databases and replication slots
+database_postgresql__object_name_pattern: '^[A-Za-z0-9_.$-]+$'
 
 database_postgresql__podman_name: 'postgresql'
 database_postgresql__podman_image: 'docker.io/library/postgres'
@@ -96,11 +120,10 @@ database_postgresql__podman_image: 'docker.io/library/postgres'
 database_postgresql__podman_home: "{{ database_postgresql__home }}"
 database_postgresql__podman_data_root: "{{ database_postgresql__podman_home }}/data"
 database_postgresql__podman_data_dir: "{{ database_postgresql__podman_data_root }}/{{ database_postgresql__version }}/docker"
-database_postgresql__podman_backup_dir: "{{ database_postgresql__podman_home }}/backup"
 
 database_postgresql__data_root: '/var/lib/postgresql'
-database_postgresql__backup_dir: '/backup'
 
+# The variables and the secrets of the initialization are not part of the quadlet unit, the image reads no variable afterwards
 database_postgresql__podman_container_default:
   name: "{{ database_postgresql__podman_name }}"
   hostname: "{{ database_postgresql__hostname }}"
@@ -110,17 +133,34 @@ database_postgresql__podman_container_default:
   network: "{{ database_postgresql__network }}"
   timezone: "{{ database_postgresql__timezone }}"
   labels: "{{ database_postgresql__labels | default(omit) }}"
-  # Set with postgresql_environment, the file variable of the password is always set
-  environment: >-
-    {{ database_postgresql__environment
-       | combine({ database_postgresql__secret_files.POSTGRES_PASSWORD: database_postgresql__secrets_dir ~ '/' ~ database_postgresql__secret_name }) }}
-  secrets:
-    - "{{ database_postgresql__secret_name }},type=mount,target={{ database_postgresql__secrets_dir }}/{{ database_postgresql__secret_name }}"
+  # The script postgresql of backup_scripts uses the container postgresql
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
     - "{{ database_postgresql__podman_data_root }}:{{ database_postgresql__data_root }}"
-    - "{{ database_postgresql__podman_backup_dir }}:{{ database_postgresql__backup_dir }}"
+
+# The environment of the container of the initialization: postgresql_environment and the file variable of the password
+database_postgresql__init_environment: >-
+  {{ (database_postgresql__environment if database_postgresql__environment is defined and database_postgresql__environment is mapping else {})
+     | combine(database_postgresql__environment_secrets_files) }}
+
+# The image initializes the data directory if it contains no PG_VERSION (docker-entrypoint.sh of docker-library/postgres)
+database_postgresql__initialized_path: "{{ database_postgresql__podman_data_dir }}/PG_VERSION"
+
+# The message of the image after the initialization
+database_postgresql__init_message: 'PostgreSQL init process complete; ready for start up.'
+
+database_postgresql__podman_init_name: "{{ database_postgresql__container.name }}-init"
+
+# The podman secrets of postgresql_secrets, only mounted in the container of the initialization for the user postgres,
+# the entrypoint reads the file after switching to postgres, entries without name are left out, the validation of the secrets reports them
+database_postgresql__podman_init_secrets: >-
+  {%- set secrets = [] -%}
+  {%- if database_postgresql__secrets is sequence and database_postgresql__secrets is not string and database_postgresql__secrets is not mapping -%}
+  {%-   for secret in database_postgresql__secrets if secret is mapping and secret.name is defined -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ database_postgresql__secrets_dir ~ '/' ~ secret.name
+                                 ~ ',uid=' ~ database_postgresql__uid ~ ',gid=' ~ database_postgresql__gid ~ ',mode=0400') -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ secrets }}
 
 database_postgresql__server_hba_default:
   # "local" is for Unix domain socket connections only

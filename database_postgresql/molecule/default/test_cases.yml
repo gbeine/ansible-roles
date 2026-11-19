@@ -6,26 +6,46 @@ database_postgresql__test_network:
   gateway: '10.89.0.1'
   netmask: 24
 
+database_postgresql__test_home: '/opt/postgresql-molecule'
+database_postgresql__test_ip: '10.89.0.40'
+database_postgresql__test_quadlet_path: '/etc/containers/systemd/postgresql.container'
+
+# Test credentials only
 database_postgresql__test_password: 'molecule-postgres-password'
 database_postgresql__test_app_password: 'molecule-app-password'
 
-# Role variables shared by all test cases
-database_postgresql__test_common:
-  postgresql_home: '/opt/postgresql-molecule'
-  postgresql_ip: '10.89.0.40'
+# The mandatory variables of all test cases
+database_postgresql__test_mandatory:
+  postgresql_home: "{{ database_postgresql__test_home }}"
+  postgresql_ip: "{{ database_postgresql__test_ip }}"
   postgresql_network: 'podman-molecule'
   postgresql_hostname: 'postgresql-molecule'
   postgresql_timezone: 'Europe/Berlin'
-  postgresql_password: 'molecule-postgres-password'
-  postgresql_settings:
+  postgresql_secrets:
+    - name: 'postgresql_password'
+      data: "{{ database_postgresql__test_password }}"
+      target: 'POSTGRES_PASSWORD'
+
+# The options of molecule-postgresql and molecule-postgresql-19
+database_postgresql__test_options:
+  # A WAL segment size of 32 MB instead of 16 MB, only read by initdb
+  postgresql_environment:
+    POSTGRES_INITDB_ARGS: '--wal-segsize=32'
+  postgresql_container:
+    wants: [ 'network-online.target' ]
+    after: [ 'network-online.target' ]
+    requires_mounts_for: [ '/opt/postgresql-molecule' ]
+  postgresql_config:
     max_connections: 50
     log_min_duration_statement: '250ms'
     wal_level: 'logical'
+    # null keeps the parameter commented out with its default
+    shared_buffers: ~
   postgresql_accounts:
     - name: 'molecule_app'
       comment: 'Account of the molecule test'
   postgresql_passwords:
-    molecule_app: 'molecule-app-password'
+    molecule_app: "{{ database_postgresql__test_app_password }}"
   postgresql_databases:
     - name: 'molecule_db'
       owner: 'molecule_app'
@@ -38,27 +58,69 @@ database_postgresql__test_common:
     - name: 'molecule_slot'
       type: 'logical'
 
-# max_connections is changed in side_effect.yml, the running service must be restarted
-database_postgresql__test_side_effect_max_connections: 60
+database_postgresql__test_quadlet_options:
+  - 'Wants=network-online.target'
+  - 'After=network-online.target'
+  - 'RequiresMountsFor=/opt/postgresql-molecule'
+
+# Neither the password nor the variables of the initialization, the time zone or the backup are part of the quadlet unit
+database_postgresql__test_quadlet_absent: [ 'Secret=', 'Environment=', 'Volume=/etc/localtime', 'Volume=/etc/timezone', 'Volume=.*:/backup' ]
 
 database_postgresql__test_cases:
 
-  - name: 'molecule-postgresql'
-    role_vars:
-      postgresql_version: 18
+  # Only the mandatory variables, PostgreSQL 18 without accounts
+  - name: 'molecule-postgresql-default'
+    role_vars: "{{ database_postgresql__test_mandatory }}"
     image: 'docker.io/library/postgres:18-alpine'
+    # Runs again without a change, PostgreSQL must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      version: '18'
+      max_connections: '100'
+      wal_segment_size: '16MB'
+      shared_buffers: 'shared_buffers = .128MB.'
+      default_setting: '#standard_conforming_strings = on'
+      quadlet: []
+      accounts: false
+      restart: false
+
+  # PostgreSQL 18 with the options, side_effect changes max_connections
+  - name: 'molecule-postgresql'
+    role_vars: "{{ database_postgresql__test_mandatory | combine(database_postgresql__test_options, { 'postgresql_version': 18 }) }}"
+    image: 'docker.io/library/postgres:18-alpine'
+    # The complete configuration with max_connections 60, PostgreSQL has to restart
+    side_effect:
+      role_vars:
+        postgresql_config:
+          max_connections: 60
+          log_min_duration_statement: '250ms'
+          wal_level: 'logical'
+          shared_buffers: ~
     expect:
       version: '18'
       max_connections: '60'
+      wal_segment_size: '32MB'
+      shared_buffers: '#shared_buffers = 128MB'
       # Only in the configuration of PostgreSQL 18
       default_setting: '#standard_conforming_strings = on'
+      quadlet: "{{ database_postgresql__test_quadlet_options }}"
+      accounts: true
+      restart: true
 
+  # PostgreSQL 19 with the options
   - name: 'molecule-postgresql-19'
-    role_vars:
-      postgresql_version: 19
+    role_vars: "{{ database_postgresql__test_mandatory | combine(database_postgresql__test_options, { 'postgresql_version': 19 }) }}"
     image: 'docker.io/library/postgres:19rc1-alpine'
+    side_effect:
+      role_vars: {}
     expect:
       version: '19'
       max_connections: '50'
+      wal_segment_size: '32MB'
+      shared_buffers: '#shared_buffers = 128MB'
       # Only in the configuration of PostgreSQL 19
       default_setting: '#ssl_sni = off'
+      quadlet: "{{ database_postgresql__test_quadlet_options }}"
+      accounts: true
+      restart: false

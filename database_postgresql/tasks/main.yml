@@ -32,7 +32,65 @@
           - database_postgresql__container | length > 0
         quiet: true
 
-    # Checks the environment and the secrets of the container after merging postgresql_container,
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_postgresql__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_postgresql__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_postgresql__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('postgresql_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('postgresql_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of postgresql_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # initdb reads the password of postgres as one line (--pwfile), the entrypoint stops without password
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_postgresql__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # Without postgresql_environment there is no environment to check
+        database_postgresql__environment_set: >-
+          {{ database_postgresql__environment if database_postgresql__environment is defined and database_postgresql__environment is mapping else {} }}
+        database_postgresql__secret_targets: "{{ database_postgresql__secrets | map(attribute='target') | list }}"
+        # A standby gets its data from the primary, it is not initialized
+        database_postgresql__secrets_missing: >-
+          {{ [] if database_postgresql__configure_from_primary | bool
+             else database_postgresql__secrets_required | reject('in', database_postgresql__secret_targets) | list }}
+        database_postgresql__secrets_in_environment: >-
+          {{ (database_postgresql__secret_targets + database_postgresql__secret_variables + database_postgresql__secret_files.values() | list)
+             | select('in', database_postgresql__environment_set.keys() | list) | unique | list }}
+        database_postgresql__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_postgresql__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('PostgreSQL needs the secrets ' ~ (database_postgresql__secrets_required | join(', ')) ~ ', missing: ' ~ (database_postgresql__secrets_missing | join(', ')) ~ '.') -%}
+          {%- elif 'POSTGRES_PASSWORD' in database_postgresql__secret_data -%}
+          {%-   set password = database_postgresql__secret_data.POSTGRES_PASSWORD | string -%}
+          {%-   if password | length == 0 or (password ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('The password of postgres must not be empty and must not contain line breaks, initdb reads it as one line.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if database_postgresql__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in postgresql_environment: ' ~ (database_postgresql__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The variables of postgresql_environment are only passed to the container of the initialization,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
@@ -42,40 +100,48 @@
         fail_msg: "{{ database_postgresql__errors | join(' ') }}"
         quiet: true
       vars:
+        database_postgresql__environment_set: >-
+          {{ database_postgresql__environment if database_postgresql__environment is defined and database_postgresql__environment is mapping else {} }}
         database_postgresql__environment_unknown: >-
-          {{ (database_postgresql__container.environment | default({})).keys()
-             | reject('in', database_postgresql__environment_allowed) | list }}
-        database_postgresql__secrets_in_environment: >-
-          {{ database_postgresql__secret_files.values() | select('in', database_postgresql__environment.keys() | list) | list }}
-        # The secrets of the container are omit without secrets
-        database_postgresql__container_secrets: >-
-          {{ database_postgresql__container.secrets
-             if database_postgresql__container.secrets is sequence and database_postgresql__container.secrets is not string
-             else [] }}
+          {{ database_postgresql__environment_set.keys() | reject('in', database_postgresql__environment_allowed) | reject('in', database_postgresql__secret_variables)
+             | reject('in', database_postgresql__secret_files.values() | list) | list }}
+        database_postgresql__environment_line_breaks: >-
+          {{ database_postgresql__environment_set | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        # The quadlet unit has no environment, the image reads no variable after the initialization
+        database_postgresql__environment_container: >-
+          {{ database_postgresql__container.environment.keys() | list if database_postgresql__container.environment is defined and database_postgresql__container.environment is mapping else [] }}
         database_postgresql__secrets_unknown: >-
-          {{ database_postgresql__container_secrets | map('regex_replace', ',.*$', '')
-             | reject('eq', database_postgresql__secret_name) | list }}
+          {{ database_postgresql__secrets | map(attribute='target') | reject('in', database_postgresql__secret_variables) | list }}
+        # The secrets are only mounted in the container of the initialization
+        database_postgresql__secrets_container: "{{ database_postgresql__container.secrets is defined }}"
         database_postgresql__errors: >-
           {%- set errors = [] -%}
+          {%- if database_postgresql__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_postgresql__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_postgresql__environment_container | length > 0 -%}
+          {%-   set _ = errors.append('The image reads no variables at runtime, the variables of the initialization are set with postgresql_environment: ' ~ (database_postgresql__environment_container | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_postgresql__secrets_container | bool -%}
+          {%-   set _ = errors.append('The quadlet unit has no secrets, the password of postgres is set with postgresql_secrets and only mounted in the container of the initialization.') -%}
+          {%- endif -%}
           {%- if database_postgresql__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_postgresql__environment_unknown | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if database_postgresql__secrets_in_environment | length > 0 -%}
-          {%-   set _ = errors.append('The file variable of the password is set by the role and must not be set in postgresql_environment: ' ~ (database_postgresql__secrets_in_environment | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if database_postgresql__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_postgresql__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (database_postgresql__environment_allowed | join(', ')) ~ ' and the secret ' ~ (database_postgresql__secret_name) ~ ' of postgresql_password.') -%}
+          {%- if database_postgresql__environment_unknown | length > 0 or database_postgresql__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the initialization ' ~ (database_postgresql__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (database_postgresql__secret_variables | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
-    - name: 'Include settings of the version'
+    - name: 'Include the parameters of the version'
       ansible.builtin.include_vars:
         file: "settings-{{ database_postgresql__version | int }}.yml"
 
-    - name: 'Validate settings, accounts and access rules'
+    - name: 'Validate the configuration, accounts and access rules'
       ansible.builtin.assert:
         that:
           - database_postgresql__errors | length == 0
@@ -83,31 +149,52 @@
         fail_msg: "{{ database_postgresql__errors | join(' ') }}"
         quiet: true
       vars:
-        database_postgresql__unknown_settings: >-
-          {{ database_postgresql__settings.keys()
-             | reject('in', database_postgresql__release_settings | map(attribute='name') | list)
-             | reject('search', '\.') | sort }}
-        database_postgresql__accounts_without_password: >-
-          {{ database_postgresql__accounts | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
-             | reject('in', database_postgresql__passwords.keys() | list) | list }}
         database_postgresql__errors: >-
           {%- set errors = [] -%}
-          {%- if database_postgresql__password | length == 0 -%}
-          {%-   set _ = errors.append('PostgreSQL needs postgresql_password for the user postgres.') -%}
+          {%- set config = database_postgresql__config -%}
+          {#- combine fails without a dictionary on most Ansible versions, the role checks it anyway -#}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('postgresql_config has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set unknown = config.keys() | reject('in', database_postgresql__release_settings | map(attribute='name') | list) | reject('search', '\\.') | sort -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown parameters for PostgreSQL ' ~ database_postgresql__version ~ ': ' ~ (unknown | join(', ')) ~ ', parameters of extensions need a dot in the name, e.g. pg_stat_statements.track.') -%}
+          {%-   endif -%}
+          {%-   set invalid = [] -%}
+          {%-   for key, value in config.items() if value is not none and value is not boolean and value is not number
+                  and (value is not string or (value ~ '.').splitlines() | length > 1) -%}
+          {%-     set _ = invalid.append(key) -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The values of postgresql_config have to be strings without line breaks, numbers or booleans, null removes a parameter: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
-          {%- if database_postgresql__unknown_settings | length > 0 -%}
-          {%-   set _ = errors.append('Unknown settings for PostgreSQL ' ~ database_postgresql__version ~ ': ' ~ (database_postgresql__unknown_settings | join(', ')) ~ ', settings of extensions need a dot in the name, e.g. pg_stat_statements.track.') -%}
-          {%- endif -%}
-          {%- if database_postgresql__accounts_without_password | length > 0 -%}
-          {%-   set _ = errors.append('Accounts without password in postgresql_passwords: ' ~ (database_postgresql__accounts_without_password | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- for name, entries in [ ['postgresql_accounts', database_postgresql__accounts], ['postgresql_databases', database_postgresql__databases], ['postgresql_slots', database_postgresql__slots] ] -%}
-          {%-   if entries | reject('mapping') | list | length > 0 or entries | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
-          {%-     set _ = errors.append(name ~ ' entries need name.') -%}
+          {%- set lists = { 'postgresql_accounts': database_postgresql__accounts, 'postgresql_databases': database_postgresql__databases, 'postgresql_slots': database_postgresql__slots } -%}
+          {%- for variable, entries in lists.items() -%}
+          {%-   if entries is not sequence or entries is string or entries is mapping -%}
+          {%-     set _ = errors.append(variable ~ ' has to be a list.') -%}
+          {%-   elif entries | reject('mapping') | list | length > 0 or entries | select('mapping') | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-     set _ = errors.append(variable ~ ' entries need name.') -%}
+          {%-   else -%}
+          {%-     set invalid = entries | map(attribute='name') | map('string') | reject('match', database_postgresql__object_name_pattern) | list -%}
+          {%-     if invalid | length > 0 -%}
+          {%-       set _ = errors.append('Invalid names in ' ~ variable ~ ': ' ~ (invalid | join(', ')) ~ ', allowed are letters, digits and _ . $ -.') -%}
+          {%-     endif -%}
           {%-   endif -%}
           {%- endfor -%}
+          {%- set passwords = database_postgresql__passwords -%}
+          {%- if passwords is not mapping -%}
+          {%-   set _ = errors.append('postgresql_passwords has to be a dictionary.') -%}
+          {%- elif database_postgresql__accounts is sequence and database_postgresql__accounts is not string -%}
+          {%-   set missing = database_postgresql__accounts | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+                              | reject('in', passwords.keys() | list) | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('Accounts without password in postgresql_passwords: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
           {%- set hba = database_postgresql__server_hba -%}
-          {%- if hba | reject('mapping') | list | length > 0
+          {%- if hba is not sequence or hba is string or hba is mapping
+                 or hba | reject('mapping') | list | length > 0
                  or hba | select('mapping') | rejectattr('type', 'defined') | list | length > 0
                  or hba | select('mapping') | rejectattr('database', 'defined') | list | length > 0
                  or hba | select('mapping') | rejectattr('user', 'defined') | list | length > 0
@@ -149,90 +236,96 @@
              | select('match', '^' + database_postgresql__podman_data_root + '/[0-9]+/docker/PG_VERSION$')
              | map('dirname') | map('dirname') | map('basename') | list }}
 
-    - name: 'Install packages'
+    - name: 'Install the packages for the management of accounts and databases'
       ansible.builtin.apt:
         pkg: "{{ database_postgresql__packages }}"
         install_recommends: false
         cache_valid_time: 3600
+      register: 'database_postgresql__packages_result'
 
-    - name: 'Create directories'
+    - name: 'Create the data directory'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
-        owner: "{{ item.owner | default('root') }}"
-        group: "{{ item.group | default('root') }}"
-        mode: "{{ item.mode | default('0755') }}"
+        dest: "{{ database_postgresql__podman_data_root }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
         state: 'directory'
-      loop:
-        - dest: "{{ database_postgresql__podman_data_root }}"
-        - dest: "{{ database_postgresql__podman_backup_dir }}"
-      loop_control:
-        label: "{{ item.dest }}"
 
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
         state: 'present'
-        name: "{{ database_postgresql__secret_name }}"
-        data: "{{ database_postgresql__password }}"
-      register: 'database_postgresql__secrets_result'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_postgresql__secrets }}"
+
+    - name: 'Find PG_VERSION of an initialized PostgreSQL'
+      ansible.builtin.stat:
+        path: "{{ database_postgresql__initialized_path }}"
+      register: 'database_postgresql__initialized'
+
+    # In check mode the accounts and databases are compared if PostgreSQL is initialized and psycopg2 is installed,
+    # on a fresh host both are missing
+    - name: 'Decide whether the accounts and databases are compared'
+      ansible.builtin.set_fact:
+        database_postgresql__manage: >-
+          {{ not (database_postgresql__configure_from_primary | bool)
+             and (not ansible_check_mode
+                  or (database_postgresql__initialized.stat.exists and database_postgresql__packages_result is not changed)) }}
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Install container'
-      containers.podman.podman_container:
-        name: "{{ database_postgresql__container.name }}"
-        hostname: "{{ database_postgresql__container.hostname }}"
-        image: "{{ database_postgresql__container.image }}"
-        ip: "{{ database_postgresql__container.ip }}"
-        ip6: "{{ database_postgresql__container.ipv6 | default(omit) }}"
-        network: "{{ database_postgresql__container.network }}"
-        timezone: "{{ database_postgresql__container.timezone }}"
-        env: "{{ database_postgresql__container.environment | default(omit) }}"
-        etc_hosts: "{{ database_postgresql__container.etc_hosts | default(omit) }}"
-        expose: "{{ database_postgresql__container.expose | default(omit) }}"
-        label: "{{ database_postgresql__container.labels | default(omit) }}"
-        publish: "{{ database_postgresql__container.publish | default(omit) }}"
-        secrets: "{{ database_postgresql__container.secrets | default(omit) }}"
-        volume: "{{ database_postgresql__container.volumes | default(omit) }}"
-        quadlet_options: |
+    # The image only initializes a data directory without PG_VERSION: initdb with the password of the secret,
+    # the variables of postgresql_environment, a temporary server for the init scripts, then it starts PostgreSQL.
+    # The container of the initialization runs once without network and is removed afterwards, a standby gets its data from the primary.
+    - name: 'Initialize PostgreSQL'
+      when:
+        - not ansible_check_mode
+        - not database_postgresql__initialized.stat.exists
+        - not database_postgresql__configure_from_primary | bool
+      block:
 
-          [Install]
-          WantedBy=default.target
+        - name: 'Run the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_postgresql__podman_init_name }}"
+            image: "{{ database_postgresql__container.image }}"
+            network: 'none'
+            env: "{{ database_postgresql__init_environment }}"
+            secrets: "{{ database_postgresql__podman_init_secrets }}"
+            volume: "{{ database_postgresql__container.volumes }}"
+            detach: true
+            state: 'started'
+          register: 'database_postgresql__init_result'
 
-          [Service]
-          {% if database_postgresql__container.exec_start_pre is defined %}
-          {% for command in database_postgresql__container.exec_start_pre %}
-          ExecStartPre={{ command }}
-          {% endfor %}
-          {% endif %}
-          RestartSec=5
-          Restart=always
+        - name: 'Wait for the end of the initialization'
+          ansible.builtin.command:
+            argv: [ 'podman', 'logs', "{{ database_postgresql__podman_init_name }}" ]
+          register: 'database_postgresql__init_log'
+          changed_when: false
+          failed_when: false
+          until: database_postgresql__init_message in (database_postgresql__init_log.stdout ~ database_postgresql__init_log.stderr)
+          retries: 60
+          delay: 2
 
-          [Unit]
-          {% if database_postgresql__container.requires is defined %}
-          Requires={{ database_postgresql__container.requires | join(' ') }}
-          {% endif %}
-        restart_policy: 'no'
-        state: 'quadlet'
-      register: 'database_postgresql__quadlet_result'
+        - name: 'Assert the initialization'
+          ansible.builtin.assert:
+            that:
+              - database_postgresql__init_message in (database_postgresql__init_log.stdout ~ database_postgresql__init_log.stderr)
+            fail_msg: >-
+              The initialization of PostgreSQL failed, remove the content of {{ database_postgresql__podman_data_dir }} before the next run,
+              the initialization only runs without PG_VERSION.
+              {{ (database_postgresql__init_log.stdout_lines | default([]) + database_postgresql__init_log.stderr_lines | default([]))[-30:] }}
+            quiet: true
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_postgresql__container.name }}"
-        daemon_reload: true
-        state: 'started'
-        enabled: true
-      when: 'not ansible_check_mode'
+      always:
 
-    # On the first start initdb creates the cluster and the configuration files of the image
-    - name: 'Wait for PostgreSQL'
-      ansible.builtin.wait_for:
-        host: "{{ database_postgresql__container.ip }}"
-        port: "{{ database_postgresql__port }}"
-        timeout: 120
-      when: 'not ansible_check_mode'
+        - name: 'Remove the container of the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_postgresql__podman_init_name }}"
+            state: 'absent'
 
+    # The configuration is written before the start, after the initialization
     - name: 'Generate postgresql.conf'
       ansible.builtin.copy:
         content: |
@@ -268,14 +361,14 @@
           #{{ (' ' ~ line) if line | length > 0 else '' }}
           {%     endfor %}
           {%   endif %}
-          {%   set line = (setting.name ~ ' = ' ~ pgvalue(database_postgresql__settings[setting.name]))
-                          if setting.name in database_postgresql__settings
+          {%   set line = (setting.name ~ ' = ' ~ pgvalue(database_postgresql__config_set[setting.name]))
+                          if setting.name in database_postgresql__config_set
                           else ('#' ~ setting.name ~ ' = ' ~ setting.default) %}
           {%   set description = setting.description.splitlines() %}
           {%   if description | length > 0 %}
-          {{ line | fill_up_to(39) }} # {{ description | first }}
+          {{ line | whitespaces_fill_up_to(39) }} # {{ description | first }}
           {%     for text in description[1:] %}
-          {{ '' | fill_up_to(39) }} # {{ text }}
+          {{ '' | whitespaces_fill_up_to(39) }} # {{ text }}
           {%     endfor %}
           {%   else %}
           {{ line }}
@@ -286,7 +379,7 @@
           # CUSTOMIZED OPTIONS
           #------------------------------------------------------------------------------
 
-          {% for name, value in database_postgresql__settings.items()
+          {% for name, value in database_postgresql__config_set.items()
                 if name not in (database_postgresql__release_settings | map(attribute='name')) %}
           {{ name }} = {{ pgvalue(value) }}
           {% endfor %}
@@ -294,6 +387,9 @@
         owner: "{{ database_postgresql__uid }}"
         group: "{{ database_postgresql__gid }}"
         mode: '0600'
+      vars:
+        # null removes a parameter, it stays commented out with its default
+        database_postgresql__config_set: "{{ database_postgresql__config | dict2items | rejectattr('value', 'none') | items2dict }}"
       register: 'database_postgresql__config_result'
       when: 'not database_postgresql__configure_from_primary | bool'
 
@@ -308,37 +404,130 @@
       register: 'database_postgresql__access_result'
       when: 'not database_postgresql__configure_from_primary | bool'
 
-    - name: 'Restart container'
-      ansible.builtin.systemd_service:
+    - name: 'Install container'
+      containers.podman.podman_container:
         name: "{{ database_postgresql__container.name }}"
-        state: 'restarted'
-      when:
-        - not ansible_check_mode
-        - >-
-          database_postgresql__config_result is changed
-          or database_postgresql__access_result is changed
-          or (database_postgresql__running | bool
-              and (database_postgresql__secrets_result is changed or database_postgresql__quadlet_result is changed))
-      vars:
-        database_postgresql__running: >-
-          {{ (ansible_facts.services[database_postgresql__container.name + '.service'].state | default('')) == 'running' }}
-      register: 'database_postgresql__restart_result'
+        hostname: "{{ database_postgresql__container.hostname }}"
+        image: "{{ database_postgresql__container.image }}"
+        ip: "{{ database_postgresql__container.ip }}"
+        ip6: "{{ database_postgresql__container.ipv6 | default(omit) }}"
+        network: "{{ database_postgresql__container.network }}"
+        timezone: "{{ database_postgresql__container.timezone }}"
+        etc_hosts: "{{ database_postgresql__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_postgresql__container.expose | default(omit) }}"
+        label: "{{ database_postgresql__container.labels | default(omit) }}"
+        publish: "{{ database_postgresql__container.publish | default(omit) }}"
+        volume: "{{ database_postgresql__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
 
-    - name: 'Wait for PostgreSQL after the restart'
-      ansible.builtin.wait_for:
-        host: "{{ database_postgresql__container.ip }}"
-        port: "{{ database_postgresql__port }}"
-        timeout: 120
-      when: database_postgresql__restart_result is changed
+          [Service]
+          {% if database_postgresql__container.exec_start_pre is defined %}
+          {% for command in database_postgresql__container.exec_start_pre %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if database_postgresql__container.requires is defined %}
+          Requires={{ database_postgresql__container.requires | join(' ') }}
+          {% endif %}
+          {% if database_postgresql__container.wants is defined %}
+          Wants={{ database_postgresql__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_postgresql__container.after is defined %}
+          After={{ database_postgresql__container.after | join(' ') }}
+          {% endif %}
+          {% if database_postgresql__container.part_of is defined %}
+          PartOf={{ database_postgresql__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_postgresql__container.binds_to is defined %}
+          BindsTo={{ database_postgresql__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_postgresql__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_postgresql__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'database_postgresql__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start PostgreSQL'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_postgresql__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_postgresql__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_postgresql__running: >-
+              {{ (ansible_facts.services[database_postgresql__container.name + '.service'].state | default('')) == 'running' }}
+            database_postgresql__restart: >-
+              {{ database_postgresql__running | bool
+                 and (database_postgresql__quadlet_result is changed
+                      or database_postgresql__config_result is changed
+                      or database_postgresql__access_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_postgresql__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_postgresql__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_postgresql__container.name ~ ' did not start' ] + database_postgresql__start_journal.stdout_lines }}"
+
+    # Roles depending on PostgreSQL and the management of the accounts need the running server,
+    # postgresql_ping fails with the versions of release candidates (19rc1), a query works with every version
+    - name: 'Wait for PostgreSQL'
+      community.postgresql.postgresql_query:
+        login_user: 'postgres'
+        login_password: "{{ database_postgresql__secret_data.POSTGRES_PASSWORD }}"
+        login_host: "{{ database_postgresql__container.ip }}"
+        login_port: "{{ database_postgresql__port }}"
+        login_db: 'postgres'
+        query: 'SELECT 1'
+      register: 'database_postgresql__ready'
+      until: database_postgresql__ready.query_result is defined
+      retries: 60
+      delay: 2
+      failed_when: false
+      no_log: true
+      when: database_postgresql__manage | bool
+
+    - name: 'Read the log of PostgreSQL'
+      when:
+        - database_postgresql__manage | bool
+        - database_postgresql__ready.query_result is not defined
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ database_postgresql__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'database_postgresql__journal'
+      changed_when: false
+      check_mode: false
+
+    - name: 'Assert that PostgreSQL answers'
+      when: database_postgresql__manage | bool
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__ready.query_result is defined
+        fail_msg: "{{ database_postgresql__journal.stdout_lines | default([]) }}"
+        quiet: true
 
     - name: 'Create accounts, databases, privileges and replication slots'
-      when:
-        - not ansible_check_mode
-        - not database_postgresql__configure_from_primary | bool
+      when: database_postgresql__manage | bool
       module_defaults:
         group/community.postgresql.all:
           login_user: 'postgres'
-          login_password: "{{ database_postgresql__password }}"
+          login_password: "{{ database_postgresql__secret_data.POSTGRES_PASSWORD }}"
           login_host: "{{ database_postgresql__container.ip }}"
           login_port: "{{ database_postgresql__port }}"
       block:

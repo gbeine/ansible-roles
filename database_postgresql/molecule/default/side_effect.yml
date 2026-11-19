@@ -1,6 +1,6 @@
 ---
 - name: 'Side effect'
-  hosts: 'molecule-postgresql'
+  hosts: 'all'
   become: true
 
   vars_files:
@@ -8,9 +8,16 @@
 
   vars:
     database_postgresql__test_case: "{{ database_postgresql__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
-    database_postgresql__test_vars: "{{ database_postgresql__test_common | combine(database_postgresql__test_case.role_vars) }}"
+    database_postgresql__test_vars: "{{ database_postgresql__test_case.role_vars }}"
+    database_postgresql__test_config: "{{ database_postgresql__test_vars.postgresql_config | default({}) }}"
     database_postgresql__test_checked_files:
-      - '/etc/containers/systemd/postgresql.container'
+      - "{{ database_postgresql__test_quadlet_path }}"
+      - "{{ database_postgresql__test_home }}/data/{{ database_postgresql__test_case.expect.version }}/docker/postgresql.conf"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
@@ -21,7 +28,7 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+    - name: 'Read the checksums of the checked files before the invalid runs'
       ansible.builtin.stat:
         path: "{{ item }}"
         checksum_algorithm: 'md5'
@@ -29,6 +36,7 @@
       register: 'database_postgresql__test_md5_before'
 
     # Include parameters take precedence over set_fact and only exist inside the include
+
     - name: 'Run database_postgresql with postgresql_container not a dictionary (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
@@ -38,6 +46,39 @@
           # combine of the defaults fails before the role checks anything
           search: 'failed to combine variables, expected dicts'
 
+    - name: 'Run database_postgresql with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_secrets: [ { name: 'postgresql_password', data: 'x' } ]
+        database_postgresql__test_invalid:
+          message: 'a secret without target'
+          search: '^postgresql_secrets entries need name, data and target$'
+
+    - name: 'Run database_postgresql without the secret POSTGRES_PASSWORD (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_secrets: []
+        database_postgresql__test_invalid:
+          message: 'without the secret POSTGRES_PASSWORD'
+          search: '^PostgreSQL needs the secrets POSTGRES_PASSWORD, missing: POSTGRES_PASSWORD\.$'
+
+    - name: 'Run database_postgresql with a line break in the password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_secrets: [ { name: 'postgresql_password', data: "molecule\npassword", target: 'POSTGRES_PASSWORD' } ]
+        database_postgresql__test_invalid:
+          message: 'a line break in the password'
+          search: '^The password of postgres must not be empty and must not contain line breaks, initdb reads it as one line\.$'
+
+    - name: 'Run database_postgresql with the file variable of the password in postgresql_environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_environment:
+          POSTGRES_PASSWORD_FILE: '/run/secrets/postgresql_password'
+        database_postgresql__test_invalid:
+          message: 'the file variable of the password in postgresql_environment'
+          search: '^Secrets and their file variables must not be set in postgresql_environment: POSTGRES_PASSWORD_FILE\.$'
+
     - name: 'Run database_postgresql with POSTGRES_USER in postgresql_environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
@@ -45,53 +86,68 @@
           POSTGRES_USER: 'molecule'
         database_postgresql__test_invalid:
           message: 'POSTGRES_USER in postgresql_environment'
-          search: 'Unknown environment variables: POSTGRES_USER\.'
+          search: '^Unknown environment variables: POSTGRES_USER\.'
 
-    - name: 'Run database_postgresql with the file variable of the password in postgresql_environment (expect ERROR)'
+    - name: 'Run database_postgresql with a line break in postgresql_environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         postgresql_environment:
-          POSTGRES_PASSWORD_FILE: '/run/secrets/postgres_password'
+          POSTGRES_INITDB_ARGS: "--wal-segsize=32\n--data-checksums"
         database_postgresql__test_invalid:
-          message: 'the file variable of the password in postgresql_environment'
-          search: 'must not be set in postgresql_environment:\s+POSTGRES_PASSWORD_FILE\.'
+          message: 'a line break in postgresql_environment'
+          search: '^The environment variables must not contain line breaks: POSTGRES_INITDB_ARGS\.$'
 
-    - name: 'Run database_postgresql with the password in postgresql_container (expect ERROR)'
+    - name: 'Run database_postgresql with a variable in postgresql_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         postgresql_container:
           environment:
             POSTGRES_PASSWORD: 'molecule'
         database_postgresql__test_invalid:
-          message: 'the password in postgresql_container'
-          search: 'Unknown environment variables: POSTGRES_PASSWORD\.'
+          message: 'a variable in postgresql_container'
+          search: '^The image reads no variables at runtime, the variables of the initialization are set with postgresql_environment: POSTGRES_PASSWORD\.$'
 
-    - name: 'Run database_postgresql with an unknown secret in postgresql_container (expect ERROR)'
+    - name: 'Run database_postgresql with a secret in postgresql_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         postgresql_container:
-          secrets:
-            - 'postgres_password,type=mount,target=/run/secrets/postgres_password'
-            - 'postgres_molecule,type=env,target=PGPASSWORD'
+          secrets: [ 'postgresql_password,type=env,target=PGPASSWORD' ]
         database_postgresql__test_invalid:
-          message: 'an unknown secret in postgresql_container'
-          search: 'Unknown secrets: postgres_molecule\.'
+          message: 'a secret in postgresql_container'
+          search: '^The quadlet unit has no secrets, the password of postgres is set with postgresql_secrets'
 
-    - name: 'Run database_postgresql with an unknown setting (expect ERROR)'
+    - name: 'Run database_postgresql with an unknown parameter (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        postgresql_settings: "{{ database_postgresql__test_vars.postgresql_settings | combine({'max_connectionz': 10}) }}"
+        postgresql_config: "{{ database_postgresql__test_config | combine({'max_connectionz': 10}) }}"
         database_postgresql__test_invalid:
-          message: 'an unknown setting'
-          search: '^Unknown settings for PostgreSQL 18: max_connectionz,'
+          message: 'an unknown parameter'
+          search: '^Unknown parameters for PostgreSQL {{ database_postgresql__test_case.expect.version }}: max_connectionz,'
+
+    - name: 'Run database_postgresql with a line break in a value of postgresql_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_config: "{{ database_postgresql__test_config | combine({'log_min_duration_statement': '250ms\nfsync = off'}) }}"
+        database_postgresql__test_invalid:
+          message: 'a line break in a value of postgresql_config'
+          search: 'null removes a parameter: log_min_duration_statement\.$'
 
     - name: 'Run database_postgresql with an account without password (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        postgresql_accounts: "{{ database_postgresql__test_vars.postgresql_accounts + [{'name': 'molecule_nopass'}] }}"
+        postgresql_accounts: "{{ database_postgresql__test_vars.postgresql_accounts | default([]) + [{'name': 'molecule_nopass'}] }}"
         database_postgresql__test_invalid:
           message: 'an account without password'
           search: '^Accounts without password in postgresql_passwords: molecule_nopass\.$'
+
+    - name: 'Run database_postgresql with an invalid name of an account (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        postgresql_accounts: [ { name: 'molecule app' } ]
+        postgresql_passwords: { 'molecule app': 'x' }
+        database_postgresql__test_invalid:
+          message: 'an invalid name of an account'
+          search: '^Invalid names in postgresql_accounts: molecule app, allowed are letters, digits and _ \. \$ -\.$'
 
     - name: 'Run database_postgresql with an entry of postgresql_hba without method (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -105,47 +161,49 @@
           message: 'an entry of postgresql_hba without method'
           search: '^postgresql_hba entries need type, database, user and method\.$'
 
+    # molecule-postgresql changes max_connections and has to restart, the other platforms run again without a change
     - name: 'Read the main PID of PostgreSQL before the change'
-      ansible.builtin.command: 'systemctl show --property=MainPID --value postgresql'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=MainPID', '--value', 'postgresql' ]
       register: 'database_postgresql__test_pid_before'
       changed_when: false
 
-    - name: 'Set the role variables with changed max_connections'
+    - name: 'Set the role variables of the change'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ database_postgresql__test_vars
-           | combine({'postgresql_settings': {'max_connections': database_postgresql__test_side_effect_max_connections}}, recursive=true)
-           | dict2items }}
+      loop: "{{ database_postgresql__test_case.side_effect.role_vars | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Run database_postgresql with changed max_connections'
+    - name: 'Run database_postgresql with the changed variables'
       ansible.builtin.include_role:
         name: 'database_postgresql'
 
     - name: 'Read the main PID of PostgreSQL after the change'
-      ansible.builtin.command: 'systemctl show --property=MainPID --value postgresql'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=MainPID', '--value', 'postgresql' ]
       register: 'database_postgresql__test_pid_after'
       changed_when: false
 
-    - name: 'Assert PostgreSQL was restarted'
+    - name: 'Assert the restart and that the initialization did not run again'
       ansible.builtin.assert:
         that:
           - database_postgresql__test_pid_after.stdout != '0'
-          - database_postgresql__test_pid_after.stdout != database_postgresql__test_pid_before.stdout
-        fail_msg: "PID {{ database_postgresql__test_pid_before.stdout }} -> {{ database_postgresql__test_pid_after.stdout }}"
+          - (database_postgresql__test_pid_after.stdout != database_postgresql__test_pid_before.stdout) == database_postgresql__test_case.expect.restart
+          - database_postgresql__init_result is skipped
+        fail_msg: >-
+          PID {{ database_postgresql__test_pid_before.stdout }} -> {{ database_postgresql__test_pid_after.stdout }},
+          initialization skipped: {{ database_postgresql__init_result is skipped }}
 
-    - name: 'Negative test: another version must fail before changing anything'
+    - name: 'Run PostgreSQL 19 on the data of PostgreSQL 18 (expect ERROR)'
+      when: inventory_hostname == 'molecule-postgresql'
       block:
 
-        - name: 'Set the role variables with PostgreSQL 19'
-          ansible.builtin.set_fact:
-            postgresql_version: 19
-
-        - name: 'Run database_postgresql with PostgreSQL 19, EXPECTED TO FAIL because of the data of PostgreSQL 18'
+        - name: 'Run database_postgresql with PostgreSQL 19, it has to fail because of the data of PostgreSQL 18 (expect ERROR)'
           ansible.builtin.include_role:
             name: 'database_postgresql'
+          vars:
+            postgresql_version: 19
 
         - name: 'Fail, the version change was not detected'
           ansible.builtin.fail:
@@ -159,17 +217,14 @@
               - "'contains data of PostgreSQL 18' in (ansible_failed_result.msg | default(''))"
             fail_msg: "Unexpected failure: {{ ansible_failed_result.msg | default('') }}"
 
-    - name: 'Set the role variables back to PostgreSQL 18'
-      ansible.builtin.set_fact:
-        postgresql_version: 18
+        - name: 'Read the image of the quadlet unit after the failed run'
+          ansible.builtin.command:
+            argv: [ 'grep', '-c', 'postgres:18-alpine', "{{ database_postgresql__test_quadlet_path }}" ]
+          register: 'database_postgresql__test_image_after'
+          changed_when: false
 
-    - name: 'Read the state of the quadlet unit after the failed run'
-      ansible.builtin.command: 'grep -c "postgres:18-alpine" /etc/containers/systemd/postgresql.container'
-      register: 'database_postgresql__test_image_after'
-      changed_when: false
-
-    - name: 'Assert the failed run did not change the container'
-      ansible.builtin.assert:
-        that:
-          - database_postgresql__test_image_after.stdout == '1'
-        fail_msg: "Image line count {{ database_postgresql__test_image_after.stdout }}"
+        - name: 'Assert the failed run did not change the container'
+          ansible.builtin.assert:
+            that:
+              - database_postgresql__test_image_after.stdout == '1'
+            fail_msg: "Image line count {{ database_postgresql__test_image_after.stdout }}"

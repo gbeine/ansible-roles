@@ -9,15 +9,13 @@
   vars:
     database_postgresql__test_case: "{{ database_postgresql__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     database_postgresql__test_expect: "{{ database_postgresql__test_case.expect }}"
-    database_postgresql__test_data_dir: >-
-      {{ database_postgresql__test_common.postgresql_home }}/data/{{ database_postgresql__test_expect.version }}/docker
-    database_postgresql__test_ip: "{{ database_postgresql__test_common.postgresql_ip }}"
+    database_postgresql__test_data_dir: "{{ database_postgresql__test_home }}/data/{{ database_postgresql__test_expect.version }}/docker"
 
   tasks:
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/postgresql.container'
+        src: "{{ database_postgresql__test_quadlet_path }}"
       register: 'database_postgresql__test_quadlet'
 
     - name: 'Assert the quadlet unit'
@@ -25,15 +23,27 @@
         that:
           - database_postgresql__test_lines | select('match', 'Label=') | list | length == 0
           - ('IP=' + database_postgresql__test_ip) in database_postgresql__test_lines
-          # The password is mounted as file, it is neither part of the quadlet unit nor of the environment
-          - "'Secret=postgres_password,type=mount,target=/run/secrets/postgres_password' in database_postgresql__test_lines"
-          - database_postgresql__test_lines | select('match', 'Environment=.*POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password') | list | length == 1
-          - database_postgresql__test_lines | select('search', 'type=env') | list | length == 0
           - ('Image=' + database_postgresql__test_case.image) in database_postgresql__test_lines
+          - database_postgresql__test_expect.quadlet | reject('in', database_postgresql__test_lines) | list | length == 0
+          # The password is only mounted in the container of the initialization
+          - database_postgresql__test_lines | select('match', '(' ~ (database_postgresql__test_quadlet_absent | join('|')) ~ ')') | list | length == 0
           - database_postgresql__test_lines | select('search', database_postgresql__test_password) | list | length == 0
         fail_msg: "Quadlet: {{ database_postgresql__test_quadlet.content | b64decode }}"
       vars:
         database_postgresql__test_lines: "{{ (database_postgresql__test_quadlet.content | b64decode).splitlines() }}"
+
+    - name: 'Read the container of the initialization'
+      ansible.builtin.command:
+        argv: [ 'podman', 'container', 'exists', 'postgresql-init' ]
+      register: 'database_postgresql__test_init_container'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the container of the initialization was removed'
+      ansible.builtin.assert:
+        that:
+          - database_postgresql__test_init_container.rc == 1
+        fail_msg: 'The container postgresql-init still exists'
 
     - name: 'Read the state of the PostgreSQL service'
       ansible.builtin.command: 'systemctl is-active postgresql'
@@ -69,7 +79,8 @@
           - >-
             ('max_connections = ' + database_postgresql__test_expect.max_connections)
             in database_postgresql__test_config_lines | map('regex_replace', '\s+#.*$', '') | list
-          - database_postgresql__test_config_lines | select('match', '^wal_level = .logical.') | list | length == 1
+          - database_postgresql__test_config_lines | select('match', '^wal_level = .logical.') | list | length == (1 if database_postgresql__test_expect.accounts else 0)
+          - database_postgresql__test_config_lines | select('match', '^' + database_postgresql__test_expect.shared_buffers) | list | length == 1
           - database_postgresql__test_config_lines | select('match', '^' + database_postgresql__test_expect.default_setting) | list | length == 1
           - database_postgresql__test_config_lines | select('match', '^#bonjour = off') | list | length == 1
         fail_msg: "Configuration: {{ database_postgresql__test_config_lines | select('match', '^[a-z]') | list | join(', ') }}"
@@ -85,7 +96,7 @@
     - name: 'Read the settings of the running server'
       ansible.builtin.command:
         argv: [ 'podman', 'exec', 'postgresql', 'psql', '-U', 'postgres', '-tAc', "SHOW {{ item }}" ]
-      loop: [ 'server_version', 'max_connections', 'wal_level', 'log_min_duration_statement', 'TimeZone' ]
+      loop: [ 'server_version', 'max_connections', 'wal_segment_size', 'log_min_duration_statement', 'TimeZone' ]
       register: 'database_postgresql__test_show'
       changed_when: false
 
@@ -94,8 +105,9 @@
         that:
           - database_postgresql__test_values[0] is match(database_postgresql__test_expect.version)
           - database_postgresql__test_values[1] == database_postgresql__test_expect.max_connections
-          - database_postgresql__test_values[2] == 'logical'
-          - database_postgresql__test_values[3] == '250ms'
+          # POSTGRES_INITDB_ARGS of postgresql_environment was read by initdb
+          - database_postgresql__test_values[2] == database_postgresql__test_expect.wal_segment_size
+          - database_postgresql__test_values[3] == ('250ms' if database_postgresql__test_expect.accounts else '-1')
           - database_postgresql__test_values[4] == 'Europe/Berlin'
         fail_msg: "Settings: {{ database_postgresql__test_values | join(', ') }}"
       vars:
@@ -110,6 +122,7 @@
       changed_when: false
 
     - name: 'Log in as molecule_app with the password over TCP'
+      when: database_postgresql__test_expect.accounts
       ansible.builtin.command:
         argv: [ 'podman', 'exec', '-e', "PGPASSWORD={{ item.password }}", 'postgresql',
                 'psql', '-h', "{{ database_postgresql__test_ip }}", '-U', 'molecule_app', '-d', 'molecule_db', '-tAc', 'SELECT current_user' ]
@@ -125,6 +138,7 @@
       failed_when: (database_postgresql__test_login.rc == 0) != item.success
 
     - name: 'Read the owner of the database and the replication slots'
+      when: database_postgresql__test_expect.accounts
       ansible.builtin.command:
         argv: [ 'podman', 'exec', 'postgresql', 'psql', '-U', 'postgres', '-tAc', "{{ item }}" ]
       loop:
@@ -135,6 +149,7 @@
       changed_when: false
 
     - name: 'Assert the database, the replication slot and the privileges'
+      when: database_postgresql__test_expect.accounts
       ansible.builtin.assert:
         that:
           - database_postgresql__test_values[0] == 'molecule_app'
