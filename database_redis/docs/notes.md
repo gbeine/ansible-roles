@@ -98,10 +98,19 @@ New versions of Redis may add options, the list is generated again.
 
 The environment of the container only allows the variables of `docker-entrypoint.sh` of the image, `SKIP_FIX_PERMS` and `SKIP_DROP_PRIVS`,
 set with `redis_environment`. The check uses the container after merging `redis_container`, so `redis_container.environment` is checked as well.
+Without `redis_environment` the quadlet unit has no environment.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `redis_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies of the quadlet unit (`requires`, `wants`, `after`, `part_of`, `binds_to`,
+`requires_mounts_for`) are changed with `redis_container`, it is merged over the default of the container:
+
+```yaml
+redis_container:
+  requires_mounts_for:
+    - '/opt'
+```
+
 The merge is not recursive, `redis_container.volumes` replaces the data directory, `redis.conf` and the ACL file,
 `redis_container.command` replaces the start of `redis-server` with `redis.conf`.
 After the start the role waits until the port of `redis_config.port` is open, so roles depending on Redis can use it.
@@ -116,9 +125,14 @@ The role checks before any change:
   and the port is a number
 - `redis_users` is a list of entries with unique and valid names, rules as list without passwords, `nopass`, `on` and `off`, `enabled` as boolean,
   every user except `default` has a password in `redis_passwords`, `redis_passwords` has no passwords of unknown users and no empty passwords
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables and secrets are set in the container, the environment variables contain no line breaks
 
 A failing template in the variables, e.g. an unknown filter, stops the role before anything changes.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares `redis.conf`, the ACL file, the secrets and the quadlet unit.
+The start of Redis and the wait for its port do not run in check mode.
 
 ### Restart and updates
 
@@ -200,24 +214,25 @@ The scenario `default` uses two VMs:
 | Platform | Test case |
 |---|---|
 | `molecule-redis-default` | Only the mandatory variables, the user `default` without password |
-| `molecule-redis` | IPv6, labels, options with a list, the users `default` and `app` with passwords, a disabled user and the secret `masterauth` with a backslash and a double quote |
+| `molecule-redis` | IPv6, labels, the dependencies `wants`, `after` and `requires_mounts_for`, options with a list, the users `default` and `app` with passwords, a disabled user and the secret `masterauth` with a backslash and a double quote |
 
-`prepare` creates the podman network and pulls the image of Redis.
+`prepare` creates the podman network and pulls the image of Redis, `check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `redis_container` and `redis_config` no dictionaries, an unknown option, the former name `slaveof`,
 the option `dir` set by the role, `requirepass`, `masterauth` in `redis_config`, `true` as value, a secret without `target`, an unknown secret,
-a user without password, a password in the rules of a user and an unknown environment variable in `redis_container.environment`
+a user without password, a password in the rules of a user, an unknown environment variable in `redis_container.environment` and a line break in `redis_environment`
 and checks that it fails with the expected message and the quadlet unit, `redis.conf` and the ACL file are unchanged (tasks marked `expect ERROR`),
-then it waits until Redis answers on `molecule-redis`, shows the log of the service otherwise, and changes `maxmemory`,
-`redis.conf` changes and Redis has to restart.
-`verify` checks the quadlet unit with the command, the volumes and the mounted secret, the service and the addresses of the container,
+then it waits until Redis answers, shows the log of the service otherwise, and changes `maxmemory` on `molecule-redis`,
+`redis.conf` changes and Redis has to restart, on `molecule-redis-default` the role runs again without a change and Redis must not restart.
+`verify` checks the quadlet unit with the command, the volumes, the mounted secret, the dependencies and no environment on `molecule-redis-default`, the service and the addresses of the container,
 the owner and the permissions of the files, the lines of `redis.conf` and the ACL file without passwords in plain text and the removed file of the former role.
 With `redis-cli` in the container it checks `PING` without password, on `molecule-redis` it has to fail,
 the number of databases, `masterauth` read from the secret and the loaded module `search` as the user `default`,
 that the user `app` may write its keys `app:*` but neither other keys nor `FLUSHALL` and that the disabled user cannot authenticate.
 
 The scenario `loop` deploys two instances with `tasks/loop.yml` in the VM `molecule-redis-loop`, `redis-cache` with IPv4 only and `redis-queue` with IPv6
-and the user `default` with password. `verify` checks every instance: the addresses, the files and that every quadlet unit only contains its own secret,
-`redis.conf`, the service, `PING` and `masterauth` read from the secret of the instance.
+and the user `default` with password. `check` runs `converge` with `--check` before.
+`verify` checks every instance like the scenario `default`: the addresses, the files with owner and permissions and that every quadlet unit only contains its own secret,
+`redis.conf`, the service, `PING`, the user `default` with its password, an option of the instance and `masterauth` read from the secret of the instance.
 
 | Environment variable | Default | Description |
 |---|---|---|

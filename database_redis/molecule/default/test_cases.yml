@@ -12,10 +12,6 @@ database_redis__test_network:
 database_redis__test_image: 'docker.io/library/redis:8-alpine'
 database_redis__test_quadlet_path: '/etc/containers/systemd/redis.container'
 
-# A valid change of the side effect, redis.conf changes and Redis has to restart
-database_redis__test_side_effect_config:
-  maxmemory: '128mb'
-
 database_redis__test_cases:
 
   # Only the mandatory variables, the user default without password like the image
@@ -26,7 +22,11 @@ database_redis__test_cases:
       redis_network: 'podman-molecule'
       redis_hostname: 'redis-default'
       redis_timezone: 'Europe/Berlin'
+    # side_effect runs the role again without a change, Redis must not restart
+    side_effect:
+      role_vars: {}
     expect:
+      restart: false
       ip: '10.89.0.70'
       ip6: ~
       quadlet:
@@ -57,6 +57,10 @@ database_redis__test_cases:
       redis_timezone: 'Europe/Berlin'
       redis_labels:
         traefik.enable: 'false'
+      redis_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/opt/redis' ]
       redis_config:
         databases: 4
         save: [ '3600 1', '300 100' ]
@@ -78,8 +82,16 @@ database_redis__test_cases:
         - name: 'redis_masterauth'
           data: 'molecule-master\pass"word'
           target: 'masterauth'
-    side_effect: true
+    # side_effect changes maxmemory, redis.conf changes and Redis has to restart
+    side_effect:
+      role_vars:
+        redis_config:
+          databases: 4
+          save: [ '3600 1', '300 100' ]
+          maxmemory: '128mb'
+          appendonly: 'yes'
     expect:
+      restart: true
       ip: '10.89.0.71'
       ip6: 'fd00:89::71'
       quadlet:
@@ -87,6 +99,9 @@ database_redis__test_cases:
         - 'Volume=/opt/redis/data:/data'
         - 'Secret=redis_masterauth,type=mount,target=/run/secrets/redis_masterauth,uid=999,gid=1000,mode=0400'
         - 'Label=traefik.enable=false'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/opt/redis'
       config:
         - 'aclfile /etc/redis/users.acl'
         - 'databases 4'

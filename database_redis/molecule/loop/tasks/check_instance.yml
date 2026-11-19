@@ -93,3 +93,56 @@
     that:
       - database_redis__test_masterauth.stdout_lines == [ 'masterauth', database_redis__expect.masterauth ]
     fail_msg: "masterauth set: {{ database_redis__test_masterauth.stdout_lines | length > 1 }}"
+
+- name: "Read the files of {{ database_redis__expect.name }}"
+  ansible.builtin.stat:
+    path: "{{ database_redis__expect.home }}/{{ item }}"
+  loop: [ 'data', 'redis.conf', 'users.acl' ]
+  register: 'database_redis__test_files'
+
+- name: "Assert the owner and the permissions of the files of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - database_redis__test_stat.data.isdir | default(false)
+      - database_redis__test_stat.data.uid == 999 and database_redis__test_stat.data.gid == 1000
+      - database_redis__test_stat.data.mode == '0750'
+      - database_redis__test_stat['redis.conf'].uid == 999 and database_redis__test_stat['redis.conf'].mode == '0640'
+      - database_redis__test_stat['users.acl'].uid == 999 and database_redis__test_stat['users.acl'].mode == '0600'
+    fail_msg: >-
+      {% for name, stat in database_redis__test_stat.items() %}{{ name }}
+      {{ (stat.uid | string ~ ':' ~ stat.gid | string ~ ' ' ~ stat.mode) if stat.exists else 'missing' }}{{ ', ' if not loop.last }}{% endfor %}
+  vars:
+    database_redis__test_stat: "{{ dict(database_redis__test_files.results | map(attribute='item') | zip(database_redis__test_files.results | map(attribute='stat'))) }}"
+
+# As the user default with its password if it has one
+- name: "Read the option {{ database_redis__expect.option.name }} of {{ database_redis__expect.name }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ [ 'podman', 'exec' ]
+         + ([ '--env', 'REDISCLI_AUTH=' ~ database_redis__expect.password ] if database_redis__expect.password else [])
+         + [ database_redis__expect.name, 'redis-cli', '--no-auth-warning', '--raw', 'CONFIG', 'GET', database_redis__expect.option.name ] }}
+  register: 'database_redis__test_option'
+  changed_when: false
+  no_log: true
+
+- name: "Assert the option {{ database_redis__expect.option.name }} of {{ database_redis__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - database_redis__test_option.stdout_lines == [ database_redis__expect.option.name, database_redis__expect.option.value ]
+    fail_msg: "{{ database_redis__test_option.stdout_lines }} {{ database_redis__test_option.stderr }}"
+
+- name: "Authenticate as the user default of {{ database_redis__expect.name }} with a wrong password"
+  when: database_redis__expect.password is not none
+  ansible.builtin.command:
+    argv: [ 'podman', 'exec', '--env', 'REDISCLI_AUTH=molecule-wrong-password', "{{ database_redis__expect.name }}",
+            'redis-cli', '--no-auth-warning', 'PING' ]
+  register: 'database_redis__test_wrong'
+  changed_when: false
+  failed_when: false
+
+- name: "Assert the user default of {{ database_redis__expect.name }} needs its password"
+  when: database_redis__expect.password is not none
+  ansible.builtin.assert:
+    that:
+      - (database_redis__test_wrong.stdout ~ database_redis__test_wrong.stderr) is not search('PONG')
+    fail_msg: "PING with a wrong password: {{ database_redis__test_wrong.stdout }} {{ database_redis__test_wrong.stderr }}"

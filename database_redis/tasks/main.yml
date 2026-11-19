@@ -192,12 +192,21 @@
         fail_msg: "{{ database_redis__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without redis_environment and redis_container.environment the environment is omitted, there is nothing to check
+        database_redis__environment_container: "{{ database_redis__container.environment | default({}) }}"
         database_redis__environment_unknown: >-
-          {{ (database_redis__container.environment | default({})).keys() | reject('in', database_redis__environment_allowed) | list }}
+          {{ (database_redis__environment_container.keys() if database_redis__environment_container is mapping else [])
+             | reject('in', database_redis__environment_allowed) | list }}
+        database_redis__environment_line_breaks: >-
+          {{ (database_redis__environment_container | dict2items if database_redis__environment_container is mapping else [])
+             | selectattr('value', 'string') | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_redis__secrets_unknown: >-
           {{ database_redis__secrets | map(attribute='target') | reject('in', database_redis__secrets_allowed) | list }}
         database_redis__errors: >-
           {%- set errors = [] -%}
+          {%- if database_redis__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_redis__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if database_redis__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_redis__environment_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
@@ -297,6 +306,21 @@
           [Unit]
           {% if database_redis__container.requires is defined %}
           Requires={{ database_redis__container.requires | join(' ') }}
+          {% endif %}
+          {% if database_redis__container.wants is defined %}
+          Wants={{ database_redis__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_redis__container.after is defined %}
+          After={{ database_redis__container.after | join(' ') }}
+          {% endif %}
+          {% if database_redis__container.part_of is defined %}
+          PartOf={{ database_redis__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_redis__container.binds_to is defined %}
+          BindsTo={{ database_redis__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_redis__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_redis__container.requires_mounts_for | join(' ') }}
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
