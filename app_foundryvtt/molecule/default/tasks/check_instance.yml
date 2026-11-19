@@ -1,0 +1,118 @@
+---
+# Checks one instance of Foundry VTT, app_foundryvtt__expect is the expectation of the instance
+
+- name: "Read the quadlet unit of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.slurp:
+    src: "/etc/containers/systemd/{{ app_foundryvtt__expect.name }}.container"
+  register: 'app_foundryvtt__test_quadlet'
+
+- name: "Assert the quadlet unit of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - ('Image=' + app_foundryvtt__test_image) in app_foundryvtt__test_quadlet_lines
+      - ('IP=' + app_foundryvtt__expect.ip) in app_foundryvtt__test_quadlet_lines
+      - app_foundryvtt__expect.ip6 is none or ('IP6=' + app_foundryvtt__expect.ip6) in app_foundryvtt__test_quadlet_lines
+      - app_foundryvtt__expect.ip6 is not none or app_foundryvtt__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+      - ('Timezone=Europe/Berlin') in app_foundryvtt__test_quadlet_lines
+      - app_foundryvtt__expect.quadlet | reject('in', app_foundryvtt__test_quadlet_lines) | list | length == 0
+      # The absent lines are prefixes, e.g. Environment=TZ=
+      - app_foundryvtt__test_quadlet_lines | select('match', '(' ~ (app_foundryvtt__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+    fail_msg: "{{ app_foundryvtt__test_quadlet.content | b64decode }}"
+  vars:
+    app_foundryvtt__test_quadlet_lines: "{{ (app_foundryvtt__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+- name: "Read the home of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.stat:
+    path: "{{ app_foundryvtt__expect.home }}"
+  register: 'app_foundryvtt__test_home'
+
+- name: "Read options.json of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.slurp:
+    src: "{{ app_foundryvtt__expect.home }}/Config/options.json"
+  register: 'app_foundryvtt__test_options'
+
+- name: "Read the permissions of options.json of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.stat:
+    path: "{{ app_foundryvtt__expect.home }}/Config/options.json"
+  register: 'app_foundryvtt__test_options_stat'
+
+# Foundry VTT creates options.json on the first start, the role never writes it
+- name: "Assert the home and options.json of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_foundryvtt__test_home.stat.isdir
+      - app_foundryvtt__test_home.stat.uid == 99
+      - app_foundryvtt__test_home.stat.gid == 100
+      - app_foundryvtt__test_home.stat.mode == '0750'
+      - app_foundryvtt__test_options_stat.stat.uid == 99
+      - app_foundryvtt__test_content.dataPath is defined
+    fail_msg: >-
+      home {{ app_foundryvtt__test_home.stat.uid | default('') }}:{{ app_foundryvtt__test_home.stat.gid | default('') }}
+      {{ app_foundryvtt__test_home.stat.mode | default('') }},
+      options.json {{ app_foundryvtt__test_options_stat.stat.uid }}:{{ app_foundryvtt__test_options_stat.stat.gid }}
+      {{ app_foundryvtt__test_options_stat.stat.mode }} {{ app_foundryvtt__test_content }}
+  vars:
+    app_foundryvtt__test_content: "{{ app_foundryvtt__test_options.content | b64decode | from_json }}"
+
+# systemd counts only the restarts after a crash, a restart loop is reported with the journal
+- name: "Read the state and the automatic restarts of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'systemctl', 'show', '--property=ActiveState', '--property=NRestarts', "{{ app_foundryvtt__expect.name }}" ]
+  register: 'app_foundryvtt__test_service'
+  changed_when: false
+
+- name: "Read the journal of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'journalctl', '-u', "{{ app_foundryvtt__expect.name }}", '-n', '80', '--no-pager' ]
+  register: 'app_foundryvtt__test_journal'
+  changed_when: false
+  failed_when: false
+
+- name: "Assert the service of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - ('ActiveState=active') in app_foundryvtt__test_service.stdout_lines
+      - ('NRestarts=0') in app_foundryvtt__test_service.stdout_lines
+    fail_msg: "{{ app_foundryvtt__test_service.stdout_lines + app_foundryvtt__test_journal.stdout_lines | default([]) }}"
+
+- name: "Inspect the container {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'podman', 'inspect', "{{ app_foundryvtt__expect.name }}" ]
+  register: 'app_foundryvtt__test_inspect'
+  changed_when: false
+
+- name: "Assert the addresses, the user, the environment and the time zone of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_foundryvtt__test_net.IPAddress == app_foundryvtt__expect.ip
+      - app_foundryvtt__expect.ip6 is none or app_foundryvtt__test_net.GlobalIPv6Address == app_foundryvtt__expect.ip6
+      - app_foundryvtt__test_container.Config.User == '99:100'
+      - app_foundryvtt__expect.env | reject('in', app_foundryvtt__test_env) | list | length == 0
+      - app_foundryvtt__test_env | select('match', 'TZ=') | list | length == 0
+      - app_foundryvtt__test_container.Config.Timezone == 'Europe/Berlin'
+    fail_msg: >-
+      IPv4 {{ app_foundryvtt__test_net.IPAddress }}, IPv6 {{ app_foundryvtt__test_net.GlobalIPv6Address }},
+      user {{ app_foundryvtt__test_container.Config.User | default('') }},
+      time zone {{ app_foundryvtt__test_container.Config.Timezone | default('') }},
+      environment {{ app_foundryvtt__test_env | join(', ') }}
+  vars:
+    app_foundryvtt__test_container: "{{ (app_foundryvtt__test_inspect.stdout | from_json)[0] }}"
+    app_foundryvtt__test_net: "{{ app_foundryvtt__test_container.NetworkSettings.Networks['podman-molecule'] }}"
+    app_foundryvtt__test_env: "{{ app_foundryvtt__test_container.Config.Env }}"
+
+# Foundry VTT answers after it prepared the data directory
+- name: "Read the status of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    return_content: true
+  loop: "{{ app_foundryvtt__expect.urls }}"
+  register: 'app_foundryvtt__test_status'
+  until: app_foundryvtt__test_status.status == 200
+  retries: 30
+  delay: 5
+
+- name: "Assert the status of {{ app_foundryvtt__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_foundryvtt__test_status.results | map(attribute='json') | map(attribute='version') | unique | list == [ app_foundryvtt__test_version ]
+    fail_msg: "{{ app_foundryvtt__test_status.results | map(attribute='content') | list }}"

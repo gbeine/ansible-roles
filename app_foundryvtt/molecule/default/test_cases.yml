@@ -1,0 +1,89 @@
+---
+# Network created by container_podman in prepare.yml
+app_foundryvtt__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_foundryvtt__test_version: '14.369'
+app_foundryvtt__test_image: "c0d3cr.io/container/foundry:{{ app_foundryvtt__test_version }}"
+
+# The time zone is set by podman, neither TZ nor the files of the host are passed
+app_foundryvtt__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
+app_foundryvtt__test_cases:
+
+  # Only the mandatory variables
+  - name: 'molecule-foundryvtt-default'
+    role_vars:
+      foundryvtt_home: '/opt/foundryvtt'
+      foundryvtt_ip: '10.89.0.110'
+      foundryvtt_network: 'podman-molecule'
+      foundryvtt_hostname: 'foundryvtt-default'
+      foundryvtt_timezone: 'Europe/Berlin'
+      foundryvtt_version: "{{ app_foundryvtt__test_version }}"
+    # Runs again without a change, Foundry VTT must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      name: 'foundryvtt'
+      ip: '10.89.0.110'
+      ip6: ~
+      home: '/opt/foundryvtt'
+      quadlet:
+        - 'Volume=/opt/foundryvtt:/data'
+        - 'User=99'
+        - 'Group=100'
+      quadlet_absent: "{{ app_foundryvtt__test_quadlet_absent + [ 'Environment=', 'Requires=', 'Wants=' ] }}"
+      env: []
+      urls:
+        - 'http://10.89.0.110:30000/api/status'
+
+  # IPv6, labels, dependencies, own container name and NODE_OPTIONS
+  - name: 'molecule-foundryvtt'
+    role_vars:
+      foundryvtt_home: '/srv/foundry-molecule'
+      foundryvtt_ip: '10.89.0.111'
+      foundryvtt_ipv6: 'fd00:89::111'
+      foundryvtt_network: 'podman-molecule'
+      foundryvtt_hostname: 'foundry-molecule'
+      foundryvtt_timezone: 'Europe/Berlin'
+      foundryvtt_version: "{{ app_foundryvtt__test_version }}"
+      foundryvtt_labels:
+        traefik.enable: 'true'
+      foundryvtt_environment:
+        NODE_OPTIONS: '--max-old-space-size=1024'
+      foundryvtt_container:
+        name: 'foundry-molecule'
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+    # The changed environment changes the quadlet unit and restarts Foundry VTT
+    side_effect:
+      role_vars:
+        foundryvtt_environment:
+          NODE_OPTIONS: '--max-old-space-size=2048'
+    expect:
+      restart: true
+      name: 'foundry-molecule'
+      ip: '10.89.0.111'
+      ip6: 'fd00:89::111'
+      home: '/srv/foundry-molecule'
+      quadlet:
+        - 'Volume=/srv/foundry-molecule:/data'
+        - 'User=99'
+        - 'Group=100'
+        - 'Label=traefik.enable=true'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      quadlet_absent: "{{ app_foundryvtt__test_quadlet_absent }}"
+      # After side_effect
+      env:
+        - 'NODE_OPTIONS=--max-old-space-size=2048'
+      urls:
+        - 'http://10.89.0.111:30000/api/status'
+        - 'http://[fd00:89::111]:30000/api/status'

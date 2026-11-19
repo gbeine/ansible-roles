@@ -1,0 +1,122 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_foundryvtt__test_case: "{{ app_foundryvtt__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    # options.json is created by Foundry VTT, the role never changes it
+    app_foundryvtt__test_checked_files:
+      - "/etc/containers/systemd/{{ app_foundryvtt__test_case.expect.name }}.container"
+      - "{{ app_foundryvtt__test_case.expect.home }}/Config/options.json"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_foundryvtt__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_foundryvtt__test_checked_files }}"
+      register: 'app_foundryvtt__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_foundryvtt with foundryvtt_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        foundryvtt_container: [ 'environment' ]
+        app_foundryvtt__test_invalid:
+          message: 'foundryvtt_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_foundryvtt with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        foundryvtt_environment:
+          FOUNDRY_PORT: '30001'
+        app_foundryvtt__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: FOUNDRY_PORT\.'
+
+    - name: 'Run app_foundryvtt with the data directory of the image in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        foundryvtt_environment:
+          FOUNDRY_DATA: '/srv'
+        app_foundryvtt__test_invalid:
+          message: 'FOUNDRY_DATA in the environment'
+          search: 'Unknown environment variables: FOUNDRY_DATA\.'
+
+    - name: 'Run app_foundryvtt with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        foundryvtt_environment:
+          NODE_OPTIONS: "--max-old-space-size=1024\nfoo"
+        app_foundryvtt__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: NODE_OPTIONS\.'
+
+    - name: 'Run app_foundryvtt with a relative home directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        foundryvtt_home: 'relative/foundryvtt'
+        app_foundryvtt__test_invalid:
+          message: 'a relative home directory'
+          search: 'foundryvtt_home has to be an absolute path\.'
+
+    - name: 'Run app_foundryvtt with an invalid container name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        foundryvtt_container:
+          name: 'foundry team'
+        app_foundryvtt__test_invalid:
+          message: 'an invalid container name'
+          search: 'The name of the container in foundryvtt_container.name has to match'
+
+    # molecule-foundryvtt changes the environment and has to restart, molecule-foundryvtt-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', "{{ app_foundryvtt__test_case.expect.name }}" ]
+      register: 'app_foundryvtt__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_foundryvtt__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run app_foundryvtt with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_foundryvtt'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', "{{ app_foundryvtt__test_case.expect.name }}" ]
+      register: 'app_foundryvtt__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the changed quadlet unit and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_foundryvtt__quadlet_result is changed) == app_foundryvtt__test_case.expect.restart
+          - (app_foundryvtt__test_started_after.stdout | int > app_foundryvtt__test_started_before.stdout | int) == app_foundryvtt__test_case.expect.restart
+        fail_msg: >-
+          quadlet changed: {{ app_foundryvtt__quadlet_result is changed }},
+          start before {{ app_foundryvtt__test_started_before.stdout }}, after {{ app_foundryvtt__test_started_after.stdout }}

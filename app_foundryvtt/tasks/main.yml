@@ -1,25 +1,77 @@
 ---
 
-- name: 'Deploy Foundry VTT containers'
-  tags: [ 'app_foundryvtt' ]
+- name: 'Install Foundry VTT'
+  tags: [ 'app', 'app_foundryvtt' ]
   block:
+
+    # A failing template in the variables (e.g. foundryvtt_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_foundryvtt__container | length > 0
+        quiet: true
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_foundryvtt__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_foundryvtt__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_foundryvtt__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_foundryvtt__podman_home is not string or app_foundryvtt__podman_home is not match('^/') -%}
+          {%-   set _ = errors.append('foundryvtt_home has to be an absolute path.') -%}
+          {%- endif -%}
+          {%- if app_foundryvtt__container.name is not string or app_foundryvtt__container.name is not match(app_foundryvtt__name_pattern) -%}
+          {%-   set _ = errors.append('The name of the container in foundryvtt_container.name has to match ' ~ app_foundryvtt__name_pattern ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment after merging foundryvtt_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      when: 'app_foundryvtt__container.environment is mapping'
+      ansible.builtin.assert:
+        that:
+          - app_foundryvtt__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_foundryvtt__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_foundryvtt__environment_unknown: >-
+          {{ app_foundryvtt__container.environment.keys() | reject('in', app_foundryvtt__environment_allowed) | list }}
+        app_foundryvtt__environment_line_breaks: >-
+          {{ app_foundryvtt__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_foundryvtt__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_foundryvtt__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_foundryvtt__environment_unknown | join(', '))
+                                    ~ '. Allowed are ' ~ (app_foundryvtt__environment_allowed | join(', '))
+                                    ~ ', the options of Foundry VTT are set in its setup.') -%}
+          {%- endif -%}
+          {%- if app_foundryvtt__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_foundryvtt__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the home directory'
+      ansible.builtin.file:
+        path: "{{ app_foundryvtt__podman_home }}"
+        owner: "{{ app_foundryvtt__uid }}"
+        group: "{{ app_foundryvtt__gid }}"
+        mode: '0750'
+        state: 'directory'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_foundryvtt__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_foundryvtt__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_foundryvtt__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name: 'Create containers'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_foundryvtt__container.name }}"
         hostname: "{{ app_foundryvtt__container.hostname }}"
@@ -28,38 +80,85 @@
         ip6: "{{ app_foundryvtt__container.ipv6 | default(omit) }}"
         network: "{{ app_foundryvtt__container.network }}"
         timezone: "{{ app_foundryvtt__container.timezone }}"
+        user: "{{ app_foundryvtt__container.user | default(omit) }}"
+        command: "{{ app_foundryvtt__container.command | default(omit) }}"
         env: "{{ app_foundryvtt__container.environment | default(omit) }}"
         etc_hosts: "{{ app_foundryvtt__container.etc_hosts | default(omit) }}"
         expose: "{{ app_foundryvtt__container.expose | default(omit) }}"
         label: "{{ app_foundryvtt__container.labels | default(omit) }}"
         publish: "{{ app_foundryvtt__container.publish | default(omit) }}"
-        secrets: "{{ app_foundryvtt__container.secrets | default(omit) }}"
         volume: "{{ app_foundryvtt__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if app_foundryvtt__container.requires is defined %}
+          Requires={{ app_foundryvtt__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_foundryvtt__container.wants is defined %}
+          Wants={{ app_foundryvtt__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_foundryvtt__container.after is defined %}
+          After={{ app_foundryvtt__container.after | join(' ') }}
+          {% endif %}
+          {% if app_foundryvtt__container.part_of is defined %}
+          PartOf={{ app_foundryvtt__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_foundryvtt__container.binds_to is defined %}
+          BindsTo={{ app_foundryvtt__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_foundryvtt__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_foundryvtt__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_foundryvtt__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ app_foundryvtt__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode is defined and podman___update_mode else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Foundry VTT'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_foundryvtt__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_foundryvtt__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_foundryvtt__running: >-
+              {{ (ansible_facts.services[app_foundryvtt__container.name + '.service'].state | default('')) == 'running' }}
+            app_foundryvtt__restart: >-
+              {{ app_foundryvtt__running | bool and app_foundryvtt__quadlet_result is changed }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ app_foundryvtt__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'app_foundryvtt__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_foundryvtt__container.name ~ ' did not start' ] + app_foundryvtt__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
-      when: 'app_foundryvtt__autoupdate_enabled'
-      include_role:
+      when: 'app_foundryvtt__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_foundryvtt__container.name }}"
         container_image: "{{ app_foundryvtt__container.image }}"
-        container_schedule: "{{ foundryvtt_autoupdate_schedule | default('0 0 * * *') }}"
+        container_schedule: "{{ app_foundryvtt__autoupdate_schedule }}"
