@@ -12,6 +12,9 @@ app_diagrams__test_network:
 app_diagrams__test_image: 'docker.io/jgraph/drawio:latest'
 app_diagrams__test_quadlet_path: '/etc/containers/systemd/diagrams.container'
 
+# The time zone is set by podman, neither TZ nor the files of the host are passed
+app_diagrams__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
 app_diagrams__test_cases:
 
   # Only the mandatory variables, draw.io serves the root context
@@ -23,18 +26,22 @@ app_diagrams__test_cases:
       diagrams_timezone: 'Europe/Berlin'
       diagrams_environment:
         DRAWIO_BASE_URL: 'http://10.89.0.60:8080'
+    # Runs again without a change, draw.io must not restart
+    side_effect:
+      role_vars: {}
     expect:
+      restart: false
       ip: '10.89.0.60'
       ip6: ~
       base_url: 'http://10.89.0.60:8080'
       context: ''
       quadlet: []
+      quadlet_absent: "{{ app_diagrams__test_quadlet_absent }}"
       env:
-        - 'TZ=Europe/Berlin'
         - 'DRAWIO_BASE_URL=http://10.89.0.60:8080'
         - 'LETS_ENCRYPT_ENABLED=false'
 
-  # IPv6, labels, additional hosts and a base URL with a path, the path sets the context of Tomcat
+  # IPv6, labels, additional hosts, dependencies and a base URL with a path, the path sets the context of Tomcat
   - name: 'molecule-diagrams'
     role_vars:
       diagrams_ip: '10.89.0.61'
@@ -49,12 +56,16 @@ app_diagrams__test_cases:
       diagrams_container:
         etc_hosts:
           nextcloud.example.org: '10.89.0.1'
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
     # side_effect changes the base URL, the quadlet unit changes and draw.io has to restart
     side_effect:
       role_vars:
         diagrams_environment:
           DRAWIO_BASE_URL: 'https://office.example.org/diagrams'
     expect:
+      restart: true
       ip: '10.89.0.61'
       ip6: 'fd00:89::61'
       base_url: 'https://office.example.org/diagrams'
@@ -62,7 +73,10 @@ app_diagrams__test_cases:
       quadlet:
         - 'Label=traefik.enable=true'
         - 'AddHost=nextcloud.example.org:10.89.0.1'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      quadlet_absent: "{{ app_diagrams__test_quadlet_absent }}"
       env:
-        - 'TZ=Europe/Berlin'
         - 'DRAWIO_BASE_URL=https://office.example.org/diagrams'
         - 'LETS_ENCRYPT_ENABLED=false'

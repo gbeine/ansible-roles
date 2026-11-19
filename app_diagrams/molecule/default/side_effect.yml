@@ -9,6 +9,11 @@
   vars:
     app_diagrams__test_case: "{{ app_diagrams__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -56,13 +61,25 @@
     - name: 'Run app_diagrams with a secret target set in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
+        diagrams_environment:
+          DRAWIO_BASE_URL: 'http://10.89.0.60:8080'
+          DRAWIO_GITLAB_SECRET: 'molecule-secret'
         diagrams_secrets:
-          - name: 'diagrams_molecule_tz'
-            data: 'UTC'
-            target: 'TZ'
+          - name: 'diagrams_molecule_gitlab'
+            data: 'molecule-secret'
+            target: 'DRAWIO_GITLAB_SECRET'
         app_diagrams__test_invalid:
           message: 'a secret target set in the environment'
-          search: 'must not be set in diagrams_environment:\s+TZ\.'
+          search: 'must not be set in diagrams_environment:\s+DRAWIO_GITLAB_SECRET\.'
+
+    - name: 'Run app_diagrams with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diagrams_environment:
+          DRAWIO_BASE_URL: "http://10.89.0.60:8080\nfoo"
+        app_diagrams__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: DRAWIO_BASE_URL\.'
 
     - name: 'Run app_diagrams with an unknown environment variable (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -95,38 +112,36 @@
           message: 'an unknown secret'
           search: 'Unknown secrets: DRAWIO_FOO_SECRET\.'
 
+    # molecule-diagrams changes the base URL and has to restart, molecule-diagrams-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'diagrams' ]
+      register: 'app_diagrams__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_diagrams__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
     - name: 'Run app_diagrams with the changed role variables'
-      when: app_diagrams__test_case.side_effect is defined
-      block:
+      ansible.builtin.include_role:
+        name: 'app_diagrams'
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'diagrams' ]
-          register: 'app_diagrams__test_started_before'
-          changed_when: false
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'diagrams' ]
+      register: 'app_diagrams__test_started_after'
+      changed_when: false
 
-        - name: 'Set the changed role variables'
-          ansible.builtin.set_fact:
-            "{{ item.key }}": "{{ item.value }}"
-          loop: "{{ app_diagrams__test_case.side_effect.role_vars | dict2items }}"
-          loop_control:
-            label: "{{ item.key }}"
-
-        - name: 'Run app_diagrams with the changed role variables'
-          ansible.builtin.include_role:
-            name: 'app_diagrams'
-
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'diagrams' ]
-          register: 'app_diagrams__test_started_after'
-          changed_when: false
-
-        - name: 'Assert the changed quadlet unit and the restart of the service'
-          ansible.builtin.assert:
-            that:
-              - app_diagrams__quadlet_result is changed
-              - app_diagrams__test_started_after.stdout | int > app_diagrams__test_started_before.stdout | int
-            fail_msg: >-
-              quadlet changed: {{ app_diagrams__quadlet_result is changed }},
-              start before {{ app_diagrams__test_started_before.stdout }}, after {{ app_diagrams__test_started_after.stdout }}
+    - name: 'Assert the quadlet unit and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_diagrams__quadlet_result is changed) == app_diagrams__test_case.expect.restart
+          - (app_diagrams__test_started_after.stdout | int > app_diagrams__test_started_before.stdout | int)
+            == app_diagrams__test_case.expect.restart
+        fail_msg: >-
+          quadlet changed: {{ app_diagrams__quadlet_result is changed }},
+          start before {{ app_diagrams__test_started_before.stdout }}, after {{ app_diagrams__test_started_after.stdout }}

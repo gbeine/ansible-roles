@@ -29,13 +29,14 @@
           - app_diagrams__expect.ip6 is not none or app_diagrams__test_quadlet_content is not search('^IP6=', multiline=true)
           - app_diagrams__test_quadlet_content is search('^Environment=.*DRAWIO_BASE_URL=' + (app_diagrams__expect.base_url | regex_escape), multiline=true)
           - app_diagrams__test_quadlet_missing | length == 0
+          - ('Timezone=' + app_diagrams__test_case.role_vars.diagrams_timezone) in app_diagrams__test_quadlet_lines
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - app_diagrams__test_quadlet_lines | select('match', '(' ~ (app_diagrams__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
         fail_msg: "{{ app_diagrams__test_quadlet_content }}"
       vars:
         app_diagrams__test_quadlet_content: "{{ app_diagrams__test_quadlet.content | b64decode }}"
-        app_diagrams__test_quadlet_missing: >-
-          {{ app_diagrams__expect.quadlet
-             | reject('in', (app_diagrams__test_quadlet_content | regex_replace('"', '')).splitlines())
-             | list }}
+        app_diagrams__test_quadlet_lines: "{{ (app_diagrams__test_quadlet_content | regex_replace('\"', '')).splitlines() }}"
+        app_diagrams__test_quadlet_missing: "{{ app_diagrams__expect.quadlet | reject('in', app_diagrams__test_quadlet_lines) | list }}"
 
     - name: 'Read the state of the diagrams service'
       ansible.builtin.command: 'systemctl is-active diagrams'
@@ -60,7 +61,10 @@
           - app_diagrams__test_net.IPAddress == app_diagrams__expect.ip
           - app_diagrams__expect.ip6 is none or app_diagrams__test_net.GlobalIPv6Address == app_diagrams__expect.ip6
           - app_diagrams__expect.env | reject('in', app_diagrams__test_env) | list | length == 0
-        fail_msg: "IPv4 {{ app_diagrams__test_net.IPAddress }}, IPv6 {{ app_diagrams__test_net.GlobalIPv6Address }}, environment {{ app_diagrams__test_env | join(', ') }}"
+          # The time zone is set by podman with /etc/localtime, not with TZ
+          - app_diagrams__test_env | select('match', 'TZ=') | list | length == 0
+          - app_diagrams__test_container.Config.Timezone == app_diagrams__test_case.role_vars.diagrams_timezone
+        fail_msg: "Time zone {{ app_diagrams__test_container.Config.Timezone | default('') }}, IPv4 {{ app_diagrams__test_net.IPAddress }}, IPv6 {{ app_diagrams__test_net.GlobalIPv6Address }}, environment {{ app_diagrams__test_env | join(', ') }}"
       vars:
         app_diagrams__test_container: "{{ (app_diagrams__test_inspect.stdout | from_json)[0] }}"
         app_diagrams__test_net: "{{ app_diagrams__test_container.NetworkSettings.Networks[app_diagrams__test_case.role_vars.diagrams_network] }}"
