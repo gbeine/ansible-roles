@@ -32,17 +32,20 @@ database_mariadb__test_cases:
       mariadb_uid: 1000
       mariadb_gid: 1000
       mariadb_secrets: "{{ database_mariadb__test_secrets }}"
+    # Runs again without a change, MariaDB must not restart
+    side_effect:
+      role_vars: {}
     expect:
       ip: '10.89.0.90'
+      restart: false
       ip6: ~
       quadlet:
         - 'Volume=/opt/mariadb:/config'
       # The root password is only mounted in the container of the initialization
-      quadlet_absent: [ 'Secret=', 'FILE__MYSQL_ROOT_PASSWORD' ]
+      quadlet_absent: [ 'Secret=', 'FILE__MYSQL_ROOT_PASSWORD', 'Environment=TZ=' ]
       env:
         - 'PUID=1000'
         - 'PGID=1000'
-        - 'TZ=Europe/Berlin'
       config:
         - '[mysqld]'
         - 'datadir = /config/databases'
@@ -99,13 +102,20 @@ database_mariadb__test_cases:
         app: 'molecule-app-password'
         reader: 'molecule-reader-password'
         _backup_: 'molecule-backup-password'
-    # custom.cnf changes, MariaDB has to restart
+    # The complete configuration with max_connections 200, custom.cnf changes and MariaDB has to restart
     side_effect:
-      config:
-        mysqld:
-          max_connections: 200
+      role_vars:
+        mariadb_config:
+          mysqld:
+            max_connections: 200
+            query_cache_type: false
+            skip-name-resolve: true
+            loose-innodb_io_capacity_max: 800
+          mysqldump:
+            max_allowed_packet: '64M'
     expect:
       ip: '10.89.0.91'
+      restart: true
       ip6: 'fd00:89::91'
       quadlet:
         - 'Volume=/opt/mariadb:/config'
@@ -113,9 +123,8 @@ database_mariadb__test_cases:
         - 'Wants=network-online.target'
         - 'After=network-online.target'
         - 'RequiresMountsFor=/opt/mariadb'
-      quadlet_absent: [ 'Secret=', 'FILE__MYSQL_ROOT_PASSWORD' ]
-      env:
-        - 'TZ=Europe/Berlin'
+      quadlet_absent: [ 'Secret=', 'FILE__MYSQL_ROOT_PASSWORD', 'Environment=TZ=' ]
+      env: []
       config:
         - 'max_connections = 200'
         - 'skip-name-resolve'

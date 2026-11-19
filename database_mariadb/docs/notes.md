@@ -2,7 +2,7 @@ MariaDB runs in the container image [linuxserver/mariadb](https://docs.linuxserv
 the role manages its databases and accounts.
 The image runs MariaDB as the user `abc` with the uid and gid of `mariadb_uid` and `mariadb_gid`, it changes the owner of `/config` to them on every start.
 `mariadb_home` is mounted to `/config`, the databases are in `<mariadb_home>/databases`, the logs in `<mariadb_home>/log/mysql`.
-MariaDB listens on port 3306, the role `backup_mysql` dumps the databases with `podman exec mariadb mariadb-dump`.
+MariaDB listens on port 3306, the script `mariadb` of `backup_scripts` dumps the databases with `podman exec mariadb mariadb-dump`.
 
 ### Configuration
 
@@ -29,7 +29,7 @@ mariadb_config:
 The names of the options are written as given, MariaDB treats `-` and `_` the same.
 The options may have the prefixes `loose-`, `skip-`, `enable-`, `disable-` and `maximum-` of MariaDB.
 
-The role sets the options the image, the role and `backup_mysql` depend on, they must not be set in `mariadb_config`:
+The role sets the options the image, the role and the script `mariadb` of `backup_scripts` depend on, they must not be set in `mariadb_config`:
 `port` and `socket` in `client`, `socket` in `mysqld_safe`, `user`, `pid-file`, `socket`, `port`, `basedir` and `datadir` in `mysqld`.
 Passwords (`password`, `wsrep_sst_auth`) must not be written to `custom.cnf`.
 
@@ -111,9 +111,11 @@ The options are generated from the sources of MariaDB 11.8.9, the version of the
 
 New versions of MariaDB may add options, the lists are generated again.
 
-The environment allows `PUID`, `PGID`, `TZ`, `UMASK`, `CLI_OPTS` and `REMOTE_SQL`, the role sets `PUID`, `PGID` and `TZ`,
+The environment allows `PUID`, `PGID`, `TZ`, `UMASK`, `CLI_OPTS` and `REMOTE_SQL`, the role sets `PUID` and `PGID`,
 `REMOTE_SQL` and `FILE__MYSQL_ROOT_PASSWORD` are only set in the container of the initialization.
-`MYSQL_DATABASE`, `MYSQL_USER` and `MYSQL_PASSWORD` of the image are rejected, databases and accounts are managed by the role.
+The time zone is set by podman with `mariadb_timezone` (`/etc/localtime` of the container), `TZ` is not needed.
+`MYSQL_DATABASE`, `MYSQL_USER` and `MYSQL_PASSWORD` of the image are unknown variables, databases and accounts are managed by the role.
+The values of the environment must not contain line breaks.
 The check uses the container after merging `mariadb_container`, so variables set with `mariadb_container.environment` are checked as well.
 
 ### Container
@@ -150,6 +152,12 @@ The role checks before any change:
 If `mariadb_container` or `mariadb_config` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and compares `custom.cnf`, the secrets and the quadlet unit.
+The initialization and the start do not run in check mode. The databases and accounts are compared if MariaDB is initialized
+and the Python library of `ansible.mariadb` is installed, on a host where the role never ran both are missing.
+
 ### Restart and updates
 
 MariaDB is restarted if it was running and the quadlet unit or `custom.cnf` changed, otherwise it is started and enabled,
@@ -174,6 +182,7 @@ without `mariadb_autoupdate_schedule` the schedule of `container_update` is used
 - The initialization runs once in `mariadb-init`, the quadlet unit has no secret, no `FILE__MYSQL_ROOT_PASSWORD` and no `REMOTE_SQL` anymore,
   existing installations are not initialized again. Without the root password in the container the image does not log the hint about a needed `mariadb-upgrade` anymore.
 - The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `mariadb_container` are supported besides `requires`.
+- `TZ` is not set in the environment anymore, the time zone is set by podman with `mariadb_timezone`.
 - The databases and accounts are managed with the collection `ansible.mariadb` instead of `community.mysql`, `community.mysql` drops the support of MariaDB with version 6.0.0.
   The controller needs `ansible.mariadb`, `community.mysql` is not needed by the role anymore.
 
@@ -188,13 +197,15 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-mariadb` | IPv6, labels, options of `mysqld` and `mysqldump` with a removed option, an option without value and a prefix, databases and accounts with privileges, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
 `prepare` creates the podman network and pulls the image.
+`check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `mariadb_container` not a dictionary, a secret without `target`, without the root password, a short root password,
 a single quote in the root password, the root password and a user of the image in the environment, an unknown section and option,
 the option `datadir` set by the role, a password in `custom.cnf`, a line break in a value, an account without password, the password of an unknown account
-and an unknown environment variable in `mariadb_container.environment`
+an unknown environment variable in `mariadb_container.environment` and a line break in the environment
 and checks that it fails with the expected message and the quadlet unit and `custom.cnf` are unchanged (tasks marked `expect ERROR`),
-then it changes `max_connections` on `molecule-mariadb`, `custom.cnf` changes and MariaDB has to restart without a second initialization.
-`verify` checks the quadlet unit without the secret, that `mariadb-init` does not exist, the service, the addresses and the environment of the container, `custom.cnf` without passwords,
+then it changes `max_connections` on `molecule-mariadb`, `custom.cnf` changes and MariaDB has to restart without a second initialization,
+`molecule-mariadb-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit without the secret and `TZ`, that `mariadb-init` does not exist, the service, the addresses, the time zone and the environment of the container, `custom.cnf` without passwords,
 the variables, the databases and the accounts as root, that `app` may write, `reader` may only read and that a wrong password is rejected,
 it connects like the role with `ansible.mariadb` from the VM to the address of the container.
 

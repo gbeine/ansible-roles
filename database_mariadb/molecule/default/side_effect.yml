@@ -16,6 +16,11 @@
       - "{{ database_mariadb__test_quadlet_path }}"
       - "{{ database_mariadb__test_vars.mariadb_home }}/custom.cnf"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -89,7 +94,7 @@
         mariadb_environment: { MYSQL_USER: 'app', MYSQL_DATABASE: 'app' }
         database_mariadb__test_invalid:
           message: 'a user of the image'
-          search: '^Databases and accounts are managed with mariadb_databases, mariadb_accounts and mariadb_passwords, not with MYSQL_DATABASE, MYSQL_USER\.$'
+          search: '^Unknown environment variables: MYSQL_USER, MYSQL_DATABASE\.'
 
     - name: 'Run database_mariadb with an unknown section (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -159,41 +164,50 @@
           message: 'an unknown environment variable in mariadb_container'
           search: '^Unknown environment variables: FOO\.'
 
-    - name: 'Run database_mariadb with the changed configuration'
-      when: database_mariadb__test_case.side_effect is defined
-      block:
+    - name: 'Run database_mariadb with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mariadb_environment: { CLI_OPTS: "--skip-ssl\n--verbose" }
+        database_mariadb__test_invalid:
+          message: 'a line break in the environment'
+          search: 'The environment variables must not contain line breaks: CLI_OPTS\.$'
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mariadb' ]
-          register: 'database_mariadb__test_started_before'
-          changed_when: false
+    # molecule-mariadb changes custom.cnf and has to restart, molecule-mariadb-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mariadb' ]
+      register: 'database_mariadb__test_started_before'
+      changed_when: false
 
-        - name: 'Set the changed configuration'
-          ansible.builtin.set_fact:
-            mariadb_config: "{{ database_mariadb__test_config | combine(database_mariadb__test_case.side_effect.config, recursive=true) }}"
+    - name: 'Set the role variables of the change'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_mariadb__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-        - name: 'Run database_mariadb with the changed configuration'
-          ansible.builtin.include_role:
-            name: 'database_mariadb'
+    - name: 'Run database_mariadb with the changed variables'
+      ansible.builtin.include_role:
+        name: 'database_mariadb'
 
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mariadb' ]
-          register: 'database_mariadb__test_started_after'
-          changed_when: false
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mariadb' ]
+      register: 'database_mariadb__test_started_after'
+      changed_when: false
 
-        - name: 'Assert the changed custom.cnf, the restart of the service and no second initialization'
-          ansible.builtin.assert:
-            that:
-              - database_mariadb__config_result is changed
-              - database_mariadb__quadlet_result is not changed
-              - database_mariadb__initialized.stat.exists
-              - database_mariadb__init_result is skipped
-              - database_mariadb__test_started_after.stdout | int > database_mariadb__test_started_before.stdout | int
-            fail_msg: >-
-              custom.cnf changed: {{ database_mariadb__config_result is changed }},
-              quadlet changed: {{ database_mariadb__quadlet_result is changed }},
-              initialized: {{ database_mariadb__initialized.stat.exists }},
-              initialization skipped: {{ database_mariadb__init_result is skipped }},
-              start before {{ database_mariadb__test_started_before.stdout }}, after {{ database_mariadb__test_started_after.stdout }}
+    - name: 'Assert custom.cnf, the restart of the service and no second initialization'
+      ansible.builtin.assert:
+        that:
+          - (database_mariadb__config_result is changed) == database_mariadb__test_case.expect.restart
+          - database_mariadb__quadlet_result is not changed
+          - database_mariadb__initialized.stat.exists
+          - database_mariadb__init_result is skipped
+          - (database_mariadb__test_started_after.stdout | int > database_mariadb__test_started_before.stdout | int)
+            == database_mariadb__test_case.expect.restart
+        fail_msg: >-
+          custom.cnf changed: {{ database_mariadb__config_result is changed }},
+          quadlet changed: {{ database_mariadb__quadlet_result is changed }},
+          initialized: {{ database_mariadb__initialized.stat.exists }},
+          initialization skipped: {{ database_mariadb__init_result is skipped }},
+          start before {{ database_mariadb__test_started_before.stdout }}, after {{ database_mariadb__test_started_after.stdout }}

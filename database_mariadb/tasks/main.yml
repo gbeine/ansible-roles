@@ -54,8 +54,6 @@
         database_mariadb__secrets_in_environment: >-
           {{ (database_mariadb__secret_targets + database_mariadb__secret_variables + database_mariadb__secret_files.values() | list)
              | select('in', database_mariadb__environment.keys() | list) | unique | list }}
-        database_mariadb__environment_managed_set: >-
-          {{ database_mariadb__environment_managed | select('in', database_mariadb__environment.keys() | list) | list }}
         database_mariadb__errors: >-
           {%- set errors = [] -%}
           {%- set bs = '\\' | first -%}
@@ -69,9 +67,6 @@
           {%-   if "'" in password or bs in password or (password ~ '.').splitlines() | length > 1 -%}
           {%-     set _ = errors.append('The root password must not contain single quotes, backslashes or line breaks, the image writes it into SQL without escaping.') -%}
           {%-   endif -%}
-          {%- endif -%}
-          {%- if database_mariadb__environment_managed_set | length > 0 -%}
-          {%-   set _ = errors.append('Databases and accounts are managed with mariadb_databases, mariadb_accounts and mariadb_passwords, not with ' ~ (database_mariadb__environment_managed_set | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if database_mariadb__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets and their file variables must not be set in mariadb_environment: ' ~ (database_mariadb__secrets_in_environment | join(', ')) ~ '.') -%}
@@ -214,10 +209,13 @@
         fail_msg: "{{ database_mariadb__errors | join(' ') }}"
         quiet: true
       vars:
+        database_mariadb__environment_checked: >-
+          {{ database_mariadb__container.environment if database_mariadb__container.environment is mapping else {} }}
         database_mariadb__environment_unknown: >-
-          {{ (database_mariadb__container.environment | default({})).keys()
-             | reject('in', database_mariadb__environment_allowed)
-             | reject('in', database_mariadb__environment_managed) | list }}
+          {{ database_mariadb__environment_checked.keys() | reject('in', database_mariadb__environment_allowed) | list }}
+        database_mariadb__environment_line_breaks: >-
+          {{ database_mariadb__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_mariadb__secrets_unknown: >-
           {{ database_mariadb__secrets | map(attribute='target') | reject('in', database_mariadb__secret_variables) | list }}
         database_mariadb__errors: >-
@@ -229,7 +227,10 @@
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_mariadb__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the variables of the image (database_mariadb__environment_allowed) and the secrets ' ~ (database_mariadb__secret_variables | join(', ')) ~ '.') -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_mariadb__environment_allowed) and the secrets ' ~ (database_mariadb__secret_variables | join(', ')) ~ ', databases and accounts are managed with mariadb_databases, mariadb_accounts and mariadb_passwords.') -%}
+          {%- endif -%}
+          {%- if database_mariadb__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_mariadb__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -238,6 +239,7 @@
         pkg: "{{ database_mariadb__packages }}"
         install_recommends: false
         cache_valid_time: 3600
+      register: 'database_mariadb__packages_result'
 
     # The image changes the owner of /config to PUID and PGID on every start
     - name: 'Create the directory of MariaDB'
@@ -269,6 +271,14 @@
       ansible.builtin.stat:
         path: "{{ database_mariadb__initialized_path }}"
       register: 'database_mariadb__initialized'
+
+    # In check mode the databases and accounts are compared if MariaDB is initialized and the Python library is installed,
+    # on a fresh host both are missing
+    - name: 'Decide whether the databases and accounts are compared'
+      ansible.builtin.set_fact:
+        database_mariadb__manage: >-
+          {{ not ansible_check_mode
+             or (database_mariadb__initialized.stat.exists and database_mariadb__packages_result is not changed) }}
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -413,19 +423,20 @@
       delay: 2
       failed_when: false
       no_log: true
-      when: 'not ansible_check_mode'
+      when: database_mariadb__manage | bool
 
     - name: 'Read the log of MariaDB'
       when:
-        - not ansible_check_mode
+        - database_mariadb__manage | bool
         - database_mariadb__ready.version is not defined
       ansible.builtin.command:
         argv: [ 'journalctl', '-u', "{{ database_mariadb__container.name }}", '-n', '50', '--no-pager' ]
       register: 'database_mariadb__journal'
       changed_when: false
+      check_mode: false
 
     - name: 'Assert that MariaDB answers'
-      when: 'not ansible_check_mode'
+      when: database_mariadb__manage | bool
       ansible.builtin.assert:
         that:
           - database_mariadb__ready.version is defined
@@ -433,7 +444,7 @@
         quiet: true
 
     - name: 'Manage the databases and accounts'
-      when: 'not ansible_check_mode'
+      when: database_mariadb__manage | bool
       block:
 
         - name: 'Remove the anonymous accounts'
