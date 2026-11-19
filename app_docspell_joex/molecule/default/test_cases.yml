@@ -1,0 +1,138 @@
+---
+# Network created by container_podman in prepare.yml
+app_docspell_joex__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_docspell_joex__test_image: 'docker.io/docspell/joex:latest'
+app_docspell_joex__test_quadlet_path: '/etc/containers/systemd/docspell-joex.container'
+
+# PostgreSQL started by prepare.yml in every VM, Joex runs the migrations of the database itself
+app_docspell_joex__test_database:
+  name: 'postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  database: 'docspell'
+  user: 'docspell'
+  password: 'molecule-db-password'
+
+app_docspell_joex__test_jdbc:
+  url: 'jdbc:postgresql://10.89.0.20:5432/docspell'
+  user: 'docspell'
+
+# The time zone is set by podman, neither TZ nor the files of the host are passed
+app_docspell_joex__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
+app_docspell_joex__test_cases:
+
+  # Only the mandatory variables: the database and the secret of its password
+  - name: 'molecule-docspell-joex-default'
+    role_vars:
+      docspell_joex_home: '/srv/docspell'
+      docspell_joex_ip: '10.89.0.70'
+      docspell_joex_network: 'podman-molecule'
+      docspell_joex_hostname: 'docspell-joex-default'
+      docspell_joex_timezone: 'Europe/Berlin'
+      docspell_joex_config:
+        docspell:
+          joex:
+            jdbc: "{{ app_docspell_joex__test_jdbc }}"
+      docspell_joex_secrets:
+        - name: 'docspell_joex_db_password'
+          data: 'molecule-db-password'
+          target: 'docspell.joex.jdbc.password'
+    # Runs again without a change, Joex must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      ip: '10.89.0.70'
+      ip6: ~
+      url: 'http://10.89.0.70:7878'
+      app_id: 'joex1'
+      config:
+        - 'docspell.joex.base-url = "http://10.89.0.70:7878"'
+        - 'docspell.joex.bind.address = "0.0.0.0"'
+        - 'docspell.joex.jdbc.url = "jdbc:postgresql://10.89.0.20:5432/docspell"'
+        - 'include required(file("/run/secrets/docspell_joex_db_password.conf"))'
+      secrets:
+        - 'docspell_joex_db_password,type=mount,target=/run/secrets/docspell_joex_db_password.conf,mode=0400'
+      quadlet: []
+      # Without docspell_joex_environment the quadlet unit has no environment
+      quadlet_absent: "{{ app_docspell_joex__test_quadlet_absent + [ 'Environment=' ] }}"
+      env: []
+
+  # IPv6, labels, dependencies, the environment, own options and the passwords of PDF files as a list in a second secret
+  - name: 'molecule-docspell-joex'
+    role_vars:
+      docspell_joex_home: '/srv/docspell'
+      docspell_joex_ip: '10.89.0.71'
+      docspell_joex_ipv6: 'fd00:89::71'
+      docspell_joex_network: 'podman-molecule'
+      docspell_joex_hostname: 'docspell-joex-molecule'
+      docspell_joex_timezone: 'Europe/Berlin'
+      docspell_joex_labels:
+        molecule.test: 'true'
+      docspell_joex_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
+      docspell_joex_environment:
+        JAVA_OPTS: '-Xmx768m'
+      docspell_joex_config:
+        docspell:
+          joex:
+            app-id: 'joex-molecule'
+            scheduler:
+              pool-size: 2
+            convert:
+              decrypt-pdf:
+                enabled: true
+            jdbc: "{{ app_docspell_joex__test_jdbc }}"
+      docspell_joex_secrets:
+        - name: 'docspell_joex_molecule_db_password'
+          data: 'molecule-db-password'
+          target: 'docspell.joex.jdbc.password'
+        - name: 'docspell_joex_molecule_pdf_passwords'
+          data: [ 'molecule-pdf' ]
+          target: 'docspell.joex.convert.decrypt-pdf.passwords'
+    # side_effect adds a password of PDF files, the secret changes and Joex has to restart
+    side_effect:
+      role_vars:
+        docspell_joex_secrets:
+          - name: 'docspell_joex_molecule_db_password'
+            data: 'molecule-db-password'
+            target: 'docspell.joex.jdbc.password'
+          - name: 'docspell_joex_molecule_pdf_passwords'
+            data: [ 'molecule-pdf', 'molecule-pdf-changed' ]
+            target: 'docspell.joex.convert.decrypt-pdf.passwords'
+    expect:
+      restart: true
+      ip: '10.89.0.71'
+      ip6: 'fd00:89::71'
+      url: 'http://10.89.0.71:7878'
+      app_id: 'joex-molecule'
+      config:
+        - 'docspell.joex.app-id = "joex-molecule"'
+        - 'docspell.joex.base-url = "http://10.89.0.71:7878"'
+        - 'docspell.joex.scheduler.pool-size = 2'
+        - 'docspell.joex.convert.decrypt-pdf.enabled = true'
+        - 'include required(file("/run/secrets/docspell_joex_molecule_db_password.conf"))'
+        - 'include required(file("/run/secrets/docspell_joex_molecule_pdf_passwords.conf"))'
+      secrets:
+        - 'docspell_joex_molecule_db_password,type=mount,target=/run/secrets/docspell_joex_molecule_db_password.conf,mode=0400'
+        - 'docspell_joex_molecule_pdf_passwords,type=mount,target=/run/secrets/docspell_joex_molecule_pdf_passwords.conf,mode=0400'
+      quadlet:
+        - 'Label=molecule.test=true'
+        - 'Environment=JAVA_OPTS=-Xmx768m'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      quadlet_absent: "{{ app_docspell_joex__test_quadlet_absent }}"
+      env:
+        - 'JAVA_OPTS=-Xmx768m'

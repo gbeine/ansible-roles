@@ -1,0 +1,48 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_docspell_joex__test_network }}"
+    podman_default_network: "{{ app_docspell_joex__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ app_docspell_joex__test_image }}"
+        - "{{ app_docspell_joex__test_database.image }}"
+
+    - name: 'Start PostgreSQL'
+      containers.podman.podman_container:
+        name: "{{ app_docspell_joex__test_database.name }}"
+        image: "{{ app_docspell_joex__test_database.image }}"
+        network: "{{ app_docspell_joex__test_network.name }}"
+        ip: "{{ app_docspell_joex__test_database.ip }}"
+        env:
+          POSTGRES_DB: "{{ app_docspell_joex__test_database.database }}"
+          POSTGRES_USER: "{{ app_docspell_joex__test_database.user }}"
+          POSTGRES_PASSWORD: "{{ app_docspell_joex__test_database.password }}"
+        state: 'started'
+
+    - name: 'Wait for PostgreSQL'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ app_docspell_joex__test_database.name }}", 'pg_isready', '-h', '127.0.0.1', '-U', "{{ app_docspell_joex__test_database.user }}" ]
+      register: 'app_docspell_joex__test_pg_ready'
+      until: app_docspell_joex__test_pg_ready.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false

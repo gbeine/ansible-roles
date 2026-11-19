@@ -1,0 +1,154 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_docspell__test_case: "{{ app_docspell__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_docspell__test_vars: "{{ app_docspell__test_case.role_vars }}"
+    app_docspell__expect: "{{ app_docspell__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read docspell.conf'
+      ansible.builtin.slurp:
+        src: "{{ app_docspell__test_vars.docspell_home }}/docspell.conf"
+      register: 'app_docspell__test_config'
+
+    - name: 'Read the attributes of docspell.conf'
+      ansible.builtin.stat:
+        path: "{{ app_docspell__test_vars.docspell_home }}/docspell.conf"
+      register: 'app_docspell__test_config_stat'
+
+    # The passwords are included from the secrets, they are never part of the file
+    - name: 'Assert docspell.conf'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__test_config_stat.stat.mode == '0600'
+          - app_docspell__test_config_stat.stat.pw_name == 'root'
+          - app_docspell__expect.config | reject('in', app_docspell__test_config_lines) | list | length == 0
+          - app_docspell__test_vars.docspell_secrets | map(attribute='data') | map('string') | select('in', app_docspell__test_config_content) | list | length == 0
+        fail_msg: "{{ app_docspell__test_config_lines | reject('search', 'password') | list }}"
+      vars:
+        app_docspell__test_config_content: "{{ app_docspell__test_config.content | b64decode }}"
+        app_docspell__test_config_lines: "{{ app_docspell__test_config_content.splitlines() }}"
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_docspell__test_quadlet_path }}"
+      register: 'app_docspell__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_docspell__test_image) in app_docspell__test_quadlet_lines
+          - ('IP=' + app_docspell__expect.ip) in app_docspell__test_quadlet_lines
+          - app_docspell__expect.ip6 is none or ('IP6=' + app_docspell__expect.ip6) in app_docspell__test_quadlet_lines
+          - app_docspell__expect.ip6 is not none or app_docspell__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Timezone=' + app_docspell__test_vars.docspell_timezone) in app_docspell__test_quadlet_lines
+          - app_docspell__expect.secrets | map('regex_replace', '^', 'Secret=') | reject('in', app_docspell__test_quadlet_lines) | list | length == 0
+          - app_docspell__expect.quadlet | reject('in', app_docspell__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - app_docspell__test_quadlet_lines | select('match', '(' ~ (app_docspell__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+        fail_msg: "{{ app_docspell__test_quadlet.content | b64decode }}"
+      vars:
+        app_docspell__test_quadlet_lines: "{{ (app_docspell__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the docspell service'
+      ansible.builtin.command: 'systemctl is-active docspell'
+      register: 'app_docspell__test_service'
+      changed_when: false
+      failed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'docspell' ]
+      register: 'app_docspell__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'docspell', '-n', '80', '--no-pager' ]
+      register: 'app_docspell__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_docspell__test_restarts.stdout ] + app_docspell__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Inspect the docspell container'
+      ansible.builtin.command: 'podman inspect docspell'
+      register: 'app_docspell__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the addresses, the environment and the time zone'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__test_service.stdout == 'active'
+          - app_docspell__test_net.IPAddress == app_docspell__expect.ip
+          - app_docspell__expect.ip6 is none or app_docspell__test_net.GlobalIPv6Address == app_docspell__expect.ip6
+          - app_docspell__expect.env | reject('in', app_docspell__test_env) | list | length == 0
+          # The time zone is set by podman with /etc/localtime, not with TZ
+          - app_docspell__test_env | select('match', 'TZ=') | list | length == 0
+          - app_docspell__test_container.Config.Timezone == app_docspell__test_vars.docspell_timezone
+        fail_msg: >-
+          service {{ app_docspell__test_service.stdout }}, time zone {{ app_docspell__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_docspell__test_net.IPAddress }}, IPv6 {{ app_docspell__test_net.GlobalIPv6Address }}, environment {{ app_docspell__test_env | join(', ') }}
+      vars:
+        app_docspell__test_container: "{{ (app_docspell__test_inspect.stdout | from_json)[0] }}"
+        app_docspell__test_net: "{{ app_docspell__test_container.NetworkSettings.Networks[app_docspell__test_vars.docspell_network] }}"
+        app_docspell__test_env: "{{ app_docspell__test_container.Config.Env }}"
+
+    # The JVM starts and the migrations of the database run before the API answers
+    - name: 'Wait until Docspell answers'
+      ansible.builtin.uri:
+        url: "{{ app_docspell__expect.url }}/api/info/version"
+        return_content: true
+      register: 'app_docspell__test_version'
+      until: app_docspell__test_version.status == 200
+      retries: 60
+      delay: 5
+
+    # The default signup mode is open, a second run of verify finds the collective
+    - name: 'Register an account'
+      ansible.builtin.uri:
+        url: "{{ app_docspell__expect.url }}/api/v1/open/signup/register"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          collectiveName: 'molecule'
+          login: 'molecule'
+          password: "{{ app_docspell__test_user_password }}"
+        return_content: true
+      register: 'app_docspell__test_register'
+
+    # The password of the database was read from the included secret, otherwise Docspell would not run
+    - name: 'Log in with the account'
+      ansible.builtin.uri:
+        url: "{{ app_docspell__expect.url }}/api/v1/open/auth/login"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          account: 'molecule/molecule'
+          password: "{{ app_docspell__test_user_password }}"
+          rememberMe: false
+        return_content: true
+      register: 'app_docspell__test_login'
+
+    - name: 'Assert the version, the registration and the login'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__test_version.json.version is defined
+          - app_docspell__test_register.json.success or app_docspell__test_register.json.message is search('exist', ignorecase=true)
+          - app_docspell__test_login.json.success
+        fail_msg: >-
+          version {{ app_docspell__test_version.content | default('') }},
+          registration {{ app_docspell__test_register.json | default({}) }},
+          login {{ app_docspell__test_login.json.message | default('') }}

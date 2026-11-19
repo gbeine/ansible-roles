@@ -1,0 +1,142 @@
+---
+# Network created by container_podman in prepare.yml
+app_docspell__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_docspell__test_image: 'docker.io/docspell/restserver:latest'
+app_docspell__test_quadlet_path: '/etc/containers/systemd/docspell.container'
+
+# PostgreSQL started by prepare.yml in every VM
+app_docspell__test_database:
+  name: 'postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  database: 'docspell'
+  user: 'docspell'
+  password: 'molecule-db-password'
+
+app_docspell__test_jdbc:
+  url: 'jdbc:postgresql://10.89.0.20:5432/docspell'
+  user: 'docspell'
+
+app_docspell__test_user_password: 'molecule-user-password'
+
+# The time zone is set by podman, neither TZ nor the files of the host are passed
+app_docspell__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
+app_docspell__test_cases:
+
+  # Only the mandatory variables: the base URL, the database and the secret of its password
+  - name: 'molecule-docspell-default'
+    role_vars:
+      docspell_home: '/srv/docspell'
+      docspell_ip: '10.89.0.60'
+      docspell_network: 'podman-molecule'
+      docspell_hostname: 'docspell-default'
+      docspell_timezone: 'Europe/Berlin'
+      docspell_config:
+        docspell:
+          server:
+            base-url: 'http://10.89.0.60:7880'
+            backend:
+              jdbc: "{{ app_docspell__test_jdbc }}"
+      docspell_secrets:
+        - name: 'docspell_db_password'
+          data: 'molecule-db-password'
+          target: 'docspell.server.backend.jdbc.password'
+    # Runs again without a change, Docspell must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      ip: '10.89.0.60'
+      ip6: ~
+      url: 'http://10.89.0.60:7880'
+      config:
+        - 'docspell.server.base-url = "http://10.89.0.60:7880"'
+        - 'docspell.server.internal-url = "http://10.89.0.60:7880"'
+        - 'docspell.server.bind.address = "0.0.0.0"'
+        - 'docspell.server.backend.jdbc.url = "jdbc:postgresql://10.89.0.20:5432/docspell"'
+        - 'include required(file("/run/secrets/docspell_db_password.conf"))'
+      secrets:
+        - 'docspell_db_password,type=mount,target=/run/secrets/docspell_db_password.conf,mode=0400'
+      quadlet: []
+      # Without docspell_environment the quadlet unit has no environment
+      quadlet_absent: "{{ app_docspell__test_quadlet_absent + [ 'Environment=' ] }}"
+      env: []
+
+  # IPv6, labels, dependencies, the environment, own options and the server secret as a second secret
+  - name: 'molecule-docspell'
+    role_vars:
+      docspell_home: '/srv/docspell'
+      docspell_ip: '10.89.0.61'
+      docspell_ipv6: 'fd00:89::61'
+      docspell_network: 'podman-molecule'
+      docspell_hostname: 'docspell-molecule'
+      docspell_timezone: 'Europe/Berlin'
+      docspell_labels:
+        traefik.enable: 'true'
+      docspell_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
+      docspell_environment:
+        JAVA_OPTS: '-Xmx512m'
+      docspell_config:
+        docspell:
+          server:
+            app-name: 'Molecule Docspell'
+            app-id: 'rest-molecule'
+            base-url: 'https://docspell.example.org'
+            logging:
+              levels:
+                docspell: 'Info'
+            backend:
+              jdbc: "{{ app_docspell__test_jdbc }}"
+      docspell_secrets:
+        - name: 'docspell_molecule_db_password'
+          data: 'molecule-db-password'
+          target: 'docspell.server.backend.jdbc.password'
+        - name: 'docspell_molecule_server_secret'
+          data: 'b64:bW9sZWN1bGUtc2VydmVyLXNlY3JldA=='
+          target: 'docspell.server.auth.server-secret'
+    # side_effect changes the server secret, the secret changes and Docspell has to restart
+    side_effect:
+      role_vars:
+        docspell_secrets:
+          - name: 'docspell_molecule_db_password'
+            data: 'molecule-db-password'
+            target: 'docspell.server.backend.jdbc.password'
+          - name: 'docspell_molecule_server_secret'
+            data: 'b64:Y2hhbmdlZC1zZXJ2ZXItc2VjcmV0'
+            target: 'docspell.server.auth.server-secret'
+    expect:
+      restart: true
+      ip: '10.89.0.61'
+      ip6: 'fd00:89::61'
+      url: 'http://10.89.0.61:7880'
+      config:
+        - 'docspell.server.app-name = "Molecule Docspell"'
+        - 'docspell.server.app-id = "rest-molecule"'
+        - 'docspell.server.base-url = "https://docspell.example.org"'
+        - 'docspell.server.logging.levels = {"docspell": "Info"}'
+        - 'include required(file("/run/secrets/docspell_molecule_db_password.conf"))'
+        - 'include required(file("/run/secrets/docspell_molecule_server_secret.conf"))'
+      secrets:
+        - 'docspell_molecule_db_password,type=mount,target=/run/secrets/docspell_molecule_db_password.conf,mode=0400'
+        - 'docspell_molecule_server_secret,type=mount,target=/run/secrets/docspell_molecule_server_secret.conf,mode=0400'
+      quadlet:
+        - 'Label=traefik.enable=true'
+        - 'Environment=JAVA_OPTS=-Xmx512m'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      quadlet_absent: "{{ app_docspell__test_quadlet_absent }}"
+      env:
+        - 'JAVA_OPTS=-Xmx512m'

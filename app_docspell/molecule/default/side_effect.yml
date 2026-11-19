@@ -1,0 +1,209 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_docspell__test_case: "{{ app_docspell__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_docspell__test_vars: "{{ app_docspell__test_case.role_vars }}"
+    app_docspell__test_config: "{{ app_docspell__test_vars.docspell_config }}"
+    app_docspell__test_secrets: "{{ app_docspell__test_vars.docspell_secrets }}"
+    app_docspell__test_checked_files:
+      - "{{ app_docspell__test_quadlet_path }}"
+      - "{{ app_docspell__test_vars.docspell_home }}/docspell.conf"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_docspell__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_docspell__test_checked_files }}"
+      register: 'app_docspell__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_docspell with docspell_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_container: [ 'environment' ]
+        app_docspell__test_invalid:
+          message: 'docspell_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_docspell with docspell_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_config: [ 'docspell' ]
+        app_docspell__test_invalid:
+          message: 'docspell_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_docspell with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_secrets:
+          - name: 'docspell_molecule_password'
+            data: 'molecule-password'
+        app_docspell__test_invalid:
+          message: 'a secret without target'
+          search: '^docspell_secrets entries need name, data and target$'
+
+    - name: 'Run app_docspell with an invalid name of a secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_secrets:
+          - name: 'docspell password'
+            data: 'molecule-password'
+            target: 'docspell.server.backend.jdbc.password'
+        app_docspell__test_invalid:
+          message: 'an invalid name of a secret'
+          search: 'the names of docspell_secrets have to match'
+
+    - name: 'Run app_docspell without the password of the database (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_secrets: []
+        app_docspell__test_invalid:
+          message: 'no password of the database'
+          search: 'needs the secrets docspell\.server\.backend\.jdbc\.password,\s+missing: docspell\.server\.backend\.jdbc\.password\.'
+
+    - name: 'Run app_docspell with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_secrets: "{{ app_docspell__test_secrets + [ { 'name': 'docspell_molecule_unknown', 'data': 'molecule', 'target': 'docspell.server.app-id' } ] }}"
+        app_docspell__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: docspell\.server\.app-id\.'
+
+    - name: 'Run app_docspell with the password of the database in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_config: "{{ app_docspell__test_config | combine({ 'docspell': { 'server': { 'backend': { 'jdbc': { 'password': 'molecule-db-password' } } } } }, recursive=true) }}"
+        app_docspell__test_invalid:
+          message: 'the password in the configuration'
+          search: 'Secrets must not be set in docspell_config, set them with docspell_secrets: docspell\.server\.backend\.jdbc\.password\.'
+
+    - name: 'Run app_docspell with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_config: "{{ app_docspell__test_config | combine({ 'docspell': { 'server': { 'app-nmae': 'molecule' } } }, recursive=true) }}"
+        app_docspell__test_invalid:
+          message: 'an unknown option'
+          search: 'Unknown options in docspell_config: docspell\.server\.app-nmae\.'
+
+    - name: 'Run app_docspell with an option of the role (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_config: "{{ app_docspell__test_config | combine({ 'docspell': { 'server': { 'bind': { 'address': '127.0.0.1' } } } }, recursive=true) }}"
+        app_docspell__test_invalid:
+          message: 'an option of the role'
+          search: 'The options docspell\.server\.bind\.address are set by the role'
+
+    - name: 'Run app_docspell without a required option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_config: "{{ app_docspell__test_config | combine({ 'docspell': { 'server': { 'base-url': none } } }, recursive=true) }}"
+        app_docspell__test_invalid:
+          message: 'a required option is missing'
+          search: 'missing or empty: docspell\.server\.base-url\.'
+
+    - name: 'Run app_docspell with a line break in an option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_config: "{{ app_docspell__test_config | combine({ 'docspell': { 'server': { 'app-id': 'molecule\nother' } } }, recursive=true) }}"
+        app_docspell__test_invalid:
+          message: 'a line break in an option'
+          search: 'must not contain line breaks: docspell\.server\.app-id\.'
+
+    - name: 'Run app_docspell with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_environment:
+          FOO: 'bar'
+        app_docspell__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: FOO\.'
+
+    - name: 'Run app_docspell with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        docspell_environment:
+          JAVA_OPTS: "-Xmx512m\n-Xms64m"
+        app_docspell__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: JAVA_OPTS\.'
+
+    # molecule-docspell changes the server secret and has to restart, molecule-docspell-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'docspell' ]
+      register: 'app_docspell__test_started_before'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, not the restarts of the role
+    - name: 'Read the automatic restarts of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'docspell' ]
+      register: 'app_docspell__test_restarts_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_docspell__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run app_docspell with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_docspell'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'docspell' ]
+      register: 'app_docspell__test_started_after'
+      changed_when: false
+
+    - name: 'Read the automatic restarts of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'docspell' ]
+      register: 'app_docspell__test_restarts_after'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'docspell', '-n', '80', '--no-pager' ]
+      register: 'app_docspell__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the changed secret and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_docspell__secrets_result is changed) == app_docspell__test_case.expect.restart
+          - app_docspell__config_result is not changed
+          - app_docspell__quadlet_result is not changed
+          - (app_docspell__test_started_after.stdout | int > app_docspell__test_started_before.stdout | int) == app_docspell__test_case.expect.restart
+        fail_msg: >-
+          secret changed: {{ app_docspell__secrets_result is changed }},
+          configuration changed: {{ app_docspell__config_result is changed }},
+          quadlet changed: {{ app_docspell__quadlet_result is changed }},
+          start before {{ app_docspell__test_started_before.stdout }}, after {{ app_docspell__test_started_after.stdout }},
+          automatic restarts before {{ app_docspell__test_restarts_before.stdout }}, after {{ app_docspell__test_restarts_after.stdout }},
+          journal {{ app_docspell__test_journal.stdout_lines | default([]) }}

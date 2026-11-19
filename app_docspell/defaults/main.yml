@@ -11,69 +11,212 @@ app_docspell__ipv6: "{{ docspell_ipv6 }}"
 app_docspell__network: "{{ docspell_network | mandatory }}"
 app_docspell__hostname: "{{ docspell_hostname | mandatory }}"
 app_docspell__timezone: "{{ docspell_timezone | mandatory }}"
-app_docspell__labels: "{{ docspell_labels | default({}) }}"
-
-app_docspell__joex_ip: "{{ docspell_joex_ip | mandatory }}"
-app_docspell__joex_ipv6: "{{ docspell_joex_ipv6 }}"
-app_docspell__joex_hostname: "{{ docspell_joex_hostname | mandatory }}"
+app_docspell__labels: "{{ docspell_labels }}"
 
 app_docspell__version: "{{ docspell_version | default('latest') }}"
 
-app_docspell__rest_container: "{{ app_docspell__rest_container_default | combine(docspell_container | default({})) }}"
-app_docspell__joex_container: "{{ app_docspell__joex_container_default | combine(docspell_joex_container | default({})) }}"
+# The content of docspell.conf, merged recursively over the default, null removes an option
+app_docspell__config: "{{ app_docspell__config_default | combine(docspell_config | default({}), recursive=true) }}"
+
+# Secrets with name, data and target, the target is the path of the option, e.g. docspell.server.backend.jdbc.password
+app_docspell__secrets: "{{ docspell_secrets | default([]) }}"
+
+# Only the variables of the image, the options of Docspell are set with docspell_config
+app_docspell__environment: "{{ docspell_environment }}"
+
+app_docspell__container: "{{ app_docspell__podman_container_default | combine(docspell_container | default({})) }}"
 
 app_docspell__autoupdate_enabled: "{{ docspell_autoupdate_enabled | default(false) }}"
-
-app_docspell__config: "{{ docspell_config | mandatory }}"
+app_docspell__autoupdate_schedule: "{{ docspell_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
+app_docspell__podman_name: 'docspell'
+app_docspell__podman_image: 'docker.io/docspell/restserver'
 app_docspell__podman_tag: "{{ app_docspell__version }}"
 
-app_docspell__podman_home: "{{ app_docspell__home }}"
-app_docspell__podman_config_file: "{{ app_docspell__podman_home }}/docspell.conf"
+app_docspell__config_file: "{{ app_docspell__home }}/docspell.conf"
+app_docspell__config_target: '/opt/docspell.conf'
+app_docspell__files_dir: "{{ app_docspell__home }}/files"
+app_docspell__secrets_dir: '/run/secrets'
 
-app_docspell__rest_podman_name: 'docspell'
-app_docspell__rest_podman_image: 'docker.io/docspell/restserver'
+# The names of the secrets are part of the paths of the files
+app_docspell__name_pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 
-app_docspell__rest_container_default:
-  name: "{{ app_docspell__rest_podman_name }}"
+app_docspell__config_default:
+  docspell:
+    server:
+      internal-url: "http://{{ app_docspell__ip }}:7880"
+      bind:
+        address: '0.0.0.0'
+        port: 7880
+
+# Options set by the role, the container needs the address
+app_docspell__config_role:
+  docspell.server.bind.address: '0.0.0.0'
+
+app_docspell__config_required:
+  - 'docspell.server.base-url'
+  - 'docspell.server.backend.jdbc.url'
+  - 'docspell.server.backend.jdbc.user'
+
+# Options whose values are dictionaries with free keys, they are not split into paths
+app_docspell__config_leaves:
+  - 'docspell.server.logging.levels'
+  - 'docspell.server.full-text-search.postgresql.pg-config'
+
+# The targets of the secrets, the paths of the options carrying passwords
+app_docspell__secrets_allowed:
+  - 'docspell.server.auth.server-secret'
+  - 'docspell.server.openid'
+  - 'docspell.server.integration-endpoint.http-basic.password'
+  - 'docspell.server.integration-endpoint.http-header.header-value'
+  - 'docspell.server.admin-endpoint.secret'
+  - 'docspell.server.full-text-search.postgresql.jdbc.password'
+  - 'docspell.server.backend.jdbc.password'
+  - 'docspell.server.backend.signup.new-invite-password'
+  - 'docspell.server.backend.files.stores.minio.secret-key'
+
+app_docspell__secrets_required:
+  - 'docspell.server.backend.jdbc.password'
+
+# The variables of the start script of the image
+app_docspell__environment_allowed:
+  - 'JAVA_OPTS'
+  - 'TZ'
+
+# The options of docspell.conf as paths, the values of lists and of app_docspell__config_leaves are not split,
+# the macro returns JSON, a macro cannot change a list of the caller
+app_docspell__config_options: >-
+  {%- macro flatten(prefix, value) -%}
+  {%-   for key, item in value.items() -%}
+  {%-     set path = prefix ~ key -%}
+  {%-     if item is mapping and item | length > 0 and path not in app_docspell__config_leaves -%}
+  {{-       flatten(path ~ '.', item) -}}
+  {%-     else -%}
+  {{-       ',' ~ ({ 'path': path, 'value': item } | to_json) -}}
+  {%-     endif -%}
+  {%-   endfor -%}
+  {%- endmacro -%}
+  {%- set options = flatten('', app_docspell__config) -%}
+  {{ ('[' ~ options[1:] ~ ']') | from_json }}
+
+# Entries without name or target are left out, the validation of the secrets reports them
+app_docspell__secrets_valid: >-
+  {{ (app_docspell__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | list)
+     if (app_docspell__secrets is sequence and app_docspell__secrets is not string) else [] }}
+
+# One line per option with the value as JSON, JSON is valid HOCON, the secrets are included at the end
+# The files of the secrets end with .conf, without an extension HOCON looks for <name>.conf, .json and .properties
+app_docspell__config_lines: >-
+  {%- set lines = [ '#', '# Ansible managed', '#', '' ] -%}
+  {%- for option in app_docspell__config_options if option.value is not none -%}
+  {%-   set _ = lines.append(option.path ~ ' = ' ~ (option.value | to_json)) -%}
+  {%- endfor -%}
+  {%- for secret in app_docspell__secrets_valid -%}
+  {%-   set _ = lines.append('include required(file("' ~ app_docspell__secrets_dir ~ '/' ~ secret.name ~ '.conf"))') -%}
+  {%- endfor -%}
+  {{ lines }}
+
+app_docspell__podman_container_default:
+  name: "{{ app_docspell__podman_name }}"
   hostname: "{{ app_docspell__hostname }}"
-  image: "{{ app_docspell__rest_podman_image }}:{{ app_docspell__podman_tag }}"
+  image: "{{ app_docspell__podman_image }}:{{ app_docspell__podman_tag }}"
   ip: "{{ app_docspell__ip }}"
   ipv6: "{{ app_docspell__ipv6 | default(omit) }}"
   network: "{{ app_docspell__network }}"
   timezone: "{{ app_docspell__timezone }}"
-  labels: "{{ app_docspell__labels }}"
+  labels: "{{ app_docspell__labels | default(omit) }}"
   command:
-    - '/opt/docspell.conf'
-  environment:
-    TZ: "{{ app_docspell__timezone }}"
+    - "{{ app_docspell__config_target }}"
+  # Without docspell_environment the quadlet unit has no environment
+  environment: "{{ app_docspell__environment | default(omit) }}"
+  # The secrets are HOCON files included by the configuration
+  secrets: >-
+    {%- set secrets = [] -%}
+    {%- for secret in app_docspell__secrets_valid -%}
+    {%-   set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ app_docspell__secrets_dir ~ '/' ~ secret.name ~ '.conf,mode=0400') -%}
+    {%- endfor -%}
+    {{ secrets if secrets | length > 0 else omit }}
+  # docspell_container.volumes replaces the list completely
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ app_docspell__podman_config_file }}:/opt/docspell.conf:ro,Z"
-    - "{{ app_docspell__podman_home }}/files:/srv/docspell/files:Z"
+    - "{{ app_docspell__config_file }}:{{ app_docspell__config_target }}:ro,Z"
+    # The store filesystem, shared with app_docspell_joex
+    - "{{ app_docspell__files_dir }}:/srv/docspell/files:z"
 
-app_docspell__joex_podman_name: 'joex'
-app_docspell__joex_podman_image: 'docker.io/docspell/joex'
-
-app_docspell__joex_container_default:
-  name: "{{ app_docspell__joex_podman_name }}"
-  hostname: "{{ app_docspell__joex_hostname }}"
-  image: "{{ app_docspell__joex_podman_image }}:{{ app_docspell__podman_tag }}"
-  ip: "{{ app_docspell__joex_ip }}"
-  ipv6: "{{ app_docspell__joex_ipv6 | default(omit) }}"
-  network: "{{ app_docspell__network }}"
-  timezone: "{{ app_docspell__timezone }}"
-  command:
-    - '/opt/docspell.conf'
-  environment:
-    TZ: "{{ app_docspell__timezone }}"
-  volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ app_docspell__podman_config_file }}:/opt/docspell.conf:ro,Z"
-    - "{{ app_docspell__podman_home }}/files:/srv/docspell/files:Z"
+# Generated from modules/restserver/src/main/resources/reference.conf of Docspell v0.42.0,
+# without the secrets and with the values of app_docspell__config_leaves not split
+app_docspell__config_allowed:
+  - 'docspell.server.app-name'
+  - 'docspell.server.app-id'
+  - 'docspell.server.base-url'
+  - 'docspell.server.internal-url'
+  - 'docspell.server.logging.format'
+  - 'docspell.server.logging.minimum-level'
+  - 'docspell.server.logging.levels'
+  - 'docspell.server.bind.address'
+  - 'docspell.server.bind.port'
+  - 'docspell.server.server-options.enable-http-2'
+  - 'docspell.server.server-options.max-connections'
+  - 'docspell.server.server-options.response-timeout'
+  - 'docspell.server.max-item-page-size'
+  - 'docspell.server.max-note-length'
+  - 'docspell.server.show-classification-settings'
+  - 'docspell.server.auth.session-valid'
+  - 'docspell.server.auth.remember-me.enabled'
+  - 'docspell.server.auth.remember-me.valid'
+  - 'docspell.server.auth.on-account-source-conflict'
+  - 'docspell.server.download-all.max-files'
+  - 'docspell.server.download-all.max-size'
+  - 'docspell.server.oidc-auto-redirect'
+  - 'docspell.server.integration-endpoint.enabled'
+  - 'docspell.server.integration-endpoint.priority'
+  - 'docspell.server.integration-endpoint.source-name'
+  - 'docspell.server.integration-endpoint.allowed-ips.enabled'
+  - 'docspell.server.integration-endpoint.allowed-ips.ips'
+  - 'docspell.server.integration-endpoint.http-basic.enabled'
+  - 'docspell.server.integration-endpoint.http-basic.realm'
+  - 'docspell.server.integration-endpoint.http-basic.user'
+  - 'docspell.server.integration-endpoint.http-header.enabled'
+  - 'docspell.server.integration-endpoint.http-header.header-name'
+  - 'docspell.server.full-text-search.enabled'
+  - 'docspell.server.full-text-search.backend'
+  - 'docspell.server.full-text-search.solr.url'
+  - 'docspell.server.full-text-search.solr.commit-within'
+  - 'docspell.server.full-text-search.solr.log-verbose'
+  - 'docspell.server.full-text-search.solr.def-type'
+  - 'docspell.server.full-text-search.solr.q-op'
+  - 'docspell.server.full-text-search.postgresql.use-default-connection'
+  - 'docspell.server.full-text-search.postgresql.jdbc.url'
+  - 'docspell.server.full-text-search.postgresql.jdbc.user'
+  - 'docspell.server.full-text-search.postgresql.pg-config'
+  - 'docspell.server.full-text-search.postgresql.pg-query-parser'
+  - 'docspell.server.full-text-search.postgresql.pg-rank-normalization'
+  - 'docspell.server.backend.mail-debug'
+  - 'docspell.server.backend.jdbc.url'
+  - 'docspell.server.backend.jdbc.user'
+  - 'docspell.server.backend.database-schema.run-main-migrations'
+  - 'docspell.server.backend.database-schema.run-fixup-migrations'
+  - 'docspell.server.backend.database-schema.repair-schema'
+  - 'docspell.server.backend.signup.mode'
+  - 'docspell.server.backend.signup.invite-time'
+  - 'docspell.server.backend.files.chunk-size'
+  - 'docspell.server.backend.files.valid-mime-types'
+  - 'docspell.server.backend.files.default-store'
+  - 'docspell.server.backend.files.stores.database.enabled'
+  - 'docspell.server.backend.files.stores.database.type'
+  - 'docspell.server.backend.files.stores.filesystem.enabled'
+  - 'docspell.server.backend.files.stores.filesystem.type'
+  - 'docspell.server.backend.files.stores.filesystem.directory'
+  - 'docspell.server.backend.files.stores.minio.enabled'
+  - 'docspell.server.backend.files.stores.minio.type'
+  - 'docspell.server.backend.files.stores.minio.endpoint'
+  - 'docspell.server.backend.files.stores.minio.access-key'
+  - 'docspell.server.backend.files.stores.minio.bucket'
+  - 'docspell.server.backend.files.stores.minio.region'
+  - 'docspell.server.backend.addons.enabled'
+  - 'docspell.server.backend.addons.allow-impure'
+  - 'docspell.server.backend.addons.allowed-urls'
+  - 'docspell.server.backend.addons.denied-urls'

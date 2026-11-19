@@ -1,147 +1,246 @@
 ---
 
-- name: 'Deploy Docspell container'
-  tags: [ 'app_docspell' ]
+- name: 'Install the Docspell REST server'
+  tags: [ 'app', 'app_docspell' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or docspell_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_docspell__container | length > 0
+          - app_docspell__config_lines | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_docspell__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_docspell__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_docspell__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('docspell_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('docspell_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of docspell_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='name') | map('string') | reject('match', app_docspell__name_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('the names of docspell_secrets have to match ' ~ app_docspell__name_pattern) -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_docspell__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_docspell__errors: >-
+          {%- set errors = [] -%}
+          {%- set options = app_docspell__config_options | rejectattr('value', 'none') | list -%}
+          {%- set paths = options | map(attribute='path') | list -%}
+          {%- set missing = app_docspell__config_required
+                            | reject('in', options | rejectattr('value', 'equalto', '') | map(attribute='path') | list) | list -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Docspell needs the options ' ~ (app_docspell__config_required | join(', ')) ~ ' in docspell_config, missing or empty: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set secrets = paths | select('in', app_docspell__secrets_allowed) | list -%}
+          {%- if secrets | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in docspell_config, set them with docspell_secrets: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set unknown = paths | reject('in', app_docspell__config_allowed) | reject('in', app_docspell__secrets_allowed) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in docspell_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the options of Docspell (app_docspell__config_allowed).') -%}
+          {%- endif -%}
+          {%- set role = app_docspell__config_role | dict2items
+                         | rejectattr('value', 'in', options | selectattr('path', 'in', app_docspell__config_role.keys() | list) | map(attribute='value') | list)
+                         | map(attribute='key') | list -%}
+          {%- if role | length > 0 -%}
+          {%-   set _ = errors.append('The options ' ~ (role | join(', ')) ~ ' are set by the role and must not be changed in docspell_config.') -%}
+          {%- endif -%}
+          {%- set lines = [] -%}
+          {%- for option in options -%}
+          {%-   set values = option.value if option.value is sequence and option.value is not string and option.value is not mapping else [ option.value ] -%}
+          {%-   if values | select('string') | select('search', '[\n\r]') | list | length > 0 -%}
+          {%-     set _ = lines.append(option.path) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of docspell_config must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging docspell_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_docspell__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_docspell__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_docspell__environment_checked: >-
+          {{ app_docspell__container.environment if app_docspell__container.environment is mapping else {} }}
+        app_docspell__environment_unknown: >-
+          {{ app_docspell__environment_checked.keys() | reject('in', app_docspell__environment_allowed) | list }}
+        app_docspell__environment_line_breaks: >-
+          {{ app_docspell__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_docspell__secrets_targets: "{{ app_docspell__secrets_valid | map(attribute='target') | list }}"
+        app_docspell__secrets_unknown: "{{ app_docspell__secrets_targets | reject('in', app_docspell__secrets_allowed) | list }}"
+        app_docspell__secrets_missing: "{{ app_docspell__secrets_required | reject('in', app_docspell__secrets_targets) | list }}"
+        app_docspell__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_docspell__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Docspell needs the secrets ' ~ (app_docspell__secrets_required | join(', ')) ~ ', missing: ' ~ (app_docspell__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_docspell__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_docspell__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_docspell__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_docspell__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_docspell__environment_unknown | length > 0 or app_docspell__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_docspell__environment_allowed | join(', ')) ~ ', the options of Docspell are set with docspell_config, and the secrets ' ~ (app_docspell__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_docspell__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (app_docspell__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        dest: "{{ item }}"
         owner: 'root'
         group: 'root'
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_docspell__podman_home }}/files"
+      loop:
+        - "{{ app_docspell__home }}"
+        - "{{ app_docspell__files_dir }}"
 
-    - name: 'Generate configuration'
+    # Docspell runs as root and reads the file at the start, the secrets are included from /run/secrets
+    - name: 'Write docspell.conf'
       ansible.builtin.copy:
-        content: "{{ app_docspell__config | to_hocon }}"
-        dest: "{{ app_docspell__podman_config_file }}"
-      when: 'not podman___update_mode | bool and app_docspell__config | length > 0'
-      notify: 'Restart docspell container'
+        # Double quotes, so \n is a line break
+        content: "{{ app_docspell__config_lines | join('\n') }}\n"
+        dest: "{{ app_docspell__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0600'
+      register: 'app_docspell__config_result'
+
+    # Every secret is a HOCON file with the option, the value is JSON, so it may be a list, e.g. docspell.server.openid
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.target ~ ' = ' ~ (item.data | to_json) }}"
+      loop: "{{ app_docspell__secrets }}"
+      register: 'app_docspell__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'REST Server container'
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_docspell__container.name }}"
+        hostname: "{{ app_docspell__container.hostname }}"
+        image: "{{ app_docspell__container.image }}"
+        ip: "{{ app_docspell__container.ip }}"
+        ip6: "{{ app_docspell__container.ipv6 | default(omit) }}"
+        network: "{{ app_docspell__container.network }}"
+        timezone: "{{ app_docspell__container.timezone }}"
+        command: "{{ app_docspell__container.command | default(omit) }}"
+        env: "{{ app_docspell__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_docspell__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_docspell__container.expose | default(omit) }}"
+        label: "{{ app_docspell__container.labels | default(omit) }}"
+        publish: "{{ app_docspell__container.publish | default(omit) }}"
+        secrets: "{{ app_docspell__container.secrets | default(omit) }}"
+        volume: "{{ app_docspell__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_docspell__container.requires is defined %}
+          Requires={{ app_docspell__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_docspell__container.wants is defined %}
+          Wants={{ app_docspell__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_docspell__container.after is defined %}
+          After={{ app_docspell__container.after | join(' ') }}
+          {% endif %}
+          {% if app_docspell__container.part_of is defined %}
+          PartOf={{ app_docspell__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_docspell__container.binds_to is defined %}
+          BindsTo={{ app_docspell__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_docspell__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_docspell__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_docspell__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Docspell'
+      when: 'not ansible_check_mode'
       block:
 
-        - name: 'Stop container when it is running'
-          ansible.builtin.systemd:
-            name: "{{ app_docspell__rest_container.name }}.service"
-            state: 'stopped'
-          when: 'ansible_facts.services[app_docspell__rest_container.name + ".service"] is defined and podman___update_mode | bool'
-
-        - name: 'Pull image'
-          containers.podman.podman_image:
-            name: "{{ app_docspell__rest_container.image }}"
-            force: true
-          when: 'podman___update_mode | bool'
-
-        - name:  'Install container'
-          containers.podman.podman_container:
-            name: "{{ app_docspell__rest_container.name }}"
-            hostname: "{{ app_docspell__rest_container.hostname }}"
-            image: "{{ app_docspell__rest_container.image }}"
-            ip: "{{ app_docspell__rest_container.ip }}"
-            ip6: "{{ app_docspell__rest_container.ipv6 | default(omit) }}"
-            network: "{{ app_docspell__rest_container.network }}"
-            timezone: "{{ app_docspell__rest_container.timezone }}"
-            env: "{{ app_docspell__rest_container.environment | default(omit) }}"
-            etc_hosts: "{{ app_docspell__rest_container.etc_hosts | default(omit) }}"
-            expose: "{{ app_docspell__rest_container.expose | default(omit) }}"
-            label: "{{ app_docspell__rest_container.labels | default(omit) }}"
-            publish: "{{ app_docspell__rest_container.publish | default(omit) }}"
-            secrets: "{{ app_docspell__rest_container.secrets | default(omit) }}"
-            volume: "{{ app_docspell__rest_container.volumes | default(omit) }}"
-            command: "{{ app_docspell__rest_container.command | default(omit) }}"
-            quadlet_options: |
-              [Install]
-              WantedBy=default.target
-
-              [Service]
-              RestartSec=5
-              Restart=always
-
-              [Unit]
-            restart_policy: 'no'
-            state: 'quadlet'
-            recreate: "{{ podman___update_mode | bool }}"
-
         - name: 'Start and enable container'
-          ansible.builtin.systemd:
-            name: "{{ app_docspell__rest_container.name }}"
+          ansible.builtin.systemd_service:
+            name: "{{ app_docspell__container.name }}"
             daemon_reload: true
-            state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
+            state: "{{ 'restarted' if app_docspell__restart | bool else 'started' }}"
             enabled: true
-          when: 'not ansible_check_mode'
-
-        - name: 'Enable autoupdate on container'
-          when: 'app_docspell__autoupdate_enabled'
-          include_role:
-            name: 'container_update'
           vars:
-            container_name: "{{ app_docspell__rest_container.name }}"
-            container_image: "{{ app_docspell__rest_container.image }}"
+            app_docspell__running: >-
+              {{ (ansible_facts.services[app_docspell__container.name + '.service'].state | default('')) == 'running' }}
+            app_docspell__restart: >-
+              {{ app_docspell__running | bool
+                 and (app_docspell__secrets_result is changed
+                      or app_docspell__config_result is changed
+                      or app_docspell__quadlet_result is changed) }}
 
-    - name: 'Job Executor container'
-      block:
+      rescue:
 
-        - name: 'Stop container when it is running'
-          ansible.builtin.systemd:
-            name: "{{ app_docspell__joex_container.name }}.service"
-            state: 'stopped'
-          when: 'ansible_facts.services[app_docspell__joex_container.name + ".service"] is defined and podman___update_mode | bool'
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_docspell__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_docspell__start_journal'
+          changed_when: false
 
-        - name: 'Pull image'
-          containers.podman.podman_image:
-            name: "{{ app_docspell__joex_container.image }}"
-            force: true
-          when: 'podman___update_mode | bool'
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_docspell__container.name ~ ' did not start' ] + app_docspell__start_journal.stdout_lines }}"
 
-        - name:  'Install container'
-          containers.podman.podman_container:
-            name: "{{ app_docspell__joex_container.name }}"
-            hostname: "{{ app_docspell__joex_container.hostname }}"
-            image: "{{ app_docspell__joex_container.image }}"
-            ip: "{{ app_docspell__joex_container.ip }}"
-            ip6: "{{ app_docspell__joex_container.ipv6 | default(omit) }}"
-            network: "{{ app_docspell__joex_container.network }}"
-            timezone: "{{ app_docspell__joex_container.timezone }}"
-            env: "{{ app_docspell__joex_container.environment | default(omit) }}"
-            etc_hosts: "{{ app_docspell__joex_container.etc_hosts | default(omit) }}"
-            expose: "{{ app_docspell__joex_container.expose | default(omit) }}"
-            label: "{{ app_docspell__joex_container.labels | default(omit) }}"
-            publish: "{{ app_docspell__joex_container.publish | default(omit) }}"
-            secrets: "{{ app_docspell__joex_container.secrets | default(omit) }}"
-            volume: "{{ app_docspell__joex_container.volumes | default(omit) }}"
-            command: "{{ app_docspell__joex_container.command | default(omit) }}"
-            quadlet_options: |
-              [Install]
-              WantedBy=default.target
-
-              [Service]
-              RestartSec=5
-              Restart=always
-
-              [Unit]
-            restart_policy: 'no'
-            state: 'quadlet'
-            recreate: "{{ podman___update_mode | bool }}"
-
-        - name: 'Start and enable container'
-          ansible.builtin.systemd:
-            name: "{{ app_docspell__joex_container.name }}"
-            daemon_reload: true
-            state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-            enabled: true
-          when: 'not ansible_check_mode'
-
-        - name: 'Enable autoupdate on container'
-          when: 'app_docspell__autoupdate_enabled'
-          include_role:
-            name: 'container_update'
-          vars:
-            container_name: "{{ app_docspell__joex_container.name }}"
-            container_image: "{{ app_docspell__joex_container.image }}"
+    - name: 'Enable autoupdate on container'
+      when: 'app_docspell__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_docspell__container.name }}"
+        container_image: "{{ app_docspell__container.image }}"
+        container_schedule: "{{ app_docspell__autoupdate_schedule }}"

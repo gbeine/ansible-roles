@@ -1,0 +1,146 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_docspell_joex__test_case: "{{ app_docspell_joex__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_docspell_joex__test_vars: "{{ app_docspell_joex__test_case.role_vars }}"
+    app_docspell_joex__expect: "{{ app_docspell_joex__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read joex.conf'
+      ansible.builtin.slurp:
+        src: "{{ app_docspell_joex__test_vars.docspell_joex_home }}/joex.conf"
+      register: 'app_docspell_joex__test_config'
+
+    - name: 'Read the attributes of joex.conf'
+      ansible.builtin.stat:
+        path: "{{ app_docspell_joex__test_vars.docspell_joex_home }}/joex.conf"
+      register: 'app_docspell_joex__test_config_stat'
+
+    # The passwords are included from the secrets, they are never part of the file
+    - name: 'Assert joex.conf'
+      ansible.builtin.assert:
+        that:
+          - app_docspell_joex__test_config_stat.stat.mode == '0600'
+          - app_docspell_joex__test_config_stat.stat.pw_name == 'root'
+          - app_docspell_joex__expect.config | reject('in', app_docspell_joex__test_config_lines) | list | length == 0
+          - app_docspell_joex__test_vars.docspell_joex_secrets | map(attribute='data') | map('string') | select('in', app_docspell_joex__test_config_content) | list | length == 0
+        fail_msg: "{{ app_docspell_joex__test_config_lines | reject('search', 'password') | list }}"
+      vars:
+        app_docspell_joex__test_config_content: "{{ app_docspell_joex__test_config.content | b64decode }}"
+        app_docspell_joex__test_config_lines: "{{ app_docspell_joex__test_config_content.splitlines() }}"
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_docspell_joex__test_quadlet_path }}"
+      register: 'app_docspell_joex__test_quadlet'
+
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_docspell_joex__test_image) in app_docspell_joex__test_quadlet_lines
+          - ('IP=' + app_docspell_joex__expect.ip) in app_docspell_joex__test_quadlet_lines
+          - app_docspell_joex__expect.ip6 is none or ('IP6=' + app_docspell_joex__expect.ip6) in app_docspell_joex__test_quadlet_lines
+          - app_docspell_joex__expect.ip6 is not none or app_docspell_joex__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Timezone=' + app_docspell_joex__test_vars.docspell_joex_timezone) in app_docspell_joex__test_quadlet_lines
+          - app_docspell_joex__expect.secrets | map('regex_replace', '^', 'Secret=') | reject('in', app_docspell_joex__test_quadlet_lines) | list | length == 0
+          - app_docspell_joex__expect.quadlet | reject('in', app_docspell_joex__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - app_docspell_joex__test_quadlet_lines | select('match', '(' ~ (app_docspell_joex__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+        fail_msg: "{{ app_docspell_joex__test_quadlet.content | b64decode }}"
+      vars:
+        app_docspell_joex__test_quadlet_lines: "{{ (app_docspell_joex__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the docspell-joex service'
+      ansible.builtin.command: 'systemctl is-active docspell-joex'
+      register: 'app_docspell_joex__test_service'
+      changed_when: false
+      failed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'docspell-joex' ]
+      register: 'app_docspell_joex__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'docspell-joex', '-n', '80', '--no-pager' ]
+      register: 'app_docspell_joex__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_docspell_joex__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_docspell_joex__test_restarts.stdout ] + app_docspell_joex__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Inspect the docspell-joex container'
+      ansible.builtin.command: 'podman inspect docspell-joex'
+      register: 'app_docspell_joex__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the addresses, the environment and the time zone'
+      ansible.builtin.assert:
+        that:
+          - app_docspell_joex__test_service.stdout == 'active'
+          - app_docspell_joex__test_net.IPAddress == app_docspell_joex__expect.ip
+          - app_docspell_joex__expect.ip6 is none or app_docspell_joex__test_net.GlobalIPv6Address == app_docspell_joex__expect.ip6
+          - app_docspell_joex__expect.env | reject('in', app_docspell_joex__test_env) | list | length == 0
+          # The time zone is set by podman with /etc/localtime, not with TZ
+          - app_docspell_joex__test_env | select('match', 'TZ=') | list | length == 0
+          - app_docspell_joex__test_container.Config.Timezone == app_docspell_joex__test_vars.docspell_joex_timezone
+        fail_msg: >-
+          service {{ app_docspell_joex__test_service.stdout }}, time zone {{ app_docspell_joex__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_docspell_joex__test_net.IPAddress }}, IPv6 {{ app_docspell_joex__test_net.GlobalIPv6Address }}, environment {{ app_docspell_joex__test_env | join(', ') }}
+      vars:
+        app_docspell_joex__test_container: "{{ (app_docspell_joex__test_inspect.stdout | from_json)[0] }}"
+        app_docspell_joex__test_net: "{{ app_docspell_joex__test_container.NetworkSettings.Networks[app_docspell_joex__test_vars.docspell_joex_network] }}"
+        app_docspell_joex__test_env: "{{ app_docspell_joex__test_container.Config.Env }}"
+
+    # The JVM starts and the migrations of the database run before the API answers
+    - name: 'Wait until Joex answers'
+      ansible.builtin.uri:
+        url: "{{ app_docspell_joex__expect.url }}/api/info/version"
+        return_content: true
+      register: 'app_docspell_joex__test_version'
+      until: app_docspell_joex__test_version.status == 200
+      retries: 60
+      delay: 5
+
+    # Joex registers itself with its base-url in the table node, so it connected with the password from the secret
+    - name: 'Read the node of Joex from PostgreSQL'
+      ansible.builtin.command:
+        argv:
+          - 'podman'
+          - 'exec'
+          - "{{ app_docspell_joex__test_database.name }}"
+          - 'psql'
+          - '-U'
+          - "{{ app_docspell_joex__test_database.user }}"
+          - '-d'
+          - "{{ app_docspell_joex__test_database.database }}"
+          - '-tAc'
+          - "SELECT url FROM node WHERE id = '{{ app_docspell_joex__expect.app_id }}'"
+      register: 'app_docspell_joex__test_node'
+      until: app_docspell_joex__test_node.stdout | trim == app_docspell_joex__expect.url
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: 'Assert the version and the node of Joex'
+      ansible.builtin.assert:
+        that:
+          - app_docspell_joex__test_version.json.version is defined
+          - app_docspell_joex__test_node.stdout | trim == app_docspell_joex__expect.url
+        fail_msg: >-
+          version {{ app_docspell_joex__test_version.content | default('') }},
+          node {{ app_docspell_joex__test_node.stdout }}
