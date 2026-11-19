@@ -4,8 +4,13 @@ The Redis servers are not part of the role.
 
 ### Configuration
 
-phpRedisAdmin is configured completely with environment variables in `phpredisadmin_environment`, merged over the default of the role.
-The default sets `TZ` to `phpredisadmin_timezone`, the passwords are passed with `phpredisadmin_secrets` (see Secrets). Values are strings, e.g. `'true'`.
+phpRedisAdmin is configured completely with environment variables in `phpredisadmin_environment`, there is no default.
+The passwords are passed with `phpredisadmin_secrets` (see Secrets). Values are strings, e.g. `'true'`.
+The time zone is set by podman with `phpredisadmin_timezone` (`/etc/localtime` of the container), `TZ` is not needed.
+
+The image copies `includes/config.environment.inc.php` to `includes/config.inc.php`, it reads every option with `getenv()`.
+The role keeps the environment instead of an own `config.inc.php`: phpRedisAdmin keeps no data and needs no other files,
+so the role has no home directory and creates no files on the host.
 
 The options of phpRedisAdmin are read by `includes/config.environment.inc.php` of the image, e.g. `FILTER`, `SEPERATOR`, `SCAN_SIZE`, `HIDE_EMPTY_DBS` or `COOKIE_AUTH`.
 The web interface needs an authentication: `ADMIN_USER` together with a secret with the target `ADMIN_PASS`,
@@ -85,7 +90,15 @@ new versions of the image may add variables.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `phpredisadmin_container`, it is merged over the default of the container.
+Ports, volumes and additional hosts (`etc_hosts`) are changed with `phpredisadmin_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists in `phpredisadmin_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+
+```yaml
+phpredisadmin_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+```
 The merge is not recursive, `phpredisadmin_container.environment` replaces the environment including `phpredisadmin_environment`, use `phpredisadmin_environment` instead.
 For a reverse proxy, e.g. Traefik, the labels are set with `phpredisadmin_labels`.
 
@@ -99,14 +112,20 @@ The role checks before any change:
 - `ADMIN_USER` and the secret `ADMIN_PASS` are set together, without both `ALLOW_NO_AUTH` is `'true'`
 - `ALLOW_NO_AUTH` is `'true'` or `'false'`, the image compares it with the string `true`
 - neither a secret nor a file variable is set in `phpredisadmin_environment`
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables and secrets are set in the container, the values contain no line breaks
 
 If `phpredisadmin_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the changes of the secrets and the quadlet unit, the service is neither started nor restarted.
+
 ### Restart and updates
 
 phpRedisAdmin is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `phpredisadmin_environment`, otherwise it is started and enabled.
+If the start fails, the role stops with the last lines of the journal of the service.
 Updates of the image are done by `container_update` with `phpredisadmin_autoupdate_enabled: true` and `phpredisadmin_autoupdate_schedule`,
 without `phpredisadmin_autoupdate_schedule` the schedule of `container_update` is used.
 
@@ -125,6 +144,9 @@ The tag of the image is set with `phpredisadmin_version`.
 `phpredisadmin_labels` has no default anymore, without it the container has no labels.
 `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
 The tag `database_phpredisadmin` stays, the tag `database` is added.
+`TZ` is no longer set in the environment, the time zone is set by podman with `phpredisadmin_timezone`.
+Without `phpredisadmin_environment` the quadlet unit has no environment.
+`wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `phpredisadmin_container` are new, `requires` was supported before.
 
 ### Tests
 
@@ -134,15 +156,18 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-phpredisadmin-default` | Only the mandatory variables, one Redis server without password and `ALLOW_NO_AUTH` |
-| `molecule-phpredisadmin` | IPv6, labels, two Redis servers, the password of the second one from a secret with the target `REDIS_2_AUTH`, `ADMIN_USER` and the secret `ADMIN_PASS` |
+| `molecule-phpredisadmin` | IPv6, labels, dependencies, two Redis servers, the password of the second one from a secret with the target `REDIS_2_AUTH`, `ADMIN_USER` and the secret `ADMIN_PASS` |
 
+`check` runs `converge` with `--check` on the new VMs.
 `prepare` installs curl, creates the podman network, pulls the images and starts two Redis containers, the second one with a password.
 `side_effect` runs the role with `phpredisadmin_container` not a dictionary, `phpredisadmin_keys` not a dictionary, with an unknown family, a gap and a duplicate key,
 a key without `REDIS_<n>_HOST`, `REDIS_3_HOST` without key, a secret without `target`, `ADMIN_USER` without `ADMIN_PASS`, without authentication,
-`ALLOW_NO_AUTH: 'yes'`, `ADMIN_PASS` and `REDIS_1_AUTH_FILE` in the environment, an unknown environment variable in `phpredisadmin_container.environment` and an unknown secret
+`ALLOW_NO_AUTH: 'yes'`, `ADMIN_PASS` and `REDIS_1_AUTH_FILE` in the environment, a line break in the environment, an unknown environment variable in `phpredisadmin_container.environment` and an unknown secret
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes `REDIS_2_NAME` on `molecule-phpredisadmin`, the quadlet unit changes and phpRedisAdmin has to restart.
-`verify` checks the quadlet unit with the secrets, the service, the addresses and the environment of the container with the file variable set by the role,
+then it changes `REDIS_2_NAME` on `molecule-phpredisadmin`, the quadlet unit changes and phpRedisAdmin has to restart,
+`molecule-phpredisadmin-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets and the dependencies and without `TZ`, the service, the addresses, the time zone
+and the environment of the container with the file variable set by the role,
 the file of the secret, that the overview needs the login if `ADMIN_USER` is set and reads the overview with curl and the digest authentication,
 every Redis server has to be shown without an error, so the password of the second server was read from the file.
 

@@ -81,15 +81,18 @@
         quiet: true
       vars:
         database_phpredisadmin__secret_targets: "{{ database_phpredisadmin__secrets | map(attribute='target') | list }}"
+        # Without phpredisadmin_environment no variable is set, the missing server is reported
+        database_phpredisadmin__environment_mapping: >-
+          {{ database_phpredisadmin__environment if database_phpredisadmin__environment is defined and database_phpredisadmin__environment is mapping else {} }}
         database_phpredisadmin__environment_set: >-
-          {{ database_phpredisadmin__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+          {{ database_phpredisadmin__environment_mapping | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
         database_phpredisadmin__environment_missing: >-
           {{ database_phpredisadmin__environment_required | reject('in', database_phpredisadmin__environment_set) | list }}
         database_phpredisadmin__secrets_missing: >-
           {{ database_phpredisadmin__secrets_required | reject('in', database_phpredisadmin__secret_targets) | list }}
         database_phpredisadmin__secrets_in_environment: >-
           {{ (database_phpredisadmin__secret_targets + database_phpredisadmin__secret_variables + database_phpredisadmin__secret_files.values() | list)
-             | select('in', database_phpredisadmin__environment.keys() | list) | unique | list }}
+             | select('in', database_phpredisadmin__environment_mapping.keys() | list) | unique | list }}
         database_phpredisadmin__servers_missing: >-
           {%- set missing = [] -%}
           {%- for key in database_phpredisadmin__keys_valid.redis if ('REDIS_' ~ key ~ '_HOST') not in database_phpredisadmin__environment_set -%}
@@ -98,7 +101,7 @@
           {{ missing }}
         database_phpredisadmin__admin_user_set: "{{ 'ADMIN_USER' in database_phpredisadmin__environment_set }}"
         database_phpredisadmin__admin_pass_set: "{{ 'ADMIN_PASS' in database_phpredisadmin__secret_targets }}"
-        database_phpredisadmin__allow_no_auth: "{{ database_phpredisadmin__environment.ALLOW_NO_AUTH | default('') }}"
+        database_phpredisadmin__allow_no_auth: "{{ database_phpredisadmin__environment_mapping.ALLOW_NO_AUTH | default('') }}"
         database_phpredisadmin__errors: >-
           {%- set errors = [] -%}
           {%- if database_phpredisadmin__environment_missing | length > 0 -%}
@@ -135,8 +138,13 @@
         fail_msg: "{{ database_phpredisadmin__errors | join(' ') }}"
         quiet: true
       vars:
+        database_phpredisadmin__environment_container: >-
+          {{ database_phpredisadmin__container.environment if database_phpredisadmin__container.environment is mapping else {} }}
         database_phpredisadmin__environment_unknown: >-
-          {{ (database_phpredisadmin__container.environment | default({})).keys() | reject('in', database_phpredisadmin__environment_allowed) | list }}
+          {{ database_phpredisadmin__environment_container.keys() | reject('in', database_phpredisadmin__environment_allowed) | list }}
+        database_phpredisadmin__environment_line_breaks: >-
+          {{ database_phpredisadmin__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_phpredisadmin__secrets_unknown: >-
           {{ database_phpredisadmin__secrets | map(attribute='target')
              | reject('in', database_phpredisadmin__secret_files.keys() | list + database_phpredisadmin__secrets_env) | list }}
@@ -148,8 +156,11 @@
           {%- if database_phpredisadmin__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_phpredisadmin__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
+          {%- if database_phpredisadmin__environment_unknown | length > 0 or database_phpredisadmin__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of the image (database_phpredisadmin__environment_allowed) and the secrets ' ~ ((database_phpredisadmin__secret_files.keys() | list + database_phpredisadmin__secrets_env) | join(', ')) ~ ', options with keys in their names need the keys in phpredisadmin_keys.') -%}
+          {%- endif -%}
+          {%- if database_phpredisadmin__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_phpredisadmin__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -193,24 +204,55 @@
           {% if database_phpredisadmin__container.requires is defined %}
           Requires={{ database_phpredisadmin__container.requires | join(' ') }}
           {% endif %}
+          {% if database_phpredisadmin__container.wants is defined %}
+          Wants={{ database_phpredisadmin__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_phpredisadmin__container.after is defined %}
+          After={{ database_phpredisadmin__container.after | join(' ') }}
+          {% endif %}
+          {% if database_phpredisadmin__container.part_of is defined %}
+          PartOf={{ database_phpredisadmin__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_phpredisadmin__container.binds_to is defined %}
+          BindsTo={{ database_phpredisadmin__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_phpredisadmin__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_phpredisadmin__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'database_phpredisadmin__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_phpredisadmin__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if database_phpredisadmin__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        database_phpredisadmin__running: >-
-          {{ (ansible_facts.services[database_phpredisadmin__container.name + '.service'].state | default('')) == 'running' }}
-        database_phpredisadmin__restart: >-
-          {{ database_phpredisadmin__running | bool
-             and (database_phpredisadmin__secrets_result is changed
-                  or database_phpredisadmin__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start phpRedisAdmin'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_phpredisadmin__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_phpredisadmin__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_phpredisadmin__running: >-
+              {{ (ansible_facts.services[database_phpredisadmin__container.name + '.service'].state | default('')) == 'running' }}
+            database_phpredisadmin__restart: >-
+              {{ database_phpredisadmin__running | bool
+                 and (database_phpredisadmin__secrets_result is changed
+                      or database_phpredisadmin__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_phpredisadmin__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_phpredisadmin__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_phpredisadmin__container.name ~ ' did not start' ] + database_phpredisadmin__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'database_phpredisadmin__autoupdate_enabled | bool'

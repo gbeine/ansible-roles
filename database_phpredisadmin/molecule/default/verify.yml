@@ -27,6 +27,8 @@
           - database_phpredisadmin__expect.ip6 is none or ('IP6=' + database_phpredisadmin__expect.ip6) in database_phpredisadmin__test_quadlet_lines
           - database_phpredisadmin__expect.ip6 is not none or database_phpredisadmin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - database_phpredisadmin__expect.quadlet | reject('in', database_phpredisadmin__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - database_phpredisadmin__test_quadlet_lines | select('match', '(' ~ (database_phpredisadmin__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
           # Only ADMIN_PASS is passed in the environment, the passwords of the servers are mounted as files
           - database_phpredisadmin__test_quadlet_lines | select('search', 'type=env') | reject('search', 'target=ADMIN_PASS$') | list | length == 0
         fail_msg: "{{ database_phpredisadmin__test_quadlet.content | b64decode }}"
@@ -53,6 +55,8 @@
           - database_phpredisadmin__expect.ip6 is none or database_phpredisadmin__test_net.GlobalIPv6Address == database_phpredisadmin__expect.ip6
           - database_phpredisadmin__expect.env | reject('in', database_phpredisadmin__test_env) | list | length == 0
           - database_phpredisadmin__test_env | select('match', 'REDIS_[0-9]+_AUTH=') | list | length == 0
+          # The time zone is set by podman with /etc/localtime, not with TZ
+          - database_phpredisadmin__test_env | select('match', 'TZ=') | list | length == 0
         fail_msg: >-
           service {{ database_phpredisadmin__test_service.stdout }},
           IPv4 {{ database_phpredisadmin__test_net.IPAddress }}, IPv6 {{ database_phpredisadmin__test_net.GlobalIPv6Address }},
@@ -61,6 +65,18 @@
         database_phpredisadmin__test_container: "{{ (database_phpredisadmin__test_inspect.stdout | from_json)[0] }}"
         database_phpredisadmin__test_net: "{{ database_phpredisadmin__test_container.NetworkSettings.Networks[database_phpredisadmin__test_case.role_vars.phpredisadmin_network] }}"
         database_phpredisadmin__test_env: "{{ database_phpredisadmin__test_container.Config.Env }}"
+
+    - name: 'Read the time zone of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'phpredisadmin', 'date', '+%Z' ]
+      register: 'database_phpredisadmin__test_timezone'
+      changed_when: false
+
+    - name: 'Assert the time zone of the container'
+      ansible.builtin.assert:
+        that:
+          - database_phpredisadmin__test_timezone.stdout in [ 'CET', 'CEST' ]
+        fail_msg: "Time zone {{ database_phpredisadmin__test_timezone.stdout }}"
 
     - name: 'Read the files of the secrets in the container'
       ansible.builtin.command:
