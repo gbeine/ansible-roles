@@ -45,15 +45,18 @@
         quiet: true
       vars:
         database_influxdb_explorer__secret_targets: "{{ database_influxdb_explorer__secrets | map(attribute='target') | list }}"
+        # Without influxdb_explorer_environment there is no environment to check
+        database_influxdb_explorer__environment_mapping: >-
+          {{ database_influxdb_explorer__environment if database_influxdb_explorer__environment is defined and database_influxdb_explorer__environment is mapping else {} }}
         database_influxdb_explorer__environment_set: >-
-          {{ database_influxdb_explorer__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+          {{ database_influxdb_explorer__environment_mapping | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
         database_influxdb_explorer__environment_missing: >-
           {{ database_influxdb_explorer__environment_required | reject('in', database_influxdb_explorer__environment_set) | list }}
         database_influxdb_explorer__secrets_missing: >-
           {{ database_influxdb_explorer__secrets_required | reject('in', database_influxdb_explorer__secret_targets) | list }}
         database_influxdb_explorer__secrets_in_environment: >-
           {{ (database_influxdb_explorer__secret_targets + database_influxdb_explorer__secret_variables + database_influxdb_explorer__secret_files.values() | list)
-             | select('in', database_influxdb_explorer__environment.keys() | list) | unique | list }}
+             | select('in', database_influxdb_explorer__environment_mapping.keys() | list) | unique | list }}
         database_influxdb_explorer__errors: >-
           {%- set errors = [] -%}
           {%- if database_influxdb_explorer__environment_missing | length > 0 -%}
@@ -99,20 +102,29 @@
         fail_msg: "{{ database_influxdb_explorer__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without influxdb_explorer_environment and influxdb_explorer_container.environment the environment is omitted, there is nothing to check
+        database_influxdb_explorer__environment_container: >-
+          {{ database_influxdb_explorer__container.environment if database_influxdb_explorer__container.environment is mapping else {} }}
         database_influxdb_explorer__environment_unknown: >-
-          {{ (database_influxdb_explorer__container.environment | default({})).keys() | reject('in', database_influxdb_explorer__environment_allowed) | list }}
+          {{ database_influxdb_explorer__environment_container.keys() | reject('in', database_influxdb_explorer__environment_allowed) | list }}
+        database_influxdb_explorer__environment_line_breaks: >-
+          {{ database_influxdb_explorer__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_influxdb_explorer__secrets_unknown: >-
           {{ database_influxdb_explorer__secrets | map(attribute='target')
              | reject('in', database_influxdb_explorer__secret_variables) | list }}
         database_influxdb_explorer__errors: >-
           {%- set errors = [] -%}
+          {%- if database_influxdb_explorer__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_influxdb_explorer__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if database_influxdb_explorer__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_influxdb_explorer__environment_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if database_influxdb_explorer__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_influxdb_explorer__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
+          {%- if database_influxdb_explorer__environment_unknown | length > 0 or database_influxdb_explorer__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of the image (database_influxdb_explorer__environment_allowed) and the secrets ' ~ (database_influxdb_explorer__secret_variables | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
@@ -186,6 +198,21 @@
           [Unit]
           {% if database_influxdb_explorer__container.requires is defined %}
           Requires={{ database_influxdb_explorer__container.requires | join(' ') }}
+          {% endif %}
+          {% if database_influxdb_explorer__container.wants is defined %}
+          Wants={{ database_influxdb_explorer__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_influxdb_explorer__container.after is defined %}
+          After={{ database_influxdb_explorer__container.after | join(' ') }}
+          {% endif %}
+          {% if database_influxdb_explorer__container.part_of is defined %}
+          PartOf={{ database_influxdb_explorer__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_influxdb_explorer__container.binds_to is defined %}
+          BindsTo={{ database_influxdb_explorer__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_influxdb_explorer__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_influxdb_explorer__container.requires_mounts_for | join(' ') }}
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'

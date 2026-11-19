@@ -27,7 +27,7 @@ The role writes `config.json` from the configuration and the token as podman sec
 and mounts it to `/app-root/config/config.json` for the user of the image, so the token is neither stored on the host nor part of the quadlet unit.
 Without configuration and token there is no `config.json`, connections are created in the web interface then.
 
-The environment of the image is set with `influxdb_explorer_environment`, merged over the default of the role, which sets `TZ` to `influxdb_explorer_timezone`,
+The environment of the image is set with `influxdb_explorer_environment`, there is no default, without it the quadlet unit has no environment,
 e.g. `LOG_LEVEL`, `DATABASE_URL`, `SSL_CERT_PATH`, `SSL_KEY_PATH` or `NODE_EXTRA_CA_CERTS`, see the [documentation of Explorer](https://docs.influxdata.com/influxdb3/explorer/install/docker/).
 
 ### Secrets
@@ -77,6 +77,17 @@ are changed with `influxdb_explorer_container`, it is merged over the default of
 The merge is not recursive, `influxdb_explorer_container.volumes` replaces the data directory,
 `influxdb_explorer_container.environment` replaces the environment including `influxdb_explorer_environment`, use `influxdb_explorer_environment` instead.
 For a reverse proxy, e.g. Traefik, the labels are set with `influxdb_explorer_labels`, the web interface listens on port 8080.
+The time zone of the container is set by podman with `influxdb_explorer_timezone` (`/etc/localtime`), not with `TZ`.
+
+The dependencies of the quadlet unit are set with `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for`
+in `influxdb_explorer_container`, the role writes them to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`:
+
+```yaml
+influxdb_explorer_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/opt/influxdb-explorer' ]
+```
 
 ### Validation
 
@@ -86,6 +97,7 @@ The role checks before any change:
 - `influxdb_explorer_config` is a dictionary, it only contains the allowed keys and no token, the values are strings without line breaks, `null` or `false`
 - no secret is set in `influxdb_explorer_environment`
 - only allowed environment variables and secrets are set in the container
+- the environment variables contain no line breaks
 
 If `influxdb_explorer_container` is no dictionary, merging it with the default fails before anything changes.
 The default of `influxdb_explorer_config` is empty, merging it does not fail on every version of Ansible, so the role checks it itself.
@@ -97,6 +109,11 @@ Explorer is restarted if it was running and a secret, `config.json` or the quadl
 otherwise it is started and enabled.
 Updates of the image are done by `container_update` with `influxdb_explorer_autoupdate_enabled: true` and `influxdb_explorer_autoupdate_schedule`,
 without `influxdb_explorer_autoupdate_schedule` the schedule of `container_update` is used.
+
+### Check mode
+
+The role runs with `--check` also on a host where it never ran before and compares the directories, the secrets including `config.json` and the quadlet unit.
+Explorer is not started or restarted in check mode.
 
 ### Migration
 
@@ -112,7 +129,8 @@ The default connection was mandatory, now it is optional. `config.json` with the
 now it is a podman secret, the role does not remove the former directory, remove it with `rm -r <influxdb_explorer_home>/config`.
 The fixed name of the secret `influxdb_explorer_session_secret` is gone, the name is free. The former secret is not removed by the role,
 remove it with `podman secret rm influxdb_explorer_session_secret`.
-`/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with `TZ` and the timezone of the container.
+`/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with the timezone of the container.
+`TZ` is not set by default anymore, without `influxdb_explorer_environment` the quadlet unit has no environment.
 The data directory is `0700` now, as required by the image.
 `influxdb_explorer_labels` has no default anymore, without it the container has no labels.
 `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
@@ -125,16 +143,19 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 | Platform | Test case |
 |---|---|
-| `molecule-influxdb-explorer-default` | Only the mandatory variables and the secret `SESSION_SECRET_KEY` |
-| `molecule-influxdb-explorer` | IPv6, labels, `LOG_LEVEL`, the default connection in `influxdb_explorer_config` and the token from a secret with the target `DEFAULT_API_TOKEN` |
+| `molecule-influxdb-explorer-default` | Only the mandatory variables and the secret `SESSION_SECRET_KEY`, no environment |
+| `molecule-influxdb-explorer` | IPv6, labels, dependencies, `LOG_LEVEL`, the default connection in `influxdb_explorer_config` and the token from a secret with the target `DEFAULT_API_TOKEN` |
 
 `prepare` creates the podman network and pulls the image, Explorer does not connect to InfluxDB at the start, the tests need no InfluxDB.
+`check` runs `converge` with `--check` on the fresh VMs.
 `side_effect` runs the role with `influxdb_explorer_container` and `influxdb_explorer_config` not a dictionary, a secret without `target`, without the secret `SESSION_SECRET_KEY`,
 `SESSION_SECRET_KEY` in the environment, an unknown key, the token and a line break in `influxdb_explorer_config`,
-an unknown environment variable in `influxdb_explorer_environment` and in `influxdb_explorer_container.environment` and an unknown secret
+a line break in the environment, an unknown environment variable in `influxdb_explorer_environment` and in `influxdb_explorer_container.environment` and an unknown secret
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes `DEFAULT_SERVER_NAME` on `molecule-influxdb-explorer`, only the secret of `config.json` changes, the quadlet unit stays the same and Explorer has to restart.
-`verify` checks the quadlet unit with the mode, the volume and the secrets, the service, the addresses and the environment of the container,
+then it runs the role with `side_effect.role_vars` of the test case: `molecule-influxdb-explorer` changes `DEFAULT_SERVER_NAME`,
+only the secret of `config.json` changes, the quadlet unit stays the same and Explorer has to restart,
+`molecule-influxdb-explorer-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the mode, the volume, the secrets and the dependencies and without `TZ`, the service, the addresses and the environment of the container,
 `config.json` in the container, the data directory with the SQLite database and the web interface.
 
 | Environment variable | Default | Description |

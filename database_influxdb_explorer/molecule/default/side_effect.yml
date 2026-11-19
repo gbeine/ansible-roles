@@ -15,6 +15,11 @@
     database_influxdb_explorer__test_checked_files:
       - "{{ database_influxdb_explorer__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -107,6 +112,14 @@
           message: 'an unknown environment variable'
           search: '^Unknown environment variables: PORT\.'
 
+    - name: 'Run database_influxdb_explorer with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_explorer_environment: "{{ database_influxdb_explorer__test_env | combine({'LOG_LEVEL': 'info\ndebug'}) }}"
+        database_influxdb_explorer__test_invalid:
+          message: 'a line break in the environment'
+          search: '^The environment variables must not contain line breaks: LOG_LEVEL\.$'
+
     - name: 'Run database_influxdb_explorer with an unknown environment variable in influxdb_explorer_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
@@ -123,8 +136,9 @@
           message: 'an unknown secret'
           search: '^Unknown secrets: API_TOKEN\.'
 
-    - name: 'Run database_influxdb_explorer with the changed configuration'
-      when: database_influxdb_explorer__test_case.side_effect | default(false)
+    # molecule-influxdb-explorer renames the server in config.json and has to restart,
+    # molecule-influxdb-explorer-default runs again without a change
+    - name: 'Run database_influxdb_explorer with the changed variables'
       block:
 
         - name: 'Read the checksum of the quadlet unit before the change'
@@ -139,11 +153,14 @@
           register: 'database_influxdb_explorer__test_started_before'
           changed_when: false
 
-        - name: 'Set the changed configuration'
+        - name: 'Set the role variables of the change'
           ansible.builtin.set_fact:
-            influxdb_explorer_config: "{{ database_influxdb_explorer__test_config | combine(database_influxdb_explorer__test_side_effect_config) }}"
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ database_influxdb_explorer__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
 
-        - name: 'Run database_influxdb_explorer with the changed configuration'
+        - name: 'Run database_influxdb_explorer with the changed variables'
           ansible.builtin.include_role:
             name: 'database_influxdb_explorer'
 
@@ -159,14 +176,14 @@
           register: 'database_influxdb_explorer__test_started_after'
           changed_when: false
 
-        # Only the secret of config.json changes, the restart is caused by the changed secret
-        - name: 'Assert the changed secret of config.json, the unchanged quadlet unit and the restart of the service'
+        # Only the secret of config.json changes, a restart is caused by the changed secret
+        - name: 'Assert the secret of config.json, the unchanged quadlet unit and the restart of the service'
           ansible.builtin.assert:
             that:
-              - database_influxdb_explorer__config_result is changed
+              - (database_influxdb_explorer__config_result is changed) == database_influxdb_explorer__test_case.expect.restart
               - database_influxdb_explorer__quadlet_result is not changed
               - database_influxdb_explorer__test_quadlet_after.stat.checksum == database_influxdb_explorer__test_quadlet_before.stat.checksum
-              - database_influxdb_explorer__test_started_after.stdout | int > database_influxdb_explorer__test_started_before.stdout | int
+              - (database_influxdb_explorer__test_started_after.stdout | int > database_influxdb_explorer__test_started_before.stdout | int) == database_influxdb_explorer__test_case.expect.restart
             fail_msg: >-
               config.json changed: {{ database_influxdb_explorer__config_result is changed }},
               quadlet changed: {{ database_influxdb_explorer__quadlet_result is changed }},
