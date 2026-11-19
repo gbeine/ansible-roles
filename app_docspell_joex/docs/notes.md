@@ -61,7 +61,7 @@ docspell_joex_secrets:
 The password of the database (`docspell.joex.jdbc.password`) is required. Allowed targets are the options carrying passwords:
 `docspell.joex.jdbc.password`, `docspell.joex.full-text-search.postgresql.jdbc.password`, `docspell.joex.files.stores.minio.secret-key`
 and `docspell.joex.convert.decrypt-pdf.passwords`.
-A target must not be set in `docspell_joex_config`. The names of the secrets are part of the paths, they consist of letters, digits, `_`, `.` and `-`.
+A target must not be set in `docspell_joex_config`. The names of the secrets are part of the paths.
 
 ### Allowed variables
 
@@ -143,7 +143,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 `prepare` creates the podman network, pulls the images and starts PostgreSQL 17 with a password, Joex creates the schema of the database itself.
 `check` runs `converge` with `--check` on the new VMs.
-`side_effect` runs the role with `docspell_joex_container` and `docspell_joex_config` not a dictionary, a secret without target, an invalid name of a secret,
+`side_effect` runs the role with `docspell_joex_container` and `docspell_joex_config` not a dictionary, a secret without target,
 without the password of the database, with an unknown secret, the password in the configuration, an unknown option, a changed `bind.address`,
 without `jdbc.url`, a line break in an option and in the environment and an unknown environment variable
 and checks that it fails with the expected message and `joex.conf` and the quadlet unit are unchanged (tasks marked `expect ERROR`),
