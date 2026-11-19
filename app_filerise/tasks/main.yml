@@ -1,91 +1,226 @@
 ---
 
-- name: 'Deploy FileRise container'
-  tags: [ 'app_filerise' ]
+- name: 'Install FileRise'
+  tags: [ 'app', 'app_filerise' ]
   block:
 
-    - name: 'Create directories'
-      block:
-        - ansible.builtin.file:
-            path: "{{ item.uploads_dir | mandatory }}"
-            state: 'directory'
-            mode: '0755'
-            recurse: true
-            owner: "{{ item.uid | default(app_filerise__uid) }}"
-            group: "{{ item.gid | default(app_filerise__gid) }}"
-          with_items: "{{ app_filerise__containers }}"
-        - ansible.builtin.file:
-            path: "{{ item.users_dir | mandatory }}"
-            state: 'directory'
-            mode: '0755'
-            recurse: true
-            owner: "{{ item.uid | default(app_filerise__uid) }}"
-            group: "{{ item.gid | default(app_filerise__gid) }}"
-          with_items: "{{ app_filerise__containers }}"
-        - ansible.builtin.file:
-            path: "{{ item.metadata_dir | mandatory }}"
-            state: 'directory'
-            mode: '0755'
-            recurse: true
-            owner: "{{ item.uid | default(app_filerise__uid) }}"
-            group: "{{ item.gid | default(app_filerise__gid) }}"
-          with_items: "{{ app_filerise__containers }}"
+    # A failing template in the variables (e.g. an unknown filter or filerise_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_filerise__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_filerise__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_filerise__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_filerise__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_filerise__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('filerise_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('filerise_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of filerise_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_filerise__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_filerise__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_filerise__secrets_in_environment: >-
+          {{ (app_filerise__secrets | map(attribute='target') | list
+              + app_filerise__secret_variables + app_filerise__secret_files.values() | list)
+             | select('in', app_filerise__environment.keys() | list) | unique | list }}
+        app_filerise__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_filerise__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets and their file variables must not be set in filerise_environment: ' ~ (app_filerise__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_filerise__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_filerise__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_filerise__invalid: >-
+          {%- set errors = [] -%}
+          {%- if app_filerise__home is not string or app_filerise__home is not match('^/') -%}
+          {%-   set _ = errors.append('filerise_home has to be an absolute path') -%}
+          {%- endif -%}
+          {%- for variable in [ 'PUID', 'PGID' ] if (app_filerise__environment[variable] | string) is not match('^[0-9]+$') -%}
+          {%-   set _ = errors.append(variable ~ ' has to be a number') -%}
+          {%- endfor -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging filerise_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_filerise__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_filerise__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_filerise__environment_checked: >-
+          {{ app_filerise__container.environment if app_filerise__container.environment is mapping else {} }}
+        app_filerise__environment_unknown: >-
+          {{ app_filerise__environment_checked.keys() | reject('in', app_filerise__environment_allowed) | list }}
+        app_filerise__environment_line_breaks: >-
+          {{ app_filerise__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_filerise__secrets_unknown: >-
+          {{ app_filerise__secrets | map(attribute='target') | reject('in', app_filerise__secret_variables) | list }}
+        app_filerise__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_filerise__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_filerise__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_filerise__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_filerise__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_filerise__environment_unknown | length > 0 or app_filerise__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (app_filerise__environment_allowed) and the secrets ' ~ (app_filerise__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_filerise__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (app_filerise__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the home directory'
+      ansible.builtin.file:
+        path: "{{ app_filerise__home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+
+    # start.sh maps www-data to PUID and PGID and sets 775 at every start, the role creates the directories the same way
+    - name: 'Create the data directories'
+      ansible.builtin.file:
+        path: "{{ app_filerise__home }}/{{ item }}"
+        owner: "{{ app_filerise__environment.PUID }}"
+        group: "{{ app_filerise__environment.PGID }}"
+        mode: '0775'
+        state: 'directory'
+      loop: "{{ app_filerise__directories }}"
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_filerise__secrets }}"
+      register: 'app_filerise__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ item.name | mandatory }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[item.name | mandatory + ".service"] is defined  and podman___update_mode | bool'
-      with_items: "{{ app_filerise__containers }}"
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ item.image | default(app_filerise__container_default.image) }}"
-        force: true
-      when: 'podman___update_mode | bool'
-      with_items: "{{ app_filerise__containers }}"
-
-    - name: 'Create containers'
+    - name: 'Install container'
       containers.podman.podman_container:
-        name: "{{ item.name | mandatory }}"
-        hostname: "{{ item.hostname | mandatory }}"
-        image: "{{ item.image | default(app_filerise__container_default.image) }}"
-        ip: "{{ item.ip | mandatory }}"
-        ip6: "{{ item.ipv6 | default(omit, true) }}"
-        network: "{{ item.network | default(app_filerise__container_default.network) }}"
-        timezone: "{{ item.timezone | default(app_filerise__container_default.timezone) }}"
-        env: "{{ app_filerise__container_default.environment | combine(item.environment | default({})) }}"
-        etc_hosts: "{{ item.etc_hosts | default(omit) }}"
-        label: "{{ item.labels | default(omit) }}"
-        publish: "{{ item.publish | default(omit) }}"
-        secrets: "{{ item.secrets | default(omit) }}"
-        expose: "{{ item.expose | default(omit) }}"
-        volume: "{{ [
-          item.uploads_dir + ':/var/www/uploads',
-          item.users_dir + ':/var/www/users',
-          item.metadata_dir + ':/var/www/metadata'
-        ] }}"
+        name: "{{ app_filerise__container.name }}"
+        hostname: "{{ app_filerise__container.hostname }}"
+        image: "{{ app_filerise__container.image }}"
+        ip: "{{ app_filerise__container.ip }}"
+        ip6: "{{ app_filerise__container.ipv6 | default(omit) }}"
+        network: "{{ app_filerise__container.network }}"
+        timezone: "{{ app_filerise__container.timezone }}"
+        env: "{{ app_filerise__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_filerise__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_filerise__container.expose | default(omit) }}"
+        label: "{{ app_filerise__container.labels | default(omit) }}"
+        publish: "{{ app_filerise__container.publish | default(omit) }}"
+        secrets: "{{ app_filerise__container.secrets | default(omit) }}"
+        volume: "{{ app_filerise__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if app_filerise__container.requires is defined %}
+          Requires={{ app_filerise__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_filerise__container.wants is defined %}
+          Wants={{ app_filerise__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_filerise__container.after is defined %}
+          After={{ app_filerise__container.after | join(' ') }}
+          {% endif %}
+          {% if app_filerise__container.part_of is defined %}
+          PartOf={{ app_filerise__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_filerise__container.binds_to is defined %}
+          BindsTo={{ app_filerise__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_filerise__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_filerise__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
-      with_items: "{{ app_filerise__containers }}"
+      register: 'app_filerise__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ item.name | mandatory }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
-      with_items: "{{ app_filerise__containers }}"
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start FileRise'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_filerise__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_filerise__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_filerise__running: >-
+              {{ (ansible_facts.services[app_filerise__container.name + '.service'].state | default('')) == 'running' }}
+            app_filerise__restart: >-
+              {{ app_filerise__running | bool
+                 and (app_filerise__secrets_result is changed
+                      or app_filerise__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_filerise__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_filerise__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_filerise__container.name ~ ' did not start' ] + app_filerise__start_journal.stdout_lines }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_filerise__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_filerise__container.name }}"
+        container_image: "{{ app_filerise__container.image }}"
+        container_schedule: "{{ app_filerise__autoupdate_schedule }}"

@@ -5,31 +5,153 @@
 # https://ansible-roles.org/roles/filerise
 #
 
+# Contains the directories uploads, users and metadata of FileRise
+app_filerise__home: "{{ filerise_home | mandatory }}"
+app_filerise__ip: "{{ filerise_ip | mandatory }}"
+app_filerise__ipv6: "{{ filerise_ipv6 }}"
 app_filerise__network: "{{ filerise_network | mandatory }}"
+app_filerise__hostname: "{{ filerise_hostname | mandatory }}"
 app_filerise__timezone: "{{ filerise_timezone | mandatory }}"
+app_filerise__labels: "{{ filerise_labels }}"
 
 app_filerise__version: "{{ filerise_version | default('latest') }}"
 
-app_filerise__secure: "{{ filerise_secure | default(false) }}"
-app_filerise__upload_size: "{{ filerise_upload_size | default('5G') }}"
+# FileRise is configured with the environment, merged over the default
+app_filerise__environment: "{{ app_filerise__environment_default | combine(filerise_environment | default({})) }}"
 
-app_filerise__containers: "{{ filerise_containers | default([]) }}"
+# Secrets with name, data and target, FR_PRO_LICENSE is mounted below /run/secrets,
+# PERSISTENT_TOKENS_KEY and FR_ENCRYPTION_MASTER_KEY are passed in the environment
+app_filerise__secrets: "{{ filerise_secrets | default([]) }}"
+
+app_filerise__container: "{{ app_filerise__podman_container_default | combine(filerise_container | default({})) }}"
+
+app_filerise__autoupdate_enabled: "{{ filerise_autoupdate_enabled | default(false) }}"
+app_filerise__autoupdate_schedule: "{{ filerise_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-app_filerise__uid: 99
-app_filerise__gid: 100
-
+app_filerise__podman_name: 'filerise'
 app_filerise__podman_image: 'docker.io/error311/filerise-docker'
-app_filerise__podman_tag: "{{ filerise_version | default('latest') }}"
+app_filerise__podman_tag: "{{ app_filerise__version }}"
 
-app_filerise__container_default:
+# The data directories below app_filerise__home, mounted to /var/www/<directory>
+app_filerise__directories: [ 'uploads', 'users', 'metadata' ]
+
+# TIMEZONE is the time zone of PHP, without it config.php uses America/New_York,
+# PUID and PGID are the defaults of the image, start.sh maps www-data to them
+app_filerise__environment_default:
+  TIMEZONE: "{{ app_filerise__timezone }}"
+  PUID: '99'
+  PGID: '100'
+
+# The targets of the secrets, they must not be set in filerise_environment
+app_filerise__secret_variables: "{{ app_filerise__secret_files.keys() | list + app_filerise__secrets_env }}"
+
+# The secrets mounted as files, FileRise reads FR_PRO_LICENSE from FR_PRO_LICENSE_FILE
+app_filerise__secret_files:
+  FR_PRO_LICENSE: 'FR_PRO_LICENSE_FILE'
+
+# The secrets passed in the environment, FileRise reads them only with getenv
+# (start.sh reads PERSISTENT_TOKENS_KEY otherwise only from metadata/persistent_tokens.key)
+app_filerise__secrets_env:
+  - 'PERSISTENT_TOKENS_KEY'
+  - 'FR_ENCRYPTION_MASTER_KEY'
+
+app_filerise__secrets_dir: '/run/secrets'
+
+# Generated from start.sh, config/config.php and src of FileRise v3.45.0, without the variables of the tests,
+# the internal variables and the secrets, the file variable FR_PRO_LICENSE_FILE is set by the role
+app_filerise__environment_allowed:
+  - 'TZ'
+  - 'PUID'
+  - 'PGID'
+  - 'TIMEZONE'
+  - 'DATE_TIME_FORMAT'
+  - 'TOTAL_UPLOAD_SIZE'
+  - 'SECURE'
+  - 'SHARE_URL'
+  - 'CHOWN_ON_START'
+  - 'SCAN_ON_START'
+  - 'CLAMAV_AUTO_UPDATE'
+  - 'VIRUS_SCAN_ENABLED'
+  - 'VIRUS_SCAN_CMD'
+  - 'VIRUS_SCAN_EXCLUDE_DIRS'
+  - 'HTTP_PORT'
+  - 'HTTPS_PORT'
+  - 'SERVER_NAME'
+  - 'LOG_STREAM'
+  - 'FR_BASE_PATH'
+  - 'FR_PUBLISHED_URL'
+  - 'FR_TRUSTED_PROXIES'
+  - 'FR_IP_HEADER'
+  - 'FR_IGNORE_REGEX'
+  - 'FR_OIDC_ADMIN_GROUP'
+  - 'FR_OIDC_ALLOW_DEMOTE'
+  - 'FR_OIDC_AUTO_CREATE'
+  - 'FR_OIDC_DEBUG'
+  - 'FR_OIDC_EXTRA_SCOPES'
+  - 'FR_OIDC_GROUP_CLAIM'
+  - 'FR_OIDC_PRO_GROUP_PREFIX'
+  - 'FR_FFMPEG_PATH'
+  - 'FR_PDF_THUMB_BINARY'
+  - 'FR_PDF_THUMB_MAX_H'
+  - 'FR_PDF_THUMB_MAX_MB'
+  - 'FR_PDF_THUMB_MAX_W'
+  - 'FR_VIDEO_THUMB_MAX_H'
+  - 'FR_VIDEO_THUMB_MAX_W'
+  - 'FR_RESUMABLE_TTL_HOURS'
+  - 'FR_WEBDAV_MAX_UPLOAD_BYTES'
+  - 'FR_WORKER_MODE'
+  - 'FR_PRO_BUNDLE_DIR'
+  - 'FR_PRO_SEARCH_ENABLED'
+  - 'ONLYOFFICE_ALLOW_UNSIGNED_CALLBACKS'
+  - 'ONLYOFFICE_DEBUG'
+  - 'FR_PRO_LICENSE_FILE'
+
+# Entries without name, data or target are left out, the validation of the secrets reports them
+app_filerise__secrets_valid: >-
+  {{ (app_filerise__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('data', 'defined')
+      | selectattr('target', 'defined') | list)
+     if (app_filerise__secrets is sequence and app_filerise__secrets is not string) else [] }}
+
+# The environment variables of the files of the secrets, secrets with an unknown target are left out, the validation reports them
+app_filerise__environment_secrets_files: >-
+  {%- set environment = {} -%}
+  {%- for secret in app_filerise__secrets_valid if secret.target in app_filerise__secret_files -%}
+  {%-   set _ = environment.update({ app_filerise__secret_files[secret.target]: app_filerise__secrets_dir ~ '/' ~ secret.name }) -%}
+  {%- endfor -%}
+  {{ environment }}
+
+# The secrets of app_filerise__secrets_env are passed in the environment, the others are mounted,
+# the user www-data of the image runs with PUID and PGID
+app_filerise__podman_secrets: >-
+  {%- set secrets = [] -%}
+  {%- for secret in app_filerise__secrets_valid -%}
+  {%-   if secret.target in app_filerise__secrets_env -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=env,target=' ~ secret.target) -%}
+  {%-   else -%}
+  {%-     set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ app_filerise__secrets_dir ~ '/' ~ secret.name
+                                 ~ ',uid=' ~ app_filerise__environment.PUID | default('99') ~ ',gid=' ~ app_filerise__environment.PGID | default('100') ~ ',mode=0400') -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ secrets }}
+
+app_filerise__podman_container_default:
+  name: "{{ app_filerise__podman_name }}"
+  hostname: "{{ app_filerise__hostname }}"
   image: "{{ app_filerise__podman_image }}:{{ app_filerise__podman_tag }}"
+  ip: "{{ app_filerise__ip }}"
+  ipv6: "{{ app_filerise__ipv6 | default(omit) }}"
   network: "{{ app_filerise__network }}"
   timezone: "{{ app_filerise__timezone }}"
-  environment:
-    TIMEZONE: "{{ app_filerise__timezone }}"
-    TOTAL_UPLOAD_SIZE: "{{ app_filerise__upload_size }}"
-    SECURE: "{{ app_filerise__secure | ternary('true', 'false') }}"
+  labels: "{{ app_filerise__labels | default(omit) }}"
+  # Set with filerise_environment and the file variables of filerise_secrets
+  environment: "{{ app_filerise__environment | combine(app_filerise__environment_secrets_files) }}"
+  secrets: "{{ app_filerise__podman_secrets if app_filerise__podman_secrets | length > 0 else omit }}"
+  # filerise_container.volumes replaces the list completely
+  volumes:
+    - "{{ app_filerise__home }}/uploads:/var/www/uploads"
+    - "{{ app_filerise__home }}/users:/var/www/users"
+    - "{{ app_filerise__home }}/metadata:/var/www/metadata"

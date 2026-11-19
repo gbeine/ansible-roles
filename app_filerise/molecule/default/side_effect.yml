@@ -1,0 +1,152 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_filerise__test_case: "{{ app_filerise__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_filerise__test_checked_files:
+      - '/etc/containers/systemd/filerise.container'
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_filerise__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_filerise__test_checked_files }}"
+      register: 'app_filerise__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_filerise with filerise_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_container: [ 'environment' ]
+        app_filerise__test_invalid:
+          message: 'filerise_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_filerise with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_secrets:
+          - name: 'filerise_molecule_tokens_key'
+            data: 'molecule-key'
+        app_filerise__test_invalid:
+          message: 'a secret without target'
+          search: '^filerise_secrets entries need name, data and target$'
+
+    - name: 'Run app_filerise with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_secrets:
+          - name: 'filerise_molecule_admin'
+            data: 'molecule-password'
+            target: 'ADMIN_PASSWORD'
+        app_filerise__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: ADMIN_PASSWORD\.'
+
+    - name: 'Run app_filerise with the key of the persistent tokens in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_environment:
+          PERSISTENT_TOKENS_KEY: 'molecule-key'
+        app_filerise__test_invalid:
+          message: 'a secret in the environment'
+          search: 'must not be set in filerise_environment: PERSISTENT_TOKENS_KEY\.'
+
+    - name: 'Run app_filerise with the file variable of the license in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_environment:
+          FR_PRO_LICENSE_FILE: '/run/secrets/license'
+        app_filerise__test_invalid:
+          message: 'a file variable in the environment'
+          search: 'must not be set in filerise_environment: FR_PRO_LICENSE_FILE\.'
+
+    - name: 'Run app_filerise with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_environment:
+          FR_TEST_UPLOAD_DIR: '/tmp'
+        app_filerise__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: FR_TEST_UPLOAD_DIR\.'
+
+    - name: 'Run app_filerise with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_environment:
+          SHARE_URL: "https://files.example.org\nfoo"
+        app_filerise__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: SHARE_URL\.'
+
+    - name: 'Run app_filerise with a relative home directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_home: 'relative/filerise'
+        app_filerise__test_invalid:
+          message: 'a relative home directory'
+          search: 'filerise_home has to be an absolute path'
+
+    - name: 'Run app_filerise with PUID not a number (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        filerise_environment:
+          PUID: 'www-data'
+        app_filerise__test_invalid:
+          message: 'PUID not a number'
+          search: 'PUID has to be a number'
+
+    # molecule-filerise changes the key of the persistent tokens and has to restart, molecule-filerise-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'filerise' ]
+      register: 'app_filerise__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_filerise__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run app_filerise with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_filerise'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'filerise' ]
+      register: 'app_filerise__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the changed secret and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_filerise__secrets_result is changed) == app_filerise__test_case.expect.restart
+          - app_filerise__quadlet_result is not changed
+          - (app_filerise__test_started_after.stdout | int > app_filerise__test_started_before.stdout | int) == app_filerise__test_case.expect.restart
+        fail_msg: >-
+          secret changed: {{ app_filerise__secrets_result is changed }},
+          quadlet changed: {{ app_filerise__quadlet_result is changed }},
+          start before {{ app_filerise__test_started_before.stdout }}, after {{ app_filerise__test_started_after.stdout }}

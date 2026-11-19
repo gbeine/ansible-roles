@@ -1,0 +1,166 @@
+---
+# Checks one instance of FileRise, app_filerise__expect is the expectation of the instance
+
+- name: "Read the quadlet unit of {{ app_filerise__expect.name }}"
+  ansible.builtin.slurp:
+    src: "/etc/containers/systemd/{{ app_filerise__expect.name }}.container"
+  register: 'app_filerise__test_quadlet'
+
+- name: "Assert the quadlet unit of {{ app_filerise__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - ('Image=' + app_filerise__test_image) in app_filerise__test_quadlet_lines
+      - ('IP=' + app_filerise__expect.ip) in app_filerise__test_quadlet_lines
+      - app_filerise__expect.ip6 is none or ('IP6=' + app_filerise__expect.ip6) in app_filerise__test_quadlet_lines
+      - app_filerise__expect.ip6 is not none or app_filerise__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+      - ('Timezone=Europe/Berlin') in app_filerise__test_quadlet_lines
+      - app_filerise__expect.quadlet | reject('in', app_filerise__test_quadlet_lines) | list | length == 0
+      # The absent lines are prefixes, e.g. Environment=TZ=
+      - app_filerise__test_quadlet_lines | select('match', '(' ~ (app_filerise__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+      # Only the secrets of this instance are part of the quadlet unit
+      - app_filerise__test_quadlet_lines | select('match', 'Secret=') | reject('in', app_filerise__expect.quadlet) | list | length == 0
+    fail_msg: "{{ app_filerise__test_quadlet.content | b64decode }}"
+  vars:
+    app_filerise__test_quadlet_lines: "{{ (app_filerise__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+- name: "Read the data directories of {{ app_filerise__expect.name }}"
+  ansible.builtin.stat:
+    path: "{{ app_filerise__expect.home }}/{{ item }}"
+  loop: [ 'uploads', 'users', 'metadata' ]
+  register: 'app_filerise__test_directories'
+
+# systemd counts only the restarts after a crash, a restart loop is reported with the journal
+- name: "Read the state and the automatic restarts of {{ app_filerise__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'systemctl', 'show', '--property=ActiveState', '--property=NRestarts', "{{ app_filerise__expect.name }}" ]
+  register: 'app_filerise__test_service'
+  changed_when: false
+
+- name: "Read the journal of {{ app_filerise__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'journalctl', '-u', "{{ app_filerise__expect.name }}", '-n', '80', '--no-pager' ]
+  register: 'app_filerise__test_journal'
+  changed_when: false
+  failed_when: false
+
+- name: "Assert the service and the data directories of {{ app_filerise__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - ('ActiveState=active') in app_filerise__test_service.stdout_lines
+      - ('NRestarts=0') in app_filerise__test_service.stdout_lines
+      - app_filerise__test_directories.results | map(attribute='stat') | rejectattr('isdir', 'defined') | list | length == 0
+      - app_filerise__test_directories.results | map(attribute='stat') | map(attribute='uid') | unique | list == [ app_filerise__expect.uid ]
+      - app_filerise__test_directories.results | map(attribute='stat') | map(attribute='gid') | unique | list == [ app_filerise__expect.gid ]
+      - app_filerise__test_directories.results | map(attribute='stat') | map(attribute='mode') | unique | list == [ '0775' ]
+    fail_msg: >-
+      {{ app_filerise__test_service.stdout_lines
+         + (app_filerise__test_directories.results | map(attribute='stat') | map('dict2items') | map('selectattr', 'key', 'in', ['path', 'uid', 'gid', 'mode']) | map('items2dict') | map('string') | list)
+         + app_filerise__test_journal.stdout_lines | default([]) }}
+
+- name: "Inspect the container {{ app_filerise__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'podman', 'inspect', "{{ app_filerise__expect.name }}" ]
+  register: 'app_filerise__test_inspect'
+  changed_when: false
+
+- name: "Assert the addresses, the environment and the time zone of {{ app_filerise__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_filerise__test_net.IPAddress == app_filerise__expect.ip
+      - app_filerise__expect.ip6 is none or app_filerise__test_net.GlobalIPv6Address == app_filerise__expect.ip6
+      - app_filerise__expect.env | reject('in', app_filerise__test_env) | list | length == 0
+      - app_filerise__test_env | select('match', 'TZ=') | list | length == 0
+      - app_filerise__test_container.Config.Timezone == 'Europe/Berlin'
+    fail_msg: >-
+      IPv4 {{ app_filerise__test_net.IPAddress }}, IPv6 {{ app_filerise__test_net.GlobalIPv6Address }},
+      time zone {{ app_filerise__test_container.Config.Timezone | default('') }},
+      environment {{ app_filerise__test_env | reject('search', 'KEY') | join(', ') }}
+  vars:
+    app_filerise__test_container: "{{ (app_filerise__test_inspect.stdout | from_json)[0] }}"
+    app_filerise__test_net: "{{ app_filerise__test_container.NetworkSettings.Networks['podman-molecule'] }}"
+    app_filerise__test_env: "{{ app_filerise__test_container.Config.Env }}"
+
+- name: "Read the files of the secrets of {{ app_filerise__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'podman', 'exec', "{{ app_filerise__expect.name }}", 'cat', "{{ item.path }}" ]
+  loop: "{{ app_filerise__expect.secret_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: 'app_filerise__test_secret_files'
+  changed_when: false
+
+# The secrets of type=env are only part of the environment of the processes, not of the quadlet unit
+- name: "Read the secrets in the environment of {{ app_filerise__expect.name }}"
+  ansible.builtin.command:
+    argv: [ 'podman', 'exec', "{{ app_filerise__expect.name }}", 'printenv', "{{ item.name }}" ]
+  loop: "{{ app_filerise__expect.secret_env }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: 'app_filerise__test_secret_env'
+  changed_when: false
+
+- name: "Assert the secrets of {{ app_filerise__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_filerise__test_secret_files.results | map(attribute='stdout') | list == app_filerise__expect.secret_files | map(attribute='content') | list
+      - app_filerise__test_secret_env.results | map(attribute='stdout') | list == app_filerise__expect.secret_env | map(attribute='value') | list
+    fail_msg: "The secrets of {{ app_filerise__expect.name }} differ"
+
+# FileRise prepares its directories at the start before Apache answers
+- name: "Wait until the instance answers: {{ app_filerise__expect.name }}"
+  ansible.builtin.uri:
+    url: "{{ item }}/"
+  loop: "{{ app_filerise__expect.urls }}"
+  register: 'app_filerise__test_ready'
+  until: app_filerise__test_ready.status == 200
+  retries: 30
+  delay: 5
+
+# The setup only works as long as there is no user, a second run of verify finds the administrator
+- name: "Create the administrator of {{ app_filerise__expect.name }}"
+  ansible.builtin.uri:
+    url: "{{ app_filerise__expect.urls[0] }}/api/addUser.php?setup=1"
+    method: 'POST'
+    body_format: 'json'
+    body:
+      username: "{{ app_filerise__test_admin.user }}"
+      password: "{{ app_filerise__test_admin.password }}"
+    status_code: [ 200, 400, 403 ]
+    return_content: true
+  register: 'app_filerise__test_setup'
+
+# Basic authentication is disabled by default, the form login needs no CSRF token
+- name: "Log in with the administrator: {{ app_filerise__expect.name }}"
+  ansible.builtin.uri:
+    url: "{{ app_filerise__expect.urls[0] }}/api/auth/auth.php"
+    method: 'POST'
+    body_format: 'json'
+    body:
+      username: "{{ app_filerise__test_admin.user }}"
+      password: "{{ app_filerise__test_admin.password }}"
+    status_code: [ 200 ]
+    return_content: true
+  register: 'app_filerise__test_login'
+
+- name: "Log in with a wrong password: {{ app_filerise__expect.name }}"
+  ansible.builtin.uri:
+    url: "{{ app_filerise__expect.urls[0] }}/api/auth/auth.php"
+    method: 'POST'
+    body_format: 'json'
+    body:
+      username: "{{ app_filerise__test_admin.user }}"
+      password: 'wrong-password'
+    status_code: [ 401 ]
+    return_content: true
+  register: 'app_filerise__test_login_wrong'
+
+- name: "Assert the logins of {{ app_filerise__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_filerise__test_login.json is mapping
+      - app_filerise__test_login.json.error is not defined
+      - app_filerise__test_login_wrong.content is search('Invalid credentials')
+    fail_msg: >-
+      setup {{ app_filerise__test_setup.content | default('') }},
+      login {{ app_filerise__test_login.content | default('') }},
+      wrong password {{ app_filerise__test_login_wrong.content | default('') }}

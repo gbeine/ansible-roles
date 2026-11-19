@@ -1,0 +1,124 @@
+---
+# Network created by container_podman in prepare.yml
+app_filerise__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_filerise__test_image: 'docker.io/error311/filerise-docker:latest'
+
+# The time zone is set by podman and TIMEZONE, neither TZ nor the files of the host are passed
+app_filerise__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
+# The administrator created by the setup in verify.yml, test password only
+app_filerise__test_admin:
+  user: 'admin'
+  password: 'Molecule-Admin-Password-1'
+
+app_filerise__test_cases:
+
+  # Only the mandatory variables, the defaults PUID 99 and PGID 100 of the image
+  - name: 'molecule-filerise-default'
+    role_vars:
+      filerise_home: '/opt/filerise'
+      filerise_ip: '10.89.0.80'
+      filerise_network: 'podman-molecule'
+      filerise_hostname: 'filerise-default'
+      filerise_timezone: 'Europe/Berlin'
+    # Runs again without a change, FileRise must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      name: 'filerise'
+      ip: '10.89.0.80'
+      ip6: ~
+      home: '/opt/filerise'
+      uid: 99
+      gid: 100
+      quadlet:
+        - 'Volume=/opt/filerise/uploads:/var/www/uploads'
+        - 'Volume=/opt/filerise/users:/var/www/users'
+        - 'Volume=/opt/filerise/metadata:/var/www/metadata'
+      quadlet_absent: "{{ app_filerise__test_quadlet_absent + [ 'Secret=' ] }}"
+      env:
+        - 'TIMEZONE=Europe/Berlin'
+        - 'PUID=99'
+        - 'PGID=100'
+      secret_files: []
+      secret_env: []
+      urls:
+        - 'http://10.89.0.80'
+
+  # IPv6, labels, dependencies, own PUID and PGID, an option and the secrets in the environment and as file
+  - name: 'molecule-filerise'
+    role_vars:
+      filerise_home: '/srv/filerise'
+      filerise_ip: '10.89.0.81'
+      filerise_ipv6: 'fd00:89::81'
+      filerise_network: 'podman-molecule'
+      filerise_hostname: 'filerise-molecule'
+      filerise_timezone: 'Europe/Berlin'
+      filerise_labels:
+        traefik.enable: 'true'
+      filerise_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
+      filerise_environment:
+        PUID: '1033'
+        PGID: '1033'
+        DATE_TIME_FORMAT: 'd.m.Y H:i'
+      filerise_secrets:
+        - name: 'filerise_molecule_tokens_key'
+          data: 'molecule-persistent-tokens-key-0123456789abcdef'
+          target: 'PERSISTENT_TOKENS_KEY'
+        - name: 'filerise_molecule_license'
+          data: 'molecule-license'
+          target: 'FR_PRO_LICENSE'
+    # side_effect changes the key of the persistent tokens, the secret changes and FileRise has to restart
+    side_effect:
+      role_vars:
+        filerise_secrets:
+          - name: 'filerise_molecule_tokens_key'
+            data: 'molecule-persistent-tokens-key-changed-0123456789'
+            target: 'PERSISTENT_TOKENS_KEY'
+          - name: 'filerise_molecule_license'
+            data: 'molecule-license'
+            target: 'FR_PRO_LICENSE'
+    expect:
+      restart: true
+      name: 'filerise'
+      ip: '10.89.0.81'
+      ip6: 'fd00:89::81'
+      home: '/srv/filerise'
+      uid: 1033
+      gid: 1033
+      quadlet:
+        - 'Volume=/srv/filerise/uploads:/var/www/uploads'
+        - 'Label=traefik.enable=true'
+        - 'Secret=filerise_molecule_tokens_key,type=env,target=PERSISTENT_TOKENS_KEY'
+        - 'Secret=filerise_molecule_license,type=mount,target=/run/secrets/filerise_molecule_license,uid=1033,gid=1033,mode=0400'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      quadlet_absent: "{{ app_filerise__test_quadlet_absent + [ 'Environment=PERSISTENT_TOKENS_KEY' ] }}"
+      env:
+        - 'TIMEZONE=Europe/Berlin'
+        - 'PUID=1033'
+        - 'PGID=1033'
+        - 'DATE_TIME_FORMAT=d.m.Y H:i'
+        - 'FR_PRO_LICENSE_FILE=/run/secrets/filerise_molecule_license'
+      secret_files:
+        - path: '/run/secrets/filerise_molecule_license'
+          content: 'molecule-license'
+      secret_env:
+        - name: 'PERSISTENT_TOKENS_KEY'
+          value: 'molecule-persistent-tokens-key-changed-0123456789'
+      urls:
+        - 'http://10.89.0.81'
+        - 'http://[fd00:89::81]'
