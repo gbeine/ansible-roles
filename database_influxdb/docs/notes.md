@@ -12,30 +12,69 @@ the default is `<release>-alpine`, a tag has to start with the release, e.g. `2.
 | `1.11`, `1.12`, `1.13` | 1.11.8, 1.12.4, 1.13.2 | `influxdb` (1500), runs as this user | `/var/lib/influxdb` |
 | `2.7`, `2.8`, `2.9` | 2.7.12, 2.8.0, 2.9.1 | `influxdb` (1000), the entrypoint starts as root and changes to this user | `/etc/influxdb2`, `/var/lib/influxdb2` |
 
-The values of the major version (user of the image, volumes, defaults of the environment and secrets) are in `vars/influxdb1.yml` and `vars/influxdb2.yml`,
-the allowed variables of every release in `vars/environment-<release>.yml`, the role includes both before it checks anything.
+The values of the major version (user of the image, volumes, configuration file, defaults of the environment and secrets) are in `vars/influxdb1.yml` and `vars/influxdb2.yml`,
+the allowed options of the configuration of every release in `vars/config-<release>.yml`, the role includes both before it checks anything.
 The major version also selects the management of databases and users in `tasks/influxdb1.yml` or `tasks/influxdb2.yml`. Data of InfluxDB 1.x cannot be used by 2.x, the upgrade of the image
 (`DOCKER_INFLUXDB_INIT_MODE: upgrade`) is not supported by the role.
 
 ### Configuration
 
-InfluxDB is configured with environment variables in `influxdb_environment`, merged over the default of the major version:
+InfluxDB is configured with the configuration file, `influxdb_config` is its content:
 
-- InfluxDB 1.x reads every option of `influxdb.conf` as `INFLUXDB_<SECTION>_<KEY>`, e.g. `INFLUXDB_LOGGING_LEVEL`,
-  the sections `graphite`, `collectd`, `opentsdb` and `udp` are lists, the first entry is set with index 0, e.g. `INFLUXDB_GRAPHITE_0_ENABLED`.
-  The default sets `INFLUXDB_HTTP_AUTH_ENABLED: 'true'` and `INFLUXDB_ADMIN_USER: 'admin'`, the role needs the admin to manage databases and users.
-- InfluxDB 2.x reads every flag of `influxd` as `INFLUXD_<FLAG>`, e.g. `INFLUXD_LOG_LEVEL`.
-  The default sets `DOCKER_INFLUXDB_INIT_MODE: 'setup'`, `DOCKER_INFLUXDB_INIT_USERNAME: 'admin'` and `DOCKER_INFLUXDB_INIT_BUCKET: 'default'`,
-  `DOCKER_INFLUXDB_INIT_ORG` is mandatory. The setup creates the admin, the organization, the bucket and the admin token on the first start.
+- InfluxDB 1.x reads `/etc/influxdb/influxdb.conf` (TOML), the role writes `<influxdb_home>/influxdb.conf` (root, group 1500, 0640) and mounts it read-only.
+  The sections are dictionaries, `graphite`, `collectd`, `opentsdb` and `udp` are lists of tables (`[[graphite]]`).
+  The default sets `http.auth-enabled: true`, the role needs the admin to manage databases and users.
+- InfluxDB 2.x reads `/etc/influxdb2/config.yml`, the role writes `<influxdb_home>/etc/config.yml` (1000:1000, 0640) without a comment,
+  `dasel` of the entrypoint loses the first option after a leading comment.
+  The options are the flags of `influxd`, e.g. `log-level` or `http-bind-address`.
+
+```yaml
+# InfluxDB 1.x
+influxdb_config:
+  logging:
+    level: 'warn'
+  http:
+    log-enabled: false
+  graphite:
+    - enabled: true
+      database: 'graphite'
+```
+
+```yaml
+# InfluxDB 2.x
+influxdb_config:
+  log-level: 'warn'
+  storage-cache-max-memory-size: 1073741824
+```
+
+The values are TOML or YAML values, e.g. booleans, numbers and lists. `null` removes an option, also in a section or a table.
+The paths of the data are set by the role and must not be set: `meta.dir`, `data.dir` and `data.wal-dir` (1.x), `bolt-path` and `engine-path` (2.x).
+`influxdb_config` is merged recursively over the default, a section of 1.x keeps the options of the default that are not set.
+The TOML of 1.x is written with `community.general.to_toml`, it needs the Python library `tomlkit` on the controller.
+
+`influxdb_environment` only takes the variables of the initialization (see Initialization) and `TZ`.
+The time zone is set by podman with `influxdb_timezone` (`/etc/localtime` of the container), `TZ` is not needed.
+
+### Initialization
+
+The image initializes InfluxDB only on the first start. The role runs the initialization once in the container `influxdb-init`
+without network, with the volumes and the configuration of the quadlet unit, and removes it afterwards, also if the initialization failed.
+The role detects an initialized InfluxDB by `<influxdb_home>/data/meta` (1.x) or `<influxdb_home>/data/influxd.bolt` (2.x).
+
+- InfluxDB 1.x: `init-influxdb.sh` creates the admin `INFLUXDB_ADMIN_USER` (default `admin`) with the secret `INFLUXDB_ADMIN_PASSWORD`,
+  the role sets `INFLUXDB_HTTP_AUTH_ENABLED=true` for it.
+- InfluxDB 2.x: the setup creates the admin `DOCKER_INFLUXDB_INIT_USERNAME` (default `admin`), the organization `DOCKER_INFLUXDB_INIT_ORG` (mandatory),
+  the bucket `DOCKER_INFLUXDB_INIT_BUCKET` (default `default`) with `DOCKER_INFLUXDB_INIT_RETENTION` and the admin token,
+  the role sets `DOCKER_INFLUXDB_INIT_MODE=setup`.
 
 ```yaml
 influxdb_environment:
   DOCKER_INFLUXDB_INIT_ORG: 'example'
   DOCKER_INFLUXDB_INIT_RETENTION: '52w'
-  INFLUXD_LOG_LEVEL: 'warn'
 ```
 
-Values are strings, e.g. `'true'`. The variables of the setup only have an effect on the first start.
+Neither the variables nor the secrets of the initialization are part of the quadlet unit.
+A failed initialization names the data directory, remove its content before the next run.
 
 ### Databases, buckets and users
 
@@ -100,22 +139,25 @@ Applications usually write and read with tokens, InfluxDB 2.x creates tokens wit
 `influxdb_secrets` is a list of podman secrets with `name`, `data` and `target`, the name of the environment variable.
 Neither a target nor its file variable may be set in `influxdb_environment`.
 
-InfluxDB 2.x reads the password and the token of the setup from files, the role mounts the secrets to `/run/secrets/<name>`
-for the user of the image and sets the file variables:
+The secrets of the initialization are only passed to `influxdb-init`:
 
-| Target | File variable | |
+| Target | Passed as | |
 |---|---|---|
-| `DOCKER_INFLUXDB_INIT_PASSWORD` | `DOCKER_INFLUXDB_INIT_PASSWORD_FILE` | mandatory |
-| `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN` | `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN_FILE` | mandatory, used by the role and by `backup_influxdb` |
-| `INFLUXD_VAULT_TOKEN` | - | passed in the environment, `influxd` reads it only from there |
+| `DOCKER_INFLUXDB_INIT_PASSWORD` (2.x) | file, `DOCKER_INFLUXDB_INIT_PASSWORD_FILE` | mandatory |
+| `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN` (2.x) | file, `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN_FILE` | mandatory, used by the role and by `backup_influxdb` |
+| `INFLUXDB_ADMIN_PASSWORD` (1.x) | environment, `init-influxdb.sh` reads it only from there | mandatory, used by the role |
 
-The image of InfluxDB 1.x reads no secret from a file, `init-influxdb.sh` and `influxd` only read the environment,
-so the secrets of 1.x are passed with `type=env`:
+The secrets of the configuration are passed in the environment of the quadlet unit with `type=env`,
+they are not part of the unit file:
 
-| Target | |
-|---|---|
-| `INFLUXDB_ADMIN_PASSWORD` | mandatory, without it `init-influxdb.sh` writes a random password to the log |
-| `INFLUXDB_HTTP_SHARED_SECRET` | optional, the secret of JWT tokens |
+| Target | Option | |
+|---|---|---|
+| `INFLUXDB_HTTP_SHARED_SECRET` (1.x) | `http.shared-secret` | the secret of JWT tokens |
+| `INFLUXD_VAULT_TOKEN` (2.x) | `vault-token` | the token of Vault |
+
+Neither TOML nor YAML can read a file and the images have no file variables for these options,
+the environment variable of the option takes precedence over the configuration file in both images.
+The options must not be set in `influxdb_config`.
 
 ```yaml
 influxdb_secrets:
@@ -127,30 +169,39 @@ influxdb_secrets:
     target: 'DOCKER_INFLUXDB_INIT_ADMIN_TOKEN'
 ```
 
-The password and the token of the setup only have an effect on the first start, the role uses them to manage the buckets and users,
-so they have to stay the values of the setup.
+The password and the token of the initialization only have an effect on the first start, the role uses them to manage the buckets and users,
+so they have to stay the values of the initialization.
 
 ### Allowed variables
 
-The role only allows the variables of the release in `vars/environment-<release>.yml` and the secrets of the major version,
-it stops before any change if unknown variables or secrets are set.
-This prevents unexpected behavior by accident, e.g. by a typo, a variable of the other major version or a variable that has to be passed as secret.
-The check uses the environment and the secrets of the container after merging `influxdb_container`,
+The role only allows the options of the release in `vars/config-<release>.yml`, the environment variables in `database_influxdb__environment_allowed`
+and the secrets of the major version, it stops before any change if unknown options, variables or secrets are set.
+This prevents unexpected behavior by accident, e.g. by a typo, an option of the other major version or a variable that has to be passed as secret.
+The check of the environment uses `influxdb_environment` and the environment of the container after merging `influxdb_container`,
 so variables set with `influxdb_container.environment` are checked as well.
 
-The lists are generated from `etc/config.sample.toml` of InfluxDB 1.x and from the flags in `cmd/influxd/launcher/cmd.go` of InfluxDB 2.x
-of the version of the image, without the testing flags of 2.x, plus the variables of the entrypoint of the image.
-The users of `init-influxdb.sh` of 1.x (`INFLUXDB_DB`, `INFLUXDB_USER`, `INFLUXDB_WRITE_USER`, `INFLUXDB_READ_USER` and their passwords) are rejected,
+The options are generated from `etc/config.sample.toml` of InfluxDB 1.x and from the flags in `cmd/influxd/launcher/cmd.go` of InfluxDB 2.x
+of the version of the image, without the testing flags of 2.x and without the secret options.
+The variables of InfluxDB (`INFLUXDB_<SECTION>_<KEY>`, `INFLUXD_<FLAG>`) and the users of `init-influxdb.sh` of 1.x (`INFLUXDB_DB`, `INFLUXDB_USER`, …) are unknown variables,
 databases and users are managed with `influxdb_databases`, `influxdb_users` and `influxdb_passwords`.
 
 ### Container
 
-The container `influxdb` mounts `<influxdb_home>/data` and `<influxdb_home>/backup` to `/backup`, 2.x also `<influxdb_home>/etc` to `/etc/influxdb2`.
+The container `influxdb` mounts `<influxdb_home>/data` and `<influxdb_home>/backup` to `/backup`, 1.x also the configuration file,
+2.x also `<influxdb_home>/etc` to `/etc/influxdb2` with the configuration file.
 `backup_influxdb` uses the container `influxdb`, the admin token and the backup directory.
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `influxdb_container`, it is merged over the default of the container.
-The merge is not recursive, `influxdb_container.environment` replaces the environment including `influxdb_environment`, use `influxdb_environment` instead.
-InfluxDB listens on port 8086, the port and HTTPS follow `INFLUXDB_HTTP_BIND_ADDRESS` and `INFLUXDB_HTTP_HTTPS_ENABLED` (1.x)
-or `INFLUXD_HTTP_BIND_ADDRESS` and `INFLUXD_TLS_CERT` (2.x), the role uses them to reach the API on the address of the container.
+Ports, volumes and additional hosts (`etc_hosts`) are changed with `influxdb_container`, it is merged over the default of the container.
+The merge is not recursive, `influxdb_container.environment` replaces the environment, use `influxdb_environment` instead.
+The dependencies of the quadlet unit are lists in `influxdb_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+
+```yaml
+influxdb_container:
+  requires_mounts_for: [ '/srv/influxdb' ]
+```
+
+InfluxDB listens on port 8086, the port and HTTPS follow `http.bind-address` and `http.https-enabled` (1.x)
+or `http-bind-address` and `tls-cert` (2.x) of `influxdb_config`, the role uses them to reach the API on the address of the container.
 
 ### Validation
 
@@ -158,20 +209,28 @@ The role checks before any change:
 
 - `influxdb_release` is supported and `influxdb_version` starts with the release
 - `influxdb_secrets` is a list of entries with `name`, `data` and `target` and unique names, the mandatory secrets exist
-- the mandatory variables are set, `INFLUXDB_HTTP_AUTH_ENABLED` is `true` (1.x), `DOCKER_INFLUXDB_INIT_MODE` is `setup` (2.x),
-  the users of the image are not set, neither a secret nor its file variable is set in `influxdb_environment`
+- the mandatory variables of the initialization are set, neither a secret nor its file variable is set in `influxdb_environment`
+- `influxdb_config` is a dictionary of known options, the sections of tables of 1.x are lists, the paths of the data and the secret options are not set,
+  `http.auth-enabled` is `true` (1.x), the values contain no line breaks
 - `influxdb_databases`, `influxdb_buckets` and `influxdb_users` are lists of entries with unique and valid names and valid retentions,
   databases only with 1.x, buckets only with 2.x, `admin` and `grants` only with 1.x, `org` and `role` only with 2.x,
   privileges and roles are known, grants only on databases of `influxdb_databases`, the admin is not in `influxdb_users`
 - every user has a password in `influxdb_passwords`, `influxdb_passwords` has no passwords of unknown users and no empty passwords
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables and secrets are set, the values contain no line breaks
 
 If `influxdb_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the changes of the configuration file, the secrets and the quadlet unit,
+the initialization, the start and the management of the databases, buckets and users are skipped.
+
 ### Restart and updates
 
-InfluxDB is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `influxdb_environment`, otherwise it is started and enabled.
+InfluxDB is restarted if it was running and the configuration file, a secret or the quadlet unit changed, e.g. after changing `influxdb_config`,
+otherwise it is started and enabled. If the start fails, the role stops with the last lines of the journal of the service.
 The role waits until `/ping` answers, shows the log of the service otherwise, and manages the databases, buckets and users afterwards.
 Updates of the image are done by `container_update` with `influxdb_autoupdate_enabled: true` and `influxdb_autoupdate_schedule`,
 without `influxdb_autoupdate_schedule` the schedule of `container_update` is used.
@@ -185,14 +244,24 @@ The former role installed InfluxDB 2 or InfluxDB 3 Core with `influxdb_version` 
 - `influxdb_username`, `influxdb_org`, `influxdb_bucket` and `influxdb_retention` are replaced by `DOCKER_INFLUXDB_INIT_USERNAME`, `DOCKER_INFLUXDB_INIT_ORG`,
   `DOCKER_INFLUXDB_INIT_BUCKET` and `DOCKER_INFLUXDB_INIT_RETENTION` in `influxdb_environment`.
 - `influxdb_password` and `influxdb_admin_token` are replaced by the secrets `DOCKER_INFLUXDB_INIT_PASSWORD` and `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN`,
-  they are mounted as files instead of the environment, keep the former values, the role uses the token.
+  keep the former values, the role uses the token.
 - `influxdb_expose` and `influxdb_publish` are removed, the port 8086 is not published by default anymore, set `influxdb_container.publish` if needed.
 - `influxdb_use_podman` is removed, the handler `Restart InfluxDB container` is removed.
 - The directories `etc`, `data` and `backup` of `influxdb_home` stay.
-- `/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with `TZ` and the timezone of the container.
+- `/etc/localtime` and `/etc/timezone` are not mounted anymore, the time zone is set by podman with `influxdb_timezone`.
 - `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
 - Buckets and users are new with `influxdb_buckets`, `influxdb_users` and `influxdb_passwords`, InfluxDB 1.x is new.
 - The tag `database_influxdb` stays, the tag `database` is added.
+
+Changes of the configuration since the first version of this role:
+
+- The options are set in `influxdb_config` instead of the environment:
+  `INFLUXDB_<SECTION>_<KEY>` of 1.x is `<section>.<key>` with `-` instead of `_` in the key, e.g. `INFLUXDB_LOGGING_LEVEL` is `logging: { level: … }`,
+  `INFLUXDB_GRAPHITE_0_ENABLED` is the first entry of the list `graphite`, `INFLUXDB_HTTP_AUTH_ENABLED` is `http.auth-enabled`.
+  `INFLUXD_<FLAG>` of 2.x is the flag with `-` instead of `_` in lower case, e.g. `INFLUXD_LOG_LEVEL` is `log-level`.
+- `DOCKER_INFLUXDB_INIT_MODE` is set by the role, `TZ` is not set anymore.
+- The initialization runs in `influxdb-init`, its variables and secrets are not part of the quadlet unit anymore.
+- `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `influxdb_container` are new.
 
 ### Tests
 
@@ -202,19 +271,19 @@ Three platforms instead of two test both major versions. The playbooks creating 
 | Platform | Test case |
 |---|---|
 | `molecule-influxdb-default` | InfluxDB 2.9 with the mandatory variables, the organization of the setup and the secrets of the setup |
-| `molecule-influxdb` | InfluxDB 2.9 with IPv6, labels, `INFLUXD_LOG_LEVEL`, buckets with retention, a second organization, a member and an owner |
-| `molecule-influxdb-1` | InfluxDB 1.13 with databases with retention, users with `WRITE`, `READ` and `ALL`, an admin and a password with a single quote |
+| `molecule-influxdb` | InfluxDB 2.9 with IPv6, labels, dependencies, `log-level`, an option removed with `null`, buckets with retention, a second organization, a member and an owner |
+| `molecule-influxdb-1` | InfluxDB 1.13 with the shared secret in the environment, databases with retention, users with `WRITE`, `READ` and `ALL`, an admin and a password with a single quote |
 
-`prepare` creates the podman network and pulls the images.
-`side_effect` runs the role with `influxdb_container` not a dictionary, InfluxDB 3, the former major version as tag, a variable of the other major version,
-a secret without `target`, without the secrets of the admin, the password of the admin in the environment, a user without password, the admin in the users,
-an unknown secret, the upgrade mode and databases with 2.9, InfluxDB 1.13 without authentication, with a user of the image,
-with a grant on an unknown database, with an unknown privilege and with an invalid retention,
-and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`).
+`prepare` creates the podman network and pulls the images, `check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with invalid values of the release, the secrets, the environment, the configuration of both major versions,
+the databases, buckets and users and checks that it fails with the expected message and that the quadlet unit and the configuration file are unchanged
+(tasks marked `expect ERROR`).
 On `molecule-influxdb` and `molecule-influxdb-1` it changes the log level, adds a bucket or database and changes a password,
-the service has to restart and the role has to create the bucket or database and change the password.
-`verify` checks the quadlet unit with the volumes and the secrets without passwords, the service, the addresses and the environment of the container,
-the owner of the data directory and `/ping`.
+only the configuration file changes, the service has to restart and the role has to create the bucket or database and change the password.
+`molecule-influxdb-default` runs again without a change and must not restart. The initialization must not run again.
+`verify` checks the quadlet unit with the volumes and the secrets without the variables and secrets of the initialization,
+the configuration file, the log level as InfluxDB reads it, that `influxdb-init` was removed,
+the service, the addresses and the environment of the container, the owner of the data directory and `/ping`.
 For 2.x it checks the buckets and their retention, the sign in of the users with their passwords and with a wrong password,
 the owners of the organization and writes and queries a point with the admin token.
 For 1.x it checks the databases and their retention, the admins and that `writer` may only write, `reader` only read from `telegraf`

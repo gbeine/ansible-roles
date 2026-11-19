@@ -9,9 +9,15 @@ database_influxdb__product_name: 'InfluxDB 1.x'
 database_influxdb__data_owner: 1500
 database_influxdb__data_group: 1500
 
+# influxd reads /etc/influxdb/influxdb.conf, the role replaces the file of the image
+database_influxdb__config_file: "{{ database_influxdb__home }}/influxdb.conf"
+database_influxdb__config_owner: 0
+database_influxdb__config_format: 'toml'
+
 database_influxdb__volumes:
   - "{{ database_influxdb__home }}/data:/var/lib/influxdb"
   - "{{ database_influxdb__home }}/backup:/backup"
+  - "{{ database_influxdb__config_file }}:/etc/influxdb/influxdb.conf:ro"
 
 database_influxdb__directories:
   - path: "{{ database_influxdb__home }}/data"
@@ -19,32 +25,59 @@ database_influxdb__directories:
   - path: "{{ database_influxdb__home }}/backup"
     mode: '0750'
 
+# The role manages databases and users with the admin
+database_influxdb__config_default:
+  http:
+    auth-enabled: true
+
+# The paths of the volume, as in influxdb.conf of the image, they must not be set in influxdb_config
+database_influxdb__config_role:
+  meta:
+    dir: '/var/lib/influxdb/meta'
+  data:
+    dir: '/var/lib/influxdb/data'
+    wal-dir: '/var/lib/influxdb/wal'
+
+# These sections are lists of tables, e.g. [[graphite]]
+database_influxdb__config_arrays: [ 'graphite', 'collectd', 'opentsdb', 'udp' ]
+
+# The options of the API of the role
+database_influxdb__bind_option: "{{ database_influxdb__config.http['bind-address'] | default(':8086') }}"
+database_influxdb__tls_option: "{{ database_influxdb__config.http['https-enabled'] | default(false) }}"
+
+# The admin is created by init-influxdb.sh of the image with the secret INFLUXDB_ADMIN_PASSWORD
 database_influxdb__environment_default:
-  TZ: "{{ database_influxdb__timezone }}"
-  # The role manages databases and users with the admin
-  INFLUXDB_HTTP_AUTH_ENABLED: 'true'
   INFLUXDB_ADMIN_USER: 'admin'
 
 database_influxdb__environment_required: [ 'INFLUXDB_ADMIN_USER' ]
 
-# The admin is created by init-influxdb.sh of the image, the other users of the image are managed by the role
-database_influxdb__environment_managed:
-  - 'INFLUXDB_DB'
-  - 'INFLUXDB_USER'
-  - 'INFLUXDB_USER_PASSWORD'
-  - 'INFLUXDB_WRITE_USER'
-  - 'INFLUXDB_WRITE_USER_PASSWORD'
-  - 'INFLUXDB_READ_USER'
-  - 'INFLUXDB_READ_USER_PASSWORD'
+# Read by init-influxdb.sh of the image, the image reads no other variable of its own
+database_influxdb__environment_allowed: [ 'INFLUXDB_ADMIN_USER', 'TZ' ]
+
+# The variables only read by the initialization, they are not part of the quadlet unit
+database_influxdb__environment_init: [ 'INFLUXDB_ADMIN_USER' ]
+
+# init-influxdb.sh only creates the admin with authentication
+database_influxdb__init_environment_role:
+  INFLUXDB_HTTP_AUTH_ENABLED: 'true'
 
 # The image reads no secret from a file, init-influxdb.sh and influxd read them from the environment
 database_influxdb__secret_files: {}
 database_influxdb__secrets_env: [ 'INFLUXDB_ADMIN_PASSWORD', 'INFLUXDB_HTTP_SHARED_SECRET' ]
 
+# The secrets of the initialization, only passed to the container of the initialization
+database_influxdb__secrets_init: [ 'INFLUXDB_ADMIN_PASSWORD' ]
+
 # Without the password of the admin init-influxdb.sh writes a random password to the log
 database_influxdb__secrets_required: [ 'INFLUXDB_ADMIN_PASSWORD' ]
 
-# The variables of the admin, the address and HTTPS, the role reaches the API with them
+# The secret options of the configuration, they are passed as secrets in the environment
+database_influxdb__config_secrets:
+  'http.shared-secret': 'INFLUXDB_HTTP_SHARED_SECRET'
+
 database_influxdb__admin_user_variable: 'INFLUXDB_ADMIN_USER'
-database_influxdb__bind_variable: 'INFLUXDB_HTTP_BIND_ADDRESS'
-database_influxdb__tls_variable: 'INFLUXDB_HTTP_HTTPS_ENABLED'
+
+# init-influxdb.sh only runs without the meta directory, it prints no message at the end
+database_influxdb__initialized_path: "{{ database_influxdb__home }}/data/meta"
+database_influxdb__init_message: 'influxdb init process complete'
+database_influxdb__init_command: [ 'bash', '-c', '/init-influxdb.sh && echo "influxdb init process complete"' ]

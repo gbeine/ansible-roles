@@ -34,6 +34,8 @@
           - database_influxdb__expect.ip6 is none or ('IP6=' + database_influxdb__expect.ip6) in database_influxdb__test_quadlet_lines
           - database_influxdb__expect.ip6 is not none or database_influxdb__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - database_influxdb__expect.quadlet | reject('in', database_influxdb__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=DOCKER_INFLUXDB_INIT_
+          - database_influxdb__test_quadlet_lines | select('match', '(' ~ (database_influxdb__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
           - database_influxdb__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
           - database_influxdb__test_quadlet_lines | select('match', 'PublishPort=') | list | length == 0
           - database_influxdb__test_plain | select('in', database_influxdb__test_quadlet.content | b64decode) | list | length == 0
@@ -53,15 +55,17 @@
       changed_when: false
       no_log: true
 
-    # Secrets of 1.x are passed in the environment of the container, they are checked in the unit and in the variables of the role only
+    # The shared secret of 1.x is passed in the environment of the container, it is checked in the unit only
     - name: 'Assert the service, the container addresses and the environment'
       ansible.builtin.assert:
         that:
           - database_influxdb__test_service.stdout == 'active'
           - database_influxdb__test_net.IPAddress == database_influxdb__expect.ip
           - database_influxdb__expect.ip6 is none or database_influxdb__test_net.GlobalIPv6Address == database_influxdb__expect.ip6
-          - database_influxdb__expect.env | reject('in', database_influxdb__test_env) | list | length == 0
-          - database_influxdb__test_env | select('match', '(DOCKER_INFLUXDB_INIT_PASSWORD|DOCKER_INFLUXDB_INIT_ADMIN_TOKEN)=') | list | length == 0
+          # The variables of the initialization and the time zone are not part of the environment,
+          # the image itself sets DOCKER_INFLUXDB_INIT_CLI_CONFIG_NAME
+          - database_influxdb__test_env | select('match', '(DOCKER_INFLUXDB_INIT_(MODE|USERNAME|PASSWORD|ORG|BUCKET|RETENTION|ADMIN_TOKEN)|INFLUXDB_ADMIN_|TZ=)')
+            | list | length == 0
         fail_msg: >-
           service {{ database_influxdb__test_service.stdout }},
           IPv4 {{ database_influxdb__test_net.IPAddress }}, IPv6 {{ database_influxdb__test_net.GlobalIPv6Address }},
@@ -70,6 +74,42 @@
         database_influxdb__test_container: "{{ (database_influxdb__test_inspect.stdout | from_json)[0] }}"
         database_influxdb__test_net: "{{ database_influxdb__test_container.NetworkSettings.Networks[database_influxdb__test_case.role_vars.influxdb_network] }}"
         database_influxdb__test_env: "{{ database_influxdb__test_container.Config.Env }}"
+
+    - name: 'Read the configuration file'
+      ansible.builtin.slurp:
+        src: "{{ database_influxdb__expect.config_path }}"
+      register: 'database_influxdb__test_config_file'
+
+    - name: 'Read the owner and the mode of the configuration file'
+      ansible.builtin.stat:
+        path: "{{ database_influxdb__expect.config_path }}"
+      register: 'database_influxdb__test_config_stat'
+
+    - name: 'Assert the configuration file'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__test_config_stat.stat.uid == database_influxdb__expect.config_owner
+          - database_influxdb__test_config_stat.stat.gid == database_influxdb__expect.owner
+          - database_influxdb__test_config_stat.stat.mode == '0640'
+          - database_influxdb__expect.config | reject('in', database_influxdb__test_config_lines) | list | length == 0
+          # null removes the option
+          - database_influxdb__test_config_lines | select('search', 'flux-log-enabled') | list | length == 0
+        fail_msg: "{{ database_influxdb__test_config_lines }}"
+      vars:
+        database_influxdb__test_config_lines: "{{ (database_influxdb__test_config_file.content | b64decode).splitlines() | map('trim') | list }}"
+
+    - name: 'Read the container of the initialization'
+      ansible.builtin.command:
+        argv: [ 'podman', 'container', 'exists', 'influxdb-init' ]
+      register: 'database_influxdb__test_init_container'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the container of the initialization was removed'
+      ansible.builtin.assert:
+        that:
+          - database_influxdb__test_init_container.rc == 1
+        fail_msg: 'influxdb-init still exists'
 
     - name: 'Read the data directory'
       ansible.builtin.stat:
@@ -91,6 +131,19 @@
     - name: 'Check InfluxDB 2.x'
       when: database_influxdb__expect.major == '2'
       block:
+
+        - name: 'Read the configuration of InfluxDB with the admin token'
+          ansible.builtin.uri:
+            url: "{{ database_influxdb__test_url }}/api/v2/config"
+            headers:
+              Authorization: "Token {{ database_influxdb__test_admin_token }}"
+          register: 'database_influxdb__test_runtime_config'
+
+        - name: 'Assert the log level as InfluxDB reads it'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb__test_runtime_config.json.config['log-level'] == database_influxdb__expect.log_level
+            fail_msg: "log-level {{ database_influxdb__test_runtime_config.json.config['log-level'] | default('missing') }}"
 
         - name: 'Read the buckets with the admin token'
           ansible.builtin.uri:
@@ -187,6 +240,18 @@
     - name: 'Check InfluxDB 1.x'
       when: database_influxdb__expect.major == '1'
       block:
+
+        - name: 'Read the configuration as InfluxDB reads it'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'influxdb', 'influxd', 'config', '-config', '/etc/influxdb/influxdb.conf' ]
+          register: 'database_influxdb__test_runtime_config'
+          changed_when: false
+
+        - name: 'Assert the log level as InfluxDB reads it'
+          ansible.builtin.assert:
+            that:
+              - database_influxdb__test_runtime_config.stdout is search('\[logging\][^\[]*level = "' ~ database_influxdb__expect.log_level ~ '"')
+            fail_msg: "{{ database_influxdb__test_runtime_config.stdout_lines | select('search', 'level') | list }}"
 
         - name: 'Read the retention policies as the admin'
           ansible.builtin.uri:
