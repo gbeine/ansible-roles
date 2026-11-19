@@ -1,11 +1,13 @@
-mongo-express runs in the container image `c0d3.sh/container/mongo-express` (`latest` by default, `mongo_express_version` sets the tag) as podman quadlet.
+mongo-express runs in the container image `c0d3cr.io/container/mongo-express` (`latest` by default, `mongo_express_version` sets the tag) as podman quadlet.
 The image is built with the `Dockerfile` of [mongo-express](https://github.com/mongo-express/mongo-express) and `ENABLE_OIDC=true`,
 the web interface listens on port 8081. mongo-express keeps no data, the role creates no directories. MongoDB is not part of the role.
 
 ### Configuration
 
 mongo-express is configured with environment variables in `mongo_express_environment`, merged over the default of the role.
-The default sets `TZ` to `mongo_express_timezone` and `ME_CONFIG_AUTH_STRATEGY` to `form`.
+The default sets `ME_CONFIG_AUTH_STRATEGY` to `form`.
+The time zone is set by podman with `mongo_express_timezone` (`/etc/localtime` of the container), `TZ` is not needed.
+mongo-express keeps no data and needs no files, so the role has no home directory and configures it with the environment.
 The connection string and the passwords are passed with `mongo_express_secrets` (see Secrets).
 Booleans may be given as YAML booleans, the role passes them as `true` or `false`.
 The variables are described in the [README of mongo-express](https://github.com/mongo-express/mongo-express#readme), e.g.
@@ -85,10 +87,18 @@ and the deprecated `ME_CONFIG_BASICAUTH`.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `mongo_express_container`, it is merged over the default of the container.
+Ports, volumes and additional hosts (`etc_hosts`) are changed with `mongo_express_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists in `mongo_express_container`: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `mongo_express_container.environment` replaces the environment including `mongo_express_environment`, use `mongo_express_environment` instead.
 For a reverse proxy, e.g. Traefik, the labels are set with `mongo_express_labels`.
-mongo-express connects to MongoDB only at the start, start it after MongoDB, e.g. with `requires`.
+mongo-express connects to MongoDB only at the start, start it after MongoDB, e.g. with `requires` and `after`:
+
+```yaml
+mongo_express_container:
+  requires: [ 'mongodb.service' ]
+  after: [ 'mongodb.service' ]
+```
 
 ### Validation
 
@@ -99,40 +109,52 @@ The role checks before any change:
 - the secrets `ME_CONFIG_MONGODB_URL` and `ME_CONFIG_SITE_SESSIONSECRET` are set
 - neither a secret nor its file variable nor a variable set by the role is set in `mongo_express_environment`
 - `ME_CONFIG_SITE_BASEURL` starts and ends with `/`
-- booleans are `true` or `false`, values and the secrets passed in the environment contain no line breaks
-- only allowed environment variables and secrets are set in the container
+- booleans are `true` or `false`, the secrets passed in the environment contain no line breaks
+- only allowed environment variables and secrets are set in the container, the values contain no line breaks
 
 If `mongo_express_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the changes of the secrets and the quadlet unit, the service is neither started nor restarted.
+
 ### Restart and updates
 
 mongo-express is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `mongo_express_environment`, otherwise it is started and enabled.
+If the start fails, the role stops with the last lines of the journal of the service.
 Updates of the image are done by `container_update` with `mongo_express_autoupdate_enabled: true` and `mongo_express_autoupdate_schedule`,
 without `mongo_express_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
 
-The role is new, there are no former variables.
+The role is new, there are no former variables. Changes since the first version:
+
+- `TZ` is no longer set in the environment, the time zone is set by podman with `mongo_express_timezone`
+- `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `mongo_express_container` are new, `requires` was supported before
+- the image is pulled from `c0d3cr.io` instead of `c0d3.sh`
 
 ### Tests
 
 The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs on a macOS controller, the base VM has to be Debian 13.
-The playbooks creating and destroying the VMs live in `.molecule/tart/` in the repository root. The VMs need access to `c0d3.sh`.
+The playbooks creating and destroying the VMs live in `.molecule/tart/` in the repository root. The VMs need access to `c0d3cr.io`.
 
 | Platform | Test case |
 |---|---|
 | `molecule-mongo-express-default` | Only the mandatory variables, the login form, the connection string, the secret of the sessions and the password |
-| `molecule-mongo-express` | IPv6, labels, basic authentication below `/mongo/`, `ME_CONFIG_OPTIONS_READONLY` and the secret of the cookies |
+| `molecule-mongo-express` | IPv6, labels, dependencies, basic authentication below `/mongo/`, `ME_CONFIG_OPTIONS_READONLY` and the secret of the cookies |
 
+`check` runs `converge` with `--check` on the new VMs.
 `prepare` installs curl, creates the podman network, pulls the images and starts MongoDB with a root user.
 `side_effect` runs the role with `mongo_express_container` not a dictionary, a secret without `target`, without the connection string,
 without the password, the password in the environment, the strategy `none`, `ME_CONFIG_BASICAUTH_ENABLED` in the environment,
 a base URL without slash at the end, an invalid boolean, a line break in a value, `NODE_ENV` and the root password of MongoDB as secret
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes `ME_CONFIG_DOCUMENTS_PER_PAGE` on `molecule-mongo-express`, the quadlet unit changes and mongo-express has to restart.
-`verify` checks the quadlet unit with the mounted secrets and the secrets in the environment without their values,
-the service, the addresses and the environment of the container with the variables set by the role,
+then it changes `ME_CONFIG_DOCUMENTS_PER_PAGE` on `molecule-mongo-express`, the quadlet unit changes and mongo-express has to restart,
+`molecule-mongo-express-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the mounted secrets, the secrets in the environment without their values, the dependencies and without `TZ`,
+the service, the addresses, the time zone and the environment of the container with the variables set by the role,
 the health check connected to MongoDB and the login: with basic authentication the start page answers 401 without and with a wrong password
 and lists the databases with the password, with the login form curl logs in with a cookie file, a wrong password returns to the login form.
 

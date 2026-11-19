@@ -102,19 +102,14 @@
       vars:
         database_mongo_express__errors: >-
           {%- set errors = [] -%}
-          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- set ns = namespace(booleans=[]) -%}
           {%- for key, value in database_mongo_express__environment.items() if value is not none -%}
           {%-   if key in database_mongo_express__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
           {%-     set ns.booleans = ns.booleans + [ key ] -%}
-          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
-          {%-     set ns.lines = ns.lines + [ key ] -%}
           {%-   endif -%}
           {%- endfor -%}
           {%- if ns.booleans | length > 0 -%}
           {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if ns.lines | length > 0 -%}
-          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -129,8 +124,13 @@
         quiet: true
       vars:
         database_mongo_express__secrets_allowed: "{{ database_mongo_express__secret_files.keys() | list + database_mongo_express__secrets_env }}"
+        database_mongo_express__environment_checked: >-
+          {{ database_mongo_express__container.environment if database_mongo_express__container.environment is mapping else {} }}
         database_mongo_express__environment_unknown: >-
-          {{ (database_mongo_express__container.environment | default({})).keys() | reject('in', database_mongo_express__environment_allowed) | list }}
+          {{ database_mongo_express__environment_checked.keys() | reject('in', database_mongo_express__environment_allowed) | list }}
+        database_mongo_express__environment_line_breaks: >-
+          {{ database_mongo_express__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         # The targets are read from the container, mongo_express_container may replace the secrets
         database_mongo_express__container_targets: >-
           {{ (database_mongo_express__container.secrets
@@ -151,6 +151,9 @@
           {%- endif -%}
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of mongo-express (database_mongo_express__environment_allowed) and the secrets ' ~ (database_mongo_express__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_mongo_express__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_mongo_express__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -194,24 +197,55 @@
           {% if database_mongo_express__container.requires is defined %}
           Requires={{ database_mongo_express__container.requires | join(' ') }}
           {% endif %}
+          {% if database_mongo_express__container.wants is defined %}
+          Wants={{ database_mongo_express__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_mongo_express__container.after is defined %}
+          After={{ database_mongo_express__container.after | join(' ') }}
+          {% endif %}
+          {% if database_mongo_express__container.part_of is defined %}
+          PartOf={{ database_mongo_express__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_mongo_express__container.binds_to is defined %}
+          BindsTo={{ database_mongo_express__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_mongo_express__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_mongo_express__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'database_mongo_express__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_mongo_express__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if database_mongo_express__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        database_mongo_express__running: >-
-          {{ (ansible_facts.services[database_mongo_express__container.name + '.service'].state | default('')) == 'running' }}
-        database_mongo_express__restart: >-
-          {{ database_mongo_express__running | bool
-             and (database_mongo_express__secrets_result is changed
-                  or database_mongo_express__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start mongo-express'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_mongo_express__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_mongo_express__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_mongo_express__running: >-
+              {{ (ansible_facts.services[database_mongo_express__container.name + '.service'].state | default('')) == 'running' }}
+            database_mongo_express__restart: >-
+              {{ database_mongo_express__running | bool
+                 and (database_mongo_express__secrets_result is changed
+                      or database_mongo_express__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_mongo_express__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_mongo_express__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_mongo_express__container.name ~ ' did not start' ] + database_mongo_express__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'database_mongo_express__autoupdate_enabled | bool'

@@ -9,7 +9,7 @@ database_mongo_express__test_network:
   ipv6_gateway: 'fd00:89::1'
   ipv6_prefixlength: 64
 
-database_mongo_express__test_image: 'c0d3.sh/container/mongo-express:latest'
+database_mongo_express__test_image: 'c0d3cr.io/container/mongo-express:latest'
 database_mongo_express__test_quadlet_path: '/etc/containers/systemd/mongo-express.container'
 
 # The connection string set by the Dockerfile of the image, mongo-express prefers ME_CONFIG_MONGODB_URL_FILE
@@ -25,9 +25,8 @@ database_mongo_express__test_database:
   database: 'molecule'
   url: 'mongodb://molecule-root:molecule-mongodb-password@10.89.0.20:27017/?authSource=admin'
 
-# A valid change of the side effect, the quadlet unit changes and mongo-express has to restart
-database_mongo_express__test_side_effect_environment:
-  ME_CONFIG_DOCUMENTS_PER_PAGE: '25'
+# The time zone is set by podman with /etc/localtime, not with TZ
+database_mongo_express__test_quadlet_absent: [ 'Environment=TZ=' ]
 
 database_mongo_express__test_cases:
 
@@ -50,6 +49,9 @@ database_mongo_express__test_cases:
         - name: 'mongo_express_password'
           data: 'molecule-admin-password'
           target: 'ME_CONFIG_BASICAUTH_PASSWORD'
+    # Runs again without a change, mongo-express must not restart
+    side_effect:
+      role_vars: {}
     expect:
       ip: '10.89.0.70'
       ip6: ~
@@ -62,8 +64,9 @@ database_mongo_express__test_cases:
         - 'Secret=mongo_express_url,type=mount,target=/run/secrets/mongo_express_url'
         - 'Secret=mongo_express_session,type=env,target=ME_CONFIG_SITE_SESSIONSECRET'
         - 'Secret=mongo_express_password,type=mount,target=/run/secrets/mongo_express_password'
+      quadlet_absent: "{{ database_mongo_express__test_quadlet_absent }}"
+      restart: false
       env:
-        - 'TZ=Europe/Berlin'
         - 'ME_CONFIG_AUTH_STRATEGY=form'
         - 'ME_CONFIG_BASICAUTH_ENABLED=false'
         - 'ME_CONFIG_OIDCAUTH_ENABLED=false'
@@ -81,6 +84,10 @@ database_mongo_express__test_cases:
       mongo_express_timezone: 'Europe/Berlin'
       mongo_express_labels:
         traefik.enable: 'true'
+      mongo_express_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
       mongo_express_environment:
         ME_CONFIG_AUTH_STRATEGY: 'basic'
         ME_CONFIG_BASICAUTH_USERNAME: 'molecule-admin'
@@ -99,7 +106,15 @@ database_mongo_express__test_cases:
         - name: 'mongo_express_password'
           data: 'molecule-admin-password'
           target: 'ME_CONFIG_BASICAUTH_PASSWORD'
-    side_effect: true
+    # The complete environment with ME_CONFIG_DOCUMENTS_PER_PAGE, the quadlet unit changes and mongo-express has to restart
+    side_effect:
+      role_vars:
+        mongo_express_environment:
+          ME_CONFIG_AUTH_STRATEGY: 'basic'
+          ME_CONFIG_BASICAUTH_USERNAME: 'molecule-admin'
+          ME_CONFIG_SITE_BASEURL: '/mongo/'
+          ME_CONFIG_OPTIONS_READONLY: true
+          ME_CONFIG_DOCUMENTS_PER_PAGE: '25'
     expect:
       ip: '10.89.0.71'
       ip6: 'fd00:89::71'
@@ -114,8 +129,12 @@ database_mongo_express__test_cases:
         - 'Secret=mongo_express_cookie,type=env,target=ME_CONFIG_SITE_COOKIESECRET'
         - 'Secret=mongo_express_password,type=mount,target=/run/secrets/mongo_express_password'
         - 'Label=traefik.enable=true'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      quadlet_absent: "{{ database_mongo_express__test_quadlet_absent }}"
+      restart: true
       env:
-        - 'TZ=Europe/Berlin'
         - 'ME_CONFIG_AUTH_STRATEGY=basic'
         - 'ME_CONFIG_BASICAUTH_ENABLED=true'
         - 'ME_CONFIG_OIDCAUTH_ENABLED=false'

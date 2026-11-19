@@ -29,6 +29,8 @@
           - database_mongo_express__expect.ip6 is none or ('IP6=' + database_mongo_express__expect.ip6) in database_mongo_express__test_quadlet_lines
           - database_mongo_express__expect.ip6 is not none or database_mongo_express__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - database_mongo_express__expect.quadlet | reject('in', database_mongo_express__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - database_mongo_express__test_quadlet_lines | select('match', '(' ~ (database_mongo_express__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
           - database_mongo_express__test_plain | select('in', database_mongo_express__test_quadlet.content | b64decode) | list | length == 0
         fail_msg: "{{ database_mongo_express__test_quadlet_lines | reject('search', 'secret') | list | to_json }}"
       vars:
@@ -54,6 +56,8 @@
           - database_mongo_express__expect.ip6 is none or database_mongo_express__test_net.GlobalIPv6Address == database_mongo_express__expect.ip6
           - database_mongo_express__expect.env | reject('in', database_mongo_express__test_env) | list | length == 0
           - database_mongo_express__test_env | select('match', 'ME_CONFIG_BASICAUTH_PASSWORD=') | list | length == 0
+          # The time zone is set by podman with /etc/localtime, not with TZ
+          - database_mongo_express__test_env | select('match', 'TZ=') | list | length == 0
           # The image sets the connection string without password, mongo-express prefers the file of the role
           - database_mongo_express__test_env | select('match', 'ME_CONFIG_MONGODB_URL=') | reject('eq', 'ME_CONFIG_MONGODB_URL=' ~ database_mongo_express__test_image_url) | list | length == 0
           - database_mongo_express__test_env | select('search', 'molecule-mongodb-password|molecule-admin-password') | list | length == 0
@@ -65,6 +69,18 @@
         database_mongo_express__test_container: "{{ (database_mongo_express__test_inspect.stdout | from_json)[0] }}"
         database_mongo_express__test_net: "{{ database_mongo_express__test_container.NetworkSettings.Networks[database_mongo_express__test_case.role_vars.mongo_express_network] }}"
         database_mongo_express__test_env: "{{ database_mongo_express__test_container.Config.Env }}"
+
+    - name: 'Read the time zone of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'mongo-express', 'date', '+%Z' ]
+      register: 'database_mongo_express__test_timezone'
+      changed_when: false
+
+    - name: 'Assert the time zone of the container'
+      ansible.builtin.assert:
+        that:
+          - database_mongo_express__test_timezone.stdout in [ 'CET', 'CEST' ]
+        fail_msg: "Time zone {{ database_mongo_express__test_timezone.stdout }}"
 
     # The health check is not behind the login, it answers 503 without connection to MongoDB
     - name: 'Wait until mongo-express is connected to MongoDB'

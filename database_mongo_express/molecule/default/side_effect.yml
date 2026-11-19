@@ -12,6 +12,11 @@
     database_mongo_express__test_checked_files:
       - "{{ database_mongo_express__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -108,7 +113,7 @@
         mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine({'ME_CONFIG_BASICAUTH_USERNAME': 'molecule\nadmin'}) }}"
         database_mongo_express__test_invalid:
           message: 'a line break in a value'
-          search: '^Values must not contain line breaks: ME_CONFIG_BASICAUTH_USERNAME\.$'
+          search: '^The environment variables must not contain line breaks: ME_CONFIG_BASICAUTH_USERNAME\.$'
 
     - name: 'Run database_mongo_express with NODE_ENV in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -126,35 +131,36 @@
           message: 'the root password of MongoDB as secret'
           search: '^Unknown secrets: MONGO_INITDB_ROOT_PASSWORD\.'
 
-    - name: 'Run database_mongo_express with the changed environment'
-      when: database_mongo_express__test_case.side_effect | default(false)
-      block:
+    # molecule-mongo-express changes the environment and has to restart, molecule-mongo-express-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongo-express' ]
+      register: 'database_mongo_express__test_started_before'
+      changed_when: false
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongo-express' ]
-          register: 'database_mongo_express__test_started_before'
-          changed_when: false
+    - name: 'Set the role variables of the change'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_mongo_express__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-        - name: 'Set the changed environment'
-          ansible.builtin.set_fact:
-            mongo_express_environment: "{{ database_mongo_express__test_vars.mongo_express_environment | combine(database_mongo_express__test_side_effect_environment) }}"
+    - name: 'Run database_mongo_express with the changed variables'
+      ansible.builtin.include_role:
+        name: 'database_mongo_express'
 
-        - name: 'Run database_mongo_express with the changed environment'
-          ansible.builtin.include_role:
-            name: 'database_mongo_express'
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongo-express' ]
+      register: 'database_mongo_express__test_started_after'
+      changed_when: false
 
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mongo-express' ]
-          register: 'database_mongo_express__test_started_after'
-          changed_when: false
-
-        - name: 'Assert the changed quadlet unit and the restart of the service'
-          ansible.builtin.assert:
-            that:
-              - database_mongo_express__quadlet_result is changed
-              - database_mongo_express__test_started_after.stdout | int > database_mongo_express__test_started_before.stdout | int
-            fail_msg: >-
-              quadlet changed: {{ database_mongo_express__quadlet_result is changed }},
-              start before {{ database_mongo_express__test_started_before.stdout }}, after {{ database_mongo_express__test_started_after.stdout }}
+    - name: 'Assert the quadlet unit and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (database_mongo_express__quadlet_result is changed) == database_mongo_express__test_case.expect.restart
+          - (database_mongo_express__test_started_after.stdout | int > database_mongo_express__test_started_before.stdout | int)
+            == database_mongo_express__test_case.expect.restart
+        fail_msg: >-
+          quadlet changed: {{ database_mongo_express__quadlet_result is changed }},
+          start before {{ database_mongo_express__test_started_before.stdout }}, after {{ database_mongo_express__test_started_after.stdout }}
