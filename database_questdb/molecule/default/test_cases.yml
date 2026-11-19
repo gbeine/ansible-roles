@@ -16,8 +16,7 @@ database_questdb__test_quadlet_path: '/etc/containers/systemd/questdb.container'
 database_questdb__test_psql_image: 'docker.io/library/postgres:17'
 
 # A valid change of the side effect, the quadlet unit changes and QuestDB has to restart
-database_questdb__test_side_effect_environment:
-  QDB_SHARED_WORKER_COUNT: '2'
+database_questdb__test_server_conf_path: '/opt/questdb/conf/server.conf'
 
 database_questdb__test_cases:
 
@@ -32,18 +31,27 @@ database_questdb__test_cases:
       questdb_secrets:
         - name: 'questdb_pg_password'
           data: 'molecule-pg-password'
-          target: 'QDB_PG_PASSWORD'
+          target: 'pg.password'
+    # Runs again without a change, QuestDB must not restart
+    side_effect:
+      role_vars: {}
     expect:
       ip: '10.89.0.60'
       ip6: ~
       quadlet:
         - 'Volume=/opt/questdb:/var/lib/questdb'
         - 'Secret=questdb_pg_password,type=mount,target=/run/secrets/questdb_pg_password,uid=10001,gid=10001,mode=0400'
-      env:
-        - 'TZ=Europe/Berlin'
-        - 'QDB_PG_PASSWORD_FILE=/run/secrets/questdb_pg_password'
+      # Without questdb_environment the quadlet unit has no environment
+      quadlet_absent:
+        - 'Environment='
+      server_conf:
+        - 'cairo.sql.copy.root=import'
+        - 'config.validation.strict=false'
+        - 'pg.password.file=/run/secrets/questdb_pg_password'
+        - 'query.timeout=1m'
       pg_password: 'molecule-pg-password'
       http: ~
+      restart: false
 
   # IPv6, labels, the HTTP authentication with the password from a secret, without telemetry
   - name: 'molecule-questdb'
@@ -56,17 +64,32 @@ database_questdb__test_cases:
       questdb_timezone: 'Europe/Berlin'
       questdb_labels:
         traefik.enable: 'true'
+      questdb_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/opt/questdb' ]
       questdb_environment:
-        QDB_HTTP_USER: 'molecule'
-        QDB_TELEMETRY_ENABLED: 'false'
+        JVM_PREPEND: '-Xmx512m'
+      # null removes query.timeout of the default
+      questdb_config:
+        http.user: 'molecule'
+        telemetry.enabled: false
+        query.timeout: ~
       questdb_secrets:
         - name: 'questdb_pg_password'
           data: 'molecule-pg-password'
-          target: 'QDB_PG_PASSWORD'
+          target: 'pg.password'
         - name: 'questdb_http_password'
           data: 'molecule-http-password'
-          target: 'QDB_HTTP_PASSWORD'
-    side_effect: true
+          target: 'http.password'
+    # The complete configuration with shared.worker.count, only server.conf changes and QuestDB has to restart
+    side_effect:
+      role_vars:
+        questdb_config:
+          http.user: 'molecule'
+          telemetry.enabled: false
+          query.timeout: ~
+          shared.worker.count: 2
     expect:
       ip: '10.89.0.61'
       ip6: 'fd00:89::61'
@@ -75,14 +98,24 @@ database_questdb__test_cases:
         - 'Secret=questdb_pg_password,type=mount,target=/run/secrets/questdb_pg_password,uid=10001,gid=10001,mode=0400'
         - 'Secret=questdb_http_password,type=mount,target=/run/secrets/questdb_http_password,uid=10001,gid=10001,mode=0400'
         - 'Label=traefik.enable=true'
-      env:
-        - 'TZ=Europe/Berlin'
-        - 'QDB_HTTP_USER=molecule'
-        - 'QDB_TELEMETRY_ENABLED=false'
-        - 'QDB_SHARED_WORKER_COUNT=2'
-        - 'QDB_PG_PASSWORD_FILE=/run/secrets/questdb_pg_password'
-        - 'QDB_HTTP_PASSWORD_FILE=/run/secrets/questdb_http_password'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/opt/questdb'
+        - 'Environment=JVM_PREPEND=-Xmx512m'
+      quadlet_absent:
+        - 'Environment=TZ='
+        - 'Environment=QDB_'
+      # After the change of the side effect
+      server_conf:
+        - 'cairo.sql.copy.root=import'
+        - 'config.validation.strict=false'
+        - 'http.password.file=/run/secrets/questdb_http_password'
+        - 'http.user=molecule'
+        - 'pg.password.file=/run/secrets/questdb_pg_password'
+        - 'shared.worker.count=2'
+        - 'telemetry.enabled=false'
       pg_password: 'molecule-pg-password'
       http:
         user: 'molecule'
         password: 'molecule-http-password'
+      restart: true

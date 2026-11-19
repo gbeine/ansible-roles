@@ -36,7 +36,7 @@
           {%- endif -%}
           {{ errors }}
 
-    - name: 'Validate environment and secrets'
+    - name: 'Validate the configuration and the secrets'
       ansible.builtin.assert:
         that:
           - database_questdb__errors | length == 0
@@ -45,33 +45,48 @@
         quiet: true
       vars:
         database_questdb__secret_targets: "{{ database_questdb__secrets | map(attribute='target') | list }}"
-        database_questdb__environment_set: >-
-          {{ database_questdb__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
-        database_questdb__environment_missing: >-
-          {{ database_questdb__environment_required | reject('in', database_questdb__environment_set) | list }}
-        database_questdb__secrets_missing: >-
-          {{ database_questdb__secrets_required | reject('in', database_questdb__secret_targets) | list }}
-        database_questdb__secrets_in_environment: >-
-          {{ (database_questdb__secret_targets + database_questdb__secret_variables + database_questdb__secret_files.values() | list)
-             | select('in', database_questdb__environment.keys() | list) | unique | list }}
+        database_questdb__secrets_missing: "{{ database_questdb__secrets_required | reject('in', database_questdb__secret_targets) | list }}"
         database_questdb__errors: >-
           {%- set errors = [] -%}
-          {%- if database_questdb__environment_missing | length > 0 -%}
-          {%-   set _ = errors.append('QuestDB needs the environment variables ' ~ (database_questdb__environment_required | join(', ')) ~ ', missing or empty: ' ~ (database_questdb__environment_missing | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- set http_user = (database_questdb__environment.QDB_HTTP_USER | default('')) not in ['', none] -%}
-          {%- if http_user != ('QDB_HTTP_PASSWORD' in database_questdb__secret_targets) -%}
-          {%-   set _ = errors.append('QDB_HTTP_USER and the secret QDB_HTTP_PASSWORD have to be set together.') -%}
-          {%- endif -%}
-          {%- if (database_questdb__environment.QDB_PG_READONLY_USER_ENABLED | default('') | string | lower) == 'true'
-                 and 'QDB_PG_READONLY_PASSWORD' not in database_questdb__secret_targets -%}
-          {%-   set _ = errors.append('QDB_PG_READONLY_USER_ENABLED needs the secret QDB_PG_READONLY_PASSWORD.') -%}
+          {%- set config = database_questdb__config_custom -%}
+          {#- combine with an empty default does not fail on every Ansible version, the role checks the configuration itself -#}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('questdb_config has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set role_keys = database_questdb__config_role.keys() | list + database_questdb__secrets_allowed | map('regex_replace', '$', '.file') | list -%}
+          {%-   set secrets = config.keys() | select('in', database_questdb__secrets_allowed) | list -%}
+          {%-   set role = config.keys() | select('in', role_keys) | list -%}
+          {%-   set unknown = config.keys() | reject('in', database_questdb__config_allowed) | reject('in', database_questdb__secrets_allowed) | reject('in', role_keys) | list -%}
+          {%-   if secrets | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not be set in questdb_config, set them with questdb_secrets: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if role | length > 0 -%}
+          {%-     set _ = errors.append('Keys set by the role must not be set in questdb_config: ' ~ (role | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in questdb_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the keys of QuestDB (database_questdb__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   set invalid = [] -%}
+          {%-   for key, value in config.items() if value is not none and value is not boolean and value is not number -%}
+          {%-     set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-     if items | reject('string') | reject('number') | list | length > 0 or (items | map('string') | join('') ~ '.').splitlines() | length > 1 -%}
+          {%-       set _ = invalid.append(key) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The values of questdb_config have to be strings without line breaks, numbers, booleans or lists of them, null removes a key: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set http_user = (config['http.user'] | default(none)) not in ['', none] -%}
+          {%-   set http_password = 'http.password' in database_questdb__secret_targets -%}
+          {%-   if http_user != http_password -%}
+          {%-     set _ = errors.append('http.user and the secret http.password have to be set together.') -%}
+          {%-   endif -%}
+          {%-   if config['pg.readonly.user.enabled'] | default(false) is true and 'pg.readonly.password' not in database_questdb__secret_targets -%}
+          {%-     set _ = errors.append('pg.readonly.user.enabled needs the secret pg.readonly.password.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {%- if database_questdb__secrets_missing | length > 0 -%}
           {%-   set _ = errors.append('QuestDB needs the secrets ' ~ (database_questdb__secrets_required | join(', ')) ~ ', missing: ' ~ (database_questdb__secrets_missing | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if database_questdb__secrets_in_environment | length > 0 -%}
-          {%-   set _ = errors.append('Secrets and their file variables must not be set in questdb_environment: ' ~ (database_questdb__secrets_in_environment | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -85,32 +100,53 @@
         fail_msg: "{{ database_questdb__errors | join(' ') }}"
         quiet: true
       vars:
+        # Without questdb_environment and questdb_container.environment the environment is omitted, there is nothing to check
+        database_questdb__environment_container: >-
+          {{ database_questdb__container.environment if database_questdb__container.environment is mapping else {} }}
         database_questdb__environment_unknown: >-
-          {{ (database_questdb__container.environment | default({})).keys() | reject('in', database_questdb__environment_allowed) | list }}
+          {{ database_questdb__environment_container.keys() | reject('in', database_questdb__environment_allowed) | list }}
+        database_questdb__environment_line_breaks: >-
+          {{ database_questdb__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_questdb__secrets_unknown: >-
-          {{ database_questdb__secrets | map(attribute='target')
-             | reject('in', database_questdb__secret_files.keys() | list) | list }}
+          {{ database_questdb__secrets | map(attribute='target') | reject('in', database_questdb__secrets_allowed) | list }}
         database_questdb__errors: >-
           {%- set errors = [] -%}
+          {%- if database_questdb__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_questdb__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if database_questdb__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_questdb__environment_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if database_questdb__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_questdb__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the keys of QuestDB as QDB_<KEY> and the variables of the image (database_questdb__environment_allowed) and the secrets ' ~ ((database_questdb__secret_files.keys() | list) | join(', ')) ~ '.') -%}
+          {%- if database_questdb__environment_unknown | length > 0 or database_questdb__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_questdb__environment_allowed), the keys of QuestDB are set with questdb_config, and the secrets ' ~ (database_questdb__secrets_allowed | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
     # QuestDB runs as the user questdb of the image, the entrypoint fixes the owner of the files
-    - name: 'Create the data directory'
+    - name: 'Create the directories'
       ansible.builtin.file:
-        path: "{{ database_questdb__home }}"
+        path: "{{ item }}"
         owner: "{{ database_questdb__data_owner }}"
         group: "{{ database_questdb__data_group }}"
         mode: '0700'
         state: 'directory'
+      loop:
+        - "{{ database_questdb__home }}"
+        - "{{ database_questdb__home }}/conf"
+
+    # QuestDB copies its server.conf only if the file is missing, the file of the role stays
+    - name: 'Write server.conf'
+      ansible.builtin.copy:
+        content: "{{ database_questdb__config_lines | join('\n') }}\n"
+        dest: "{{ database_questdb__home }}/conf/server.conf"
+        owner: "{{ database_questdb__data_owner }}"
+        group: "{{ database_questdb__data_group }}"
+        mode: '0600'
+      register: 'database_questdb__config_result'
 
     - name: 'Create secrets'
       no_log: true
@@ -152,24 +188,56 @@
           {% if database_questdb__container.requires is defined %}
           Requires={{ database_questdb__container.requires | join(' ') }}
           {% endif %}
+          {% if database_questdb__container.wants is defined %}
+          Wants={{ database_questdb__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_questdb__container.after is defined %}
+          After={{ database_questdb__container.after | join(' ') }}
+          {% endif %}
+          {% if database_questdb__container.part_of is defined %}
+          PartOf={{ database_questdb__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_questdb__container.binds_to is defined %}
+          BindsTo={{ database_questdb__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_questdb__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_questdb__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'database_questdb__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_questdb__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if database_questdb__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        database_questdb__running: >-
-          {{ (ansible_facts.services[database_questdb__container.name + '.service'].state | default('')) == 'running' }}
-        database_questdb__restart: >-
-          {{ database_questdb__running | bool
-             and (database_questdb__secrets_result is changed
-                  or database_questdb__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start QuestDB'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_questdb__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_questdb__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_questdb__running: >-
+              {{ (ansible_facts.services[database_questdb__container.name + '.service'].state | default('')) == 'running' }}
+            database_questdb__restart: >-
+              {{ database_questdb__running | bool
+                 and (database_questdb__secrets_result is changed
+                      or database_questdb__config_result is changed
+                      or database_questdb__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_questdb__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_questdb__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_questdb__container.name ~ ' did not start' ] + database_questdb__start_journal.stdout_lines }}"
 
     # Roles depending on QuestDB start after the port is open
     - name: 'Wait for the port of QuestDB'

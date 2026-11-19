@@ -28,6 +28,8 @@
           - database_questdb__expect.ip6 is none or ('IP6=' + database_questdb__expect.ip6) in database_questdb__test_quadlet_lines
           - database_questdb__expect.ip6 is not none or database_questdb__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - database_questdb__expect.quadlet | reject('in', database_questdb__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=
+          - database_questdb__test_quadlet_lines | select('match', '(' ~ (database_questdb__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
           # The passwords are mounted as files, they are never part of the environment
           - database_questdb__test_quadlet_lines | select('search', 'type=env|molecule-pg-password|molecule-http-password') | list | length == 0
         fail_msg: "{{ database_questdb__test_quadlet.content | b64decode }}"
@@ -51,8 +53,8 @@
           - database_questdb__test_service.stdout == 'active'
           - database_questdb__test_net.IPAddress == database_questdb__expect.ip
           - database_questdb__expect.ip6 is none or database_questdb__test_net.GlobalIPv6Address == database_questdb__expect.ip6
-          - database_questdb__expect.env | reject('in', database_questdb__test_env) | list | length == 0
-          - database_questdb__test_env | select('match', 'QDB_(PG|HTTP|PG_READONLY)_PASSWORD=') | list | length == 0
+          # The keys of QuestDB are set in server.conf, the passwords only as files
+          - database_questdb__test_env | select('match', 'QDB_.*PASSWORD') | list | length == 0
         fail_msg: >-
           service {{ database_questdb__test_service.stdout }},
           IPv4 {{ database_questdb__test_net.IPAddress }}, IPv6 {{ database_questdb__test_net.GlobalIPv6Address }},
@@ -67,12 +69,31 @@
         path: "{{ database_questdb__test_home }}"
       register: 'database_questdb__test_data'
 
-    - name: 'Assert the data directory'
+    - name: 'Read server.conf'
+      ansible.builtin.stat:
+        path: "{{ database_questdb__test_server_conf_path }}"
+      register: 'database_questdb__test_server_conf_stat'
+
+    - name: 'Read the content of server.conf'
+      ansible.builtin.slurp:
+        src: "{{ database_questdb__test_server_conf_path }}"
+      register: 'database_questdb__test_server_conf'
+
+    # QuestDB keeps the server.conf of the role, the secrets are only referenced as files
+    - name: 'Assert the data directory and server.conf'
       ansible.builtin.assert:
         that:
           - database_questdb__test_data.stat.isdir | default(false)
           - database_questdb__test_data.stat.uid == 10001
-        fail_msg: "uid {{ database_questdb__test_data.stat.uid | default('missing') }}"
+          - database_questdb__test_server_conf_stat.stat.uid == 10001
+          - database_questdb__test_server_conf_stat.stat.mode == '0600'
+          - database_questdb__test_server_conf_lines == database_questdb__expect.server_conf
+        fail_msg: >-
+          uid {{ database_questdb__test_data.stat.uid | default('missing') }},
+          server.conf {{ database_questdb__test_server_conf_stat.stat.uid | default('missing') }} {{ database_questdb__test_server_conf_stat.stat.mode | default('') }}:
+          {{ database_questdb__test_server_conf_lines | join(', ') }}
+      vars:
+        database_questdb__test_server_conf_lines: "{{ (database_questdb__test_server_conf.content | b64decode).splitlines() }}"
 
     - name: 'Wait until QuestDB answers'
       ansible.builtin.uri:
