@@ -15,6 +15,11 @@
     app_forgejo__test_checked_files:
       - "{{ app_forgejo__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -154,39 +159,49 @@
           message: 'an unknown secret'
           search: '^Unknown secrets: FORGEJO__server__ROOT_URL\.'
 
-    - name: 'Run app_forgejo with the changed theme and password'
-      when: app_forgejo__test_case.side_effect is defined
-      block:
+    - name: 'Run app_forgejo with a line break in forgejo_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_container:
+          environment:
+            USER_UID: '1000'
+            SSH_LOG_LEVEL: "INFO\nDEBUG"
+        app_forgejo__test_invalid:
+          message: 'a line break in forgejo_container.environment'
+          search: 'The environment variables must not contain line breaks: SSH_LOG_LEVEL\.'
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo' ]
-          register: 'app_forgejo__test_started_before'
-          changed_when: false
+    # molecule-forgejo changes the theme and the password and has to restart, molecule-forgejo-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo' ]
+      register: 'app_forgejo__test_started_before'
+      changed_when: false
 
-        - name: 'Set the changed values'
-          ansible.builtin.set_fact:
-            forgejo_environment: "{{ app_forgejo__test_environment | combine(app_forgejo__test_case.side_effect.environment) }}"
-            forgejo_admin: "{{ app_forgejo__test_admin | combine(app_forgejo__test_case.side_effect.admin) }}"
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_forgejo__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
 
-        - name: 'Run app_forgejo with the changed values'
-          ansible.builtin.include_role:
-            name: 'app_forgejo'
+    - name: 'Run app_forgejo with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_forgejo'
 
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo' ]
-          register: 'app_forgejo__test_started_after'
-          changed_when: false
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo' ]
+      register: 'app_forgejo__test_started_after'
+      changed_when: false
 
-        - name: 'Assert the restart and the changed password'
-          ansible.builtin.assert:
-            that:
-              - app_forgejo__quadlet_result is changed
-              - app_forgejo__admin_result is changed
-              - not app_forgejo__admin_result.created
-              - app_forgejo__test_started_after.stdout | int > app_forgejo__test_started_before.stdout | int
-            fail_msg: >-
-              quadlet changed: {{ app_forgejo__quadlet_result is changed }}, administrator changed: {{ app_forgejo__admin_result is changed }},
-              created: {{ app_forgejo__admin_result.created | default('') }},
-              start before {{ app_forgejo__test_started_before.stdout }}, after {{ app_forgejo__test_started_after.stdout }}
+    - name: 'Assert the restart and the changed password'
+      ansible.builtin.assert:
+        that:
+          - (app_forgejo__quadlet_result is changed) == app_forgejo__test_case.expect.restart
+          - (app_forgejo__admin_result is changed) == app_forgejo__test_case.expect.restart
+          - not app_forgejo__admin_result.created
+          - (app_forgejo__test_started_after.stdout | int > app_forgejo__test_started_before.stdout | int) == app_forgejo__test_case.expect.restart
+        fail_msg: >-
+          quadlet changed: {{ app_forgejo__quadlet_result is changed }}, administrator changed: {{ app_forgejo__admin_result is changed }},
+          created: {{ app_forgejo__admin_result.created | default('') }},
+          start before {{ app_forgejo__test_started_before.stdout }}, after {{ app_forgejo__test_started_after.stdout }}

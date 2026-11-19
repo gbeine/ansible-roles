@@ -129,13 +129,17 @@ The check uses the environment of the container after merging `forgejo_container
 
 ### Container
 
-Ports (e.g. SSH), volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `forgejo_container`, it is merged over the default of the container.
+Ports (e.g. SSH), volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `forgejo_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `forgejo_container.volumes` replaces `/data`, `forgejo_container.environment` replaces the environment including `forgejo_environment`.
 The role waits until `/api/healthz` of Forgejo answers, Forgejo migrates the database on start, it shows the log of the service otherwise.
 
 ```yaml
 forgejo_container:
   publish: [ '2222:22' ]
+  requires: [ 'mariadb.service' ]
+  after: [ 'mariadb.service' ]
 ```
 
 ### Validation
@@ -147,13 +151,20 @@ The role checks before any change:
 - `FORGEJO__database__DB_TYPE` is `mysql`, `postgres` or `sqlite3`, `mysql` and `postgres` have the variables of the database and the secret `PASSWD`
 - neither a secret nor its file variable is set in `forgejo_environment`, the booleans are `true` or `false`, values and secrets have no line breaks
 - `forgejo_admin` has a valid name, a valid email and a password with at least 8 characters
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables and secrets are set in the container, also the values of `forgejo_container.environment` contain no line breaks
 
 If `forgejo_container` is no dictionary, merging it with the default fails before anything changes.
+
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the changes of the directory, the secrets and the quadlet unit, the service is neither started nor restarted,
+the administrator is not checked.
 
 ### Restart and updates
 
 Forgejo is restarted if it was running and a secret or the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role stops with the last lines of the journal of the service.
 The image writes the variables to `app.ini` on start, a changed password of the administrator needs no restart.
 Updates of the image are done by `container_update` with `forgejo_autoupdate_enabled: true` and `forgejo_autoupdate_schedule`,
 without `forgejo_autoupdate_schedule` the schedule of `container_update` is used.
@@ -178,6 +189,7 @@ The single variables are replaced by `forgejo_environment` and `forgejo_secrets`
 - `forgejo_admin` is new and mandatory, an existing administrator with the same name gets the password and the email of `forgejo_admin`.
 - `forgejo_environment`, `forgejo_secrets`, `forgejo_keys` and `forgejo_autoupdate_schedule` are new.
 - The volumes `/etc/localtime` and `/etc/timezone` are removed, the timezone is set by podman.
+- `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `forgejo_container` are new, `requires` was supported before.
 - The service is not stopped on every run anymore, `podman___update_mode` is removed.
 - The tag `app_forgejo` stays, the tag `app` is added.
 
@@ -189,15 +201,18 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-forgejo-default` | Only the mandatory variables, MariaDB and the administrator |
-| `molecule-forgejo` | IPv6, labels, PostgreSQL, the keys `git.config` and `storage`, options, the secret `FORGEJO__metrics__TOKEN` and the administrator |
+| `molecule-forgejo` | IPv6, labels, dependencies, PostgreSQL, the keys `git.config` and `storage`, options, the secret `FORGEJO__metrics__TOKEN` and the administrator |
 
+`check` runs `converge` with `--check` on the new VMs.
 `prepare` creates the podman network, pulls the images and starts MariaDB on `molecule-forgejo-default` and PostgreSQL on `molecule-forgejo`.
 `side_effect` runs the role with `forgejo_container` not a dictionary, `forgejo_keys` not a dictionary, an unknown family, an invalid key,
 a secret without `target`, no `SECRET_KEY`, the database password in the environment, `mysql` without the host, an invalid database type,
-an invalid boolean, a line break in a value, an administrator without password, a short password, an option of a storage missing in `forgejo_keys`
-and an unknown secret and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes the theme and the password of the administrator on `molecule-forgejo`, Forgejo has to restart and the password changes without a new administrator.
-`verify` checks the quadlet unit with the secrets as files and without their values, the service, the addresses and the environment of the container,
+an invalid boolean, a line break in a value, an administrator without password, a short password, an option of a storage missing in `forgejo_keys`,
+an unknown secret and a line break in `forgejo_container.environment` and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
+then it changes the theme and the password of the administrator on `molecule-forgejo`, Forgejo has to restart and the password changes without a new administrator,
+`molecule-forgejo-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets as files and without their values and the dependencies, the service without automatic restarts,
+the addresses, the environment and the time zone of the container,
 the options in `app.ini`, `/api/healthz`, the login of the administrator with the password and the refused former password,
 `/metrics` with the token and without and the tables of Forgejo in the database.
 

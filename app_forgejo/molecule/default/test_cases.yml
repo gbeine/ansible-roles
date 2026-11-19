@@ -70,7 +70,11 @@ app_forgejo__test_cases:
         name: 'forgejo-admin'
         email: 'admin@example.org'
         password: 'molecule-admin-password'
+    # Runs again without a change, Forgejo must not restart
+    side_effect:
+      role_vars: {}
     expect:
+      restart: false
       ip: '10.89.0.90'
       ip6: ~
       quadlet:
@@ -99,6 +103,10 @@ app_forgejo__test_cases:
       forgejo_uid: 1000
       forgejo_labels:
         traefik.enable: 'false'
+      forgejo_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
       forgejo_keys:
         git.config: [ 'core.longpaths' ]
         storage: [ 'molecule' ]
@@ -129,17 +137,33 @@ app_forgejo__test_cases:
         password: 'molecule-admin-password'
     # The theme changes and Forgejo has to restart, the password of the administrator changes with the API
     side_effect:
-      environment:
-        FORGEJO__ui__DEFAULT_THEME: 'forgejo-light'
-      admin:
-        password: 'molecule-admin-changed'
+      role_vars:
+        forgejo_environment:
+          FORGEJO__database__DB_TYPE: 'postgres'
+          FORGEJO__database__HOST: '10.89.0.20:5432'
+          FORGEJO__database__NAME: 'forgejo'
+          FORGEJO__database__USER: 'forgejo'
+          FORGEJO__server__DOMAIN: 'git.example.org'
+          FORGEJO__ui__DEFAULT_THEME: 'forgejo-light'
+          FORGEJO__metrics__ENABLED: true
+          FORGEJO__git_0X2E_config__core_0X2E_longpaths: true
+          FORGEJO__storage_0X2E_molecule__STORAGE_TYPE: 'local'
+          FORGEJO__storage_0X2E_molecule__PATH: '/data/molecule-storage'
+        forgejo_admin:
+          name: 'forgejo-admin'
+          email: 'admin@example.org'
+          password: 'molecule-admin-changed'
     expect:
+      restart: true
       ip: '10.89.0.91'
       ip6: 'fd00:89::91'
       quadlet:
         - 'Volume=/opt/forgejo:/data'
         - 'Label=traefik.enable=false'
         - 'Secret=forgejo_metrics_token,type=mount,target=/run/secrets/forgejo_metrics_token'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
       env:
         - 'FORGEJO__database__DB_TYPE=postgres'
         - 'FORGEJO__metrics__ENABLED=true'

@@ -15,7 +15,8 @@
     app_forgejo__test_plain: >-
       {{ (app_forgejo__test_case.role_vars.forgejo_secrets | default([])) | map(attribute='data') | list
          + [ app_forgejo__test_case.role_vars.forgejo_admin.password ]
-         + ([ app_forgejo__test_case.side_effect.admin.password ] if app_forgejo__test_case.side_effect is defined else []) }}
+         + ([ app_forgejo__test_case.side_effect.role_vars.forgejo_admin.password ]
+            if app_forgejo__test_case.side_effect.role_vars.forgejo_admin is defined else []) }}
 
   tasks:
 
@@ -35,6 +36,7 @@
           - app_forgejo__expect.quadlet | reject('in', app_forgejo__test_quadlet_lines) | list | length == 0
           - app_forgejo__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
           - app_forgejo__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - ('Timezone=' + app_forgejo__test_case.role_vars.forgejo_timezone) in app_forgejo__test_quadlet_lines
           - app_forgejo__test_plain | select('in', app_forgejo__test_quadlet.content | b64decode) | list | length == 0
         fail_msg: "{{ app_forgejo__test_quadlet.content | b64decode }}"
       vars:
@@ -59,14 +61,35 @@
           - app_forgejo__expect.ip6 is none or app_forgejo__test_net.GlobalIPv6Address == app_forgejo__expect.ip6
           - app_forgejo__expect.env | reject('in', app_forgejo__test_env) | list | length == 0
           - app_forgejo__test_plain | select('in', app_forgejo__test_env | join(' ')) | list | length == 0
+          - app_forgejo__test_container.Config.Timezone == app_forgejo__test_case.role_vars.forgejo_timezone
         fail_msg: >-
-          service {{ app_forgejo__test_service.stdout }},
+          service {{ app_forgejo__test_service.stdout }}, time zone {{ app_forgejo__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_forgejo__test_net.IPAddress }}, IPv6 {{ app_forgejo__test_net.GlobalIPv6Address }},
           environment {{ app_forgejo__test_env | join(', ') }}
       vars:
         app_forgejo__test_container: "{{ (app_forgejo__test_inspect.stdout | from_json)[0] }}"
         app_forgejo__test_net: "{{ app_forgejo__test_container.NetworkSettings.Networks[app_forgejo__test_case.role_vars.forgejo_network] }}"
         app_forgejo__test_env: "{{ app_forgejo__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'forgejo' ]
+      register: 'app_forgejo__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'forgejo', '-n', '80', '--no-pager' ]
+      register: 'app_forgejo__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_forgejo__test_restarts.stdout ] + app_forgejo__test_journal.stdout_lines | default([]) }}"
 
     # environment-to-ini writes the variables to app.ini on every start
     - name: 'Read app.ini'
