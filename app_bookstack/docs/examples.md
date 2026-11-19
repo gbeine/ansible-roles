@@ -8,9 +8,9 @@ bookstack_network: 'podman99'
 bookstack_timezone: 'Europe/Berlin'
 bookstack_uid: 1031
 
-# Configure BookStack with environment variables
-# See https://www.bookstackapp.com/docs/ for all available variables
-bookstack_environment:
+# Configure BookStack, the role writes the keys to www/.env
+# See https://www.bookstackapp.com/docs/ for all available keys
+bookstack_config:
   APP_URL: 'https://wiki.example.org'
   DB_HOST: '192.168.99.30'
   MAIL_DRIVER: 'smtp'

@@ -16,7 +16,14 @@ app_bookstack__labels: "{{ bookstack_labels }}"
 app_bookstack__version: "{{ bookstack_version | default('latest') }}"
 
 app_bookstack__container: "{{ app_bookstack__podman_container_default | combine(bookstack_container | default({})) }}"
+
+# The content of /config/www/.env, the options of BookStack, merged over the default
+app_bookstack__config: "{{ app_bookstack__config_default | combine(bookstack_config | default({})) }}"
+
+# The variables of the linuxserver image, e.g. UMASK, the role sets PUID, PGID and the file variables of the secrets
 app_bookstack__environment: "{{ app_bookstack__environment_default | combine(bookstack_environment | default({})) }}"
+
+# Secrets with name, data and target, mounted below /run/secrets, the role sets FILE__<target>
 app_bookstack__secrets: "{{ bookstack_secrets | default([]) }}"
 
 app_bookstack__autoupdate_enabled: "{{ bookstack_autoupdate_enabled | default(false) }}"
@@ -36,17 +43,37 @@ app_bookstack__podman_tag: "{{ app_bookstack__version }}"
 app_bookstack__podman_home: "{{ app_bookstack__home }}"
 app_bookstack__podman_config_dir: "{{ app_bookstack__podman_home }}/www"
 
-app_bookstack__environment_default:
-  PUID: "{{ app_bookstack__uid }}"
-  PGID: "{{ app_bookstack__gid }}"
+# BookStack reads /config/www/.env, the image copies .env.example only if the file is missing or empty
+app_bookstack__config_file: "{{ app_bookstack__podman_config_dir }}/.env"
+
+app_bookstack__config_default:
   DB_DATABASE: 'bookstack'
   DB_USERNAME: 'bookstack'
 
-app_bookstack__environment_required:
+app_bookstack__config_required:
   - 'APP_URL'
   - 'DB_HOST'
   - 'DB_DATABASE'
   - 'DB_USERNAME'
+
+# The lines of .env, strings in double quotes, booleans as true or false, null removes a key
+app_bookstack__config_lines: >-
+  {%- set bs = '\\' | first -%}
+  {%- set lines = [ '#', '# Ansible managed', '#', '' ] -%}
+  {%- for key, value in app_bookstack__config.items() if value is not none -%}
+  {%-   if value is boolean -%}
+  {%-     set _ = lines.append(key ~ '=' ~ (value | string | lower)) -%}
+  {%-   elif value is number -%}
+  {%-     set _ = lines.append(key ~ '=' ~ value) -%}
+  {%-   else -%}
+  {%-     set _ = lines.append(key ~ '="' ~ (value | string | replace(bs, bs ~ bs) | replace('"', bs ~ '"')) ~ '"') -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ lines }}
+
+app_bookstack__environment_default:
+  PUID: "{{ app_bookstack__uid }}"
+  PGID: "{{ app_bookstack__gid }}"
 
 app_bookstack__secrets_required:
   - 'APP_KEY'
@@ -90,14 +117,9 @@ app_bookstack__environment_secrets_files: >-
   {%- endif -%}
   {{ environment }}
 
-# The variables of the linuxserver image (PUID, PGID, TZ, UMASK) and the keys of BookStack,
-# generated from .env.example.complete and app/Config/*.php of BookStack v26.09.3, update with new versions of BookStack,
-# without the variables carrying secrets and TEST_DATABASE_URL
-app_bookstack__environment_allowed:
-  - 'PUID'
-  - 'PGID'
-  - 'TZ'
-  - 'UMASK'
+# The keys of BookStack in .env, generated from .env.example.complete and app/Config/*.php of BookStack v26.09.3,
+# update with new versions of BookStack, without the keys carrying secrets and TEST_DATABASE_URL
+app_bookstack__config_allowed:
   - 'ALLOWED_IFRAME_HOSTS'
   - 'ALLOWED_IFRAME_SOURCES'
   - 'ALLOWED_IMAGE_SOURCES'
@@ -262,7 +284,13 @@ app_bookstack__environment_allowed:
   - 'TWITTER_AUTO_CONFIRM_EMAIL'
   - 'TWITTER_AUTO_REGISTER'
   - 'WKHTMLTOPDF'
-  # The file variables of the secrets, set by the role
+
+# The variables of the linuxserver image and the file variables of the secrets, set by the role
+app_bookstack__environment_allowed:
+  - 'PUID'
+  - 'PGID'
+  - 'TZ'
+  - 'UMASK'
   - 'FILE__APP_KEY'
   - 'FILE__DB_PASSWORD'
   - 'FILE__DATABASE_URL'
@@ -300,6 +328,4 @@ app_bookstack__podman_container_default:
       if (app_bookstack__secrets is sequence and app_bookstack__secrets is not string and app_bookstack__secrets | length > 0)
       else omit }}
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
     - "{{ app_bookstack__podman_home }}:/config"

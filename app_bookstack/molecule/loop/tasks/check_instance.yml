@@ -52,6 +52,8 @@
       - app_bookstack__expect.env is subset(app_bookstack__test_container.Config.Env)
       # The secrets are mounted as files, they are never part of the environment
       - app_bookstack__test_container.Config.Env | select('match', '(APP_KEY|DB_PASSWORD)=') | list | length == 0
+      # The options of BookStack are written to .env, not to the environment
+      - app_bookstack__test_container.Config.Env | select('match', '(APP_URL|DB_HOST)=') | list | length == 0
     fail_msg: >-
       IPv4 {{ app_bookstack__test_net.IPAddress }}, IPv6 {{ app_bookstack__test_net.GlobalIPv6Address }},
       missing environment {{ app_bookstack__expect.env | reject('in', app_bookstack__test_container.Config.Env) | list }}
@@ -78,3 +80,17 @@
   loop: "{{ app_bookstack__expect.urls }}"
   loop_control:
     index_var: 'app_bookstack__test_index'
+
+- name: "Read .env of {{ app_bookstack__expect.name }}"
+  ansible.builtin.slurp:
+    src: "{{ app_bookstack__expect.home }}/www/.env"
+  register: 'app_bookstack__test_dotenv'
+
+- name: "Assert .env of {{ app_bookstack__expect.name }}"
+  ansible.builtin.assert:
+    that:
+      - app_bookstack__expect.config | reject('in', app_bookstack__test_dotenv_lines) | list | length == 0
+      - app_bookstack__test_dotenv_lines | select('match', '(APP_KEY|DB_PASSWORD)=') | list | length == 0
+    fail_msg: "{{ app_bookstack__test_dotenv_lines | reject('match', '(APP_KEY|DB_PASSWORD)=') | list }}"
+  vars:
+    app_bookstack__test_dotenv_lines: "{{ (app_bookstack__test_dotenv.content | b64decode).splitlines() }}"

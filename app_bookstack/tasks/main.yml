@@ -11,6 +11,7 @@
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - app_bookstack__container | length > 0
+          - app_bookstack__config | length > 0
         quiet: true
 
     - name: 'Validate the secrets'
@@ -44,10 +45,6 @@
         fail_msg: "{{ app_bookstack__errors | join(' ') }}"
         quiet: true
       vars:
-        app_bookstack__environment_missing: >-
-          {{ app_bookstack__environment_required
-             | reject('in', app_bookstack__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
-             | list }}
         app_bookstack__secrets_missing: >-
           {{ app_bookstack__secrets_required
              | reject('in', app_bookstack__secrets | map(attribute='target') | list)
@@ -58,14 +55,42 @@
              | select('in', app_bookstack__environment.keys() | list) | unique | list }}
         app_bookstack__errors: >-
           {%- set errors = [] -%}
-          {%- if app_bookstack__environment_missing | length > 0 -%}
-          {%-   set _ = errors.append('BookStack needs the environment variables ' ~ (app_bookstack__environment_required | join(', ')) ~ ', missing or empty: ' ~ (app_bookstack__environment_missing | join(', ')) ~ '.') -%}
-          {%- endif -%}
           {%- if app_bookstack__secrets_missing | length > 0 -%}
           {%-   set _ = errors.append('BookStack needs the secrets ' ~ (app_bookstack__secrets_required | join(', ')) ~ ', missing: ' ~ (app_bookstack__secrets_missing | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if app_bookstack__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets and their file variables must not be set in bookstack_environment: ' ~ (app_bookstack__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_bookstack__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_bookstack__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_bookstack__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = app_bookstack__config -%}
+          {%- set missing = app_bookstack__config_required | reject('in', config | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list) | list -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('BookStack needs the keys ' ~ (app_bookstack__config_required | join(', ')) ~ ' in bookstack_config, missing or empty: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set secrets = config.keys() | select('in', app_bookstack__secret_variables) | list -%}
+          {%- if secrets | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in bookstack_config, set them with bookstack_secrets: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set unknown = config.keys() | reject('in', app_bookstack__config_allowed) | reject('in', app_bookstack__secret_variables) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown keys in bookstack_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the keys of BookStack (app_bookstack__config_allowed).') -%}
+          {%- endif -%}
+          {%- set invalid = config | dict2items | rejectattr('value', 'none') | rejectattr('value', 'boolean') | rejectattr('value', 'number')
+                               | rejectattr('value', 'string') | map(attribute='key') | list -%}
+          {%- set lines = config | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list -%}
+          {%- if invalid | length > 0 or lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of bookstack_config have to be strings without line breaks, numbers or booleans, null removes a key: ' ~ ((invalid + lines) | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -79,9 +104,13 @@
         fail_msg: "{{ app_bookstack__errors | join(' ') }}"
         quiet: true
       vars:
+        app_bookstack__environment_checked: >-
+          {{ app_bookstack__container.environment if app_bookstack__container.environment is mapping else {} }}
         app_bookstack__environment_unknown: >-
-          {{ (app_bookstack__container.environment | default({})).keys()
-             | reject('in', app_bookstack__environment_allowed) | list }}
+          {{ app_bookstack__environment_checked.keys() | reject('in', app_bookstack__environment_allowed) | list }}
+        app_bookstack__environment_line_breaks: >-
+          {{ app_bookstack__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_bookstack__secrets_unknown: >-
           {{ app_bookstack__secrets | map(attribute='target') | reject('in', app_bookstack__secret_files.keys() | list) | list }}
         app_bookstack__errors: >-
@@ -93,7 +122,10 @@
           {%-   set _ = errors.append('Unknown secrets: ' ~ (app_bookstack__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the variables of the image (app_bookstack__environment_allowed) and the secrets ' ~ (app_bookstack__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (app_bookstack__environment_allowed), the options of BookStack are set with bookstack_config, and the secrets ' ~ (app_bookstack__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_bookstack__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (app_bookstack__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -106,6 +138,17 @@
         state: 'directory'
       loop:
         - dest: "{{ app_bookstack__podman_config_dir }}"
+
+    # BookStack reads .env, the environment variables of the secrets take precedence
+    - name: 'Write .env'
+      ansible.builtin.copy:
+        # Double quotes, so \n is a line break
+        content: "{{ app_bookstack__config_lines | join('\n') }}\n"
+        dest: "{{ app_bookstack__config_file }}"
+        owner: "{{ app_bookstack__uid }}"
+        group: "{{ app_bookstack__gid }}"
+        mode: '0600'
+      register: 'app_bookstack__config_result'
 
     - name: 'Create secrets'
       no_log: true
@@ -147,23 +190,56 @@
           {% if app_bookstack__container.requires is defined %}
           Requires={{ app_bookstack__container.requires | join(' ') }}
           {% endif %}
+          {% if app_bookstack__container.wants is defined %}
+          Wants={{ app_bookstack__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_bookstack__container.after is defined %}
+          After={{ app_bookstack__container.after | join(' ') }}
+          {% endif %}
+          {% if app_bookstack__container.part_of is defined %}
+          PartOf={{ app_bookstack__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_bookstack__container.binds_to is defined %}
+          BindsTo={{ app_bookstack__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_bookstack__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_bookstack__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_bookstack__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_bookstack__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_bookstack__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_bookstack__running: >-
-          {{ (ansible_facts.services[app_bookstack__container.name + '.service'].state | default('')) == 'running' }}
-        app_bookstack__restart: >-
-          {{ app_bookstack__running | bool
-             and (app_bookstack__secrets_result is changed or app_bookstack__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start BookStack'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_bookstack__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_bookstack__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_bookstack__running: >-
+              {{ (ansible_facts.services[app_bookstack__container.name + '.service'].state | default('')) == 'running' }}
+            app_bookstack__restart: >-
+              {{ app_bookstack__running | bool
+                 and (app_bookstack__secrets_result is changed
+                      or app_bookstack__config_result is changed
+                      or app_bookstack__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_bookstack__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_bookstack__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_bookstack__container.name ~ ' did not start' ] + app_bookstack__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'app_bookstack__autoupdate_enabled | bool'

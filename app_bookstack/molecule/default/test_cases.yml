@@ -23,9 +23,30 @@ app_bookstack__test_database:
 # Test key only, generated for this scenario
 app_bookstack__test_app_key: 'base64:ENZ/nuxiEbr4eND1zEe6uoXupzlzpWSU2jcGZV6qSWk='
 
+# The secrets of all test cases
+app_bookstack__test_secrets:
+  - name: 'bookstack_molecule_app_key'
+    data: "{{ app_bookstack__test_app_key }}"
+    target: 'APP_KEY'
+  - name: 'bookstack_molecule_db_password'
+    data: "{{ app_bookstack__test_database.password }}"
+    target: 'DB_PASSWORD'
+
+app_bookstack__test_secret_lines:
+  - 'bookstack_molecule_app_key,type=mount,target=/run/secrets/bookstack_molecule_app_key'
+  - 'bookstack_molecule_db_password,type=mount,target=/run/secrets/bookstack_molecule_db_password'
+
+# The secrets are mounted as files, the image reads them with FILE__<variable>
+app_bookstack__test_env:
+  - 'PUID=1000'
+  - 'PGID=1000'
+  - 'FILE__APP_KEY=/run/secrets/bookstack_molecule_app_key'
+  - 'FILE__DB_PASSWORD=/run/secrets/bookstack_molecule_db_password'
+
 app_bookstack__test_cases:
 
-  - name: 'molecule-bookstack-ipv4-only'
+  # Only the mandatory variables, IPv4 only
+  - name: 'molecule-bookstack-default'
     role_vars:
       bookstack_home: '/opt/bookstack-molecule'
       bookstack_ip: '10.89.0.10'
@@ -33,36 +54,31 @@ app_bookstack__test_cases:
       bookstack_hostname: 'bookstack-molecule'
       bookstack_timezone: 'Europe/Berlin'
       bookstack_uid: 1000
-      bookstack_environment:
+      bookstack_config:
         APP_URL: 'http://10.89.0.10'
         DB_HOST: '10.89.0.20'
-      bookstack_secrets:
-        - name: 'bookstack_molecule_app_key'
-          data: "{{ app_bookstack__test_app_key }}"
-          target: 'APP_KEY'
-        - name: 'bookstack_molecule_db_password'
-          data: "{{ app_bookstack__test_database.password }}"
-          target: 'DB_PASSWORD'
+      bookstack_secrets: "{{ app_bookstack__test_secrets }}"
+    # Runs again without a change, BookStack must not restart
+    side_effect:
+      role_vars: {}
     expect:
       ip: '10.89.0.10'
       ip6: ~
-      env:
-        - 'APP_URL=http://10.89.0.10'
-        - 'DB_HOST=10.89.0.20'
-        - 'DB_DATABASE=bookstack'
-        - 'DB_USERNAME=bookstack'
-        - 'PUID=1000'
-        - 'PGID=1000'
-        # The secrets are mounted as files, the image reads them with FILE__<variable>
-        - 'FILE__APP_KEY=/run/secrets/bookstack_molecule_app_key'
-        - 'FILE__DB_PASSWORD=/run/secrets/bookstack_molecule_db_password'
-      secrets:
-        - 'bookstack_molecule_app_key,type=mount,target=/run/secrets/bookstack_molecule_app_key'
-        - 'bookstack_molecule_db_password,type=mount,target=/run/secrets/bookstack_molecule_db_password'
+      restart: false
+      quadlet: []
+      env: "{{ app_bookstack__test_env }}"
+      secrets: "{{ app_bookstack__test_secret_lines }}"
+      config:
+        - 'DB_DATABASE="bookstack"'
+        - 'DB_USERNAME="bookstack"'
+        - 'APP_URL="http://10.89.0.10"'
+        - 'DB_HOST="10.89.0.20"'
+      config_absent: [ 'APP_DEFAULT_DARK_MODE' ]
       urls:
         - 'http://10.89.0.10/login'
 
-  - name: 'molecule-bookstack-ipv6'
+  # IPv6, dependencies of the quadlet unit and options of BookStack
+  - name: 'molecule-bookstack'
     role_vars:
       bookstack_home: '/opt/bookstack-molecule'
       bookstack_ip: '10.89.0.10'
@@ -71,40 +87,41 @@ app_bookstack__test_cases:
       bookstack_hostname: 'bookstack-molecule'
       bookstack_timezone: 'Europe/Berlin'
       bookstack_uid: 1000
-      bookstack_environment:
+      bookstack_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/opt/bookstack-molecule' ]
+      bookstack_config:
         APP_URL: 'http://10.89.0.10'
         DB_HOST: '10.89.0.20'
-      bookstack_secrets:
-        - name: 'bookstack_molecule_app_key'
-          data: "{{ app_bookstack__test_app_key }}"
-          target: 'APP_KEY'
-        - name: 'bookstack_molecule_db_password'
-          data: "{{ app_bookstack__test_database.password }}"
-          target: 'DB_PASSWORD'
-    # side_effect enables the dark mode, the quadlet unit changes and BookStack has to restart
+        MAIL_FROM_NAME: 'Molecule "Docs"'
+        REVISION_LIMIT: 20
+      bookstack_secrets: "{{ app_bookstack__test_secrets }}"
+    # side_effect enables the dark mode, .env changes and BookStack has to restart
     side_effect:
       role_vars:
-        bookstack_environment:
+        bookstack_config:
           APP_URL: 'http://10.89.0.10'
           DB_HOST: '10.89.0.20'
-          APP_DEFAULT_DARK_MODE: 'true'
+          MAIL_FROM_NAME: 'Molecule "Docs"'
+          REVISION_LIMIT: 20
+          APP_DEFAULT_DARK_MODE: true
     expect:
       ip: '10.89.0.10'
       ip6: 'fd00:89::10'
-      env:
-        - 'APP_URL=http://10.89.0.10'
+      restart: true
+      quadlet:
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/opt/bookstack-molecule'
+      env: "{{ app_bookstack__test_env }}"
+      secrets: "{{ app_bookstack__test_secret_lines }}"
+      config:
+        - 'APP_URL="http://10.89.0.10"'
+        - 'MAIL_FROM_NAME="Molecule \"Docs\""'
+        - 'REVISION_LIMIT=20'
         - 'APP_DEFAULT_DARK_MODE=true'
-        - 'DB_HOST=10.89.0.20'
-        - 'DB_DATABASE=bookstack'
-        - 'DB_USERNAME=bookstack'
-        - 'PUID=1000'
-        - 'PGID=1000'
-        # The secrets are mounted as files, the image reads them with FILE__<variable>
-        - 'FILE__APP_KEY=/run/secrets/bookstack_molecule_app_key'
-        - 'FILE__DB_PASSWORD=/run/secrets/bookstack_molecule_db_password'
-      secrets:
-        - 'bookstack_molecule_app_key,type=mount,target=/run/secrets/bookstack_molecule_app_key'
-        - 'bookstack_molecule_db_password,type=mount,target=/run/secrets/bookstack_molecule_db_password'
+      config_absent: []
       urls:
         - 'http://10.89.0.10/login'
         - 'http://[fd00:89::10]/login'

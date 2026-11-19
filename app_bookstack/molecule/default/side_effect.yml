@@ -8,8 +8,15 @@
 
   vars:
     app_bookstack__test_case: "{{ app_bookstack__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_bookstack__test_vars: "{{ app_bookstack__test_case.role_vars }}"
     app_bookstack__test_checked_files:
       - '/etc/containers/systemd/bookstack.container'
+      - "{{ app_bookstack__test_vars.bookstack_home }}/www/.env"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
@@ -20,7 +27,7 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+    - name: 'Read the checksums of the checked files before the invalid runs'
       ansible.builtin.stat:
         path: "{{ item }}"
         checksum_algorithm: 'md5'
@@ -58,7 +65,7 @@
     - name: 'Run app_bookstack with the mail password in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        bookstack_environment: "{{ app_bookstack__test_case.role_vars.bookstack_environment | combine({'MAIL_PASSWORD': 'molecule'}) }}"
+        bookstack_environment: { MAIL_PASSWORD: 'molecule' }
         app_bookstack__test_invalid:
           message: 'the mail password in the environment'
           search: 'must not be set in bookstack_environment:\s+MAIL_PASSWORD\.'
@@ -66,18 +73,66 @@
     - name: 'Run app_bookstack with the file variable of the application key in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        bookstack_environment: "{{ app_bookstack__test_case.role_vars.bookstack_environment | combine({'FILE__APP_KEY': '/run/secrets/bookstack_molecule_app_key'}) }}"
+        bookstack_environment: { FILE__APP_KEY: '/run/secrets/bookstack_molecule_app_key' }
         app_bookstack__test_invalid:
           message: 'the file variable of the application key in the environment'
           search: 'must not be set in bookstack_environment:\s+FILE__APP_KEY\.'
 
-    - name: 'Run app_bookstack with an unknown environment variable (expect ERROR)'
+    - name: 'Run app_bookstack with an option of BookStack in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        bookstack_environment: "{{ app_bookstack__test_case.role_vars.bookstack_environment | combine({'APP_NAMES': 'Molecule'}) }}"
+        bookstack_environment: { APP_URL: 'http://10.89.0.10' }
         app_bookstack__test_invalid:
-          message: 'an unknown environment variable'
-          search: 'Unknown environment variables: APP_NAMES\.'
+          message: 'an option of BookStack in the environment'
+          search: '^Unknown environment variables: APP_URL\. Allowed are the variables of the image'
+
+    - name: 'Run app_bookstack with bookstack_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        bookstack_config: [ 'APP_URL' ]
+        app_bookstack__test_invalid:
+          message: 'bookstack_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_bookstack without APP_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        bookstack_config: { DB_HOST: '10.89.0.20' }
+        app_bookstack__test_invalid:
+          message: 'without APP_URL'
+          search: '^BookStack needs the keys APP_URL, DB_HOST, DB_DATABASE, DB_USERNAME in bookstack_config, missing or empty: APP_URL\.$'
+
+    - name: 'Run app_bookstack with an unknown key in bookstack_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        bookstack_config: "{{ app_bookstack__test_vars.bookstack_config | combine({'APP_NAMES': 'Molecule'}) }}"
+        app_bookstack__test_invalid:
+          message: 'an unknown key in bookstack_config'
+          search: '^Unknown keys in bookstack_config: APP_NAMES\.'
+
+    - name: 'Run app_bookstack with the database password in bookstack_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        bookstack_config: "{{ app_bookstack__test_vars.bookstack_config | combine({'DB_PASSWORD': 'molecule'}) }}"
+        app_bookstack__test_invalid:
+          message: 'the database password in bookstack_config'
+          search: '^Secrets must not be set in bookstack_config, set them with bookstack_secrets: DB_PASSWORD\.$'
+
+    - name: 'Run app_bookstack with a line break in bookstack_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        bookstack_config: "{{ app_bookstack__test_vars.bookstack_config | combine({'MAIL_FROM_NAME': 'Molecule\nAPP_DEBUG=true'}) }}"
+        app_bookstack__test_invalid:
+          message: 'a line break in bookstack_config'
+          search: 'null removes a key: MAIL_FROM_NAME\.$'
+
+    - name: 'Run app_bookstack with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        bookstack_environment: { UMASK: "022\n" }
+        app_bookstack__test_invalid:
+          message: 'a line break in the environment'
+          search: '^The environment variables must not contain line breaks: UMASK\.$'
 
     - name: 'Run app_bookstack with an unknown environment variable in bookstack_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -97,47 +152,47 @@
           message: 'an unknown secret'
           search: 'Unknown secrets: API_TOKEN\.'
 
+    # The first start migrates the database, the change restarts BookStack after it
+    - name: 'Wait until BookStack finished the first start'
+      ansible.builtin.uri:
+        url: "http://{{ app_bookstack__test_case.expect.ip }}/login"
+      register: 'app_bookstack__test_first_start'
+      until: app_bookstack__test_first_start.status | default(0) == 200
+      retries: 60
+      delay: 5
+
+    # molecule-bookstack changes .env and has to restart, molecule-bookstack-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'bookstack' ]
+      register: 'app_bookstack__test_started_before'
+      changed_when: false
+
+    - name: 'Set the role variables of the change'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_bookstack__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
     - name: 'Run app_bookstack with the changed role variables'
-      when: app_bookstack__test_case.side_effect is defined
-      block:
+      ansible.builtin.include_role:
+        name: 'app_bookstack'
 
-        # The first start migrates the database, the change restarts BookStack after it
-        - name: 'Wait until BookStack finished the first start'
-          ansible.builtin.uri:
-            url: "http://{{ app_bookstack__test_case.expect.ip }}/login"
-          register: 'app_bookstack__test_first_start'
-          until: app_bookstack__test_first_start.status | default(0) == 200
-          retries: 60
-          delay: 5
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'bookstack' ]
+      register: 'app_bookstack__test_started_after'
+      changed_when: false
 
-        - name: 'Read the start time of the service before the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'bookstack' ]
-          register: 'app_bookstack__test_started_before'
-          changed_when: false
-
-        - name: 'Set the changed role variables'
-          ansible.builtin.set_fact:
-            "{{ item.key }}": "{{ item.value }}"
-          loop: "{{ app_bookstack__test_case.side_effect.role_vars | dict2items }}"
-          loop_control:
-            label: "{{ item.key }}"
-
-        - name: 'Run app_bookstack with the changed role variables'
-          ansible.builtin.include_role:
-            name: 'app_bookstack'
-
-        - name: 'Read the start time of the service after the change'
-          ansible.builtin.command:
-            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'bookstack' ]
-          register: 'app_bookstack__test_started_after'
-          changed_when: false
-
-        - name: 'Assert the changed quadlet unit and the restart of the service'
-          ansible.builtin.assert:
-            that:
-              - app_bookstack__quadlet_result is changed
-              - app_bookstack__test_started_after.stdout | int > app_bookstack__test_started_before.stdout | int
-            fail_msg: >-
-              quadlet changed: {{ app_bookstack__quadlet_result is changed }},
-              start before {{ app_bookstack__test_started_before.stdout }}, after {{ app_bookstack__test_started_after.stdout }}
+    - name: 'Assert .env, the unchanged quadlet unit and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_bookstack__config_result is changed) == app_bookstack__test_case.expect.restart
+          - app_bookstack__quadlet_result is not changed
+          - (app_bookstack__test_started_after.stdout | int > app_bookstack__test_started_before.stdout | int)
+            == app_bookstack__test_case.expect.restart
+        fail_msg: >-
+          .env changed: {{ app_bookstack__config_result is changed }},
+          quadlet changed: {{ app_bookstack__quadlet_result is changed }},
+          start before {{ app_bookstack__test_started_before.stdout }}, after {{ app_bookstack__test_started_after.stdout }}
