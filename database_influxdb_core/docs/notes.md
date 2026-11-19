@@ -15,13 +15,13 @@ The default of the role sets the options of the former command:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TZ` | `influxdb_core_timezone` | Timezone of the container |
 | `INFLUXDB3_NODE_ID` | `node0` | Name of the node, the prefix of the files in the object store |
 | `INFLUXDB3_OBJECT_STORE` | `file` | Object store: `file`, `memory`, `s3`, `google` or `azure` |
 | `INFLUXDB3_DATA_DIR` | `/var/lib/influxdb3/data` | Directory of the object store `file` |
 | `INFLUXDB3_PLUGIN_DIR` | `/var/lib/influxdb3/plugins` | Directory of the plugins of the processing engine |
 
 `INFLUXDB3_NODE_ID` and `INFLUXDB3_OBJECT_STORE` are required, they must not be empty.
+The time zone of the container is set by podman with `influxdb_core_timezone` (`/etc/localtime`), not with `TZ`.
 The other object stores are configured with `INFLUXDB3_BUCKET` and the variables of the provider, e.g. `AWS_ACCESS_KEY_ID`, `AWS_DEFAULT_REGION` and `AWS_ENDPOINT`,
 the secret keys are passed with `influxdb_core_secrets`.
 
@@ -89,6 +89,16 @@ The container uses the command of the image, `influxdb3 serve`.
 For a reverse proxy, e.g. Traefik, the labels are set with `influxdb_core_labels`, the HTTP API listens on port 8181.
 After the start the role waits until the port is open, so roles depending on InfluxDB 3 can use it.
 
+The dependencies of the quadlet unit are set with `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for`
+in `influxdb_core_container`, the role writes them to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`:
+
+```yaml
+influxdb_core_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/opt/influxdb-core' ]
+```
+
 ### Validation
 
 The role checks before any change:
@@ -98,6 +108,7 @@ The role checks before any change:
 - the data of the secret `INFLUXDB3_ADMIN_TOKEN` is JSON with `token` starting with `apiv3_` and `name`
 - neither a secret nor `INFLUXDB3_ADMIN_TOKEN_FILE` is set in `influxdb_core_environment`
 - only allowed environment variables and secrets are set in the container
+- the environment variables contain no line breaks
 
 If `influxdb_core_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
@@ -108,6 +119,11 @@ InfluxDB 3 is restarted if it was running and a secret or the quadlet unit chang
 Updates of the image are done by `container_update` with `influxdb_core_autoupdate_enabled: true` and `influxdb_core_autoupdate_schedule`,
 without `influxdb_core_autoupdate_schedule` the schedule of `container_update` is used.
 
+### Check mode
+
+The role runs with `--check` also on a host where it never ran before and compares the directories, the secrets and the quadlet unit.
+InfluxDB 3 is not started or restarted and the role does not wait for the port in check mode.
+
 ### Migration
 
 - `influxdb_core_publish` is `influxdb_core_container.publish`
@@ -115,7 +131,8 @@ without `influxdb_core_autoupdate_schedule` the schedule of `container_update` i
   with the same values, the container uses the command of the image
 - the admin token is new, it is set with a secret with the target `INFLUXDB3_ADMIN_TOKEN`, an existing token with the same name is kept
 
-`/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with `TZ` and the timezone of the container.
+`/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with the timezone of the container.
+`TZ` is not set by default anymore, podman sets `/etc/localtime` with `influxdb_core_timezone`.
 The directory `influxdb_core_home/backup` was created but never used, it is not created anymore, the role does not remove it.
 The data and the plugins keep their directories, the name of the container `influxdb-core` stays for `backup_influxdb_core`.
 `influxdb_core_labels` has no default anymore, without it the container has no labels.
@@ -130,16 +147,19 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-influxdb-core-default` | Only the mandatory variables, the authentication without a token |
-| `molecule-influxdb-core` | IPv6, labels, `LOG_FILTER` and the admin token from a secret with the target `INFLUXDB3_ADMIN_TOKEN` |
+| `molecule-influxdb-core` | IPv6, labels, dependencies, `LOG_FILTER` and the admin token from a secret with the target `INFLUXDB3_ADMIN_TOKEN` |
 
 `prepare` creates the podman network and pulls the image.
+`check` runs `converge` with `--check` on the fresh VMs.
 `side_effect` runs the role with `influxdb_core_container` not a dictionary, a secret without `target`, an empty `INFLUXDB3_NODE_ID`,
 `INFLUXDB3_ADMIN_TOKEN_FILE` and `AWS_SECRET_ACCESS_KEY` in the environment, an admin token without `apiv3_` and an admin token that is no JSON,
+a line break in the environment,
 an unknown environment variable in `influxdb_core_environment` and in `influxdb_core_container.environment` and an unknown secret
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it waits until InfluxDB 3 answers on `molecule-influxdb-core`, shows the log of the service otherwise, and changes `LOG_FILTER`,
-the quadlet unit changes and InfluxDB 3 has to restart.
-`verify` checks the quadlet unit with the volumes and the mounted secret, the service, the addresses and the environment of the container
+then it waits until InfluxDB 3 answers, shows the log of the service otherwise, and runs the role with `side_effect.role_vars` of the test case:
+`molecule-influxdb-core` changes `LOG_FILTER`, the quadlet unit changes and InfluxDB 3 has to restart,
+`molecule-influxdb-core-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the volumes, the mounted secret and the dependencies and without `TZ`, the service, the addresses and the environment of the container
 and the directories owned by the user of the image. Without a token `/health` has to answer 401, with the admin token of the secret 200,
 then it writes a point with the admin token and reads it with SQL.
 

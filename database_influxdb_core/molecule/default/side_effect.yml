@@ -14,6 +14,11 @@
     database_influxdb_core__test_checked_files:
       - "{{ database_influxdb_core__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -103,6 +108,14 @@
           message: 'an unknown environment variable'
           search: '^Unknown environment variables: INFLUXDB3_HOST\.'
 
+    - name: 'Run database_influxdb_core with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        influxdb_core_environment: "{{ database_influxdb_core__test_env | combine({'LOG_FILTER': 'info\ndebug'}) }}"
+        database_influxdb_core__test_invalid:
+          message: 'a line break in the environment'
+          search: '^The environment variables must not contain line breaks: LOG_FILTER\.$'
+
     - name: 'Run database_influxdb_core with an unknown environment variable in influxdb_core_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
@@ -119,8 +132,8 @@
           message: 'an unknown secret'
           search: '^Unknown secrets: INFLUXDB3_TOKEN\.'
 
-    - name: 'Run database_influxdb_core with the changed environment'
-      when: database_influxdb_core__test_case.side_effect | default(false)
+    # molecule-influxdb-core changes LOG_FILTER and has to restart, molecule-influxdb-core-default runs again without a change
+    - name: 'Run database_influxdb_core with the changed variables'
       block:
 
         # The change is only a restart if InfluxDB runs
@@ -153,11 +166,14 @@
           register: 'database_influxdb_core__test_started_before'
           changed_when: false
 
-        - name: 'Set the changed environment'
+        - name: 'Set the role variables of the change'
           ansible.builtin.set_fact:
-            influxdb_core_environment: "{{ database_influxdb_core__test_env | combine(database_influxdb_core__test_side_effect_environment) }}"
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ database_influxdb_core__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
 
-        - name: 'Run database_influxdb_core with the changed environment'
+        - name: 'Run database_influxdb_core with the changed variables'
           ansible.builtin.include_role:
             name: 'database_influxdb_core'
 
@@ -167,11 +183,12 @@
           register: 'database_influxdb_core__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed quadlet unit and the restart of the service'
+        - name: 'Assert the quadlet unit and the restart of the service'
           ansible.builtin.assert:
             that:
-              - database_influxdb_core__quadlet_result is changed
-              - database_influxdb_core__test_started_after.stdout | int > database_influxdb_core__test_started_before.stdout | int
+              - (database_influxdb_core__quadlet_result is changed) == database_influxdb_core__test_case.expect.restart
+              - (database_influxdb_core__test_started_after.stdout | int > database_influxdb_core__test_started_before.stdout | int)
+                == database_influxdb_core__test_case.expect.restart
             fail_msg: >-
               quadlet changed: {{ database_influxdb_core__quadlet_result is changed }},
               start before {{ database_influxdb_core__test_started_before.stdout }}, after {{ database_influxdb_core__test_started_after.stdout }}

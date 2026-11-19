@@ -15,10 +15,6 @@ database_influxdb_core__test_quadlet_path: '/etc/containers/systemd/influxdb-cor
 # The admin token of the test, test credentials only
 database_influxdb_core__test_token: 'apiv3_molecule-admin-token'
 
-# A valid change of the side effect, the quadlet unit changes and InfluxDB has to restart
-database_influxdb_core__test_side_effect_environment:
-  LOG_FILTER: 'debug'
-
 database_influxdb_core__test_cases:
 
   # Only the mandatory variables, the authentication is enabled without a token
@@ -29,21 +25,27 @@ database_influxdb_core__test_cases:
       influxdb_core_network: 'podman-molecule'
       influxdb_core_hostname: 'influxdb-core-default'
       influxdb_core_timezone: 'Europe/Berlin'
+    # Runs again without a change, InfluxDB must not restart
+    side_effect:
+      role_vars: {}
     expect:
       ip: '10.89.0.60'
       ip6: ~
       quadlet:
         - 'Volume=/opt/influxdb-core/data:/var/lib/influxdb3/data'
         - 'Volume=/opt/influxdb-core/plugins:/var/lib/influxdb3/plugins'
+      # The time zone is set by podman with influxdb_core_timezone, not with TZ
+      quadlet_absent:
+        - 'Environment=TZ='
       env:
-        - 'TZ=Europe/Berlin'
         - 'INFLUXDB3_NODE_ID=node0'
         - 'INFLUXDB3_OBJECT_STORE=file'
         - 'INFLUXDB3_DATA_DIR=/var/lib/influxdb3/data'
         - 'INFLUXDB3_PLUGIN_DIR=/var/lib/influxdb3/plugins'
       token: ~
+      restart: false
 
-  # IPv6, labels, the log filter and the admin token from a secret mounted as file
+  # IPv6, labels, dependencies, the log filter and the admin token from a secret mounted as file
   - name: 'molecule-influxdb-core'
     role_vars:
       influxdb_core_home: '/opt/influxdb-core'
@@ -54,13 +56,21 @@ database_influxdb_core__test_cases:
       influxdb_core_timezone: 'Europe/Berlin'
       influxdb_core_labels:
         traefik.enable: 'true'
+      influxdb_core_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/opt/influxdb-core' ]
       influxdb_core_environment:
         LOG_FILTER: 'info'
       influxdb_core_secrets:
         - name: 'influxdb_core_admin_token'
           data: "{{ {'token': database_influxdb_core__test_token, 'name': 'molecule'} | to_json }}"
           target: 'INFLUXDB3_ADMIN_TOKEN'
-    side_effect: true
+    # Changes LOG_FILTER, InfluxDB has to restart
+    side_effect:
+      role_vars:
+        influxdb_core_environment:
+          LOG_FILTER: 'debug'
     expect:
       ip: '10.89.0.61'
       ip6: 'fd00:89::61'
@@ -69,9 +79,14 @@ database_influxdb_core__test_cases:
         - 'Volume=/opt/influxdb-core/plugins:/var/lib/influxdb3/plugins'
         - 'Secret=influxdb_core_admin_token,type=mount,target=/run/secrets/influxdb_core_admin_token,uid=1500,gid=1500,mode=0400'
         - 'Label=traefik.enable=true'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/opt/influxdb-core'
+      quadlet_absent:
+        - 'Environment=TZ='
       env:
-        - 'TZ=Europe/Berlin'
         - 'INFLUXDB3_NODE_ID=node0'
         - 'LOG_FILTER=debug'
         - 'INFLUXDB3_ADMIN_TOKEN_FILE=/run/secrets/influxdb_core_admin_token'
       token: "{{ database_influxdb_core__test_token }}"
+      restart: true
