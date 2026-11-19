@@ -3,11 +3,17 @@ The role installs FreshRSS, keeps its configuration up to date and manages its u
 `freshrss_home` is mounted to `/config`, the data of FreshRSS is in `<freshrss_home>/www/freshrss/data`, the configuration in its `config.php`.
 The image runs FreshRSS as the user `abc` with the uid and gid of `freshrss_uid` and `freshrss_gid` (defaults to `freshrss_uid`),
 it refreshes the feeds every 15 minutes with cron.
+The role sets `TZ` to `freshrss_timezone`, the base image writes it as `date.timezone` of PHP to `/config/php/php-local.ini`,
+without `TZ` PHP uses UTC. The image only creates `php-local.ini` if it is missing, a changed time zone has to be changed in this file as well.
+The time zone of the container is set by podman with `freshrss_timezone`.
 
 ### Configuration
 
 `freshrss_config` contains the options of `data/config.php`, see `config.default.php` of FreshRSS.
 It is merged recursively over the default of the role, the role merges it into the existing `config.php` after every start.
+FreshRSS manages `config.php` itself, the installation creates it and the system settings of the web interface save to it,
+so the role never replaces the file, it only writes the options of `freshrss_config` and the passwords of `freshrss_secrets`.
+Options that are not set in `freshrss_config` keep the values set in the web interface.
 
 - a dictionary is a section, e.g. `db` or `limits`
 - a string, a number, a boolean or a list is written as value of the option, lists replace the former value
@@ -90,7 +96,17 @@ The check uses the container after merging `freshrss_container`, so variables se
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `freshrss_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `freshrss_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+
+```yaml
+freshrss_container:
+  publish: [ '8080:80' ]
+  requires: [ 'postgres.service' ]
+  after: [ 'postgres.service' ]
+```
+
 The merge is not recursive, `freshrss_container.volumes` replaces `/config`, `freshrss_container.environment` replaces the environment including `freshrss_environment`.
 The role waits until FreshRSS answers on port 80, shows the log of the service otherwise, and installs and configures FreshRSS afterwards.
 
@@ -103,14 +119,22 @@ The role checks before any change:
 - `freshrss_config` is a dictionary, its options are known, not set by the role, have no line breaks and the allowed values
 - `freshrss_users` has at least one user with valid and unique names, `admin` is a boolean, `default_user` is one of the users
 - every user has a password with at least 7 characters, `freshrss_passwords` and `freshrss_api_passwords` have no passwords of unknown users
+- the values of the environment contain no line breaks and are no YAML booleans
 - only allowed environment variables and secrets are set in the container
 
 If `freshrss_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check` without failing, also on a host where it never ran before.
+It reports the changes of the directory and the quadlet unit, the service is neither started nor restarted,
+the installation, `config.php` and the users are only changed in a real run.
+
 ### Restart and updates
 
 FreshRSS is restarted if it was running and the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role stops with the last lines of the journal of the service.
 Changes of `config.php` and of the users need no restart, FreshRSS reads them with every request.
 Updates of the image are done by `container_update` with `freshrss_autoupdate_enabled: true` and `freshrss_autoupdate_schedule`,
 without `freshrss_autoupdate_schedule` the schedule of `container_update` is used.
@@ -125,6 +149,8 @@ without `freshrss_autoupdate_schedule` the schedule of `container_update` is use
 - The volumes `/etc/localtime` and `/etc/timezone` are removed, the timezone is set by podman and `TZ`.
 - The service is not stopped on every run anymore, `podman___update_mode` is removed.
 - The tag `app_freshrss` stays, the tag `app` is added.
+- The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` in `freshrss_container` are new.
+- Line breaks and YAML booleans in the environment are rejected now.
 
 ### Tests
 
@@ -134,15 +160,17 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-freshrss-default` | Only the mandatory variables and one user, sqlite |
-| `molecule-freshrss` | IPv6, labels, PostgreSQL with the secret `DB_PASSWORD`, title, base URL and API, two users, an administrator and an API password |
+| `molecule-freshrss` | IPv6, labels, dependencies, PostgreSQL with the secret `DB_PASSWORD`, title, base URL and API, two users, an administrator and an API password |
 
 `prepare` creates the podman network, pulls the image and starts PostgreSQL on `molecule-freshrss`.
-`side_effect` runs the role with `freshrss_container` not a dictionary, a secret without `target`, an unknown option, `salt` and `db.password` in `freshrss_config`,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `freshrss_container` not a dictionary, `freshrss_secrets` not a list, a secret without `target`, an unknown option, `salt` and `db.password` in `freshrss_config`,
 a line break in a value, an invalid `auth_type`, a user without password, a short password, the password of an unknown user, an unknown default user
-and an unknown environment variable in `freshrss_container.environment`
+an unknown environment variable in `freshrss_container.environment` and a line break and a YAML boolean in `freshrss_environment`
 and checks that it fails with the expected message and the quadlet unit and `config.php` are unchanged (tasks marked `expect ERROR`),
-then it sets `UMASK` and changes the title on `molecule-freshrss`, FreshRSS has to restart and `config.php` changes without a second installation.
-`verify` checks the quadlet unit without secrets, the service, the addresses and the environment of the container, owner and options of `config.php`, the mode of `freshrss_home`,
+then it sets `UMASK` and changes the title on `molecule-freshrss`, FreshRSS has to restart and `config.php` changes without a second installation,
+`molecule-freshrss-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit without secrets and with the dependencies, the service without automatic restarts, the addresses, the time zone and the environment of the container, owner and options of `config.php`, the mode of `freshrss_home`,
 the users and the administrators, the title of the page and the login to the Google Reader API with the API password and a wrong password.
 
 | Environment variable | Default | Description |

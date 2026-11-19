@@ -15,6 +15,11 @@
       - "{{ app_freshrss__test_quadlet_path }}"
       - "{{ app_freshrss__test_vars.freshrss_home }}/www/freshrss/data/config.php"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -48,7 +53,7 @@
         freshrss_secrets: [ { name: 'freshrss_db_password', data: 'x' } ]
         app_freshrss__test_invalid:
           message: 'a secret without target'
-          search: '^freshrss_secrets entries need name, data and target$'
+          search: '^`freshrss_secrets` entries need name, data and target$'
 
     - name: 'Run app_freshrss with an unknown option (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -133,8 +138,32 @@
           message: 'an unknown environment variable in freshrss_container'
           search: '^Unknown environment variables: FOO\.'
 
+    - name: 'Run app_freshrss with freshrss_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_secrets: 'freshrss_db_password'
+        app_freshrss__test_invalid:
+          message: 'freshrss_secrets not a list'
+          search: '^`freshrss_secrets` has to be a list$'
+
+    - name: 'Run app_freshrss with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_environment: { UMASK: "022\n" }
+        app_freshrss__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: UMASK\.'
+
+    - name: 'Run app_freshrss with a YAML boolean in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        freshrss_environment: { UMASK: true }
+        app_freshrss__test_invalid:
+          message: 'a YAML boolean in the environment'
+          search: 'YAML booleans, use strings: UMASK\.'
+
+    # molecule-freshrss changes the environment and the title and has to restart, molecule-freshrss-default runs again without a change
     - name: 'Run app_freshrss with the changed environment and configuration'
-      when: app_freshrss__test_case.side_effect is defined
       block:
 
         - name: 'Read the start time of the service before the change'
@@ -146,7 +175,7 @@
         - name: 'Set the changed environment and configuration'
           ansible.builtin.set_fact:
             freshrss_environment: "{{ app_freshrss__test_case.side_effect.environment }}"
-            freshrss_config: "{{ app_freshrss__test_vars.freshrss_config | combine(app_freshrss__test_case.side_effect.config, recursive=true) }}"
+            freshrss_config: "{{ app_freshrss__test_vars.freshrss_config | default({}) | combine(app_freshrss__test_case.side_effect.config, recursive=true) }}"
 
         - name: 'Run app_freshrss with the changed environment and configuration'
           ansible.builtin.include_role:
@@ -161,11 +190,11 @@
         - name: 'Assert the restart, the changed config.php and no second installation'
           ansible.builtin.assert:
             that:
-              - app_freshrss__quadlet_result is changed
-              - app_freshrss__config_result is changed
+              - (app_freshrss__quadlet_result is changed) == app_freshrss__test_case.expect.restart
+              - (app_freshrss__config_result is changed) == (app_freshrss__test_case.expect.changed_options | length > 0)
               - not app_freshrss__config_result.installed
-              - app_freshrss__config_result.changed_options == [ 'title' ]
-              - app_freshrss__test_started_after.stdout | int > app_freshrss__test_started_before.stdout | int
+              - app_freshrss__config_result.changed_options | default([]) == app_freshrss__test_case.expect.changed_options
+              - (app_freshrss__test_started_after.stdout | int > app_freshrss__test_started_before.stdout | int) == app_freshrss__test_case.expect.restart
             fail_msg: >-
               quadlet changed: {{ app_freshrss__quadlet_result is changed }},
               config.php: {{ app_freshrss__config_result.changed_options | default([]) }},

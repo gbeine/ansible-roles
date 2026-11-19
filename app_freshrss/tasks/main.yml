@@ -27,16 +27,16 @@
           {%- set errors = [] -%}
           {%- set secrets = app_freshrss__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('freshrss_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`freshrss_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('freshrss_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`freshrss_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of freshrss_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `freshrss_secrets` have to be unique') -%}
           {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the targets of freshrss_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the targets of `freshrss_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -53,8 +53,21 @@
              | select('in', app_freshrss__environment.keys() | list) | unique | list }}
         app_freshrss__secrets_lines: >-
           {{ app_freshrss__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='target') | list }}
+        app_freshrss__environment_line_breaks: >-
+          {{ app_freshrss__environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_freshrss__environment_booleans: >-
+          {{ app_freshrss__environment | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list }}
         app_freshrss__errors: >-
           {%- set errors = [] -%}
+          {%- if app_freshrss__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_freshrss__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_freshrss__environment_booleans | length > 0 -%}
+          {%-   set _ = errors.append('These environment variables are YAML booleans, use strings: '
+                                    ~ (app_freshrss__environment_booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if app_freshrss__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets must not be set in freshrss_environment: ' ~ (app_freshrss__secrets_in_environment | join(', ')) ~ '.') -%}
           {%- endif -%}
@@ -170,6 +183,7 @@
     # Checks the environment and the secrets of the container after merging freshrss_container,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
+      when: 'app_freshrss__container.environment is mapping'
       ansible.builtin.assert:
         that:
           - app_freshrss__errors | length == 0
@@ -178,7 +192,10 @@
         quiet: true
       vars:
         app_freshrss__environment_unknown: >-
-          {{ (app_freshrss__container.environment | default({})).keys() | reject('in', app_freshrss__environment_allowed) | list }}
+          {{ app_freshrss__container.environment.keys() | reject('in', app_freshrss__environment_allowed) | list }}
+        app_freshrss__environment_line_breaks: >-
+          {{ app_freshrss__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_freshrss__secrets_unknown: >-
           {{ app_freshrss__secrets | map(attribute='target') | reject('in', app_freshrss__secret_variables) | list }}
         app_freshrss__errors: >-
@@ -191,6 +208,10 @@
           {%- endif -%}
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of the image (app_freshrss__environment_allowed) and the secrets ' ~ (app_freshrss__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_freshrss__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_freshrss__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -234,21 +255,58 @@
           {% if app_freshrss__container.requires is defined %}
           Requires={{ app_freshrss__container.requires | join(' ') }}
           {% endif %}
+          {% if app_freshrss__container.wants is defined %}
+          Wants={{ app_freshrss__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_freshrss__container.after is defined %}
+          After={{ app_freshrss__container.after | join(' ') }}
+          {% endif %}
+          {% if app_freshrss__container.part_of is defined %}
+          PartOf={{ app_freshrss__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_freshrss__container.binds_to is defined %}
+          BindsTo={{ app_freshrss__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_freshrss__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_freshrss__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_freshrss__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_freshrss__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_freshrss__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_freshrss__running: >-
-          {{ (ansible_facts.services[app_freshrss__container.name + '.service'].state | default('')) == 'running' }}
-        app_freshrss__restart: "{{ app_freshrss__running | bool and app_freshrss__quadlet_result is changed }}"
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start FreshRSS'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_freshrss__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_freshrss__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_freshrss__running: >-
+              {{ (ansible_facts.services[app_freshrss__container.name + '.service'].state | default('')) == 'running' }}
+            app_freshrss__restart: "{{ app_freshrss__running | bool and app_freshrss__quadlet_result is changed }}"
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ app_freshrss__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'app_freshrss__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_freshrss__container.name ~ ' did not start' ] + app_freshrss__start_journal.stdout_lines }}"
 
     # nginx starts after the init of the image linked /app/www/data to /config/www/freshrss/data
     - name: 'Wait for FreshRSS'
