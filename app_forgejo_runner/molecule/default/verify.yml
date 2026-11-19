@@ -1,0 +1,123 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_forgejo_runner__test_case: "{{ app_forgejo_runner__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_forgejo_runner__expect: "{{ app_forgejo_runner__test_case.expect }}"
+    # The secrets of the test case, they must not be part of the unit, the environment or config.yml
+    app_forgejo_runner__test_plain: "{{ app_forgejo_runner__test_case.role_vars.forgejo_runner_secrets | map(attribute='data') | list }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_forgejo_runner__test_quadlet_path }}"
+      register: 'app_forgejo_runner__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_forgejo_runner__test_image) in app_forgejo_runner__test_quadlet_lines
+          - ('IP=' + app_forgejo_runner__expect.ip) in app_forgejo_runner__test_quadlet_lines
+          - app_forgejo_runner__expect.ip6 is none or ('IP6=' + app_forgejo_runner__expect.ip6) in app_forgejo_runner__test_quadlet_lines
+          - app_forgejo_runner__expect.ip6 is not none or app_forgejo_runner__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_forgejo_runner__expect.quadlet | reject('in', app_forgejo_runner__test_quadlet_lines) | list | length == 0
+          - ('Exec=forgejo-runner daemon --config /data/config.yml') in app_forgejo_runner__test_quadlet_lines
+          - app_forgejo_runner__test_quadlet_lines | select('match', 'Secret=forgejo_runner_token,type=mount,') | list | length == 1
+          - app_forgejo_runner__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_forgejo_runner__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_forgejo_runner__expect.env | length > 0 or app_forgejo_runner__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
+          - ('Timezone=' + app_forgejo_runner__test_case.role_vars.forgejo_runner_timezone) in app_forgejo_runner__test_quadlet_lines
+          - app_forgejo_runner__test_plain | select('in', app_forgejo_runner__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_forgejo_runner__test_quadlet.content | b64decode }}"
+      vars:
+        app_forgejo_runner__test_quadlet_lines: "{{ (app_forgejo_runner__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read config.yml'
+      ansible.builtin.slurp:
+        src: "{{ app_forgejo_runner__test_config_path }}"
+      register: 'app_forgejo_runner__test_config'
+
+    - name: 'Read the permissions of config.yml'
+      ansible.builtin.stat:
+        path: "{{ app_forgejo_runner__test_config_path }}"
+      register: 'app_forgejo_runner__test_config_stat'
+
+    # The expected options are compared, the token is only referenced with token_url
+    - name: 'Assert config.yml'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__test_content | combine(app_forgejo_runner__expect.config, recursive=true) == app_forgejo_runner__test_content
+          - app_forgejo_runner__test_content.server.connections.forgejo.token is not defined
+          - app_forgejo_runner__test_content.runner.file is not defined
+          - app_forgejo_runner__test_plain | select('in', app_forgejo_runner__test_config.content | b64decode) | list | length == 0
+          - app_forgejo_runner__test_config_stat.stat.mode == '0640'
+          - app_forgejo_runner__test_config_stat.stat.uid == 1000
+          - app_forgejo_runner__test_config_stat.stat.gid == 1000
+        fail_msg: "mode {{ app_forgejo_runner__test_config_stat.stat.mode }}, {{ app_forgejo_runner__test_config.content | b64decode }}"
+      vars:
+        app_forgejo_runner__test_content: "{{ app_forgejo_runner__test_config.content | b64decode | from_yaml }}"
+
+    - name: 'Read the state of the Forgejo Runner service'
+      ansible.builtin.command: 'systemctl is-active forgejo-runner'
+      register: 'app_forgejo_runner__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the Forgejo Runner container'
+      ansible.builtin.command: 'podman inspect forgejo-runner'
+      register: 'app_forgejo_runner__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__test_service.stdout == 'active'
+          - app_forgejo_runner__test_net.IPAddress == app_forgejo_runner__expect.ip
+          - app_forgejo_runner__expect.ip6 is none or app_forgejo_runner__test_net.GlobalIPv6Address == app_forgejo_runner__expect.ip6
+          - app_forgejo_runner__expect.env | reject('in', app_forgejo_runner__test_env) | list | length == 0
+          - app_forgejo_runner__test_plain | select('in', app_forgejo_runner__test_env | join(' ')) | list | length == 0
+          - app_forgejo_runner__test_container.Config.Timezone == app_forgejo_runner__test_case.role_vars.forgejo_runner_timezone
+          - app_forgejo_runner__test_container.Config.User == '1000:1000'
+        fail_msg: >-
+          service {{ app_forgejo_runner__test_service.stdout }}, time zone {{ app_forgejo_runner__test_container.Config.Timezone | default('') }},
+          user {{ app_forgejo_runner__test_container.Config.User | default('') }},
+          IPv4 {{ app_forgejo_runner__test_net.IPAddress }}, IPv6 {{ app_forgejo_runner__test_net.GlobalIPv6Address }},
+          environment {{ app_forgejo_runner__test_env | join(', ') }}
+      vars:
+        app_forgejo_runner__test_container: "{{ (app_forgejo_runner__test_inspect.stdout | from_json)[0] }}"
+        app_forgejo_runner__test_net: "{{ app_forgejo_runner__test_container.NetworkSettings.Networks[app_forgejo_runner__test_case.role_vars.forgejo_runner_network] }}"
+        app_forgejo_runner__test_env: "{{ app_forgejo_runner__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'forgejo-runner' ]
+      register: 'app_forgejo_runner__test_restarts'
+      changed_when: false
+
+    # The runner declares its labels to Forgejo after every start, this proves the token and the UUID
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'forgejo-runner', '-n', '200', '--no-pager' ]
+      register: 'app_forgejo_runner__test_journal'
+      until: app_forgejo_runner__test_journal.stdout is search('declared successfully')
+      retries: 30
+      delay: 2
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself and connected to Forgejo'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__test_restarts.stdout | int == 0
+          - app_forgejo_runner__test_journal.stdout is search('declared successfully')
+          # Quoted, the colon would make the line a mapping
+          - 'app_forgejo_runner__test_journal.stdout is search("with labels: \[molecule\]")'
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_forgejo_runner__test_restarts.stdout ] + app_forgejo_runner__test_journal.stdout_lines | default([]) }}"

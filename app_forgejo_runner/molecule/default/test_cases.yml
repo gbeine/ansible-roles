@@ -1,0 +1,158 @@
+---
+# Network created by container_podman in prepare.yml
+app_forgejo_runner__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_forgejo_runner__test_image: 'data.forgejo.org/forgejo/runner:13'
+app_forgejo_runner__test_quadlet_path: '/etc/containers/systemd/forgejo-runner.container'
+app_forgejo_runner__test_config_path: '/opt/forgejo-runner/config.yml'
+
+# Forgejo started by prepare.yml, the runner is registered with the secret of the test case, test values only
+app_forgejo_runner__test_forgejo:
+  name: 'molecule-forgejo'
+  image: 'codeberg.org/forgejo/forgejo:17'
+  ip: '10.89.0.30'
+  port: 3000
+  env:
+    FORGEJO__security__INSTALL_LOCK: 'true'
+    FORGEJO__database__DB_TYPE: 'sqlite3'
+
+app_forgejo_runner__test_cases:
+
+  # Only the mandatory variables and one connection
+  - name: 'molecule-forgejo-runner-default'
+    # 40 hex characters, the UUID is made from the bytes of the first 16 characters
+    runner_secret: '5f0e1d2c3b4a59687706f5e4d3c2b1a098765432'
+    role_vars:
+      forgejo_runner_home: '/opt/forgejo-runner'
+      forgejo_runner_ip: '10.89.0.95'
+      forgejo_runner_network: 'podman-molecule'
+      forgejo_runner_hostname: 'forgejo-runner-default'
+      forgejo_runner_timezone: 'Europe/Berlin'
+      forgejo_runner_uid: 1000
+      forgejo_runner_keys:
+        connections: [ 'forgejo' ]
+      forgejo_runner_config:
+        runner:
+          labels: [ 'molecule:host' ]
+        server:
+          connections:
+            forgejo:
+              url: 'http://10.89.0.30:3000/'
+              uuid: '35663065-3164-3263-3362-346135393638'
+      forgejo_runner_secrets:
+        - name: 'forgejo_runner_token'
+          data: '5f0e1d2c3b4a59687706f5e4d3c2b1a098765432'
+          target: 'server.connections.forgejo.token'
+    # Runs again without a change, the runner must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      ip: '10.89.0.95'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/forgejo-runner:/data'
+        - 'User=1000'
+        - 'Group=1000'
+        - 'Secret=forgejo_runner_token,type=mount,target=/run/secrets/forgejo_runner_token,uid=1000,gid=1000,mode=0400'
+      env: []
+      config:
+        log: { level: 'info', job_level: 'info' }
+        runner: { capacity: 1, labels: [ 'molecule:host' ] }
+        server:
+          connections:
+            forgejo:
+              url: 'http://10.89.0.30:3000/'
+              uuid: '35663065-3164-3263-3362-346135393638'
+              token_url: 'file:/run/secrets/forgejo_runner_token'
+
+  # IPv6, labels, dependencies, options, the secret of the cache and the environment
+  - name: 'molecule-forgejo-runner'
+    runner_secret: 'c0ffee0123456789abcdef0123456789abcdef01'
+    role_vars:
+      forgejo_runner_home: '/opt/forgejo-runner'
+      forgejo_runner_ip: '10.89.0.96'
+      forgejo_runner_ipv6: 'fd00:89::96'
+      forgejo_runner_network: 'podman-molecule'
+      forgejo_runner_hostname: 'forgejo-runner-molecule'
+      forgejo_runner_timezone: 'Europe/Berlin'
+      forgejo_runner_uid: 1000
+      forgejo_runner_labels:
+        traefik.enable: 'false'
+      forgejo_runner_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
+      forgejo_runner_environment:
+        DOCKER_HOST: 'unix:///run/podman/podman.sock'
+      forgejo_runner_keys:
+        connections: [ 'forgejo' ]
+      forgejo_runner_config:
+        log:
+          level: 'debug'
+        runner:
+          capacity: 2
+          envs:
+            MOLECULE: 'true'
+        server:
+          connections:
+            forgejo:
+              url: 'http://10.89.0.30:3000/'
+              uuid: '63306666-6565-3031-3233-343536373839'
+              labels: [ 'molecule:host' ]
+      forgejo_runner_secrets:
+        - name: 'forgejo_runner_token'
+          data: 'c0ffee0123456789abcdef0123456789abcdef01'
+          target: 'server.connections.forgejo.token'
+        - name: 'forgejo_runner_cache_secret'
+          data: 'molecule-cache-secret'
+          target: 'cache.secret'
+    # The capacity changes and the runner has to restart
+    side_effect:
+      role_vars:
+        forgejo_runner_config:
+          log:
+            level: 'debug'
+          runner:
+            capacity: 3
+            envs:
+              MOLECULE: 'true'
+          server:
+            connections:
+              forgejo:
+                url: 'http://10.89.0.30:3000/'
+                uuid: '63306666-6565-3031-3233-343536373839'
+                labels: [ 'molecule:host' ]
+    expect:
+      restart: true
+      ip: '10.89.0.96'
+      ip6: 'fd00:89::96'
+      quadlet:
+        - 'Volume=/opt/forgejo-runner:/data'
+        - 'User=1000'
+        - 'Group=1000'
+        - 'Label=traefik.enable=false'
+        - 'Secret=forgejo_runner_cache_secret,type=mount,target=/run/secrets/forgejo_runner_cache_secret,uid=1000,gid=1000,mode=0400'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      env:
+        - 'DOCKER_HOST=unix:///run/podman/podman.sock'
+      config:
+        log: { level: 'debug', job_level: 'info' }
+        runner: { capacity: 3, envs: { MOLECULE: 'true' } }
+        cache: { enabled: true, secret_url: 'file:/run/secrets/forgejo_runner_cache_secret' }
+        server:
+          connections:
+            forgejo:
+              url: 'http://10.89.0.30:3000/'
+              uuid: '63306666-6565-3031-3233-343536373839'
+              labels: [ 'molecule:host' ]
+              token_url: 'file:/run/secrets/forgejo_runner_token'

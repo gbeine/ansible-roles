@@ -1,47 +1,222 @@
 ---
 
-- name: 'Deploy Forgejo runner container'
-  tags: [ 'app_forgejo_runner' ]
+- name: 'Install Forgejo Runner'
+  tags: [ 'app', 'app_forgejo_runner' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or forgejo_runner_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_forgejo_runner__container | length > 0
+          - app_forgejo_runner__config_file_content | length > 0
+        quiet: true
+
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo_runner__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_forgejo_runner__invalid: >-
+          {%- set errors = [] -%}
+          {%- set keys = app_forgejo_runner__keys -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('forgejo_runner_keys has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set unknown = keys.keys() | reject('in', app_forgejo_runner__keys_families.keys() | list) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('unknown entries in forgejo_runner_keys: ' ~ unknown | join(', ')
+                                        ~ ', allowed are ' ~ app_forgejo_runner__keys_families.keys() | join(', ')) -%}
+          {%-   endif -%}
+          {%-   for family in app_forgejo_runner__keys_families if family in keys -%}
+          {%-     set values = keys[family] -%}
+          {%-     if values is not sequence or values is string or values is mapping -%}
+          {%-       set _ = errors.append('forgejo_runner_keys.' ~ family ~ ' has to be a list') -%}
+          {%-     else -%}
+          {%-       set invalid = values | select('string') | reject('match', app_forgejo_runner__keys_pattern) | list
+                                  + values | reject('string') | map('string') | list -%}
+          {%-       if invalid | length > 0 -%}
+          {%-         set _ = errors.append('forgejo_runner_keys.' ~ family ~ ' contains invalid keys, allowed are letters, digits, _ and -: ' ~ invalid | unique | join(', ')) -%}
+          {%-       elif values | unique | list | length != values | length -%}
+          {%-         set _ = errors.append('forgejo_runner_keys.' ~ family ~ ' contains duplicate keys') -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo_runner__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_forgejo_runner__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_forgejo_runner__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('forgejo_runner_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('forgejo_runner_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of forgejo_runner_secrets have to be unique') -%}
+          {%- elif secrets | map(attribute='name') | map('string') | reject('match', app_forgejo_runner__name_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('the names of forgejo_runner_secrets have to match ' ~ app_forgejo_runner__name_pattern) -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Every connection declared in forgejo_runner_keys needs url, uuid and the secret of its token
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo_runner__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_forgejo_runner__errors: >-
+          {%- set errors = [] -%}
+          {%- set options = app_forgejo_runner__config_options | rejectattr('value', 'none') | list -%}
+          {%- set paths = options | map(attribute='path') | list -%}
+          {%- set targets = app_forgejo_runner__secrets_valid | map(attribute='target') | map('string') | list -%}
+          {%- set secrets = paths | select('in', app_forgejo_runner__secrets_allowed + app_forgejo_runner__secrets_allowed_keys) | list
+                            + paths | select('match', '^server\\.connections\\.[^.]+\\.token(_url)?$') | list -%}
+          {%- if secrets | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in forgejo_runner_config, set them with forgejo_runner_secrets: ' ~ (secrets | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set role = paths | select('in', app_forgejo_runner__config_role) | list -%}
+          {%- if role | length > 0 -%}
+          {%-   set _ = errors.append('The options ' ~ (role | join(', ')) ~ ' are set by the role and must not be set in forgejo_runner_config.') -%}
+          {%- endif -%}
+          {%- set unknown = paths | reject('in', app_forgejo_runner__config_allowed) | reject('in', secrets) | reject('in', role) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in forgejo_runner_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the options of the runner (app_forgejo_runner__config_allowed),'
+                                    ~ ' the names of the connections are declared in forgejo_runner_keys.connections.') -%}
+          {%- endif -%}
+          {%- set missing = [] -%}
+          {%- for name in app_forgejo_runner__keys_valid.connections -%}
+          {%-   set prefix = app_forgejo_runner__keys_families.connections.prefix ~ name ~ '.' -%}
+          {%-   for option in app_forgejo_runner__keys_families.connections.required if (prefix ~ option) not in paths -%}
+          {%-     set _ = missing.append(prefix ~ option) -%}
+          {%-   endfor -%}
+          {%-   if (prefix ~ 'token') not in targets -%}
+          {%-     set _ = missing.append('the secret ' ~ prefix ~ 'token') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if app_forgejo_runner__keys_valid.connections | length == 0 -%}
+          {%-   set _ = errors.append('Forgejo Runner needs a connection, declare its name in forgejo_runner_keys.connections.') -%}
+          {%- elif missing | length > 0 -%}
+          {%-   set _ = errors.append('Every connection needs url, uuid and the secret of its token, missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set lines = [] -%}
+          {%- for option in options -%}
+          {%-   set values = option.value if option.value is sequence and option.value is not string and option.value is not mapping
+                                         else (option.value.values() | list) if option.value is mapping else [ option.value ] -%}
+          {%-   if values | select('string') | select('search', '[\n\r]') | list | length > 0 -%}
+          {%-     set _ = lines.append(option.path) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of forgejo_runner_config must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo_runner__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_forgejo_runner__invalid: >-
+          {%- set errors = [] -%}
+          {%- if app_forgejo_runner__home is not string or app_forgejo_runner__home is not match('^/') -%}
+          {%-   set _ = errors.append('forgejo_runner_home has to be an absolute path') -%}
+          {%- endif -%}
+          {%- if (app_forgejo_runner__uid | string) is not match('^[0-9]+$') or (app_forgejo_runner__gid | string) is not match('^[0-9]+$') -%}
+          {%-   set _ = errors.append('forgejo_runner_uid and forgejo_runner_gid have to be numbers') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets after merging forgejo_runner_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_forgejo_runner__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_forgejo_runner__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_forgejo_runner__environment_checked: >-
+          {{ app_forgejo_runner__container.environment if app_forgejo_runner__container.environment is mapping else {} }}
+        app_forgejo_runner__environment_unknown: >-
+          {{ app_forgejo_runner__environment_checked.keys() | reject('in', app_forgejo_runner__environment_allowed) | list }}
+        app_forgejo_runner__environment_line_breaks: >-
+          {{ app_forgejo_runner__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_forgejo_runner__secrets_unknown: >-
+          {{ app_forgejo_runner__secrets_valid | map(attribute='target') | map('string') | reject('in', app_forgejo_runner__secrets_allowed) | list }}
+        app_forgejo_runner__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_forgejo_runner__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_forgejo_runner__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_forgejo_runner__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_forgejo_runner__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_forgejo_runner__environment_unknown | length > 0 or app_forgejo_runner__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_forgejo_runner__environment_allowed | join(', '))
+                                    ~ ', the options of the runner are set with forgejo_runner_config, and the secrets ' ~ (app_forgejo_runner__secrets_allowed | join(', '))
+                                    ~ ', the tokens of the connections need the names in forgejo_runner_keys.connections.') -%}
+          {%- endif -%}
+          {%- if app_forgejo_runner__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_forgejo_runner__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the home directory'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ app_forgejo_runner__home }}"
         owner: "{{ app_forgejo_runner__uid }}"
         group: "{{ app_forgejo_runner__gid }}"
-        mode: "{{ item.mode | default('0750') }}"
+        mode: '0750'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_forgejo_runner__home }}"
-        - dest: "{{ app_forgejo_runner__home }}/.cache"
-          mode: 'ug=rwx,g+s'
 
-    - name: 'Create Forgejo runner registration file'
-      ansible.builtin.file:
-        mode: 'ug=rw,g+s'
-        path: "{{ app_forgejo_runner__home }}/.runner"
-        state: 'touch'
+    # The tokens are files in /run/secrets, config.yml references them with token_url and secret_url
+    - name: 'Write config.yml'
+      ansible.builtin.copy:
+        # Double quotes, so \n is a line break
+        content: "{{ '#\n# Ansible managed\n#\n\n' ~ (app_forgejo_runner__config_file_content | to_nice_yaml(indent=2)) }}"
+        dest: "{{ app_forgejo_runner__config_file }}"
         owner: "{{ app_forgejo_runner__uid }}"
         group: "{{ app_forgejo_runner__gid }}"
-      when: 'not podman___update_mode | bool'
+        mode: '0640'
+      register: 'app_forgejo_runner__config_result'
 
-    - name: 'Create Forgejo runner environment file'
-      ansible.builtin.template:
-        mode: '440'
-        dest: "{{ app_forgejo_runner__home }}/.env"
-        src: 'env.j2'
-        owner: "{{ app_forgejo_runner__uid }}"
-        group: "{{ app_forgejo_runner__gid }}"
-      when: 'not podman___update_mode | bool'
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_forgejo_runner__secrets }}"
+      register: 'app_forgejo_runner__secrets_result'
 
-    - name: 'Create Forgejo runner configuration file'
-      ansible.builtin.template:
-        mode: '440'
-        dest: "{{ app_forgejo_runner__home }}/config.yml"
-        src: 'config.yml.j2'
-        owner: "{{ app_forgejo_runner__uid }}"
-        group: "{{ app_forgejo_runner__gid }}"
-      when: 'not podman___update_mode | bool'
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -52,15 +227,15 @@
         ip6: "{{ app_forgejo_runner__container.ipv6 | default(omit) }}"
         network: "{{ app_forgejo_runner__container.network }}"
         timezone: "{{ app_forgejo_runner__container.timezone }}"
+        user: "{{ app_forgejo_runner__container.user | default(omit) }}"
+        command: "{{ app_forgejo_runner__container.command | default(omit) }}"
         env: "{{ app_forgejo_runner__container.environment | default(omit) }}"
         etc_hosts: "{{ app_forgejo_runner__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_forgejo_runner__container.expose | default(omit) }}"
         label: "{{ app_forgejo_runner__container.labels | default(omit) }}"
         publish: "{{ app_forgejo_runner__container.publish | default(omit) }}"
-        expose: "{{ app_forgejo_runner__container.expose | default(omit) }}"
         secrets: "{{ app_forgejo_runner__container.secrets | default(omit) }}"
         volume: "{{ app_forgejo_runner__container.volumes | default(omit) }}"
-        user: "{{ app_forgejo_runner__container.user | default(omit) }}"
-        command: "{{ app_forgejo_runner__container.command | mandatory }}"
         quadlet_options: |
           [Install]
           WantedBy=default.target
@@ -68,22 +243,73 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if app_forgejo_runner__container.requires is defined %}
+          Requires={{ app_forgejo_runner__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_forgejo_runner__container.wants is defined %}
+          Wants={{ app_forgejo_runner__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_forgejo_runner__container.after is defined %}
+          After={{ app_forgejo_runner__container.after | join(' ') }}
+          {% endif %}
+          {% if app_forgejo_runner__container.part_of is defined %}
+          PartOf={{ app_forgejo_runner__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_forgejo_runner__container.binds_to is defined %}
+          BindsTo={{ app_forgejo_runner__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_forgejo_runner__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_forgejo_runner__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_forgejo_runner__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ app_forgejo_runner__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Forgejo Runner'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_forgejo_runner__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_forgejo_runner__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_forgejo_runner__running: >-
+              {{ (ansible_facts.services[app_forgejo_runner__container.name + '.service'].state | default('')) == 'running' }}
+            app_forgejo_runner__restart: >-
+              {{ app_forgejo_runner__running | bool
+                 and (app_forgejo_runner__secrets_result is changed
+                      or app_forgejo_runner__config_result is changed
+                      or app_forgejo_runner__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ app_forgejo_runner__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'app_forgejo_runner__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_forgejo_runner__container.name ~ ' did not start' ] + app_forgejo_runner__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
-      when: 'app_forgejo_runner__autoupdate_enabled'
-      include_role:
+      when: 'app_forgejo_runner__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_forgejo_runner__container.name }}"
         container_image: "{{ app_forgejo_runner__container.image }}"
+        container_schedule: "{{ app_forgejo_runner__autoupdate_schedule }}"

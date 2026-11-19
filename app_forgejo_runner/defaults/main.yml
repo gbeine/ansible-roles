@@ -5,54 +5,150 @@
 # https://ansible-roles.org/roles/forgejo-runner
 #
 
+# Mounted to /data, the home of the runner, contains config.yml and the cache
 app_forgejo_runner__home: "{{ forgejo_runner_home | mandatory }}"
 app_forgejo_runner__ip: "{{ forgejo_runner_ip | mandatory }}"
 app_forgejo_runner__ipv6: "{{ forgejo_runner_ipv6 }}"
 app_forgejo_runner__network: "{{ forgejo_runner_network | mandatory }}"
 app_forgejo_runner__hostname: "{{ forgejo_runner_hostname | mandatory }}"
 app_forgejo_runner__timezone: "{{ forgejo_runner_timezone | mandatory }}"
+app_forgejo_runner__labels: "{{ forgejo_runner_labels }}"
 
-app_forgejo_runner__version: "{{ forgejo_runner_version | default('12') }}"
+# The user and group running the runner, the owner of the home
+app_forgejo_runner__uid: "{{ forgejo_runner_uid | mandatory }}"
+app_forgejo_runner__gid: "{{ forgejo_runner_gid | default(app_forgejo_runner__uid) }}"
 
-app_forgejo_runner__setup: "{{ forgejo_runner_setup | default(true) }}"
-app_forgejo_runner__docker_host: "{{ forgejo_runner_docker_host | mandatory }}"
+app_forgejo_runner__version: "{{ forgejo_runner_version | default('13') }}"
 
-app_forgejo_runner__log_level: "{{ forgejo_runner_log_level | default('info') }}"
-app_forgejo_runner__log_job_level: "{{ forgejo_runner_log_job_level | default('info') }}"
+# The content of config.yml, merged recursively over the default
+app_forgejo_runner__config: "{{ app_forgejo_runner__config_default | combine(forgejo_runner_config | default({}), recursive=true) }}"
 
-app_forgejo_runner__container_environment: "{{ forgejo_runner_container_environment | default({}) }}"
-app_forgejo_runner__container_privileged: "{{ forgejo_runner_container_privileged | default(false) }}"
-app_forgejo_runner__container_valid_volumes: "{{ forgejo_runner_container_valid_volumes | default([]) }}"
-app_forgejo_runner__container_force_pull: "{{ forgejo_runner_container_force_pull | default(false) }}"
+# Secrets with name, data and target, the target is the path of the option, e.g. server.connections.<name>.token
+app_forgejo_runner__secrets: "{{ forgejo_runner_secrets | default([]) }}"
 
-app_forgejo_runner__user: "{{ forgejo_runner_user | default('forgejo-runner') }}"
+# The names of the connections, see app_forgejo_runner__keys_families
+app_forgejo_runner__keys: "{{ forgejo_runner_keys | default({}) }}"
 
-app_forgejo_runner__container: "{{ app_forgejo_runner__container_default | combine(forgejo_runner_container | default({})) }}"
+# Only the variables of the Docker client, the options of the runner are set with forgejo_runner_config
+app_forgejo_runner__environment: "{{ forgejo_runner_environment }}"
+
+app_forgejo_runner__container: "{{ app_forgejo_runner__podman_container_default | combine(forgejo_runner_container | default({})) }}"
 
 app_forgejo_runner__autoupdate_enabled: "{{ forgejo_runner_autoupdate_enabled | default(false) }}"
+app_forgejo_runner__autoupdate_schedule: "{{ forgejo_runner_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-app_forgejo_runner__uid: "{{ forgejo_runner_uid | mandatory }}"
-app_forgejo_runner__gid: "{{ forgejo_runner_gid | default(app_forgejo_runner__uid) }}"
-
 app_forgejo_runner__podman_name: 'forgejo-runner'
 app_forgejo_runner__podman_image: 'data.forgejo.org/forgejo/runner'
 app_forgejo_runner__podman_tag: "{{ app_forgejo_runner__version }}"
 
-app_forgejo_runner__podman_home: "{{ app_forgejo_runner__home }}"
+app_forgejo_runner__config_file: "{{ app_forgejo_runner__home }}/config.yml"
+app_forgejo_runner__secrets_dir: '/run/secrets'
 
-app_forgejo_runner__command: "{{
-  ['/bin/sh', '-c', 'while true ; do sleep 1 ; done ;'] if app_forgejo_runner__setup
-  else ['forgejo-runner', 'daemon', '--config',' /data/config.yml']
-}}"
+# The names of the secrets are part of the paths of the files
+app_forgejo_runner__name_pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 
-app_forgejo_runner__volumes_default:
+# The values of config.example.yaml the role keeps, the other options use the defaults of the runner
+app_forgejo_runner__config_default:
+  log:
+    level: 'info'
+    job_level: 'info'
+  runner:
+    capacity: 1
+    timeout: '3h'
+  cache:
+    enabled: true
+  container:
+    privileged: false
+    valid_volumes: []
+    force_pull: false
 
-# See: https://forgejo.org/docs/latest/admin/installation-docker/
-app_forgejo_runner__container_default:
+# Options set by the role from the secrets, runner.file and runner.env_file are not used with server.connections
+app_forgejo_runner__config_role: [ 'runner.file', 'runner.env_file', 'cache.secret_url' ]
+
+# Options whose values are dictionaries with free keys, they are not split into paths
+app_forgejo_runner__config_leaves: [ 'runner.envs' ]
+
+# The families of forgejo_runner_keys, the names of the connections to Forgejo instances,
+# generated from config.example.yaml of Forgejo Runner v13.2.2
+app_forgejo_runner__keys_families:
+  connections:
+    prefix: 'server.connections.'
+    options: [ 'url', 'uuid', 'labels', 'fetch_interval' ]
+    # Every connection needs these options and the secret token
+    required: [ 'url', 'uuid' ]
+
+app_forgejo_runner__keys_pattern: '^[A-Za-z0-9_-]+$'
+
+# The keys of forgejo_runner_keys, entries of the wrong type are left out, the validation reports them
+app_forgejo_runner__keys_valid: >-
+  {%- set keys = {} -%}
+  {%- for family in app_forgejo_runner__keys_families -%}
+  {%-   set values = app_forgejo_runner__keys[family] | default([]) if app_forgejo_runner__keys is mapping else [] -%}
+  {%-   set _ = keys.update({ family: (values | select('string') | list) if values is sequence and values is not string and values is not mapping else [] }) -%}
+  {%- endfor -%}
+  {{ keys }}
+
+# The options and secrets of the connections declared in forgejo_runner_keys
+app_forgejo_runner__config_allowed_keys: >-
+  {%- set paths = [] -%}
+  {%- for name in app_forgejo_runner__keys_valid.connections -%}
+  {%-   for option in app_forgejo_runner__keys_families.connections.options -%}
+  {%-     set _ = paths.append(app_forgejo_runner__keys_families.connections.prefix ~ name ~ '.' ~ option) -%}
+  {%-   endfor -%}
+  {%- endfor -%}
+  {{ paths }}
+
+app_forgejo_runner__secrets_allowed_keys: >-
+  {{ app_forgejo_runner__keys_valid.connections | map('regex_replace', '^', app_forgejo_runner__keys_families.connections.prefix)
+     | map('regex_replace', '$', '.token') | list }}
+
+app_forgejo_runner__config_allowed: "{{ app_forgejo_runner__config_allowed_options + app_forgejo_runner__config_allowed_keys }}"
+app_forgejo_runner__secrets_allowed: "{{ app_forgejo_runner__secrets_allowed_options + app_forgejo_runner__secrets_allowed_keys }}"
+
+# The variables of the Docker client of the runner
+app_forgejo_runner__environment_allowed: [ 'TZ', 'DOCKER_HOST', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY' ]
+
+# Entries without name, data or target are left out, the validation of the secrets reports them
+app_forgejo_runner__secrets_valid: >-
+  {{ (app_forgejo_runner__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('data', 'defined')
+      | selectattr('target', 'defined') | list)
+     if (app_forgejo_runner__secrets is sequence and app_forgejo_runner__secrets is not string) else [] }}
+
+# The configuration with the files of the secrets, the token of a connection is token_url, the secret of the cache is secret_url
+app_forgejo_runner__config_file_content: >-
+  {%- set options = [ app_forgejo_runner__config if app_forgejo_runner__config is mapping else {} ] -%}
+  {%- for secret in app_forgejo_runner__secrets_valid -%}
+  {%-   set target = secret.target | string -%}
+  {%-   set url = 'file:' ~ app_forgejo_runner__secrets_dir ~ '/' ~ secret.name -%}
+  {%-   if target == 'cache.secret' -%}
+  {%-     set _ = options.append({ 'cache': { 'secret_url': url } }) -%}
+  {%-   elif target is match('^server\\.connections\\.[^.]+\\.token$') -%}
+  {%-     set _ = options.append({ 'server': { 'connections': { target.split('.')[2]: { 'token_url': url } } } }) -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ options | combine(recursive=true) }}
+
+# The options of config.yml as paths, the values of lists and of app_forgejo_runner__config_leaves are not split,
+# the macro returns JSON, a macro cannot change a list of the caller
+app_forgejo_runner__config_options: >-
+  {%- macro flatten(prefix, value) -%}
+  {%-   for key, item in value.items() -%}
+  {%-     set path = prefix ~ key -%}
+  {%-     if item is mapping and item | length > 0 and path not in app_forgejo_runner__config_leaves -%}
+  {{-       flatten(path ~ '.', item) -}}
+  {%-     else -%}
+  {{-       ',' ~ ({ 'path': path, 'value': item } | to_json) -}}
+  {%-     endif -%}
+  {%-   endfor -%}
+  {%- endmacro -%}
+  {%- set options = flatten('', app_forgejo_runner__config if app_forgejo_runner__config is mapping else {}) -%}
+  {{ ('[' ~ options[1:] ~ ']') | from_json }}
+
+app_forgejo_runner__podman_container_default:
   name: "{{ app_forgejo_runner__podman_name }}"
   hostname: "{{ app_forgejo_runner__hostname }}"
   image: "{{ app_forgejo_runner__podman_image }}:{{ app_forgejo_runner__podman_tag }}"
@@ -60,13 +156,53 @@ app_forgejo_runner__container_default:
   ipv6: "{{ app_forgejo_runner__ipv6 | default(omit) }}"
   network: "{{ app_forgejo_runner__network }}"
   timezone: "{{ app_forgejo_runner__timezone }}"
-  environment:
-    USER_UID: "{{ app_forgejo_runner__uid }}"
-    USER_GID: "{{ app_forgejo_runner__gid }}"
-    DOCKER_HOST: "{{ app_forgejo_runner__docker_host }}"
-  volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
-    - "{{ app_forgejo_runner__podman_home }}:/data"
+  labels: "{{ app_forgejo_runner__labels | default(omit) }}"
   user: "{{ app_forgejo_runner__uid }}:{{ app_forgejo_runner__gid }}"
-  command: "{{ app_forgejo_runner__command }}"
+  command: [ 'forgejo-runner', 'daemon', '--config', '/data/config.yml' ]
+  # Without forgejo_runner_environment the quadlet unit has no environment
+  environment: "{{ app_forgejo_runner__environment | default(omit) }}"
+  secrets: >-
+    {%- set secrets = [] -%}
+    {%- for secret in app_forgejo_runner__secrets_valid -%}
+    {%-   set _ = secrets.append(secret.name ~ ',type=mount,target=' ~ app_forgejo_runner__secrets_dir ~ '/' ~ secret.name
+                               ~ ',uid=' ~ app_forgejo_runner__uid ~ ',gid=' ~ app_forgejo_runner__gid ~ ',mode=0400') -%}
+    {%- endfor -%}
+    {{ secrets if secrets | length > 0 else omit }}
+  # forgejo_runner_container.volumes replaces the list completely
+  volumes:
+    - "{{ app_forgejo_runner__home }}:/data"
+
+# Generated from internal/pkg/config/config.example.yaml of Forgejo Runner v13.2.2, the secrets set with forgejo_runner_secrets
+app_forgejo_runner__secrets_allowed_options: [ 'cache.secret' ]
+
+# Generated from internal/pkg/config/config.example.yaml of Forgejo Runner v13.2.2, without the secrets and the options of the role,
+# the connections are generated from forgejo_runner_keys
+app_forgejo_runner__config_allowed_options:
+  - 'log.level'
+  - 'log.job_level'
+  - 'runner.capacity'
+  - 'runner.envs'
+  - 'runner.timeout'
+  - 'runner.shutdown_timeout'
+  - 'runner.insecure'
+  - 'runner.fetch_timeout'
+  - 'runner.fetch_interval'
+  - 'runner.report_interval'
+  - 'runner.labels'
+  - 'cache.enabled'
+  - 'cache.port'
+  - 'cache.dir'
+  - 'cache.external_server'
+  - 'cache.host'
+  - 'cache.proxy_port'
+  - 'cache.actions_cache_url_override'
+  - 'container.network'
+  - 'container.enable_ipv6'
+  - 'container.privileged'
+  - 'container.options'
+  - 'container.workdir_parent'
+  - 'container.valid_volumes'
+  - 'container.docker_host'
+  - 'container.force_pull'
+  - 'container.force_rebuild'
+  - 'host.workdir_parent'

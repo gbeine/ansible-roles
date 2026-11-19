@@ -1,0 +1,72 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_forgejo_runner__test_network }}"
+    podman_default_network: "{{ app_forgejo_runner__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+    app_forgejo_runner__test_case: "{{ app_forgejo_runner__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_forgejo_runner__test_url: "http://{{ app_forgejo_runner__test_forgejo.ip }}:{{ app_forgejo_runner__test_forgejo.port }}"
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # Codeberg refuses requests with 403 while it is under load, the pull is repeated
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      register: 'app_forgejo_runner__test_pull'
+      until: app_forgejo_runner__test_pull is succeeded
+      retries: 10
+      delay: 30
+      loop:
+        - "{{ app_forgejo_runner__test_image }}"
+        - "{{ app_forgejo_runner__test_forgejo.image }}"
+
+    - name: 'Start Forgejo'
+      containers.podman.podman_container:
+        name: "{{ app_forgejo_runner__test_forgejo.name }}"
+        image: "{{ app_forgejo_runner__test_forgejo.image }}"
+        network: "{{ app_forgejo_runner__test_network.name }}"
+        ip: "{{ app_forgejo_runner__test_forgejo.ip }}"
+        env: "{{ app_forgejo_runner__test_forgejo.env }}"
+        state: 'started'
+
+    - name: 'Wait for Forgejo'
+      ansible.builtin.uri:
+        url: "{{ app_forgejo_runner__test_url }}/api/healthz"
+      register: 'app_forgejo_runner__test_health'
+      until: app_forgejo_runner__test_health is succeeded
+      retries: 60
+      delay: 2
+
+    # Registers the runner with the secret of the test case, the command does nothing if the runner exists
+    - name: 'Register the runner in Forgejo'
+      ansible.builtin.command:
+        argv:
+          - 'podman'
+          - 'exec'
+          - '--user'
+          - 'git'
+          - "{{ app_forgejo_runner__test_forgejo.name }}"
+          - 'forgejo'
+          - 'forgejo-cli'
+          - 'actions'
+          - 'register'
+          - '--secret'
+          - "{{ app_forgejo_runner__test_case.runner_secret }}"
+          - '--name'
+          - "{{ inventory_hostname }}"
+          - '--labels'
+          - 'molecule'
+      changed_when: false

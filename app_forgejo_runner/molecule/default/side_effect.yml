@@ -1,0 +1,223 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_forgejo_runner__test_case: "{{ app_forgejo_runner__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_forgejo_runner__test_vars: "{{ app_forgejo_runner__test_case.role_vars }}"
+    app_forgejo_runner__test_config: "{{ app_forgejo_runner__test_vars.forgejo_runner_config }}"
+    app_forgejo_runner__test_secrets: "{{ app_forgejo_runner__test_vars.forgejo_runner_secrets }}"
+    app_forgejo_runner__test_connection: "{{ app_forgejo_runner__test_config.server.connections.forgejo }}"
+    app_forgejo_runner__test_checked_files:
+      - "{{ app_forgejo_runner__test_quadlet_path }}"
+      - "{{ app_forgejo_runner__test_config_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_forgejo_runner__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_forgejo_runner__test_checked_files }}"
+      register: 'app_forgejo_runner__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_forgejo_runner with forgejo_runner_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_container: [ 'environment' ]
+        app_forgejo_runner__test_invalid:
+          message: 'forgejo_runner_container not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_forgejo_runner with forgejo_runner_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: [ 'log' ]
+        app_forgejo_runner__test_invalid:
+          message: 'forgejo_runner_config not a dictionary'
+          search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
+
+    - name: 'Run app_forgejo_runner with forgejo_runner_keys not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_keys: [ 'forgejo' ]
+        app_forgejo_runner__test_invalid:
+          message: 'forgejo_runner_keys not a dictionary'
+          search: '^forgejo_runner_keys has to be a dictionary$'
+
+    - name: 'Run app_forgejo_runner with an unknown family in forgejo_runner_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_keys: { connections: [ 'forgejo' ], servers: [ 'forgejo' ] }
+        app_forgejo_runner__test_invalid:
+          message: 'an unknown family in forgejo_runner_keys'
+          search: '^unknown entries in forgejo_runner_keys: servers, allowed are connections$'
+
+    - name: 'Run app_forgejo_runner with an invalid key in forgejo_runner_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_keys: { connections: [ 'forgejo', 'my forgejo' ] }
+        app_forgejo_runner__test_invalid:
+          message: 'an invalid key in forgejo_runner_keys'
+          search: '^forgejo_runner_keys.connections contains invalid keys, allowed are letters, digits, _ and -: my forgejo$'
+
+    - name: 'Run app_forgejo_runner with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_secrets: [ { name: 'forgejo_runner_token', data: 'x' } ]
+        app_forgejo_runner__test_invalid:
+          message: 'a secret without target'
+          search: '^forgejo_runner_secrets entries need name, data and target$'
+
+    - name: 'Run app_forgejo_runner with a connection missing in forgejo_runner_keys (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: "{{ app_forgejo_runner__test_config | combine({ 'server': { 'connections': { 'other': { 'url': 'http://10.89.0.31:3000/' } } } }, recursive=true) }}"
+        app_forgejo_runner__test_invalid:
+          message: 'a connection missing in forgejo_runner_keys'
+          search: '^Unknown options in forgejo_runner_config: server\.connections\.other\.url\. .*forgejo_runner_keys\.connections'
+
+    - name: 'Run app_forgejo_runner with a connection without uuid (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: "{{ app_forgejo_runner__test_config | combine({ 'server': { 'connections': { 'forgejo': { 'url': app_forgejo_runner__test_connection.url } } } }) }}"
+        app_forgejo_runner__test_invalid:
+          message: 'a connection without uuid'
+          search: '^Every connection needs url, uuid and the secret of its token, missing: server\.connections\.forgejo\.uuid\.$'
+
+    - name: 'Run app_forgejo_runner with a connection without the secret of its token (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_secrets: "{{ app_forgejo_runner__test_secrets | rejectattr('target', 'eq', 'server.connections.forgejo.token') | list }}"
+        app_forgejo_runner__test_invalid:
+          message: 'a connection without the secret of its token'
+          search: '^Every connection needs url, uuid and the secret of its token, missing: the secret server\.connections\.forgejo\.token\.$'
+
+    - name: 'Run app_forgejo_runner without a connection (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_keys: {}
+        forgejo_runner_config: { runner: { labels: [ 'molecule:host' ] } }
+        forgejo_runner_secrets: []
+        app_forgejo_runner__test_invalid:
+          message: 'no connection'
+          search: '^Forgejo Runner needs a connection, declare its name in forgejo_runner_keys\.connections\.$'
+
+    - name: 'Run app_forgejo_runner with the token in forgejo_runner_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: "{{ app_forgejo_runner__test_config | combine({ 'server': { 'connections': { 'forgejo': { 'token': 'molecule' } } } }, recursive=true) }}"
+        app_forgejo_runner__test_invalid:
+          message: 'the token in forgejo_runner_config'
+          search: '^Secrets must not be set in forgejo_runner_config, set them with forgejo_runner_secrets: server\.connections\.forgejo\.token\.$'
+
+    - name: 'Run app_forgejo_runner with runner.file in forgejo_runner_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: "{{ app_forgejo_runner__test_config | combine({ 'runner': { 'file': '.runner' } }, recursive=true) }}"
+        app_forgejo_runner__test_invalid:
+          message: 'runner.file in forgejo_runner_config'
+          search: '^The options runner\.file are set by the role and must not be set in forgejo_runner_config\.$'
+
+    - name: 'Run app_forgejo_runner with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: "{{ app_forgejo_runner__test_config | combine({ 'runner': { 'unknown': 1 } }, recursive=true) }}"
+        app_forgejo_runner__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in forgejo_runner_config: runner\.unknown\.'
+
+    - name: 'Run app_forgejo_runner with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_config: "{{ app_forgejo_runner__test_config | combine({ 'runner': { 'labels': [ \"molecule:host\nother:host\" ] } }, recursive=true) }}"
+        app_forgejo_runner__test_invalid:
+          message: 'a line break in a value'
+          search: '^The values of forgejo_runner_config must not contain line breaks: runner\.labels\.$'
+
+    - name: 'Run app_forgejo_runner with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_environment: { GITEA_RUNNER_NAME: 'molecule' }
+        app_forgejo_runner__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: GITEA_RUNNER_NAME\. Allowed are'
+
+    - name: 'Run app_forgejo_runner with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_secrets: "{{ app_forgejo_runner__test_secrets + [ { 'name': 'forgejo_runner_unknown', 'data': 'molecule', 'target': 'log.level' } ] }}"
+        app_forgejo_runner__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: log\.level\.'
+
+    - name: 'Run app_forgejo_runner with a line break in forgejo_runner_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_container:
+          environment:
+            DOCKER_HOST: "unix:///run/docker.sock\nother"
+        app_forgejo_runner__test_invalid:
+          message: 'a line break in forgejo_runner_container.environment'
+          search: 'The environment variables must not contain line breaks: DOCKER_HOST\.'
+
+    - name: 'Run app_forgejo_runner with a relative home (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        forgejo_runner_home: 'opt/forgejo-runner'
+        app_forgejo_runner__test_invalid:
+          message: 'a relative home'
+          search: '^forgejo_runner_home has to be an absolute path$'
+
+    # molecule-forgejo-runner changes the capacity and has to restart, molecule-forgejo-runner-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo-runner' ]
+      register: 'app_forgejo_runner__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_forgejo_runner__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run app_forgejo_runner with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_forgejo_runner'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'forgejo-runner' ]
+      register: 'app_forgejo_runner__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the restart'
+      ansible.builtin.assert:
+        that:
+          - (app_forgejo_runner__config_result is changed) == app_forgejo_runner__test_case.expect.restart
+          - app_forgejo_runner__quadlet_result is not changed
+          - (app_forgejo_runner__test_started_after.stdout | int > app_forgejo_runner__test_started_before.stdout | int) == app_forgejo_runner__test_case.expect.restart
+        fail_msg: >-
+          config changed: {{ app_forgejo_runner__config_result is changed }}, quadlet changed: {{ app_forgejo_runner__quadlet_result is changed }},
+          start before {{ app_forgejo_runner__test_started_before.stdout }}, after {{ app_forgejo_runner__test_started_after.stdout }}
