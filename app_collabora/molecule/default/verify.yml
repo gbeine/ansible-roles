@@ -26,11 +26,15 @@
           - app_collabora__expect.ip6 is not none or app_collabora__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - app_collabora__expect.secrets | map('regex_replace', '^', 'Secret=') | reject('in', app_collabora__test_quadlet_lines) | list | length == 0
           - ('PodmanArgs=--no-healthcheck') in app_collabora__test_quadlet_lines
+          - ('Timezone=' + app_collabora__test_case.role_vars.collabora_timezone) in app_collabora__test_quadlet_lines
           - app_collabora__test_capabilities_expected | reject('in', app_collabora__test_capabilities) | list | length == 0
+          - app_collabora__expect.quadlet | reject('in', app_collabora__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - app_collabora__test_quadlet_lines | select('match', '(' ~ (app_collabora__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
         fail_msg: "{{ app_collabora__test_quadlet.content | b64decode }}"
       vars:
         app_collabora__test_capabilities_expected: [ 'SYS_CHROOT', 'SYS_ADMIN', 'FOWNER', 'CHOWN', 'MKNOD' ]
-        app_collabora__test_quadlet_lines: "{{ (app_collabora__test_quadlet.content | b64decode).splitlines() }}"
+        app_collabora__test_quadlet_lines: "{{ (app_collabora__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
         app_collabora__test_capabilities: >-
           {{ app_collabora__test_quadlet_lines | select('match', 'AddCapability=')
              | map('regex_replace', '^AddCapability=', '') | join(' ') | split | map('upper')
@@ -70,8 +74,11 @@
           - app_collabora__test_net.IPAddress == app_collabora__expect.ip
           - app_collabora__expect.ip6 is none or app_collabora__test_net.GlobalIPv6Address == app_collabora__expect.ip6
           - app_collabora__expect.env | reject('in', app_collabora__test_env) | list | length == 0
-          - app_collabora__test_env | map('regex_replace', '=.*$', '') | select('in', app_collabora__expect.absent_env | default([])) | list | length == 0
-        fail_msg: "IPv4 {{ app_collabora__test_net.IPAddress }}, IPv6 {{ app_collabora__test_net.GlobalIPv6Address }}, environment {{ app_collabora__test_env | join(', ') }}"
+          # The time zone is set by podman with /etc/localtime, not with TZ
+          - app_collabora__test_env | select('match', 'TZ=') | list | length == 0
+          # The image has no date, the time zone set by podman is read from the container
+          - app_collabora__test_container.Config.Timezone == app_collabora__test_case.role_vars.collabora_timezone
+        fail_msg: "Time zone {{ app_collabora__test_container.Config.Timezone | default('') }}, IPv4 {{ app_collabora__test_net.IPAddress }}, IPv6 {{ app_collabora__test_net.GlobalIPv6Address }}, environment {{ app_collabora__test_env | join(', ') }}"
       vars:
         app_collabora__test_container: "{{ (app_collabora__test_inspect.stdout | from_json)[0] }}"
         app_collabora__test_net: "{{ app_collabora__test_container.NetworkSettings.Networks[app_collabora__test_case.role_vars.collabora_network] }}"

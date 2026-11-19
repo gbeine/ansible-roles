@@ -83,8 +83,13 @@
           {{ app_collabora__container.secrets
              if app_collabora__container.secrets is sequence and app_collabora__container.secrets is not string
              else [] }}
+        app_collabora__environment_container: >-
+          {{ app_collabora__container.environment if app_collabora__container.environment is mapping else {} }}
         app_collabora__environment_unknown: >-
-          {{ (app_collabora__container.environment | default({})).keys() | reject('in', app_collabora__environment_allowed) | list }}
+          {{ app_collabora__environment_container.keys() | reject('in', app_collabora__environment_allowed) | list }}
+        app_collabora__environment_line_breaks: >-
+          {{ app_collabora__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_collabora__secrets_unknown: >-
           {{ app_collabora__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
              | reject('in', app_collabora__secrets_allowed) | list }}
@@ -98,6 +103,9 @@
           {%- endif -%}
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the environment variables ' ~ (app_collabora__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_collabora__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_collabora__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (app_collabora__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -151,24 +159,55 @@
           {% if app_collabora__container.requires is defined %}
           Requires={{ app_collabora__container.requires | join(' ') }}
           {% endif %}
+          {% if app_collabora__container.wants is defined %}
+          Wants={{ app_collabora__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_collabora__container.after is defined %}
+          After={{ app_collabora__container.after | join(' ') }}
+          {% endif %}
+          {% if app_collabora__container.part_of is defined %}
+          PartOf={{ app_collabora__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_collabora__container.binds_to is defined %}
+          BindsTo={{ app_collabora__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_collabora__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_collabora__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_collabora__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_collabora__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_collabora__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_collabora__running: >-
-          {{ (ansible_facts.services[app_collabora__container.name + '.service'].state | default('')) == 'running' }}
-        app_collabora__restart: >-
-          {{ app_collabora__running | bool
-             and (app_collabora__secrets_result is changed
-                  or app_collabora__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Collabora'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_collabora__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_collabora__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_collabora__running: >-
+              {{ (ansible_facts.services[app_collabora__container.name + '.service'].state | default('')) == 'running' }}
+            app_collabora__restart: >-
+              {{ app_collabora__running | bool
+                 and (app_collabora__secrets_result is changed
+                      or app_collabora__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_collabora__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_collabora__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_collabora__container.name ~ ' did not start' ] + app_collabora__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'app_collabora__autoupdate_enabled | bool'

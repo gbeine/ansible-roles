@@ -12,6 +12,9 @@ app_collabora__test_network:
 app_collabora__test_image: 'docker.io/collabora/code:latest'
 app_collabora__test_quadlet_path: '/etc/containers/systemd/collabora.container'
 
+# The time zone is set by podman, neither TZ nor the files of the host are passed
+app_collabora__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
 app_collabora__test_cases:
 
   # Only the mandatory variables, Collabora serves HTTP for a reverse proxy terminating TLS
@@ -25,7 +28,11 @@ app_collabora__test_cases:
         - name: 'collabora_password'
           data: 'molecule-password'
           target: 'password'
+    # Runs again without a change, Collabora must not restart
+    side_effect:
+      role_vars: {}
     expect:
+      restart: false
       ip: '10.89.0.50'
       ip6: ~
       url: 'http://10.89.0.50:9980'
@@ -33,12 +40,13 @@ app_collabora__test_cases:
       password: 'molecule-password'
       secrets:
         - 'collabora_password,type=env,target=password'
+      quadlet: []
+      quadlet_absent: "{{ app_collabora__test_quadlet_absent }}"
       env:
-        - 'TZ=Europe/Berlin'
         - 'username=admin'
         - 'extra_params=--o:ssl.enable=false --o:ssl.termination=true'
 
-  # IPv6, an own admin user, aliasgroup1 and an empty extra_params,
+  # IPv6, dependencies, an own admin user, aliasgroup1 and an empty extra_params,
   # Collabora serves HTTPS with the self-signed certificate of the image
   - name: 'molecule-collabora'
     role_vars:
@@ -47,7 +55,11 @@ app_collabora__test_cases:
       collabora_network: 'podman-molecule'
       collabora_hostname: 'collabora-molecule'
       collabora_timezone: 'Europe/Berlin'
-      # Merged over the default, TZ is kept
+      collabora_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+        requires_mounts_for: [ '/var/lib/containers' ]
+      # Merged over the default, username is replaced
       collabora_environment:
         username: 'molecule'
         aliasgroup1: 'https://nextcloud.example.org:443'
@@ -64,6 +76,7 @@ app_collabora__test_cases:
             data: 'molecule-password-changed'
             target: 'password'
     expect:
+      restart: true
       ip: '10.89.0.51'
       ip6: 'fd00:89::51'
       url: 'https://10.89.0.51:9980'
@@ -71,8 +84,12 @@ app_collabora__test_cases:
       password: 'molecule-password-changed'
       secrets:
         - 'collabora_molecule_password,type=env,target=password'
+      quadlet:
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'RequiresMountsFor=/var/lib/containers'
+      quadlet_absent: "{{ app_collabora__test_quadlet_absent }}"
       env:
-        - 'TZ=Europe/Berlin'
         - 'username=molecule'
         - 'aliasgroup1=https://nextcloud.example.org:443'
         - 'extra_params='
