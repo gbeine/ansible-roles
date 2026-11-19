@@ -28,8 +28,10 @@
           - database_pgadmin__expect.ip6 is none or ('IP6=' + database_pgadmin__expect.ip6) in database_pgadmin__test_quadlet_lines
           - database_pgadmin__expect.ip6 is not none or database_pgadmin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - database_pgadmin__expect.quadlet | reject('in', database_pgadmin__test_quadlet_lines) | list | length == 0
-          # Only the passwords of the settings without file variable are passed in the environment
-          - database_pgadmin__test_quadlet_lines | select('search', 'type=env') | reject('search', 'target=PGADMIN_CONFIG_(MAIL_PASSWORD|LDAP_BIND_PASSWORD|WEBSERVER_SHARED_SECRET)$') | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=
+          - database_pgadmin__test_quadlet_lines | select('match', '(' ~ (database_pgadmin__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+          # The secrets are mounted as files, the passwords are never part of the quadlet unit
+          - database_pgadmin__test_quadlet_lines | select('search', 'type=env|molecule-admin-password|molecule-mail-password') | list | length == 0
         fail_msg: "{{ database_pgadmin__test_quadlet.content | b64decode }}"
       vars:
         database_pgadmin__test_quadlet_lines: "{{ (database_pgadmin__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -51,8 +53,8 @@
           - database_pgadmin__test_service.stdout == 'active'
           - database_pgadmin__test_net.IPAddress == database_pgadmin__expect.ip
           - database_pgadmin__expect.ip6 is none or database_pgadmin__test_net.GlobalIPv6Address == database_pgadmin__expect.ip6
-          - database_pgadmin__expect.env | reject('in', database_pgadmin__test_env) | list | length == 0
-          - database_pgadmin__test_env | select('match', 'PGADMIN_DEFAULT_PASSWORD=') | list | length == 0
+          # The variables and the secrets of the initialization are not part of the container
+          - database_pgadmin__test_env | select('match', 'PGADMIN_(DEFAULT_|CONFIG_)') | list | length == 0
         fail_msg: >-
           service {{ database_pgadmin__test_service.stdout }},
           IPv4 {{ database_pgadmin__test_net.IPAddress }}, IPv6 {{ database_pgadmin__test_net.GlobalIPv6Address }},
@@ -62,32 +64,59 @@
         database_pgadmin__test_net: "{{ database_pgadmin__test_container.NetworkSettings.Networks[database_pgadmin__test_case.role_vars.pgadmin_network] }}"
         database_pgadmin__test_env: "{{ database_pgadmin__test_container.Config.Env }}"
 
-    - name: 'Read the files of the secrets in the container'
+    - name: 'Read config_system.py'
+      ansible.builtin.slurp:
+        src: "{{ database_pgadmin__test_config_path }}"
+      register: 'database_pgadmin__test_config_file'
+
+    - name: 'Read the owner and the mode of config_system.py'
+      ansible.builtin.stat:
+        path: "{{ database_pgadmin__test_config_path }}"
+      register: 'database_pgadmin__test_config_stat'
+
+    # pgAdmin imports /etc/pgadmin/config_system.py as the user of the image, it reads the password of the mail server from the file of the secret
+    - name: 'Read the settings of config_system.py in the container'
       ansible.builtin.command:
-        argv: [ 'podman', 'exec', 'pgadmin', 'cat', "{{ item.path }}" ]
-      loop: "{{ database_pgadmin__expect.secret_files }}"
-      loop_control:
-        label: "{{ item.path }}"
-      register: 'database_pgadmin__test_secret_files'
+        argv:
+          - 'podman'
+          - 'exec'
+          - 'pgadmin'
+          - '/venv/bin/python3'
+          - '-c'
+          - >-
+            import json, sys; sys.path.insert(0, '/etc/pgadmin'); import config_system as c;
+            print(json.dumps({k: v for k, v in vars(c).items() if k.isupper()}))
+      register: 'database_pgadmin__test_settings'
       changed_when: false
       no_log: true
 
-    # The entrypoint writes the settings of PGADMIN_CONFIG_* to config_distro.py at the start of the container
-    - name: 'Read config_distro.py in the container'
-      ansible.builtin.command:
-        argv: [ 'podman', 'exec', 'pgadmin', 'cat', '/pgadmin4/config_distro.py' ]
-      register: 'database_pgadmin__test_config_distro'
-      changed_when: false
-      no_log: true
-
-    - name: 'Assert the files of the secrets and the settings of pgAdmin'
+    - name: 'Assert config_system.py and the settings of pgAdmin'
       ansible.builtin.assert:
         that:
-          - database_pgadmin__test_secret_files.results | map(attribute='stdout') | list
-            == database_pgadmin__expect.secret_files | map(attribute='content') | list
-          - database_pgadmin__expect.config_distro | reject('in', database_pgadmin__test_config_distro.stdout_lines) | list | length == 0
-        fail_msg: 'The files of the secrets or the settings in config_distro.py differ from the expected values'
-      no_log: true
+          - database_pgadmin__test_config_stat.stat.uid == 0
+          - database_pgadmin__test_config_stat.stat.mode == '0644'
+          - database_pgadmin__expect.config | reject('in', database_pgadmin__test_config_lines) | list | length == 0
+          - database_pgadmin__test_config_lines | select('match', '^[A-Z]') | list | length
+            == database_pgadmin__expect.config | select('match', '^[A-Z]') | list | length
+          # The passwords are only read from the files of the secrets
+          - database_pgadmin__test_config_lines | select('search', 'molecule-admin-password|molecule-mail-password') | list | length == 0
+          - (database_pgadmin__test_settings.stdout | from_json) == database_pgadmin__expect.settings
+        fail_msg: "config_system.py: {{ database_pgadmin__test_config_lines | join(' | ') }}"
+      vars:
+        database_pgadmin__test_config_lines: "{{ (database_pgadmin__test_config_file.content | b64decode).splitlines() }}"
+
+    - name: 'Read the container of the initialization'
+      ansible.builtin.command:
+        argv: [ 'podman', 'container', 'exists', 'pgadmin-init' ]
+      register: 'database_pgadmin__test_init_container'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the container of the initialization was removed'
+      ansible.builtin.assert:
+        that:
+          - database_pgadmin__test_init_container.rc == 1
+        fail_msg: 'The container pgadmin-init still exists'
 
     - name: 'Read the data directory'
       ansible.builtin.stat:

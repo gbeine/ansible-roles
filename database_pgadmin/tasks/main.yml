@@ -44,16 +44,18 @@
         fail_msg: "{{ database_pgadmin__errors | join(' ') }}"
         quiet: true
       vars:
-        database_pgadmin__secret_targets: "{{ database_pgadmin__secrets | map(attribute='target') | list }}"
+        # Without pgadmin_environment there is no environment to check
         database_pgadmin__environment_set: >-
-          {{ database_pgadmin__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+          {{ database_pgadmin__environment if database_pgadmin__environment is defined and database_pgadmin__environment is mapping else {} }}
+        database_pgadmin__secret_targets: "{{ database_pgadmin__secrets | map(attribute='target') | list }}"
         database_pgadmin__environment_missing: >-
-          {{ database_pgadmin__environment_required | reject('in', database_pgadmin__environment_set) | list }}
+          {{ database_pgadmin__environment_required
+             | reject('in', database_pgadmin__environment_set | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list)
+             | list }}
         database_pgadmin__secrets_missing: >-
           {{ database_pgadmin__secrets_required | reject('in', database_pgadmin__secret_targets) | list }}
         database_pgadmin__secrets_in_environment: >-
-          {{ (database_pgadmin__secret_targets + database_pgadmin__secret_variables + database_pgadmin__secret_files.values() | list)
-             | select('in', database_pgadmin__environment.keys() | list) | unique | list }}
+          {{ (database_pgadmin__secret_targets + database_pgadmin__secret_variables) | select('in', database_pgadmin__environment_set.keys() | list) | unique | list }}
         database_pgadmin__errors: >-
           {%- set errors = [] -%}
           {%- if database_pgadmin__environment_missing | length > 0 -%}
@@ -71,6 +73,49 @@
           {%- endif -%}
           {{ errors }}
 
+    # pgAdmin checks the types of some settings itself and stops otherwise (validate_config_variable)
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - database_pgadmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_pgadmin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_pgadmin__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = database_pgadmin__config -%}
+          {#- combine is not used, the role checks that the configuration is a dictionary -#}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('pgadmin_config has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set secrets = config.keys() | select('in', database_pgadmin__secrets_config) | list -%}
+          {%-   if secrets | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not be set in pgadmin_config, set them with pgadmin_secrets: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set unknown = config.keys() | reject('in', database_pgadmin__config_allowed) | reject('in', database_pgadmin__secrets_config) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown settings in pgadmin_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the settings of pgAdmin (database_pgadmin__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   set booleans = config | dict2items | selectattr('key', 'in', database_pgadmin__config_boolean) | rejectattr('value', 'boolean') | map(attribute='key') | list -%}
+          {%-   if booleans | length > 0 -%}
+          {%-     set _ = errors.append('These settings of pgadmin_config have to be booleans: ' ~ (booleans | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set integers = config | dict2items | selectattr('key', 'in', database_pgadmin__config_integer) | rejectattr('value', 'integer') | map(attribute='key') | list -%}
+          {%-   if integers | length > 0 -%}
+          {%-     set _ = errors.append('These settings of pgadmin_config have to be integers: ' ~ (integers | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set invalid = [] -%}
+          {%-   for key, value in config.items() if value is not none and value is not boolean and value is not number
+                  and value is not mapping and (value is not sequence or (value is string and (value ~ '.').splitlines() | length > 1)) -%}
+          {%-     set _ = invalid.append(key) -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The values of pgadmin_config have to be strings without line breaks, numbers, booleans, lists or dictionaries, null removes a setting: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
     # Checks the environment and the secrets of the container after merging pgadmin_container,
     # unknown variables would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
@@ -81,21 +126,30 @@
         fail_msg: "{{ database_pgadmin__errors | join(' ') }}"
         quiet: true
       vars:
+        # The environment of pgadmin_environment, including the variables of the initialization, and of pgadmin_container
+        database_pgadmin__environment_container: >-
+          {{ (database_pgadmin__environment if database_pgadmin__environment is defined and database_pgadmin__environment is mapping else {})
+             | combine(database_pgadmin__container.environment if database_pgadmin__container.environment is mapping else {}) }}
         database_pgadmin__environment_unknown: >-
-          {{ (database_pgadmin__container.environment | default({})).keys() | reject('in', database_pgadmin__environment_allowed) | list }}
+          {{ database_pgadmin__environment_container.keys() | reject('in', database_pgadmin__environment_allowed) | list }}
+        database_pgadmin__environment_line_breaks: >-
+          {{ database_pgadmin__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         database_pgadmin__secrets_unknown: >-
-          {{ database_pgadmin__secrets | map(attribute='target')
-             | reject('in', database_pgadmin__secret_files.keys() | list + database_pgadmin__secrets_env) | list }}
+          {{ database_pgadmin__secrets | map(attribute='target') | reject('in', database_pgadmin__secrets_allowed) | list }}
         database_pgadmin__errors: >-
           {%- set errors = [] -%}
+          {%- if database_pgadmin__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_pgadmin__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {%- if database_pgadmin__environment_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_pgadmin__environment_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if database_pgadmin__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (database_pgadmin__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the variables of the image and the settings of pgAdmin (database_pgadmin__environment_allowed) and the secrets ' ~ ((database_pgadmin__secret_files.keys() | list + database_pgadmin__secrets_env) | join(', ')) ~ '.') -%}
+          {%- if database_pgadmin__environment_unknown | length > 0 or database_pgadmin__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of the image (database_pgadmin__environment_allowed), the settings of pgAdmin are set with pgadmin_config, and the secrets ' ~ (database_pgadmin__secrets_allowed | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -119,6 +173,7 @@
       loop_control:
         label: "{{ item.path }}"
 
+    # Only the initialization loads servers.json
     - name: 'Create servers.json'
       ansible.builtin.copy:
         content: "{{ database_pgadmin__servers | to_nice_json }}\n"
@@ -127,13 +182,22 @@
         group: 'root'
         mode: '0644'
       when: 'database_pgadmin__servers | length > 0'
-      register: 'database_pgadmin__servers_result'
 
     - name: 'Remove servers.json without pgadmin_servers'
       ansible.builtin.file:
         path: "{{ database_pgadmin__servers_file }}"
         state: 'absent'
       when: 'database_pgadmin__servers | length == 0'
+
+    # config_system.py contains no secrets, it reads them from their files
+    - name: 'Write config_system.py'
+      ansible.builtin.copy:
+        content: "{{ database_pgadmin__config_lines | join('\n') }}\n"
+        dest: "{{ database_pgadmin__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'database_pgadmin__config_result'
 
     - name: 'Create secrets'
       no_log: true
@@ -144,8 +208,60 @@
       loop: "{{ database_pgadmin__secrets }}"
       register: 'database_pgadmin__secrets_result'
 
+    - name: 'Find the database of an initialized pgAdmin'
+      ansible.builtin.stat:
+        path: "{{ database_pgadmin__initialized_path }}"
+      register: 'database_pgadmin__initialized'
+
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
+
+    # The image only initializes /var/lib/pgadmin without pgadmin4.db: it creates the admin with the password of the secret,
+    # loads servers.json and starts gunicorn. The container of the initialization runs once without network and is removed afterwards.
+    - name: 'Initialize pgAdmin'
+      when:
+        - not ansible_check_mode
+        - not database_pgadmin__initialized.stat.exists
+      block:
+
+        - name: 'Run the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_pgadmin__podman_init_name }}"
+            image: "{{ database_pgadmin__container.image }}"
+            network: 'none'
+            env: "{{ database_pgadmin__init_environment }}"
+            secrets: "{{ database_pgadmin__podman_init_secrets }}"
+            volume: "{{ database_pgadmin__podman_init_volumes }}"
+            detach: true
+            state: 'started'
+          register: 'database_pgadmin__init_result'
+
+        - name: 'Wait for the end of the initialization'
+          ansible.builtin.command:
+            argv: [ 'podman', 'logs', "{{ database_pgadmin__podman_init_name }}" ]
+          register: 'database_pgadmin__init_log'
+          changed_when: false
+          failed_when: false
+          until: database_pgadmin__init_message in (database_pgadmin__init_log.stdout ~ database_pgadmin__init_log.stderr)
+          retries: 60
+          delay: 2
+
+        - name: 'Assert the initialization'
+          ansible.builtin.assert:
+            that:
+              - database_pgadmin__init_message in (database_pgadmin__init_log.stdout ~ database_pgadmin__init_log.stderr)
+            fail_msg: >-
+              The initialization of pgAdmin failed, remove the content of {{ database_pgadmin__data_dir }} before the next run,
+              the initialization only runs without pgadmin4.db.
+              {{ (database_pgadmin__init_log.stdout_lines | default([]) + database_pgadmin__init_log.stderr_lines | default([]))[-30:] }}
+            quiet: true
+
+      always:
+
+        - name: 'Remove the container of the initialization'
+          containers.podman.podman_container:
+            name: "{{ database_pgadmin__podman_init_name }}"
+            state: 'absent'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -175,25 +291,56 @@
           {% if database_pgadmin__container.requires is defined %}
           Requires={{ database_pgadmin__container.requires | join(' ') }}
           {% endif %}
+          {% if database_pgadmin__container.wants is defined %}
+          Wants={{ database_pgadmin__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_pgadmin__container.after is defined %}
+          After={{ database_pgadmin__container.after | join(' ') }}
+          {% endif %}
+          {% if database_pgadmin__container.part_of is defined %}
+          PartOf={{ database_pgadmin__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_pgadmin__container.binds_to is defined %}
+          BindsTo={{ database_pgadmin__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_pgadmin__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_pgadmin__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'database_pgadmin__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ database_pgadmin__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if database_pgadmin__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        database_pgadmin__running: >-
-          {{ (ansible_facts.services[database_pgadmin__container.name + '.service'].state | default('')) == 'running' }}
-        database_pgadmin__restart: >-
-          {{ database_pgadmin__running | bool
-             and (database_pgadmin__secrets_result is changed
-                  or database_pgadmin__quadlet_result is changed
-                  or database_pgadmin__servers_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start pgAdmin'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_pgadmin__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_pgadmin__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_pgadmin__running: >-
+              {{ (ansible_facts.services[database_pgadmin__container.name + '.service'].state | default('')) == 'running' }}
+            database_pgadmin__restart: >-
+              {{ database_pgadmin__running | bool
+                 and (database_pgadmin__secrets_result is changed
+                      or database_pgadmin__config_result is changed
+                      or database_pgadmin__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_pgadmin__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_pgadmin__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_pgadmin__container.name ~ ' did not start' ] + database_pgadmin__start_journal.stdout_lines }}"
 
     - name: 'Enable autoupdate on container'
       when: 'database_pgadmin__autoupdate_enabled | bool'

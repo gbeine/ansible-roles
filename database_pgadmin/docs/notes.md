@@ -6,32 +6,29 @@ The PostgreSQL servers are not part of the role.
 
 ### Configuration
 
-pgAdmin is configured completely with environment variables in `pgadmin_environment`, merged over the default of the role.
-The default sets `TZ` to `pgadmin_timezone`, the passwords are passed with `pgadmin_secrets` (see Secrets).
-`PGADMIN_DEFAULT_EMAIL` is required, it is the email address of the admin created by the first start.
-
-The variables of the image are described in the [documentation of the container](https://www.pgadmin.org/docs/pgadmin4/latest/container_deployment.html),
-e.g. `PGADMIN_LISTEN_PORT`, `PGADMIN_DISABLE_POSTFIX` or `PGADMIN_REPLACE_SERVERS_ON_STARTUP`.
-Every setting of `config.py` of pgAdmin is set with `PGADMIN_CONFIG_<SETTING>`, the image writes it as `<SETTING> = <value>` to `config_distro.py` at every start.
-The values are Python literals, strings need quotes, e.g. `"'smtp.example.org'"`, `true` and `false` are written as `True` and `False`.
+The settings of `config.py` of pgAdmin are set with `pgadmin_config`, a dictionary of the settings, see the
+[configuration of pgAdmin](https://www.pgadmin.org/docs/pgadmin4/latest/config_py.html), there is no default.
+The role writes them to `pgadmin_home/config_system.py`, mounted read only to `/etc/pgadmin/config_system.py`,
+pgAdmin imports this file last, it overrides `config_distro.py` and `config_local.py` of the image.
+Every setting is written as JSON and read with `json.loads`, strings, numbers, `true`, `false`, lists and dictionaries are possible, `null` removes a setting.
+pgAdmin checks the types of some settings itself, e.g. `SERVER_MODE` is a boolean and `MAIL_PORT` an integer.
 
 ```yaml
-pgadmin_environment:
-  PGADMIN_DEFAULT_EMAIL: 'admin@example.org'
-  PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: 'True'
-  PGADMIN_CONFIG_MAIL_SERVER: "'smtp.example.org'"
-  PGADMIN_CONFIG_MAIL_PORT: '587'
-  PGADMIN_CONFIG_MAIL_USE_TLS: 'True'
-  PGADMIN_CONFIG_MAIL_USERNAME: "'pgadmin@example.org'"
-  PGADMIN_CONFIG_SECURITY_EMAIL_SENDER: "'pgadmin@example.org'"
+pgadmin_config:
+  ENHANCED_COOKIE_PROTECTION: true
+  MAIL_SERVER: 'smtp.example.org'
+  MAIL_PORT: 587
+  MAIL_USE_TLS: true
+  MAIL_USERNAME: 'pgadmin@example.org'
+  SECURITY_EMAIL_SENDER: 'pgadmin@example.org'
 ```
 
+`pgadmin_environment` takes the variables of the image that are no settings of pgAdmin, e.g. `PGADMIN_LISTEN_PORT`, `PGADMIN_DISABLE_POSTFIX`
+or `GUNICORN_THREADS`, see the [documentation of the container](https://www.pgadmin.org/docs/pgadmin4/latest/container_deployment.html), there is no default.
+`PGADMIN_DEFAULT_EMAIL` is required, it is the email address of the admin created by the initialization (see Initialization).
+
 `pgadmin_servers` is the content of `servers.json`, a dictionary with `Servers`, see the [documentation of the import](https://www.pgadmin.org/docs/pgadmin4/latest/import_export_servers.html).
-The role writes it to `pgadmin_home/servers.json` and mounts it to `/pgadmin4/servers.json`, a change restarts pgAdmin.
-pgAdmin loads the servers for `PGADMIN_DEFAULT_EMAIL` only at the first start with an empty data directory,
-with `PGADMIN_REPLACE_SERVERS_ON_STARTUP: 'True'` it replaces the servers of the admin at every start.
-The first start creates the database of pgAdmin and loads the servers afterwards, if pgAdmin is restarted in between, e.g. by a second run of the role with changes,
-the servers are not loaded, `PGADMIN_REPLACE_SERVERS_ON_STARTUP: 'True'` loads them at the next start.
+The role writes it to `pgadmin_home/servers.json`, the initialization loads the servers for `PGADMIN_DEFAULT_EMAIL`, changes later have no effect.
 
 ```yaml
 pgadmin_servers:
@@ -48,21 +45,13 @@ pgadmin_servers:
 
 ### Secrets
 
-`pgadmin_secrets` is a list of podman secrets with `name`, `data` and `target`, the usual name of the variable, e.g. `PGADMIN_DEFAULT_PASSWORD`.
-The secret `PGADMIN_DEFAULT_PASSWORD` is required.
+`pgadmin_secrets` is a list of podman secrets with `name`, `data` and `target`, the secret `PGADMIN_DEFAULT_PASSWORD` is required.
 
-| Target | Passed as |
-|---|---|
-| `PGADMIN_DEFAULT_PASSWORD`, the password of the admin | file `/run/secrets/<name>`, the role sets `PGADMIN_DEFAULT_PASSWORD_FILE` |
-| `PGADMIN_CONFIG_CONFIG_DATABASE_URI`, an external configuration database | file `/run/secrets/<name>`, the role sets `PGADMIN_CONFIG_CONFIG_DATABASE_URI_FILE` |
-| `PGADMIN_CONFIG_MAIL_PASSWORD`, `PGADMIN_CONFIG_LDAP_BIND_PASSWORD`, `PGADMIN_CONFIG_WEBSERVER_SHARED_SECRET` | environment variable |
-
-The secrets with a file variable are mounted to `/run/secrets/<name>`, the entrypoint of the image reads them with `file_env`,
-they are neither part of the quadlet unit nor of the environment of the container.
-The entrypoint has no file variable for the other settings of pgAdmin, so the passwords of the mail server, of the LDAP bind user
-and the shared secret of the web server authentication are passed with `type=env`, podman sets them when the container starts.
-Like every setting the data of these secrets and of `PGADMIN_CONFIG_CONFIG_DATABASE_URI` are Python literals, e.g. `"'secret'"`,
-the data of `PGADMIN_DEFAULT_PASSWORD` is the plain password.
+- `PGADMIN_DEFAULT_PASSWORD`, the password of the admin, is only mounted in the container of the initialization,
+  the entrypoint reads it from the file of `PGADMIN_DEFAULT_PASSWORD_FILE`.
+- `MAIL_PASSWORD`, `LDAP_BIND_PASSWORD`, `WEBSERVER_SHARED_SECRET` and `CONFIG_DATABASE_URI` are settings of pgAdmin,
+  they are mounted to `/run/secrets/<name>` for the user of the image and `config_system.py` reads them with `open('/run/secrets/<name>')`.
+  The configuration is Python and reads the files itself, the passwords are neither part of `config_system.py`, the quadlet unit nor of the environment.
 
 ```yaml
 pgadmin_secrets:
@@ -70,60 +59,96 @@ pgadmin_secrets:
     data: "{{ vault_pgadmin_default_password }}"
     target: 'PGADMIN_DEFAULT_PASSWORD'
   - name: 'pgadmin_mail_password'
-    data: "'{{ vault_pgadmin_mail_password }}'"
-    target: 'PGADMIN_CONFIG_MAIL_PASSWORD'
+    data: "{{ vault_pgadmin_mail_password }}"
+    target: 'MAIL_PASSWORD'
 ```
 
-The targets are the keys of `database_pgadmin__secret_files` and `database_pgadmin__secrets_env`.
-Neither a target nor a file variable may be set in `pgadmin_environment`.
-`PGADMIN_DEFAULT_PASSWORD` is only used by the first start with an empty data directory, later changes of the password are done in pgAdmin.
+Changing `PGADMIN_DEFAULT_PASSWORD` later does not change the password of the admin.
+
+### Initialization
+
+The image creates the database of pgAdmin with the admin and loads `servers.json` only if `pgadmin_home/data/pgadmin4.db` is missing.
+The role runs the initialization once in the container `pgadmin-init` without network, with `PGADMIN_DEFAULT_EMAIL`, the secrets and `servers.json`,
+waits until gunicorn listens (`Listening at:`) and removes the container, also if the initialization failed.
+A failed initialization names the data directory whose content has to be removed before the next run.
+With `SERVER_MODE: false` or the secret `CONFIG_DATABASE_URI` the role passes them to the initialization as `PGADMIN_CONFIG_SERVER_MODE`
+and `PGADMIN_CONFIG_CONFIG_DATABASE_URI_FILE`, the entrypoint reads them from the environment.
+The quadlet unit contains neither the email, the password of the admin nor `servers.json`.
 
 ### Allowed variables
 
-The role only allows the environment variables in `database_pgadmin__environment_allowed` and the secrets with the targets listed in Secrets,
-it stops before any change if unknown variables or secrets are set.
-This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
-The check uses the environment and the secrets of the container after merging `pgadmin_container`,
-so variables set with `pgadmin_container.environment` are checked as well.
+The role only allows the settings of `database_pgadmin__config_allowed` in `pgadmin_config`, generated from `web/config.py` of [pgAdmin](https://github.com/pgadmin-org/pgadmin4) 9.19
+without the settings carrying secrets, the variables of `database_pgadmin__environment_allowed` in the environment
+and the secrets with a target in `database_pgadmin__secrets_allowed`, it stops before any change if unknown settings, variables or secrets are set.
+This prevents unexpected behavior by accident, e.g. by a typo or a password in plain text.
+The check of the environment uses `pgadmin_environment` and the environment of the container after merging `pgadmin_container`.
 
-Allowed environment variables:
-
-- the variables of `pkg/docker/entrypoint.sh` of the image (`PGADMIN_*`, `PGPASS_FILE`, `PUID`, `PGID`, `GUNICORN_*`) and `TZ`
-- `PGADMIN_CONFIG_<SETTING>` for every setting of `web/config.py` of pgAdmin, except the settings passed as secrets
-- the file variables of the secrets (`PGADMIN_DEFAULT_PASSWORD_FILE`, `PGADMIN_CONFIG_CONFIG_DATABASE_URI_FILE`),
-  the role sets them from `pgadmin_secrets`, they must not be set in `pgadmin_environment`
-
-The list is generated from `pkg/docker/entrypoint.sh` and `web/config.py` of [pgAdmin](https://github.com/pgadmin-org/pgadmin4) 9.19,
-new versions of the image may add variables or settings.
+The allowed variables are the variables of `pkg/docker/entrypoint.sh` of pgAdmin 9.19 without `PGADMIN_CONFIG_*`, which are set with `pgadmin_config`,
+and without the variables of the initialization managed by the role (`PGADMIN_SERVER_JSON_FILE`, `PGADMIN_PREFERENCES_JSON_FILE`,
+`PGADMIN_REPLACE_SERVERS_ON_STARTUP`, `PGPASS_FILE`, `PGADMIN_CUSTOM_CONFIG_DISTRO_FILE`), and `TZ`.
+New versions of pgAdmin may add settings, the lists are generated again.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `pgadmin_container`, it is merged over the default of the container.
-The merge is not recursive, `pgadmin_container.volumes` replaces the data directory and `servers.json`,
+Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `pgadmin_container`, it is merged over the default of the container.
+The merge is not recursive, `pgadmin_container.volumes` replaces the data directory and `config_system.py`,
 `pgadmin_container.environment` replaces the environment including `pgadmin_environment`, use `pgadmin_environment` instead.
-For a reverse proxy, e.g. Traefik, the labels are set with `pgadmin_labels`.
+The time zone of the container is set by podman with `pgadmin_timezone`.
+For a reverse proxy, e.g. Traefik, the labels are set with `pgadmin_labels`, the web interface listens on port 80.
+
+The dependencies of the quadlet unit are set with `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for`
+in `pgadmin_container`, the role writes them to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`:
+
+```yaml
+pgadmin_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/opt/pgadmin' ]
+```
 
 ### Validation
 
 The role checks before any change:
 
-- `pgadmin_secrets` is a list of entries with `name`, `data` and `target` and unique names
-- `PGADMIN_DEFAULT_EMAIL` is set and not empty, the secret `PGADMIN_DEFAULT_PASSWORD` exists
-- `pgadmin_servers` is empty or a dictionary with the dictionary `Servers`
-- neither a secret nor a file variable is set in `pgadmin_environment`
-- only allowed environment variables and secrets are set in the container
+- `pgadmin_secrets` is a list of entries with `name`, `data` and `target` and unique names, the secret `PGADMIN_DEFAULT_PASSWORD` exists
+- `PGADMIN_DEFAULT_EMAIL` is set, neither a secret nor its file variable is set in `pgadmin_environment`
+- `pgadmin_servers` is a dictionary with `Servers`
+- `pgadmin_config` is a dictionary of known settings without secrets, the boolean and integer settings checked by pgAdmin have the right type,
+  the values are strings without line breaks, numbers, booleans, lists, dictionaries or `null`
+- only allowed environment variables without line breaks and secrets are set
 
 If `pgadmin_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check` also on a host where it never ran before and compares `config_system.py`, `servers.json`, the secrets and the quadlet unit.
+The initialization and the start do not run in check mode.
+
 ### Restart and updates
 
-pgAdmin is restarted if it was running and a secret, the quadlet unit or `servers.json` changed, e.g. after changing `pgadmin_environment`,
-otherwise it is started and enabled.
+pgAdmin is restarted if it was running and `config_system.py`, a secret or the quadlet unit changed, otherwise it is started and enabled.
+A failed start reports the journal of the service.
 Updates of the image are done by `container_update` with `pgadmin_autoupdate_enabled: true` and `pgadmin_autoupdate_schedule`,
 without `pgadmin_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
+
+The settings of pgAdmin are set in `config_system.py` with `pgadmin_config` instead of `PGADMIN_CONFIG_<SETTING>` in `pgadmin_environment`,
+the values are YAML instead of Python literals, e.g.:
+
+- `PGADMIN_CONFIG_MAIL_SERVER: "'smtp.example.org'"` is `MAIL_SERVER: 'smtp.example.org'`
+- `PGADMIN_CONFIG_MAIL_PORT: '587'` is `MAIL_PORT: 587`
+- `PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: 'True'` is `ENHANCED_COOKIE_PROTECTION: true`
+
+The targets of the secrets of the settings are the settings: `PGADMIN_CONFIG_MAIL_PASSWORD` is `MAIL_PASSWORD`, `PGADMIN_CONFIG_LDAP_BIND_PASSWORD` is `LDAP_BIND_PASSWORD`,
+`PGADMIN_CONFIG_WEBSERVER_SHARED_SECRET` is `WEBSERVER_SHARED_SECRET`, `PGADMIN_CONFIG_CONFIG_DATABASE_URI` is `CONFIG_DATABASE_URI`,
+the passwords are read from files by `config_system.py` and are no longer passed in the environment.
+The admin is created and `servers.json` is loaded in the container `pgadmin-init`, the quadlet unit no longer contains them,
+`PGADMIN_REPLACE_SERVERS_ON_STARTUP` is not supported anymore.
+`TZ` is not set by default anymore, the time zone is set by podman with `pgadmin_timezone`.
+
+Changes of former versions:
 
 The single variables of former versions are replaced by `pgadmin_environment`, `pgadmin_secrets` and `pgadmin_servers`:
 
@@ -136,7 +161,7 @@ Now they are kept in `pgadmin_home/data`, the first start with the new role crea
 The password of the admin is mounted as file now instead of being passed as environment variable,
 the fixed name of the secret `pgadmin_password` is gone, the name is free. The former secret is not removed by the role,
 remove it with `podman secret rm pgadmin_password`.
-`/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with `TZ` and the timezone of the container.
+`/etc/localtime` and `/etc/timezone` are not mounted anymore, the timezone is set with the timezone of the container.
 `pgadmin_labels` has no default anymore, without it the container has no labels.
 `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
 The tag `database_pgadmin` stays, the tag `database` is added.
@@ -149,17 +174,21 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-pgadmin-default` | Only the mandatory variables, `PGADMIN_DEFAULT_EMAIL` and the secret `PGADMIN_DEFAULT_PASSWORD` |
-| `molecule-pgadmin` | IPv6, labels, a server in `pgadmin_servers`, `PGADMIN_CONFIG_LOGIN_BANNER`, `PGADMIN_CONFIG_MAIL_SERVER` and the secret `PGADMIN_CONFIG_MAIL_PASSWORD` in the environment |
+| `molecule-pgadmin` | IPv6, labels, dependencies, `GUNICORN_THREADS`, a server in `pgadmin_servers`, `LOGIN_BANNER`, `MAIL_SERVER` and `MAIL_PORT` in `pgadmin_config` and the secret `MAIL_PASSWORD` |
 
-`prepare` installs curl, creates the podman network, pulls the images and starts a PostgreSQL container.
-`side_effect` runs the role with `pgadmin_container` not a dictionary, a secret without `target`, without `PGADMIN_DEFAULT_EMAIL`, without the secret `PGADMIN_DEFAULT_PASSWORD`,
-`PGADMIN_DEFAULT_PASSWORD_FILE` and `PGADMIN_CONFIG_MAIL_PASSWORD` in the environment, `pgadmin_servers` without `Servers`,
-an unknown setting `PGADMIN_CONFIG_FOO`, an unknown environment variable in `pgadmin_container.environment` and an unknown secret
-and checks that it fails with the expected message and the quadlet unit and `servers.json` are unchanged (tasks marked `expect ERROR`),
-then it waits until the first start of pgAdmin on `molecule-pgadmin` has finished and changes `PGADMIN_CONFIG_LOGIN_BANNER`, the quadlet unit changes and pgAdmin has to restart.
-`verify` checks the quadlet unit with the volumes and the secrets, the service, the addresses and the environment of the container
-with the file variable set by the role and without the password, the file of the secret, the settings in `config_distro.py` including the password of the mail server,
-the data directory with the database of pgAdmin, logs in as admin with curl and checks the servers of the admin exported with `setup.py dump-servers`.
+`prepare` installs curl, creates the podman network, pulls the images and starts a PostgreSQL container, `check` runs `converge` with `--check` on the fresh VMs.
+`side_effect` runs the role with invalid variables and checks that it fails with the expected message and the quadlet unit, `config_system.py` and `servers.json`
+are unchanged (tasks marked `expect ERROR`): `pgadmin_container` and `pgadmin_config` not a dictionary, a secret without `target`, without `PGADMIN_DEFAULT_EMAIL`,
+without the secret `PGADMIN_DEFAULT_PASSWORD`, `PGADMIN_DEFAULT_PASSWORD_FILE` and `PGADMIN_CONFIG_LOGIN_BANNER` in the environment, `MAIL_PASSWORD` in `pgadmin_config`,
+`SERVER_MODE` as string, a line break in a setting and in the environment, `pgadmin_servers` without `Servers`, an unknown setting,
+an unknown environment variable in `pgadmin_container.environment` and an unknown secret.
+Then it waits for the login page and runs the role with `side_effect.role_vars` of the test case: `molecule-pgadmin` changes `LOGIN_BANNER`,
+only `config_system.py` changes and pgAdmin has to restart, `molecule-pgadmin-default` runs again without a change and must not restart,
+the initialization must not run again.
+`verify` checks the quadlet unit with the volumes, the mounted secret and the dependencies and without email, password, `TZ` and `servers.json`,
+the service, the addresses and the environment of the container, `config_system.py` and the settings pgAdmin reads from it in the container
+including the password of the mail server, that `pgadmin-init` was removed, the data directory with the database of pgAdmin,
+logs in as admin with curl and checks the servers of the admin exported with `setup.py dump-servers`.
 
 | Environment variable | Default | Description |
 |---|---|---|
