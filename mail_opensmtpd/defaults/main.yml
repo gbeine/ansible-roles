@@ -27,6 +27,9 @@ mail_opensmtpd__tls: "{{ opensmtpd_tls | default({}) }}"
 # One secret with name, data and the target secrets: the table mounted as /config/secrets, written as table secrets
 mail_opensmtpd__secrets: "{{ opensmtpd_secrets | default([]) }}"
 
+# The mail name of the host, written to <home>/mailname and mounted read-only as /etc/smtpd/mailname, empty without the file
+mail_opensmtpd__mailname: "{{ opensmtpd_mailname | default('') }}"
+
 # Variables of the image that are no options of OpenSMTPD, the options are set with opensmtpd_config
 mail_opensmtpd__environment: "{{ opensmtpd_environment }}"
 
@@ -163,6 +166,16 @@ mail_opensmtpd__config_file: "{{ mail_opensmtpd__podman_home }}/smtpd.conf"
 mail_opensmtpd__config_check_file: "{{ mail_opensmtpd__podman_home }}/smtpd.conf.check"
 # The mount point of the secret, podman cannot create it in the read-only home of the check
 mail_opensmtpd__secrets_mount_point: "{{ mail_opensmtpd__podman_home }}/secrets"
+# The image starts smtpd -f /etc/smtpd/smtpd.conf, smtpd.conf and mailname of the home are mounted there read-only
+mail_opensmtpd__config_target: '/etc/smtpd/smtpd.conf'
+mail_opensmtpd__mailname_file: "{{ mail_opensmtpd__podman_home }}/mailname"
+mail_opensmtpd__mailname_target: '/etc/smtpd/mailname'
+mail_opensmtpd__mailname_pattern: '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
+
+# The filters of files/ (opensmtpd-rewrite-from of Jakub Jirutka and filter-rewrite-to, ISC license), installed to <home>/filters,
+# used with proc-exec "/config/filters/<filter> <arguments>"
+mail_opensmtpd__filters_dir: "{{ mail_opensmtpd__podman_home }}/filters"
+mail_opensmtpd__filters: [ 'filter-rewrite-from', 'filter-rewrite-to' ]
 
 mail_opensmtpd__podman_container_default:
   name: "{{ mail_opensmtpd__podman_name }}"
@@ -178,9 +191,12 @@ mail_opensmtpd__podman_container_default:
   publish:
     - '25:25'
     - '[::]:25:25'
-  # opensmtpd_container.volumes replaces the list completely, /config contains smtpd.conf, tls and the spool
-  volumes:
-    - "{{ mail_opensmtpd__podman_home }}:/config"
+  # opensmtpd_container.volumes replaces the list completely, /config contains tls, the filters and the spool
+  volumes: >-
+    {{ [ mail_opensmtpd__podman_home ~ ':/config',
+         mail_opensmtpd__config_file ~ ':' ~ mail_opensmtpd__config_target ~ ':ro' ]
+       + ([ mail_opensmtpd__mailname_file ~ ':' ~ mail_opensmtpd__mailname_target ~ ':ro' ]
+          if mail_opensmtpd__mailname is string and mail_opensmtpd__mailname | length > 0 else []) }}
   # Copies the certificate of the realm on every start, a renewed certificate is used after the next restart.
   # install follows the links of the realm, the image changes the mode of a mounted key on the host.
   exec_start_pre: >-

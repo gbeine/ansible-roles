@@ -48,7 +48,8 @@
     - name: 'Read the files of the home directory'
       ansible.builtin.stat:
         path: "{{ mail_opensmtpd__test_home }}/{{ item }}"
-      loop: [ 'smtpd.conf', 'tls', 'tls/fullchain.pem', 'tls/privkey.pem', 'spool', 'smtpd.conf.check' ]
+      loop: [ 'smtpd.conf', 'tls', 'tls/fullchain.pem', 'tls/privkey.pem', 'spool', 'smtpd.conf.check', 'mailname',
+              'filters', 'filters/filter-rewrite-from', 'filters/filter-rewrite-to', 'filters/LICENSE' ]
       register: 'mail_opensmtpd__test_files'
 
     # The image creates the spool owned by root with 0711, OpenSMTPD reads the key only owned by root with at most 0740
@@ -61,6 +62,11 @@
           - mail_opensmtpd__test_modes['smtpd.conf.check'] == 'absent'
           - mail_opensmtpd__test_modes['tls/fullchain.pem'] == ('0644 root' if mail_opensmtpd__expect.tls else 'absent')
           - mail_opensmtpd__test_modes['tls/privkey.pem'] == ('0600 root' if mail_opensmtpd__expect.tls else 'absent')
+          - mail_opensmtpd__test_modes['mailname'] == ('absent' if mail_opensmtpd__expect.mailname is none else '0644 root')
+          - mail_opensmtpd__test_modes['filters'] == '0755 root'
+          - mail_opensmtpd__test_modes['filters/filter-rewrite-from'] == '0755 root'
+          - mail_opensmtpd__test_modes['filters/filter-rewrite-to'] == '0755 root'
+          - mail_opensmtpd__test_modes['filters/LICENSE'] == '0644 root'
         fail_msg: "{{ mail_opensmtpd__test_modes | to_json }}"
       vars:
         mail_opensmtpd__test_modes: >-
@@ -71,6 +77,21 @@
           {{ modes }}
 
     # pki_update restarts OpenSMTPD after a renewal of the certificate of the realm, only with TLS
+    # The image starts smtpd -f /etc/smtpd/smtpd.conf, smtpd.conf and mailname of the home are mounted there read-only
+    - name: 'Read smtpd.conf and the mail name in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'opensmtpd', 'cat', "{{ item }}" ]
+      loop: "{{ [ '/etc/smtpd/smtpd.conf' ] + ([ '/etc/smtpd/mailname' ] if mail_opensmtpd__expect.mailname is not none else []) }}"
+      register: 'mail_opensmtpd__test_mounted'
+      changed_when: false
+
+    - name: 'Assert smtpd.conf and the mail name in the container'
+      ansible.builtin.assert:
+        that:
+          - mail_opensmtpd__test_mounted.results[0].stdout == (mail_opensmtpd__test_config.content | b64decode).rstrip('\n')
+          - mail_opensmtpd__expect.mailname is none or mail_opensmtpd__test_mounted.results[1].stdout == mail_opensmtpd__expect.mailname
+        fail_msg: "{{ mail_opensmtpd__test_mounted.results | map(attribute='stdout') | list | to_json }}"
+
     - name: 'Read the override of pki_update'
       ansible.builtin.stat:
         path: '/etc/systemd/system/pki-update@opensmtpd.service.d/override.conf'
@@ -190,6 +211,8 @@
               - mail_opensmtpd__test_auth.auth.code == 235
               - mail_opensmtpd__test_auth.mail.code == 250
               - mail_opensmtpd__test_queue.stdout is search('test@example.org')
+              # The filter rewrite of the submission listener replaces the sender
+              - mail_opensmtpd__expect.sender is none or mail_opensmtpd__test_queue.stdout is search(mail_opensmtpd__expect.sender)
             fail_msg: >-
               wrong password: {{ mail_opensmtpd__test_auth_wrong.auth }}, password: {{ mail_opensmtpd__test_auth.auth }},
               mail: {{ mail_opensmtpd__test_auth.mail }}, queue: {{ mail_opensmtpd__test_queue.stdout_lines }}

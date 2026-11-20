@@ -9,7 +9,7 @@ mail_opensmtpd__test_network:
   ipv6_gateway: 'fd00:89::1'
   ipv6_prefixlength: 64
 
-mail_opensmtpd__test_image: 'c0d3.sh/container/opensmtpd:latest'
+mail_opensmtpd__test_image: 'c0d3cr.io/container/opensmtpd:latest'
 mail_opensmtpd__test_quadlet_path: '/etc/containers/systemd/opensmtpd.container'
 mail_opensmtpd__test_home: '/opt/opensmtpd-molecule'
 
@@ -44,11 +44,15 @@ mail_opensmtpd__test_cases:
       ip: '10.89.0.10'
       quadlet:
         - 'Volume=/opt/opensmtpd-molecule:/config'
+        - 'Volume=/opt/opensmtpd-molecule/smtpd.conf:/etc/smtpd/smtpd.conf:ro'
         - 'PublishPort=25:25'
       quadlet_absent:
         - 'Secret='
         - 'Environment='
         - 'ExecStartPre='
+        - '/etc/smtpd/mailname'
+      mailname: ~
+      sender: ~
       config:
         - 'listen on 0.0.0.0'
         - 'action "relay" relay'
@@ -73,10 +77,14 @@ mail_opensmtpd__test_cases:
           target: 'secrets'
       opensmtpd_environment:
         TZ: 'Europe/Berlin'
+      opensmtpd_mailname: 'mail.molecule.test'
       opensmtpd_config:
+        # The filter of the role rewrites the sender of the submission
+        filter:
+          rewrite: 'proc-exec "/config/filters/filter-rewrite-from noreply@molecule.test"'
         listen:
           - "on 0.0.0.0 tls pki {{ mail_opensmtpd__test_realm }}"
-          - "on 0.0.0.0 port 587 tls-require pki {{ mail_opensmtpd__test_realm }} auth <secrets>"
+          - "on 0.0.0.0 port 587 tls-require pki {{ mail_opensmtpd__test_realm }} auth <secrets> filter \"rewrite\""
         action:
           molecule: "{{ mail_opensmtpd__test_relay }}"
         match:
@@ -94,6 +102,8 @@ mail_opensmtpd__test_cases:
       ip: '10.89.0.11'
       quadlet:
         - 'Volume=/opt/opensmtpd-molecule:/config'
+        - 'Volume=/opt/opensmtpd-molecule/smtpd.conf:/etc/smtpd/smtpd.conf:ro'
+        - 'Volume=/opt/opensmtpd-molecule/mailname:/etc/smtpd/mailname:ro'
         - 'Secret=opensmtpd-molecule,type=mount,target=/config/secrets,uid=0,gid=100,mode=0440'
         - 'Environment=TZ=Europe/Berlin'
         # The certificate of certbot of side_effect
@@ -106,11 +116,15 @@ mail_opensmtpd__test_cases:
         - 'smtp max-message-size 20M'
         - 'table "secrets" file:/config/secrets'
         - 'listen on 0.0.0.0 tls pki mx.molecule.test'
-        - 'listen on 0.0.0.0 port 587 tls-require pki mx.molecule.test auth <secrets>'
+        - 'listen on 0.0.0.0 port 587 tls-require pki mx.molecule.test auth <secrets> filter "rewrite"'
+        - 'filter "rewrite" proc-exec "/config/filters/filter-rewrite-from noreply@molecule.test"'
         - 'action "molecule" relay host smtp://192.0.2.1'
         - 'match from auth for any action "molecule"'
       tls: true
       secrets: true
       # The certificate of certbot of side_effect
       pki_certificate: '/opt/certbot/etc/live/mx.molecule.test/fullchain.pem'
-      banner: 'mx.molecule.test'
+      # OpenSMTPD uses /etc/smtpd/mailname as its host name
+      banner: 'mail.molecule.test'
+      mailname: 'mail.molecule.test'
+      sender: 'noreply@molecule.test'

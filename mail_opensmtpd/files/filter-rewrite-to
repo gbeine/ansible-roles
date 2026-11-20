@@ -1,0 +1,94 @@
+#!/usr/bin/awk -f
+# vim: set ft=awk: ts=4:
+#
+# USAGE:
+#   filter <filter-name> proc-exec "/path/to/filter-rewrite-to <old-domain> <new-domain>"
+#
+# OpenSMTPD filter that rewrites email address in To header with the
+# specified domain.
+#
+# ARGUMENTS:
+#   <old-domain> The old domain used in the To header
+#   <new-domain> The domain that should be used in the To header
+
+function die(msg) {
+	printf("rewrite-to: %s\n", msg) > "/dev/stderr"
+	exit 1
+}
+
+# Replaces OLD domain, and appends @NEW to addresses without a domain.
+function replace_mailaddr(s, n, parts, i, p, out) {
+	gsub(OLD_RE, "@" NEW, s)
+	n = split(s, parts, ",")
+	out = ""
+	for (i = 1; i <= n; i++) {
+		p = parts[i]
+		if (p ~ /<[^@>]*>/)
+			sub(/>/, "@" NEW ">", p)           # Name <root>
+		else if (p !~ /@/ && p ~ /[^ \t]/)
+			sub(/[ \t]*$/, "@" NEW, p)         # root
+		out = out (i > 1 ? "," : "") p
+	}
+	return out
+}
+
+BEGIN {
+	ARGC = 0  # don't treat additional CLI args as input files
+	FS = "|"
+	OFS = FS
+	_ = FS
+	OLD = ARGV[1]
+	NEW = ARGV[2]
+	in_body[""] = 0
+	in_to[""] = 0
+
+	if (!OLD || !NEW) {
+		die("invalid usage: old and new domain must be provided!")
+	}
+	OLD_RE = "@" OLD
+	gsub(/\./, "[.]", OLD_RE)  # dots are literal
+}
+
+"config|ready" == $0 {
+	print("register|filter|smtp-in|data-line")
+	print("register|ready")
+	fflush()
+	next
+}
+"config" == $1 {
+	next
+}
+"filter" == $1 {
+	if (NF < 7) {
+		die("invalid filter command: expected >6 fields!")
+	}
+	sid = $6
+	token = $7
+	line = substr($0, length($1$2$3$4$5$6$7) + 8)
+    printf("rewrite-to: sid=%s line=%s\n", sid, line) > "/dev/stderr"
+
+	# continue with next rule...
+}
+"filter|smtp-in|data-line" == $1_$4_$5 {
+	if (line == "") {  # end of headers
+		in_body[sid] = 1
+		delete in_to[sid]
+	}
+	if (!in_body[sid]) {
+		if (toupper(line) ~ /^TO:/) {
+			in_to[sid] = 1
+			line = "To:" replace_mailaddr(substr(line, 4))
+		} else if (line ~ /^[ \t]/ && (sid in in_to)) {  # folded To header
+			gsub(OLD_RE, "@" NEW, line)
+		} else {
+			delete in_to[sid]
+		}
+	}
+	if (line == ".") {  # end of data
+		delete in_body[sid]
+		delete in_to[sid]
+	}
+	print("filter-dataline", sid, token, line)
+	fflush()
+	next
+}
