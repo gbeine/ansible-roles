@@ -1,0 +1,70 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_gitlab_ce__test_network }}"
+    podman_default_network: "{{ app_gitlab_ce__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ app_gitlab_ce__test_image }}"
+
+    # The realm of molecule-gitlab-ce, laid out like the realms of pki_easyrsa_deploy and pki_certbot
+    - name: 'Create the realm of the registry'
+      when: inventory_hostname == 'molecule-gitlab-ce'
+      block:
+
+        - name: 'Install the cryptography library'
+          ansible.builtin.apt:
+            name: 'python3-cryptography'
+            update_cache: true
+
+        - name: 'Create the directory of the realm'
+          ansible.builtin.file:
+            path: "{{ app_gitlab_ce__test_realm.dir }}"
+            mode: '0755'
+            state: 'directory'
+
+        - name: 'Create the key of the realm'
+          community.crypto.openssl_privatekey:
+            path: "{{ app_gitlab_ce__test_realm.dir }}/privkey.pem"
+            mode: '0600'
+
+        - name: 'Create the request of the realm'
+          community.crypto.openssl_csr_pipe:
+            privatekey_path: "{{ app_gitlab_ce__test_realm.dir }}/privkey.pem"
+            common_name: "{{ app_gitlab_ce__test_realm.address }}"
+            subject_alt_name: [ "IP:{{ app_gitlab_ce__test_realm.address }}" ]
+            basic_constraints: [ 'CA:TRUE' ]
+            basic_constraints_critical: true
+          register: 'app_gitlab_ce__test_csr'
+
+        - name: 'Create the self-signed certificate of the realm'
+          community.crypto.x509_certificate:
+            path: "{{ app_gitlab_ce__test_realm.dir }}/fullchain.pem"
+            csr_content: "{{ app_gitlab_ce__test_csr.csr }}"
+            privatekey_path: "{{ app_gitlab_ce__test_realm.dir }}/privkey.pem"
+            provider: 'selfsigned'
+            mode: '0644'
+
+        # The certificate is its own CA
+        - name: 'Create the chain of the realm'
+          ansible.builtin.copy:
+            src: "{{ app_gitlab_ce__test_realm.dir }}/fullchain.pem"
+            dest: "{{ app_gitlab_ce__test_realm.dir }}/chain.pem"
+            remote_src: true
+            mode: '0644'

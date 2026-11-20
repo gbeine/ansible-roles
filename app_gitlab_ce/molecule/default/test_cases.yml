@@ -1,0 +1,167 @@
+---
+# Network created by container_podman in prepare.yml
+app_gitlab_ce__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_gitlab_ce__test_image: 'docker.io/gitlab/gitlab-ce:latest'
+app_gitlab_ce__test_quadlet_path: '/etc/containers/systemd/gitlab-ce.container'
+
+# The realm created by prepare.yml on molecule-gitlab-ce, a self-signed certificate for the address of the registry
+app_gitlab_ce__test_realm:
+  name: 'gitlab-molecule'
+  dir: '/etc/pki/realms/gitlab-molecule'
+  address: '10.89.0.121'
+
+# The time zone is set by podman and gitlab_rails.time_zone, neither TZ nor the files of the host are passed
+app_gitlab_ce__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone' ]
+
+app_gitlab_ce__test_cases:
+
+  # Only the mandatory variables, external_url is set by the image from the hostname
+  - name: 'molecule-gitlab-ce-default'
+    role_vars:
+      gitlab_home: '/opt/gitlab'
+      gitlab_ip: '10.89.0.120'
+      gitlab_network: 'podman-molecule'
+      gitlab_hostname: 'gitlab-default'
+      gitlab_timezone: 'Europe/Berlin'
+    # Runs again without a change, GitLab must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      ip: '10.89.0.120'
+      ip6: ~
+      home: '/opt/gitlab'
+      url: 'http://10.89.0.120'
+      quadlet:
+        - 'Volume=/opt/gitlab/config:/etc/gitlab'
+        - 'Volume=/opt/gitlab/data:/var/opt/gitlab'
+        - 'Volume=/opt/gitlab/logs:/var/log/gitlab'
+        - 'ShmSize=256m'
+        - 'StopTimeout=120'
+        - 'TimeoutStartSec=900'
+        - 'TimeoutStopSec=150'
+      quadlet_absent: "{{ app_gitlab_ce__test_quadlet_absent + [ 'Secret=', 'Environment=', 'ExecStartPre=', 'Wants=' ] }}"
+      config:
+        - "gitlab_rails['time_zone'] = 'Europe/Berlin'"
+        - "gitlab_rails['monitoring_whitelist'] = ['127.0.0.0/8', '::1/128']"
+      login: ~
+      registry: ~
+
+  # IPv6, labels, dependencies, options, secrets in gitlab.rb, LDAP with gitlab_keys and the registry with the certificate of a realm
+  - name: 'molecule-gitlab-ce'
+    role_vars:
+      gitlab_home: '/srv/gitlab'
+      gitlab_ip: '10.89.0.121'
+      gitlab_ipv6: 'fd00:89::121'
+      gitlab_network: 'podman-molecule'
+      gitlab_hostname: 'gitlab-molecule'
+      gitlab_timezone: 'Europe/Berlin'
+      gitlab_labels:
+        traefik.enable: 'false'
+      gitlab_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+      gitlab_config:
+        external_url: 'http://10.89.0.121'
+        registry_external_url: 'https://10.89.0.121:5050'
+        gitlab_rails:
+          gitlab_ssh_host: 'ssh.example.org'
+          gitlab_default_theme: 1
+          smtp_enable: true
+          smtp_address: 'mail.example.org'
+          smtp_port: 465
+          smtp_user_name: 'gitlab@example.org'
+          smtp_tls: true
+          ldap_enabled: true
+          ldap_servers:
+            main:
+              label: 'LDAP'
+              host: 'ldap.example.org'
+              port: 389
+              uid: 'uid'
+              bind_dn: 'cn=gitlab,dc=example,dc=org'
+              encryption: 'plain'
+              base: 'dc=example,dc=org'
+      gitlab_keys:
+        ldap_servers: [ 'main' ]
+      gitlab_secrets:
+        - name: 'gitlab_root_password'
+          data: 'Mlc7-rqZt42-Vx9!'
+          target: 'gitlab_rails.initial_root_password'
+        - name: 'gitlab_smtp_password'
+          data: 'molecule-smtp-password'
+          target: 'gitlab_rails.smtp_password'
+        - name: 'gitlab_ldap_password'
+          data: 'molecule-ldap-password'
+          target: 'gitlab_rails.ldap_servers.main.password'
+      gitlab_tls:
+        realm: 'gitlab-molecule'
+    # The changed theme changes gitlab.rb, GitLab has to restart
+    side_effect:
+      role_vars:
+        gitlab_config:
+          external_url: 'http://10.89.0.121'
+          registry_external_url: 'https://10.89.0.121:5050'
+          gitlab_rails:
+            gitlab_ssh_host: 'ssh.example.org'
+            gitlab_default_theme: 2
+            smtp_enable: true
+            smtp_address: 'mail.example.org'
+            smtp_port: 465
+            smtp_user_name: 'gitlab@example.org'
+            smtp_tls: true
+            ldap_enabled: true
+            ldap_servers:
+              main:
+                label: 'LDAP'
+                host: 'ldap.example.org'
+                port: 389
+                uid: 'uid'
+                bind_dn: 'cn=gitlab,dc=example,dc=org'
+                encryption: 'plain'
+                base: 'dc=example,dc=org'
+    expect:
+      restart: true
+      ip: '10.89.0.121'
+      ip6: 'fd00:89::121'
+      home: '/srv/gitlab'
+      url: 'http://10.89.0.121'
+      quadlet:
+        - 'Volume=/srv/gitlab/config:/etc/gitlab'
+        - 'Label=traefik.enable=false'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+        - 'Secret=gitlab_root_password,type=mount,target=/run/secrets/gitlab_root_password,uid=0,gid=0,mode=0400'
+        - 'Secret=gitlab_ldap_password,type=mount,target=/run/secrets/gitlab_ldap_password,uid=0,gid=0,mode=0400'
+        - 'ExecStartPre=install -o root -g root -m 0644 /etc/pki/realms/gitlab-molecule/fullchain.pem /srv/gitlab/config/ssl/tls.crt'
+        - 'ExecStartPre=install -o root -g root -m 0600 /etc/pki/realms/gitlab-molecule/privkey.pem /srv/gitlab/config/ssl/tls.key'
+        - 'ExecStartPre=install -o root -g root -m 0644 /etc/pki/realms/gitlab-molecule/chain.pem /srv/gitlab/config/trusted-certs/gitlab-molecule.crt'
+        - 'StopTimeout=120'
+        - 'TimeoutStartSec=900'
+        - 'TimeoutStopSec=150'
+      quadlet_absent: "{{ app_gitlab_ce__test_quadlet_absent }}"
+      # After side_effect
+      config:
+        - "external_url 'http://10.89.0.121'"
+        - "registry_external_url 'https://10.89.0.121:5050'"
+        - "gitlab_rails['time_zone'] = 'Europe/Berlin'"
+        - "gitlab_rails['gitlab_default_theme'] = 2"
+        - "gitlab_rails['smtp_tls'] = true"
+        - "gitlab_rails['ldap_servers'] = { 'main' => { 'label' => 'LDAP', 'host' => 'ldap.example.org', 'port' => 389, 'uid' => 'uid', 'bind_dn' => 'cn=gitlab,dc=example,dc=org', 'encryption' => 'plain', 'base' => 'dc=example,dc=org' } }"
+        - "registry['nginx']['ssl_certificate'] = '/etc/gitlab/ssl/tls.crt'"
+        - "registry['nginx']['ssl_certificate_key'] = '/etc/gitlab/ssl/tls.key'"
+        - "gitlab_rails['initial_root_password'] = File.read('/run/secrets/gitlab_root_password').chomp"
+        - "gitlab_rails['smtp_password'] = File.read('/run/secrets/gitlab_smtp_password').chomp"
+        - "gitlab_rails['ldap_servers']['main']['password'] = File.read('/run/secrets/gitlab_ldap_password').chomp"
+      login:
+        user: 'root'
+        password: 'Mlc7-rqZt42-Vx9!'
+      registry: 'https://10.89.0.121:5050/v2/'

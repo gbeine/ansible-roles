@@ -1,91 +1,428 @@
 ---
 
-- name: Deploy GitLab CE container
-  tags: [ 'app_gitlab_ce' ]
+- name: 'Install GitLab CE'
+  tags: [ 'app', 'app_gitlab_ce' ]
   block:
 
-    - name: Create directories for GitLab CE
+    # A failing template in the variables (e.g. gitlab_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_gitlab_ce__container | length > 0
+          - app_gitlab_ce__config is mapping
+        fail_msg: 'gitlab_config has to be a dictionary.'
+        quiet: true
+
+    - name: 'Validate the keys'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_ce__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_gitlab_ce__invalid: >-
+          {%- set errors = [] -%}
+          {%- set keys = app_gitlab_ce__keys -%}
+          {%- if keys is not mapping -%}
+          {%-   set _ = errors.append('`gitlab_keys` has to be a dictionary') -%}
+          {%- else -%}
+          {%-   set unknown = keys.keys() | map('string') | reject('in', app_gitlab_ce__keys_families) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('unknown entries in `gitlab_keys`: ' ~ unknown | join(', ')
+                                        ~ ', allowed are ' ~ app_gitlab_ce__keys_families | join(', ')) -%}
+          {%-   endif -%}
+          {%-   for family in app_gitlab_ce__keys_families if family in keys -%}
+          {%-     set values = keys[family] -%}
+          {%-     if values is not sequence or values is string or values is mapping -%}
+          {%-       set _ = errors.append('`gitlab_keys.' ~ family ~ '` has to be a list') -%}
+          {%-     else -%}
+          {%-       set invalid = values | select('string') | reject('match', app_gitlab_ce__key_pattern) | list
+                                  + values | reject('string') | map('string') | list -%}
+          {%-       if invalid | length > 0 -%}
+          {%-         set _ = errors.append('`gitlab_keys.' ~ family ~ '` contains invalid keys, allowed are lowercase letters, digits and _ starting with a letter: '
+                                            ~ invalid | unique | join(', ')) -%}
+          {%-       elif values | unique | list | length != values | length -%}
+          {%-         set _ = errors.append('`gitlab_keys.' ~ family ~ '` contains duplicate keys') -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_ce__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_gitlab_ce__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_gitlab_ce__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`gitlab_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`gitlab_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `gitlab_secrets` have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of `gitlab_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The options are <attribute>.<key>, the content of the values is not checked,
+    # except line breaks and the options set by the secrets and gitlab_tls
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_ce__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_gitlab_ce__errors: >-
+          {%- macro lines(value, path, ns) -%}
+          {%-   if value is string -%}
+          {%-     if value is search('[\n\r]') -%}
+          {%-       set ns.lines = ns.lines + [ path ] -%}
+          {%-     endif -%}
+          {%-   elif value is mapping -%}
+          {%-     for key, item in value.items() -%}
+          {%-       if (key | string) is search('[\n\r]') -%}
+          {%-         set ns.lines = ns.lines + [ path ] -%}
+          {%-       endif -%}
+          {%-       set _ = lines(item, path ~ '.' ~ key, ns) -%}
+          {%-     endfor -%}
+          {%-   elif value is sequence -%}
+          {%-     for item in value -%}
+          {%-       set _ = lines(item, path, ns) -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endmacro -%}
+          {%- macro find(value, keys) -%}
+          {%-   if keys | length == 0 -%}{{ 'set' if value is not none }}
+          {%-   elif value is mapping and keys[0] in value -%}{{ find(value[keys[0]], keys[1:]) }}
+          {%-   endif -%}
+          {%- endmacro -%}
+          {%- set errors = [] -%}
+          {%- set config = app_gitlab_ce__config -%}
+          {%- set ns = namespace(lines=[]) -%}
+          {%- set unknown = [] -%}
+          {%- for key, value in config.items() -%}
+          {%-   if value is mapping -%}
+          {%-     for option in value.keys() | map('string') | map('regex_replace', '^', key ~ '.') | reject('in', app_gitlab_ce__config_allowed) -%}
+          {%-       set _ = unknown.append(option) -%}
+          {%-     endfor -%}
+          {%-   elif key not in app_gitlab_ce__config_settings -%}
+          {%-     set _ = unknown.append(key | string) -%}
+          {%-   endif -%}
+          {%-   set _ = lines(value, key | string, ns) -%}
+          {%- endfor -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in gitlab_config: ' ~ (unknown | join(', '))
+                                    ~ '. Allowed are the settings ' ~ (app_gitlab_ce__config_settings | join(', '))
+                                    ~ ' and the options of gitlab.rb.template (app_gitlab_ce__config_allowed).') -%}
+          {%- endif -%}
+          {%- set targets = app_gitlab_ce__secrets_valid | map(attribute='target') | map('string')
+                            | select('in', app_gitlab_ce__secrets_allowed) | list -%}
+          {%- set secrets = [] -%}
+          {%- for target in targets if find(config, target.split('.')) == 'set' -%}
+          {%-   set _ = secrets.append(target) -%}
+          {%- endfor -%}
+          {%- if secrets | length > 0 -%}
+          {%-   set _ = errors.append('Options set by gitlab_secrets must not be set in gitlab_config: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- macro option_value(options, keys) -%}
+          {%-   if keys | length == 0 -%}{{ options }}
+          {%-   elif options is mapping and keys[0] in options -%}{{ option_value(options[keys[0]], keys[1:]) }}
+          {%-   endif -%}
+          {%- endmacro -%}
+          {%- set tls = [] -%}
+          {%- for path in app_gitlab_ce__config_tls_paths if app_gitlab_ce__tls_valid | bool
+                and option_value(config, path.split('.')) != option_value(app_gitlab_ce__config_tls, path.split('.')) -%}
+          {%-   set _ = tls.append(path) -%}
+          {%- endfor -%}
+          {%- if tls | length > 0 -%}
+          {%-   set _ = errors.append('Options set for gitlab_tls must not be set in gitlab_config: ' ~ (tls | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the certificate'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_ce__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_gitlab_ce__errors: >-
+          {%- set errors = [] -%}
+          {%- set tls = app_gitlab_ce__tls -%}
+          {%- if tls is not mapping -%}
+          {%-   set _ = errors.append('gitlab_tls has to be a dictionary with the realm, e.g. { "realm": "gitlab.example.org" }.') -%}
+          {%- elif tls | length > 0 -%}
+          {%-   set unknown = tls.keys() | map('string') | reject('in', app_gitlab_ce__tls_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in gitlab_tls: ' ~ (unknown | join(', ')) ~ ', allowed are realm and dir.') -%}
+          {%-   endif -%}
+          {%-   if not (app_gitlab_ce__tls_realm is string and app_gitlab_ce__tls_realm is match(app_gitlab_ce__realm_pattern)) -%}
+          {%-     set _ = errors.append('gitlab_tls.realm is the name of a realm of letters, digits, _, . and -.') -%}
+          {%-   endif -%}
+          {%-   if not app_gitlab_ce__tls_dir_valid | bool -%}
+          {%-     set _ = errors.append('gitlab_tls.dir has to be an absolute path without line breaks, e.g. /opt/certbot/etc/live.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__home is string
+          - app_gitlab_ce__home is match('^/')
+        fail_msg: 'gitlab_home has to be an absolute path'
+        quiet: true
+
+    # Checks the environment and the secrets of the container after merging gitlab_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_ce__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_gitlab_ce__environment_checked: >-
+          {{ app_gitlab_ce__container.environment if app_gitlab_ce__container.environment is mapping else {} }}
+        app_gitlab_ce__environment_unknown: >-
+          {{ app_gitlab_ce__environment_checked.keys() | reject('in', app_gitlab_ce__environment_allowed) | list }}
+        app_gitlab_ce__environment_line_breaks: >-
+          {{ app_gitlab_ce__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_gitlab_ce__secrets_unknown: >-
+          {{ app_gitlab_ce__secrets_valid | map(attribute='target') | map('string') | reject('in', app_gitlab_ce__secrets_allowed) | list }}
+        app_gitlab_ce__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_gitlab_ce__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_gitlab_ce__environment_unknown | join(', '))
+                                    ~ '. Allowed are ' ~ (app_gitlab_ce__environment_allowed | join(', '))
+                                    ~ ', the options of GitLab are set with gitlab_config, the passwords with gitlab_secrets.') -%}
+          {%- endif -%}
+          {%- if app_gitlab_ce__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_gitlab_ce__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_gitlab_ce__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_gitlab_ce__secrets_unknown | join(', '))
+                                    ~ '. Allowed are the passwords, secrets and tokens of gitlab.rb.template (app_gitlab_ce__secrets_allowed_options)'
+                                    ~ ' and gitlab_rails.ldap_servers.<key>.password with the keys in gitlab_keys.ldap_servers.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The realm is deployed on the host by pki_easyrsa_deploy or pki_certbot
+    - name: 'Find the certificate of the realm'
+      ansible.builtin.stat:
+        path: "{{ item.src }}"
+      loop: "{{ app_gitlab_ce__tls_files if app_gitlab_ce__tls_valid | bool else [] }}"
+      loop_control:
+        label: "{{ item.src }}"
+      register: 'app_gitlab_ce__tls_stat'
+
+    # In check mode pki_easyrsa_deploy and pki_certbot do not create a new realm, the missing files are only reported
+    - name: 'Validate the certificate of the realm'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or app_gitlab_ce__tls_missing | length == 0
+        fail_msg: "{{ app_gitlab_ce__tls_message }}"
+        quiet: true
+      vars:
+        app_gitlab_ce__tls_missing: "{{ app_gitlab_ce__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+        app_gitlab_ce__tls_message: >-
+          These files of the realm {{ app_gitlab_ce__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ app_gitlab_ce__tls_missing | join(', ') }}.
+
+    - name: 'Report the missing certificate of the realm in check mode'
+      ansible.builtin.debug:
+        msg: >-
+          These files of the realm {{ app_gitlab_ce__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ app_gitlab_ce__tls_missing | join(', ') }}.
+      when:
+        - ansible_check_mode
+        - app_gitlab_ce__tls_missing | length > 0
+      vars:
+        app_gitlab_ce__tls_missing: "{{ app_gitlab_ce__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+
+    # The image runs GitLab as root, the modes are the ones gitlab-ctl reconfigure sets, it changes the owners below data and logs itself
+    - name: 'Create the directories'
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
         owner: 'root'
         group: 'root'
+        mode: "{{ item.mode }}"
         state: 'directory'
-      with_items:
-        - "{{ app_gitlab_ce__data_dir }}"
-        - "{{ app_gitlab_ce__logs_dir }}"
-        - "{{ app_gitlab_ce__config_dir }}"
-        - "{{ app_gitlab_ce__ssl_dir }}"
-        - "{{ app_gitlab_ce__trusted_certs_dir }}"
+      loop:
+        - path: "{{ app_gitlab_ce__home }}"
+          mode: '0755'
+        - path: "{{ app_gitlab_ce__config_dir }}"
+          mode: '0775'
+        - path: "{{ app_gitlab_ce__ssl_dir }}"
+          mode: '0755'
+        - path: "{{ app_gitlab_ce__trusted_certs_dir }}"
+          mode: '0755'
+        - path: "{{ app_gitlab_ce__data_dir }}"
+          mode: '0755'
+        - path: "{{ app_gitlab_ce__logs_dir }}"
+          mode: '0755'
+      loop_control:
+        label: "{{ item.path }}"
 
-    - name: Create GitLab CE configuration
+    # gitlab-ctl reconfigure reads gitlab.rb on every start, the passwords are read from the files of the secrets
+    - name: 'Write gitlab.rb'
       ansible.builtin.template:
         src: 'gitlab.rb.j2'
-        dest: "{{ app_gitlab_ce__config_dir }}/gitlab.rb"
+        dest: "{{ app_gitlab_ce__config_file }}"
         owner: 'root'
         group: 'root'
-        mode: '640'
-      when: not podman___update_mode
+        mode: '0600'
+      register: 'app_gitlab_ce__config_result'
 
-    - name: SSL for registry
-      ansible.builtin.copy:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        remote_src: 'yes'
-      with_items:
-        - src: "{{ pki_easyrsa_common__realms_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}/private/{{ app_gitlab_ce__registry_ssl_realm }}.key"
-          dest: "{{ app_gitlab_ce__ssl_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}.key"
-        - src: "{{ pki_easyrsa_common__realms_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}/public/{{ app_gitlab_ce__registry_ssl_realm }}.fullchain.crt"
-          dest: "{{ app_gitlab_ce__ssl_dir }}/{{ app_gitlab_ce__registry_ssl_realm }}.crt"
-      when: app_gitlab_ce__registry_enable
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_gitlab_ce__secrets_valid }}"
+      register: 'app_gitlab_ce__secrets_result'
 
-    - name: Copy SSL CA into containers
-      ansible.builtin.copy:
-        src: "{{ pki_easyrsa_deploy__ca_certificates_file }}"
-        dest: "{{ app_gitlab_ce__config_dir }}/trusted-certs/{{ pki_easyrsa_deploy__ca_name }}.crt"
-        remote_src: yes
-      when: not ansible_check_mode
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
 
-    - name: Create podman containers
+    - name: 'Install container'
       containers.podman.podman_container:
-        name: "{{ app_gitlab_ce__container_default.name }}"
-        hostname: "{{ app_gitlab_ce__container_default.hostname }}"
-        image: "{{ app_gitlab_ce__container_default.image }}"
-        ip: "{{ app_gitlab_ce__container_default.ip }}"
-        network: "{{ app_gitlab_ce__container_default.network }}"
-        expose: "{{ app_gitlab_ce__container_default.expose }}"
-        publish: "{{ app_gitlab_ce__container_default.publish }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ app_gitlab_ce__container_default.restart_policy }}"
-        etc_hosts: "{{ app_gitlab_ce__container_default.hosts }}"
-        shm_size: "{{ app_gitlab_ce__container_default.shm_size }}"
-        env: "{{ app_gitlab_ce__container_default.environment }}"
-        timezone: "{{ app_gitlab_ce__container_default.timezone | mandatory }}"
-        volume: "{{ [
-          app_gitlab_ce__config_dir + ':/etc/gitlab',
-          app_gitlab_ce__data_dir + ':/var/opt/gitlab',
-          app_gitlab_ce__logs_dir + ':/var/log/gitlab'
-        ] }}"
-      when: app_gitlab_ce__ipv6 | length == 0
+        name: "{{ app_gitlab_ce__container.name }}"
+        hostname: "{{ app_gitlab_ce__container.hostname }}"
+        image: "{{ app_gitlab_ce__container.image }}"
+        ip: "{{ app_gitlab_ce__container.ip }}"
+        ip6: "{{ app_gitlab_ce__container.ipv6 | default(omit) }}"
+        network: "{{ app_gitlab_ce__container.network }}"
+        timezone: "{{ app_gitlab_ce__container.timezone }}"
+        command: "{{ app_gitlab_ce__container.command | default(omit) }}"
+        env: "{{ app_gitlab_ce__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_gitlab_ce__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_gitlab_ce__container.expose | default(omit) }}"
+        label: "{{ app_gitlab_ce__container.labels | default(omit) }}"
+        publish: "{{ app_gitlab_ce__container.publish | default(omit) }}"
+        secrets: "{{ app_gitlab_ce__container.secrets | default(omit) }}"
+        shm_size: "{{ app_gitlab_ce__container.shm_size | default(omit) }}"
+        stop_timeout: "{{ app_gitlab_ce__container.stop_timeout | default(omit) }}"
+        volume: "{{ app_gitlab_ce__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
 
-    - name: Create podman containers
-      containers.podman.podman_container:
-        name: "{{ app_gitlab_ce__container_default.name }}"
-        hostname: "{{ app_gitlab_ce__container_default.hostname }}"
-        image: "{{ app_gitlab_ce__container_default.image }}"
-        ip: "{{ app_gitlab_ce__container_default.ip }}"
-        ip6: "{{ app_gitlab_ce__container_default.ipv6 }}"
-        network: "{{ app_gitlab_ce__container_default.network }}"
-        expose: "{{ app_gitlab_ce__container_default.expose }}"
-        publish: "{{ app_gitlab_ce__container_default.publish }}"
-        recreate: "{{ podman___update_mode | default(false) }}"
-        restart_policy: "{{ app_gitlab_ce__container_default.restart_policy }}"
-        etc_hosts: "{{ app_gitlab_ce__container_default.hosts }}"
-        shm_size: "{{ app_gitlab_ce__container_default.shm_size }}"
-        env: "{{ app_gitlab_ce__container_default.environment }}"
-        timezone: "{{ app_gitlab_ce__container_default.timezone | mandatory }}"
-        volume: "{{ [
-          app_gitlab_ce__config_dir + ':/etc/gitlab',
-          app_gitlab_ce__data_dir + ':/var/opt/gitlab',
-          app_gitlab_ce__logs_dir + ':/var/log/gitlab'
-        ] }}"
-      when: app_gitlab_ce__ipv6 | length > 0
+          [Service]
+          {% for command in app_gitlab_ce__container.exec_start_pre | default([]) %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          {% if app_gitlab_ce__container.timeout_start is defined %}
+          TimeoutStartSec={{ app_gitlab_ce__container.timeout_start }}
+          {% endif %}
+          {% if app_gitlab_ce__container.stop_timeout is defined %}
+          TimeoutStopSec={{ app_gitlab_ce__container.stop_timeout | int + 30 }}
+          {% endif %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_gitlab_ce__container.requires is defined %}
+          Requires={{ app_gitlab_ce__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_ce__container.wants is defined %}
+          Wants={{ app_gitlab_ce__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_ce__container.after is defined %}
+          After={{ app_gitlab_ce__container.after | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_ce__container.part_of is defined %}
+          PartOf={{ app_gitlab_ce__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_ce__container.binds_to is defined %}
+          BindsTo={{ app_gitlab_ce__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_ce__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_gitlab_ce__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_gitlab_ce__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start GitLab CE'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_gitlab_ce__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_gitlab_ce__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_gitlab_ce__running: >-
+              {{ (ansible_facts.services[app_gitlab_ce__container.name + '.service'].state | default('')) == 'running' }}
+            # gitlab-ctl reconfigure only runs at the start of the container
+            app_gitlab_ce__restart: >-
+              {{ app_gitlab_ce__running | bool
+                 and (app_gitlab_ce__config_result is changed
+                      or app_gitlab_ce__secrets_result is changed
+                      or app_gitlab_ce__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ app_gitlab_ce__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'app_gitlab_ce__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_gitlab_ce__container.name ~ ' did not start' ] + app_gitlab_ce__start_journal.stdout_lines }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_gitlab_ce__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_gitlab_ce__container.name }}"
+        container_image: "{{ app_gitlab_ce__container.image }}"
+        container_schedule: "{{ app_gitlab_ce__autoupdate_schedule }}"
+
+    # ExecStartPre copies the certificate only at the start, the timer restarts GitLab after a renewal
+    - name: 'Enable the restart after a renewal of the certificate'
+      when:
+        - app_gitlab_ce__tls_valid | bool
+        - app_gitlab_ce__pki_update_enabled | bool
+      ansible.builtin.include_role:
+        name: 'pki_update'
+      vars:
+        pki_service: "{{ app_gitlab_ce__container.name }}"
+        pki_certificate: "{{ app_gitlab_ce__tls_files[0].src }}"
+        pki_schedule: "{{ app_gitlab_ce__pki_update_schedule }}"

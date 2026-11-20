@@ -1,0 +1,226 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_gitlab_ce__test_case: "{{ app_gitlab_ce__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_gitlab_ce__expect: "{{ app_gitlab_ce__test_case.expect }}"
+    # The passwords of the test case, they must not be part of the unit, the environment or gitlab.rb
+    app_gitlab_ce__test_plain: "{{ app_gitlab_ce__test_case.role_vars.gitlab_secrets | default([]) | map(attribute='data') | list }}"
+    # The token of the standard form posting to /users/sign_in, with LDAP the page has a form for LDAP before it
+    app_gitlab_ce__test_token_pattern: '(?s)<form[^>]*action="/users/sign_in"[^>]*>.*?name="authenticity_token" value="([^"]+)"'
+    # The alerts of a rejected login, e.g. Invalid login or password
+    app_gitlab_ce__test_alert_pattern: '(?s)class="[^"]*(?:gl-alert-body|flash-alert)[^"]*"[^>]*>(.*?)</div>'
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_gitlab_ce__test_quadlet_path }}"
+      register: 'app_gitlab_ce__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_gitlab_ce__test_image) in app_gitlab_ce__test_quadlet_lines
+          - ('IP=' + app_gitlab_ce__expect.ip) in app_gitlab_ce__test_quadlet_lines
+          - app_gitlab_ce__expect.ip6 is none or ('IP6=' + app_gitlab_ce__expect.ip6) in app_gitlab_ce__test_quadlet_lines
+          - app_gitlab_ce__expect.ip6 is not none or app_gitlab_ce__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Timezone=' + app_gitlab_ce__test_case.role_vars.gitlab_timezone) in app_gitlab_ce__test_quadlet_lines
+          - app_gitlab_ce__expect.quadlet | reject('in', app_gitlab_ce__test_quadlet_lines) | list | length == 0
+          # The absent lines are prefixes, e.g. Environment=TZ=
+          - app_gitlab_ce__test_quadlet_lines | select('match', '(' ~ (app_gitlab_ce__expect.quadlet_absent | join('|')) ~ ')') | list | length == 0
+          - app_gitlab_ce__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          - app_gitlab_ce__test_plain | select('in', app_gitlab_ce__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_gitlab_ce__test_quadlet.content | b64decode }}"
+      vars:
+        app_gitlab_ce__test_quadlet_lines: "{{ (app_gitlab_ce__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read gitlab.rb'
+      ansible.builtin.slurp:
+        src: "{{ app_gitlab_ce__expect.home }}/config/gitlab.rb"
+      register: 'app_gitlab_ce__test_config'
+
+    - name: 'Read the permissions of gitlab.rb'
+      ansible.builtin.stat:
+        path: "{{ app_gitlab_ce__expect.home }}/config/gitlab.rb"
+      register: 'app_gitlab_ce__test_config_stat'
+
+    # The passwords are only referenced with File.read
+    - name: 'Assert gitlab.rb'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__expect.config | reject('in', app_gitlab_ce__test_config_lines) | list | length == 0
+          - app_gitlab_ce__test_plain | select('in', app_gitlab_ce__test_config.content | b64decode) | list | length == 0
+          - app_gitlab_ce__test_config_stat.stat.mode == '0600'
+          - app_gitlab_ce__test_config_stat.stat.uid == 0
+        fail_msg: "mode {{ app_gitlab_ce__test_config_stat.stat.mode }}, {{ app_gitlab_ce__test_config_lines }}"
+      vars:
+        app_gitlab_ce__test_config_lines: "{{ (app_gitlab_ce__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the GitLab service'
+      ansible.builtin.command: 'systemctl is-active gitlab-ce'
+      register: 'app_gitlab_ce__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the GitLab container'
+      ansible.builtin.command: 'podman inspect gitlab-ce'
+      register: 'app_gitlab_ce__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses, the time zone and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__test_service.stdout == 'active'
+          - app_gitlab_ce__test_net.IPAddress == app_gitlab_ce__expect.ip
+          - app_gitlab_ce__expect.ip6 is none or app_gitlab_ce__test_net.GlobalIPv6Address == app_gitlab_ce__expect.ip6
+          - app_gitlab_ce__test_container.Config.Timezone == app_gitlab_ce__test_case.role_vars.gitlab_timezone
+          - app_gitlab_ce__test_env | select('match', '(TZ|GITLAB_OMNIBUS_CONFIG|GITLAB_ROOT_PASSWORD)=') | list | length == 0
+          - app_gitlab_ce__test_plain | select('in', app_gitlab_ce__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ app_gitlab_ce__test_service.stdout }}, time zone {{ app_gitlab_ce__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_gitlab_ce__test_net.IPAddress }}, IPv6 {{ app_gitlab_ce__test_net.GlobalIPv6Address }},
+          environment {{ app_gitlab_ce__test_env | join(', ') }}
+      vars:
+        app_gitlab_ce__test_container: "{{ (app_gitlab_ce__test_inspect.stdout | from_json)[0] }}"
+        app_gitlab_ce__test_net: "{{ app_gitlab_ce__test_container.NetworkSettings.Networks[app_gitlab_ce__test_case.role_vars.gitlab_network] }}"
+        app_gitlab_ce__test_env: "{{ app_gitlab_ce__test_container.Config.Env }}"
+
+    # The first start and the restart of side_effect run gitlab-ctl reconfigure and migrate the database,
+    # the readiness check is only answered for the monitoring whitelist, e.g. localhost in the container
+    - name: 'Wait until GitLab is ready'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'gitlab-ce', 'curl', '--silent', '--fail', 'http://localhost/-/readiness' ]
+      register: 'app_gitlab_ce__test_ready'
+      until: app_gitlab_ce__test_ready.rc == 0
+      retries: 90
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'gitlab-ce' ]
+      register: 'app_gitlab_ce__test_restarts'
+      changed_when: false
+
+    # The output of reconfigure fills the journal, only the lines of systemd and podman show the restarts
+    - name: 'Read the restarts in the journal of the service'
+      ansible.builtin.shell:
+        cmd: "set -o pipefail && journalctl -u gitlab-ce -o short-iso --no-pager | grep -E 'systemd\\[|podman\\[|conmon' | tail -n 40"
+        executable: '/bin/bash'
+      register: 'app_gitlab_ce__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the killed processes of the kernel'
+      ansible.builtin.shell:
+        cmd: "set -o pipefail && dmesg | grep -i -E 'oom|killed process' | tail -n 10"
+        executable: '/bin/bash'
+      register: 'app_gitlab_ce__test_oom'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert that GitLab is ready and did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_ce__test_ready.rc == 0
+          - app_gitlab_ce__test_restarts.stdout | int == 0
+        fail_msg: >-
+          {{ [ 'readiness: ' ~ app_gitlab_ce__test_ready.stdout | default(''), 'automatic restarts: ' ~ app_gitlab_ce__test_restarts.stdout,
+               'state: ' ~ ((app_gitlab_ce__test_inspect.stdout | from_json)[0].State | dict2items
+                            | selectattr('key', 'in', [ 'ExitCode', 'OOMKilled', 'StartedAt', 'Error' ]) | items2dict | string) ]
+             + app_gitlab_ce__test_journal.stdout_lines | default([]) + app_gitlab_ce__test_oom.stdout_lines | default([]) }}
+
+    - name: 'Read the sign in page'
+      ansible.builtin.uri:
+        url: "{{ app_gitlab_ce__expect.url }}/users/sign_in"
+        return_content: true
+      register: 'app_gitlab_ce__test_sign_in'
+
+    # The form login with the initial password from the secret, a failed login renders the sign in page again
+    - name: 'Log in as root'
+      when: app_gitlab_ce__expect.login is not none
+      block:
+
+        # GitLab only uses gitlab_rails.initial_root_password while seeding. gitlab-rails runs as git and cannot read the secret,
+        # which is only readable by root for gitlab-ctl reconfigure, so the password is passed on stdin and is no argument
+        - name: 'Check the password of root against the secret'
+          ansible.builtin.command:
+            argv:
+              - 'podman'
+              - 'exec'
+              - '-i'
+              - 'gitlab-ce'
+              - 'gitlab-rails'
+              - 'runner'
+              - "print User.find_by_username('root').valid_password?(STDIN.read.chomp)"
+            stdin: "{{ app_gitlab_ce__expect.login.password }}"
+          register: 'app_gitlab_ce__test_root_password'
+          until: app_gitlab_ce__test_root_password.rc == 0
+          retries: 3
+          delay: 10
+          changed_when: false
+
+        - name: 'Assert that the password of root is the one of the secret'
+          ansible.builtin.assert:
+            that:
+              - app_gitlab_ce__test_root_password.stdout_lines | last | default('') == 'true'
+            fail_msg: "valid_password? of root: {{ app_gitlab_ce__test_root_password.stdout }} {{ app_gitlab_ce__test_root_password.stderr | default('') }}"
+
+        # With LDAP the page has a form for LDAP and the standard form posting to /users/sign_in
+        - name: 'Log in as root with the initial password'
+          ansible.builtin.uri:
+            url: "{{ app_gitlab_ce__expect.url }}/users/sign_in"
+            method: 'POST'
+            body_format: 'form-urlencoded'
+            body:
+              authenticity_token: "{{ app_gitlab_ce__test_sign_in.content | regex_search(app_gitlab_ce__test_token_pattern, '\\1') | first }}"
+              'user[login]': "{{ app_gitlab_ce__expect.login.user }}"
+              'user[password]': "{{ app_gitlab_ce__expect.login.password }}"
+            headers:
+              Cookie: "{{ app_gitlab_ce__test_sign_in.cookies_string }}"
+            follow_redirects: 'none'
+            status_code: [ 200, 302 ]
+            return_content: true
+          register: 'app_gitlab_ce__test_login'
+
+        # A rejected login renders the sign in page again with an alert
+        - name: 'Assert the login of root'
+          ansible.builtin.assert:
+            that:
+              - app_gitlab_ce__test_login.status == 302
+              - app_gitlab_ce__test_login.location is not search('/users/sign_in')
+            fail_msg: >-
+              status {{ app_gitlab_ce__test_login.status }}, redirected to {{ app_gitlab_ce__test_login.location | default('nothing') }},
+              alerts {{ app_gitlab_ce__test_login.content | default('') | regex_findall(app_gitlab_ce__test_alert_pattern)
+                        | map('regex_replace', '<[^>]+>', '') | map('trim') | list }}
+
+    # The registry is served by the nginx of GitLab with the certificate of the realm, it needs a token
+    - name: 'Check the registry with the certificate of the realm'
+      when: app_gitlab_ce__expect.registry is not none
+      block:
+
+        - name: 'Request the registry with the CA of the realm'
+          ansible.builtin.uri:
+            url: "{{ app_gitlab_ce__expect.registry }}"
+            ca_path: "{{ app_gitlab_ce__test_realm.dir }}/chain.pem"
+            status_code: [ 401 ]
+
+        - name: 'Read the CA of the realm in the trusted certificates of GitLab'
+          ansible.builtin.stat:
+            path: "{{ app_gitlab_ce__expect.home }}/config/trusted-certs/{{ app_gitlab_ce__test_realm.name }}.crt"
+          register: 'app_gitlab_ce__test_trusted'
+
+        - name: 'Assert the CA of the realm in the trusted certificates'
+          ansible.builtin.assert:
+            that:
+              - app_gitlab_ce__test_trusted.stat.exists
+            fail_msg: 'The CA of the realm is not in the trusted certificates of GitLab'

@@ -1,0 +1,215 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_gitlab_ce__test_case: "{{ app_gitlab_ce__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_gitlab_ce__test_checked_files:
+      - "{{ app_gitlab_ce__test_quadlet_path }}"
+      - "{{ app_gitlab_ce__test_case.expect.home }}/config/gitlab.rb"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_gitlab_ce__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_gitlab_ce__test_checked_files }}"
+      register: 'app_gitlab_ce__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_gitlab_ce with gitlab_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_container: [ 'environment' ]
+        app_gitlab_ce__test_invalid:
+          message: 'gitlab_container is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_gitlab_ce with gitlab_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_config: [ 'external_url' ]
+        app_gitlab_ce__test_invalid:
+          message: 'gitlab_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts|^gitlab_config has to be a dictionary\.$'
+
+    - name: 'Run app_gitlab_ce with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_config:
+          gitlab_rails: { time_zon: 'Europe/Berlin' }
+          externel_url: 'http://gitlab.example.org'
+        app_gitlab_ce__test_invalid:
+          message: 'an unknown option'
+          search: 'Unknown options in gitlab_config: (externel_url, gitlab_rails\.time_zon|gitlab_rails\.time_zon, externel_url)\.'
+
+    - name: 'Run app_gitlab_ce with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_config:
+          gitlab_rails: { gitlab_ssh_host: "ssh.example.org\nfoo" }
+        app_gitlab_ce__test_invalid:
+          message: 'a line break in a value'
+          search: 'Values must not contain line breaks: gitlab_rails\.gitlab_ssh_host\.'
+
+    - name: 'Run app_gitlab_ce with a secret in gitlab_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_config:
+          gitlab_rails: { smtp_password: 'plain' }
+        gitlab_secrets:
+          - name: 'gitlab_smtp_password'
+            data: 'molecule-smtp-password'
+            target: 'gitlab_rails.smtp_password'
+        app_gitlab_ce__test_invalid:
+          message: 'a secret in gitlab_config'
+          search: 'Options set by gitlab_secrets must not be set in gitlab_config: gitlab_rails\.smtp_password\.'
+
+    - name: 'Run app_gitlab_ce with gitlab_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_secrets: 'gitlab_root_password'
+        app_gitlab_ce__test_invalid:
+          message: 'gitlab_secrets not a list'
+          search: '^`gitlab_secrets` has to be a list$'
+
+    - name: 'Run app_gitlab_ce with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_secrets:
+          - name: 'gitlab_ssh_host'
+            data: 'ssh.example.org'
+            target: 'gitlab_rails.gitlab_ssh_host'
+        app_gitlab_ce__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: gitlab_rails\.gitlab_ssh_host\.'
+
+    - name: 'Run app_gitlab_ce with the password of an LDAP server without its key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_keys: {}
+        gitlab_secrets:
+          - name: 'gitlab_ldap_password'
+            data: 'molecule-ldap-password'
+            target: 'gitlab_rails.ldap_servers.main.password'
+        app_gitlab_ce__test_invalid:
+          message: 'the password of an LDAP server without its key'
+          search: 'Unknown secrets: gitlab_rails\.ldap_servers\.main\.password\.'
+
+    - name: 'Run app_gitlab_ce with an invalid key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_keys:
+          ldap_servers: [ 'Main Server' ]
+        app_gitlab_ce__test_invalid:
+          message: 'an invalid key'
+          search: '`gitlab_keys.ldap_servers` contains invalid keys'
+
+    - name: 'Run app_gitlab_ce with GITLAB_OMNIBUS_CONFIG in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_environment:
+          GITLAB_OMNIBUS_CONFIG: "external_url 'http://gitlab.example.org'"
+        app_gitlab_ce__test_invalid:
+          message: 'GITLAB_OMNIBUS_CONFIG in the environment'
+          search: 'Unknown environment variables: GITLAB_OMNIBUS_CONFIG\.'
+
+    - name: 'Run app_gitlab_ce with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_environment:
+          GITLAB_SKIP_TAIL_LOGS: "true\nfoo"
+        app_gitlab_ce__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: GITLAB_SKIP_TAIL_LOGS\.'
+
+    - name: 'Run app_gitlab_ce with an unknown key in gitlab_tls (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_tls:
+          realm: 'gitlab-molecule'
+          certificate: 'fullchain.pem'
+        app_gitlab_ce__test_invalid:
+          message: 'an unknown key in gitlab_tls'
+          search: 'Unknown keys in gitlab_tls: certificate, allowed are realm and dir\.'
+
+    - name: 'Run app_gitlab_ce with a relative directory of the realms (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_tls:
+          realm: 'gitlab-molecule'
+          dir: 'pki/realms'
+        app_gitlab_ce__test_invalid:
+          message: 'a relative directory of the realms'
+          search: 'gitlab_tls\.dir has to be an absolute path'
+
+    - name: 'Run app_gitlab_ce with a relative home directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_home: 'relative/gitlab'
+        app_gitlab_ce__test_invalid:
+          message: 'a relative home directory'
+          search: 'gitlab_home has to be an absolute path'
+
+    # The first start runs reconfigure and migrates the database, the restart has to stop a running GitLab
+    - name: 'Wait until GitLab finished the first start'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'gitlab-ce', 'curl', '--silent', '--fail', 'http://localhost/-/readiness' ]
+      register: 'app_gitlab_ce__test_first_start'
+      until: app_gitlab_ce__test_first_start.rc == 0
+      retries: 90
+      delay: 10
+      changed_when: false
+
+    # molecule-gitlab-ce changes the theme and has to restart, molecule-gitlab-ce-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'gitlab-ce' ]
+      register: 'app_gitlab_ce__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_gitlab_ce__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run app_gitlab_ce with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_gitlab_ce'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'gitlab-ce' ]
+      register: 'app_gitlab_ce__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the changed gitlab.rb and the restart of the service'
+      ansible.builtin.assert:
+        that:
+          - (app_gitlab_ce__config_result is changed) == app_gitlab_ce__test_case.expect.restart
+          - app_gitlab_ce__quadlet_result is not changed
+          - (app_gitlab_ce__test_started_after.stdout | int > app_gitlab_ce__test_started_before.stdout | int) == app_gitlab_ce__test_case.expect.restart
+        fail_msg: >-
+          gitlab.rb changed: {{ app_gitlab_ce__config_result is changed }},
+          quadlet changed: {{ app_gitlab_ce__quadlet_result is changed }},
+          start before {{ app_gitlab_ce__test_started_before.stdout }}, after {{ app_gitlab_ce__test_started_after.stdout }}
