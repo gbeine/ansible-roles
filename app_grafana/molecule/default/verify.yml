@@ -95,13 +95,36 @@
           - app_grafana__expect.ip6 is none or app_grafana__test_net.GlobalIPv6Address == app_grafana__expect.ip6
           # The password is read by Grafana from the file of the secret, it is not part of the environment
           - app_grafana__test_env | select('search', 'molecule-password|GF_SECURITY') | list | length == 0
+          - app_grafana__test_env | select('match', 'TZ=') | list | length == 0
+          - app_grafana__test_container.Config.Timezone == app_grafana__test_case.role_vars.grafana_timezone
         fail_msg: >-
           IPv4 {{ app_grafana__test_net.IPAddress }}, IPv6 {{ app_grafana__test_net.GlobalIPv6Address }},
+          time zone {{ app_grafana__test_container.Config.Timezone | default('') }},
           environment {{ app_grafana__test_env | join(', ') }}
       vars:
         app_grafana__test_container: "{{ (app_grafana__test_inspect.stdout | from_json)[0] }}"
         app_grafana__test_net: "{{ app_grafana__test_container.NetworkSettings.Networks[app_grafana__test_case.role_vars.grafana_network] }}"
         app_grafana__test_env: "{{ app_grafana__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'grafana' ]
+      register: 'app_grafana__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'grafana', '-n', '80', '--no-pager' ]
+      register: 'app_grafana__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_grafana__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_grafana__test_restarts.stdout ] + app_grafana__test_journal.stdout_lines | default([]) }}"
 
     # The first start of Grafana migrates the database
     - name: 'Wait until Grafana is ready'

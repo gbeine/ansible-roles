@@ -13,6 +13,11 @@
       - "{{ app_grafana__test_quadlet_path }}"
       - "{{ app_grafana__test_case.expect.home }}/grafana.ini"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -55,7 +60,7 @@
             data: 'molecule-password'
         app_grafana__test_invalid:
           message: 'a secret without target'
-          search: '^grafana_secrets entries need name, data and target$'
+          search: '^`grafana_secrets` entries need name, data and target$'
 
     - name: 'Run app_grafana with an unknown section, an unknown option and a plugin section without key (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -111,8 +116,26 @@
           message: 'an unknown secret'
           search: 'Unknown secrets: security\.admin_email\.'
 
+    - name: 'Run app_grafana with grafana_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_secrets: 'grafana_admin_password'
+        app_grafana__test_invalid:
+          message: 'grafana_secrets not a list'
+          search: '^`grafana_secrets` has to be a list$'
+
+    - name: 'Run app_grafana with a line break in grafana_container.environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        grafana_container:
+          environment:
+            TZ: "Europe/Berlin\nfoo"
+        app_grafana__test_invalid:
+          message: 'a line break in grafana_container.environment'
+          search: 'The environment variables must not contain line breaks: TZ\.'
+
+    # molecule-grafana enables the anonymous access and has to restart, molecule-grafana-default runs again without a change
     - name: 'Change the configuration'
-      when: app_grafana__test_case.side_effect is defined
       block:
 
         - name: 'Read the start time of the service before the change'
@@ -138,10 +161,10 @@
         - name: 'Assert the changed configuration and the restart of the service'
           ansible.builtin.assert:
             that:
-              - app_grafana__config_result is changed
+              - (app_grafana__config_result is changed) == app_grafana__test_case.expect.restart
               - app_grafana__quadlet_result is not changed
               - app_grafana__secrets_result is not changed
-              - app_grafana__test_started_after.stdout | int > app_grafana__test_started_before.stdout | int
+              - (app_grafana__test_started_after.stdout | int > app_grafana__test_started_before.stdout | int) == app_grafana__test_case.expect.restart
             fail_msg: >-
               grafana.ini changed: {{ app_grafana__config_result is changed }},
               quadlet changed: {{ app_grafana__quadlet_result is changed }},

@@ -140,7 +140,8 @@ The role checks before any change:
 - `grafana_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a known secret and set once, no secret contains a line break
 - `grafana_config` contains known sections and options or valid free keys, strings, numbers, booleans, `null` or lists of them without line breaks and `"""`,
   no secret and not the section `paths`
-- `grafana_environment`, if set, contains no option of Grafana (`GF_*`) and no line breaks, only allowed environment variables are set in the container
+- `grafana_environment`, if set, contains no option of Grafana (`GF_*`) and no line breaks, only allowed environment variables are set in the container,
+  their values contain no line breaks, also those of `grafana_container.environment`
 
 If `grafana_container` or `grafana_config` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter. Grafana checks the values of the options at the start.
@@ -201,12 +202,14 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-grafana` | IPv6, labels, `instance_name`, `level` in `log`, a custom response header, the section of a plugin with `grafana_keys` and the admin `molecule` with the password from a secret with the target `security.admin_password` |
 
 `prepare` creates the podman network and pulls the image.
-`side_effect` runs the role with `grafana_container` and `grafana_config` not a dictionary, a secret without target, an unknown section, option and plugin section,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `grafana_container` and `grafana_config` not a dictionary, `grafana_secrets` not a list, a secret without target, an unknown section, option and plugin section,
 the admin password, a dictionary and a line break in `grafana_config`, options of Grafana in `grafana_environment`, an unknown environment variable in `grafana_container`
-and an unknown secret and checks that it fails with the expected message and the quadlet unit and `grafana.ini` are unchanged (tasks marked `expect ERROR`),
-then it enables the anonymous access in `auth.anonymous` on `molecule-grafana`, `grafana.ini` changes and Grafana has to restart.
-`verify` checks the quadlet unit without mounts of the time zone, options and passwords, `grafana.ini` with the reference to the secret, the service,
-owner and mode of `data` and `log`, the addresses and the environment of the container without the password,
+an unknown secret and a line break in `grafana_container.environment` and checks that it fails with the expected message and the quadlet unit and `grafana.ini` are unchanged (tasks marked `expect ERROR`),
+then it enables the anonymous access in `auth.anonymous` on `molecule-grafana`, `grafana.ini` changes and Grafana has to restart,
+`molecule-grafana-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit without mounts of the time zone, options and passwords, `grafana.ini` with the reference to the secret, the service without automatic restarts,
+owner and mode of `data` and `log`, the addresses, the time zone and the environment of the container without the password and `TZ`,
 waits until `/api/health` reports the database `ok`, requests `/api/org` without credentials and as admin with the password from the secret
 and checks the custom response header.
 
