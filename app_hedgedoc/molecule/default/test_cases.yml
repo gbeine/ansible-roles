@@ -11,6 +11,7 @@ app_hedgedoc__test_network:
 
 app_hedgedoc__test_image: 'lscr.io/linuxserver/hedgedoc:latest'
 app_hedgedoc__test_quadlet_path: '/etc/containers/systemd/hedgedoc.container'
+app_hedgedoc__test_config_path: '/opt/hedgedoc/config.json'
 
 # Database started by prepare.yml on molecule-hedgedoc, test credentials only
 app_hedgedoc__test_database:
@@ -38,11 +39,15 @@ app_hedgedoc__test_cases:
       hedgedoc_hostname: 'hedgedoc-default'
       hedgedoc_timezone: 'Europe/Berlin'
       hedgedoc_uid: 1000
-      hedgedoc_environment:
-        CMD_DOMAIN: '10.89.0.90'
+      hedgedoc_config:
+        domain: '10.89.0.90'
       hedgedoc_secrets:
         - "{{ app_hedgedoc__test_session_secret }}"
+    # Runs again without a change, HedgeDoc must not restart
+    side_effect:
+      role_vars: {}
     expect:
+      restart: false
       ip: '10.89.0.90'
       ip6: ~
       quadlet:
@@ -51,9 +56,9 @@ app_hedgedoc__test_cases:
       env:
         - 'PUID=1000'
         - 'PGID=1000'
-        - 'TZ=Europe/Berlin'
-        - 'CMD_DOMAIN=10.89.0.90'
         - 'FILE__CMD_SESSION_SECRET=/run/secrets/hedgedoc_session_secret'
+      config:
+        domain: '10.89.0.90'
       anonymous: true
       provider: ~
       postgres: false
@@ -70,24 +75,28 @@ app_hedgedoc__test_cases:
       hedgedoc_uid: 1000
       hedgedoc_labels:
         traefik.enable: 'false'
+      hedgedoc_config:
+        domain: '10.89.0.91'
+        allowAnonymous: false
+        allowGravatar: true
+        oauth2:
+          providerName: 'Molecule SSO'
+          clientID: 'hedgedoc'
+          authorizationURL: 'https://sso.example.org/authorize'
+          tokenURL: 'https://sso.example.org/token'
+          userProfileURL: 'https://sso.example.org/userinfo'
+          userProfileUsernameAttr: 'preferred_username'
+          userProfileDisplayNameAttr: 'name'
+          userProfileEmailAttr: 'email'
+          scope: 'openid email profile'
+      # The database is set with the variables of the image
       hedgedoc_environment:
-        CMD_DOMAIN: '10.89.0.91'
-        CMD_ALLOW_ANONYMOUS: false
-        CMD_ALLOW_GRAVATAR: true
+        UMASK: '022'
         DB_HOST: '10.89.0.20'
-        DB_PORT: 5432
+        DB_PORT: '5432'
         DB_USER: 'hedgedoc'
         DB_NAME: 'hedgedoc'
         CMD_DB_DIALECT: 'postgres'
-        CMD_OAUTH2_PROVIDERNAME: 'Molecule SSO'
-        CMD_OAUTH2_CLIENT_ID: 'hedgedoc'
-        CMD_OAUTH2_AUTHORIZATION_URL: 'https://sso.example.org/authorize'
-        CMD_OAUTH2_TOKEN_URL: 'https://sso.example.org/token'
-        CMD_OAUTH2_USER_PROFILE_URL: 'https://sso.example.org/userinfo'
-        CMD_OAUTH2_USER_PROFILE_USERNAME_ATTR: 'preferred_username'
-        CMD_OAUTH2_USER_PROFILE_DISPLAY_NAME_ATTR: 'name'
-        CMD_OAUTH2_USER_PROFILE_EMAIL_ATTR: 'email'
-        CMD_OAUTH2_SCOPE: 'openid email profile'
       hedgedoc_secrets:
         - "{{ app_hedgedoc__test_session_secret }}"
         - name: 'hedgedoc_db_pass'
@@ -96,11 +105,25 @@ app_hedgedoc__test_cases:
         - name: 'hedgedoc_oauth2_client_secret'
           data: 'molecule-oauth2-secret'
           target: 'CMD_OAUTH2_CLIENT_SECRET'
-    # The quadlet unit changes and HedgeDoc has to restart
+    # config.json changes and HedgeDoc has to restart
     side_effect:
-      environment:
-        CMD_ALLOW_GRAVATAR: false
+      role_vars:
+        hedgedoc_config:
+          domain: '10.89.0.91'
+          allowAnonymous: false
+          allowGravatar: false
+          oauth2:
+            providerName: 'Molecule SSO'
+            clientID: 'hedgedoc'
+            authorizationURL: 'https://sso.example.org/authorize'
+            tokenURL: 'https://sso.example.org/token'
+            userProfileURL: 'https://sso.example.org/userinfo'
+            userProfileUsernameAttr: 'preferred_username'
+            userProfileDisplayNameAttr: 'name'
+            userProfileEmailAttr: 'email'
+            scope: 'openid email profile'
     expect:
+      restart: true
       ip: '10.89.0.91'
       ip6: 'fd00:89::91'
       quadlet:
@@ -108,12 +131,19 @@ app_hedgedoc__test_cases:
         - 'Label=traefik.enable=false'
         - 'Secret=hedgedoc_db_pass,type=mount,target=/run/secrets/hedgedoc_db_pass'
       env:
-        - 'CMD_ALLOW_ANONYMOUS=false'
-        - 'CMD_ALLOW_GRAVATAR=false'
+        - 'UMASK=022'
         - 'CMD_DB_DIALECT=postgres'
         - 'DB_PORT=5432'
         - 'FILE__DB_PASS=/run/secrets/hedgedoc_db_pass'
         - 'FILE__CMD_OAUTH2_CLIENT_SECRET=/run/secrets/hedgedoc_oauth2_client_secret'
+      # The options after the side effect
+      config:
+        domain: '10.89.0.91'
+        allowAnonymous: false
+        allowGravatar: false
+        oauth2:
+          providerName: 'Molecule SSO'
+          clientID: 'hedgedoc'
       anonymous: false
       provider: 'Molecule SSO'
       postgres: true
