@@ -1,0 +1,78 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ app_gitlab_runner__test_network }}"
+    podman_default_network: "{{ app_gitlab_runner__test_network.name }}"
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ app_gitlab_runner__test_image }}"
+
+    # GitLab for the registration of the runner on molecule-gitlab-runner
+    - name: 'Start GitLab and create a runner'
+      when: inventory_hostname == 'molecule-gitlab-runner'
+      block:
+
+        - name: 'Start GitLab'
+          containers.podman.podman_container:
+            name: "{{ app_gitlab_runner__test_gitlab.name }}"
+            image: "{{ app_gitlab_runner__test_gitlab.image }}"
+            network: "{{ app_gitlab_runner__test_network.name }}"
+            ip: "{{ app_gitlab_runner__test_gitlab.ip }}"
+            shm_size: '256m'
+            env:
+              GITLAB_OMNIBUS_CONFIG: "external_url '{{ app_gitlab_runner__test_gitlab.url }}'"
+            state: 'started'
+
+        # The first start runs reconfigure and migrates the database
+        - name: 'Wait until GitLab is ready'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', "{{ app_gitlab_runner__test_gitlab.name }}", 'curl', '--silent', '--fail', 'http://localhost/-/readiness' ]
+          register: 'app_gitlab_runner__test_ready'
+          until: app_gitlab_runner__test_ready.rc == 0
+          retries: 90
+          delay: 10
+          changed_when: false
+
+        - name: 'Read the token file'
+          ansible.builtin.stat:
+            path: "{{ app_gitlab_runner__test_gitlab.token_file }}"
+          register: 'app_gitlab_runner__test_token_file'
+
+        # An instance runner of root, the token is the authentication token glrt-... for the registration
+        - name: 'Create an instance runner in GitLab'
+          when: not app_gitlab_runner__test_token_file.stat.exists
+          ansible.builtin.command:
+            argv:
+              - 'podman'
+              - 'exec'
+              - "{{ app_gitlab_runner__test_gitlab.name }}"
+              - 'gitlab-rails'
+              - 'runner'
+              - >-
+                runner = Ci::Runners::CreateRunnerService.new(user: User.find_by_username('root'),
+                params: { runner_type: 'instance_type', description: 'molecule', run_untagged: true }).execute.payload[:runner];
+                print runner.token
+          register: 'app_gitlab_runner__test_runner'
+          changed_when: true
+
+        - name: 'Write the token of the runner'
+          when: not app_gitlab_runner__test_token_file.stat.exists
+          ansible.builtin.copy:
+            content: "{{ app_gitlab_runner__test_runner.stdout_lines | select('match', '^glrt-') | first }}"
+            dest: "{{ app_gitlab_runner__test_gitlab.token_file }}"
+            mode: '0600'

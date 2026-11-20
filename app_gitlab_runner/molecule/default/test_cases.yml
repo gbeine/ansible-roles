@@ -1,0 +1,105 @@
+---
+# Network created by container_podman in prepare.yml
+app_gitlab_runner__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_gitlab_runner__test_image: 'docker.io/gitlab/gitlab-runner:latest'
+app_gitlab_runner__test_quadlet_path: '/etc/containers/systemd/gitlab-runner.container'
+
+# GitLab started by prepare.yml on molecule-gitlab-runner, the token of an instance runner is written to the token file
+app_gitlab_runner__test_gitlab:
+  name: 'molecule-gitlab'
+  image: 'docker.io/gitlab/gitlab-ce:latest'
+  ip: '10.89.0.132'
+  url: 'http://10.89.0.132'
+  token_file: '/root/molecule-runner-token'
+
+# The time zone is set by podman, neither TZ nor the files of the host are passed
+app_gitlab_runner__test_quadlet_absent: [ 'Environment=TZ=', 'Volume=/etc/localtime', 'Volume=/etc/timezone', 'Secret=', 'CI_SERVER_TOKEN' ]
+
+app_gitlab_runner__test_cases:
+
+  # Only the mandatory variables, without a token the runner is not registered
+  - name: 'molecule-gitlab-runner-default'
+    role_vars:
+      gitlab_runner_home: '/opt/gitlab-runner'
+      gitlab_runner_ip: '10.89.0.130'
+      gitlab_runner_network: 'podman-molecule'
+      gitlab_runner_hostname: 'runner-default'
+      gitlab_runner_timezone: 'Europe/Berlin'
+    # Runs again without a change, the runner must not restart
+    side_effect:
+      role_vars: {}
+    expect:
+      restart: false
+      registered: false
+      ip: '10.89.0.130'
+      ip6: ~
+      home: '/opt/gitlab-runner'
+      quadlet:
+        - 'Volume=/opt/gitlab-runner:/etc/gitlab-runner'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock'
+        - 'Wants=podman.socket'
+        - 'After=podman.socket'
+      quadlet_absent: "{{ app_gitlab_runner__test_quadlet_absent + [ 'Environment=' ] }}"
+      env: []
+      config: []
+
+  # IPv6, labels, the environment and the registration at GitLab with the token and a template
+  - name: 'molecule-gitlab-runner'
+    # The token of the instance runner created by prepare.yml, read by the playbooks
+    token_file: "{{ app_gitlab_runner__test_gitlab.token_file }}"
+    role_vars:
+      gitlab_runner_home: '/srv/gitlab-runner'
+      gitlab_runner_ip: '10.89.0.131'
+      gitlab_runner_ipv6: 'fd00:89::131'
+      gitlab_runner_network: 'podman-molecule'
+      gitlab_runner_hostname: 'runner-molecule'
+      gitlab_runner_timezone: 'Europe/Berlin'
+      gitlab_runner_labels:
+        traefik.enable: 'false'
+      gitlab_runner_url: "{{ app_gitlab_runner__test_gitlab.url }}"
+      gitlab_runner_environment:
+        LOG_LEVEL: 'info'
+      gitlab_runner_config:
+        environment: [ 'MOLECULE=1' ]
+        docker:
+          image: 'alpine:3.20'
+          privileged: false
+    # The changed environment restarts the runner, the changed template does not register the runner again
+    side_effect:
+      role_vars:
+        gitlab_runner_environment:
+          LOG_LEVEL: 'debug'
+        gitlab_runner_config:
+          environment: [ 'MOLECULE=1' ]
+          docker:
+            image: 'alpine:3.21'
+            privileged: false
+    expect:
+      restart: true
+      registered: true
+      ip: '10.89.0.131'
+      ip6: 'fd00:89::131'
+      home: '/srv/gitlab-runner'
+      quadlet:
+        - 'Volume=/srv/gitlab-runner:/etc/gitlab-runner'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock'
+        - 'Label=traefik.enable=false'
+        - 'Environment=LOG_LEVEL=debug'
+      quadlet_absent: "{{ app_gitlab_runner__test_quadlet_absent }}"
+      env:
+        - 'LOG_LEVEL=debug'
+      # The options of the registration, the template of side_effect is not applied
+      config:
+        - '[[runners]]'
+        - 'name = "runner-molecule"'
+        - 'url = "http://10.89.0.132"'
+        - 'executor = "docker"'
+        - 'image = "alpine:3.20"'

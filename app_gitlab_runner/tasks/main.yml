@@ -1,12 +1,340 @@
 ---
 
-- name: Deploy GitLab Runner container
-  tags: [ 'app_gitlab_runner' ]
+- name: 'Install GitLab Runner'
+  tags: [ 'app', 'app_gitlab_runner' ]
   block:
 
-    - name: Deploy container via podman
-      ansible.builtin.import_role:
-        name: podman
+    # A failing template in the variables (e.g. gitlab_runner_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_gitlab_runner__container | length > 0
+          - app_gitlab_runner__config is mapping
+        fail_msg: 'gitlab_runner_config has to be a dictionary.'
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_runner__invalid | join('. ') }}"
+        quiet: true
       vars:
-        pod_containers:
-          - "{{ app_gitlab_runner__container }}"
+        app_gitlab_runner__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_gitlab_runner__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`gitlab_runner_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`gitlab_runner_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `gitlab_runner_secrets` have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of `gitlab_runner_secrets` have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | reject('in', app_gitlab_runner__secrets_allowed) | list | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (secrets | map(attribute='target') | reject('in', app_gitlab_runner__secrets_allowed) | join(', '))
+                                    ~ ', allowed is the target token, the authentication token of the runner') -%}
+          {%- elif secrets | rejectattr('data', 'string') | list | length > 0 or secrets | selectattr('data', 'search', '[\n\r]') | list | length > 0 -%}
+          {%-   set _ = errors.append('The data of `gitlab_runner_secrets` is a string without line breaks') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The template is one [[runners]] entry, the content of its subsections is not checked
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_runner__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_gitlab_runner__errors: >-
+          {%- macro lines(value, path, ns) -%}
+          {%-   if value is string -%}
+          {%-     if value is search('[\n\r]') -%}
+          {%-       set ns.lines = ns.lines + [ path ] -%}
+          {%-     endif -%}
+          {%-   elif value is mapping -%}
+          {%-     for key, item in value.items() -%}
+          {%-       set _ = lines(item, path ~ '.' ~ key, ns) -%}
+          {%-     endfor -%}
+          {%-   elif value is sequence -%}
+          {%-     for item in value -%}
+          {%-       set _ = lines(item, path, ns) -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endmacro -%}
+          {%- set errors = [] -%}
+          {%- set config = app_gitlab_runner__config -%}
+          {%- set role = config.keys() | map('string') | select('in', app_gitlab_runner__config_role) | list -%}
+          {%- if role | length > 0 -%}
+          {%-   set _ = errors.append('The options ' ~ (role | join(', ')) ~ ' are set by the role and must not be set in gitlab_runner_config,'
+                                    ~ ' the token is set with gitlab_runner_secrets, the URL with gitlab_runner_url.') -%}
+          {%- endif -%}
+          {%- set unknown = config.keys() | map('string') | reject('in', app_gitlab_runner__config_allowed) | reject('in', app_gitlab_runner__config_role) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in gitlab_runner_config: ' ~ (unknown | join(', '))
+                                    ~ '. Allowed are the options of [[runners]] (app_gitlab_runner__config_allowed).') -%}
+          {%- endif -%}
+          {%- if config.executor is not defined or config.executor not in app_gitlab_runner__executors -%}
+          {%-   set _ = errors.append('The executor of gitlab_runner_config has to be one of ' ~ (app_gitlab_runner__executors | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set ns = namespace(lines=[]) -%}
+          {%- for key, value in config.items() -%}
+          {%-   set _ = lines(value, key | string, ns) -%}
+          {%- endfor -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the role variables'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_runner__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_gitlab_runner__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_gitlab_runner__podman_home is not string or app_gitlab_runner__podman_home is not match('^/') -%}
+          {%-   set _ = errors.append('gitlab_runner_home has to be an absolute path.') -%}
+          {%- endif -%}
+          {%- if app_gitlab_runner__url is not string or app_gitlab_runner__url is search('[\s]')
+                or (app_gitlab_runner__url | length > 0 and app_gitlab_runner__url is not match('^https?://[^/]+')) -%}
+          {%-   set _ = errors.append('gitlab_runner_url has to be the http or https URL of GitLab.') -%}
+          {%- elif app_gitlab_runner__token_secret | length > 0 and app_gitlab_runner__url | length == 0 -%}
+          {%-   set _ = errors.append('The registration with the token of gitlab_runner_secrets needs gitlab_runner_url.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment after merging gitlab_runner_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables'
+      when: 'app_gitlab_runner__container.environment is mapping'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_gitlab_runner__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_gitlab_runner__environment_unknown: >-
+          {{ app_gitlab_runner__container.environment.keys() | reject('in', app_gitlab_runner__environment_allowed) | list }}
+        app_gitlab_runner__environment_line_breaks: >-
+          {{ app_gitlab_runner__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_gitlab_runner__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_gitlab_runner__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_gitlab_runner__environment_unknown | join(', '))
+                                    ~ '. Allowed are ' ~ (app_gitlab_runner__environment_allowed | join(', '))
+                                    ~ ', the runner is configured with gitlab_runner_config, the token with gitlab_runner_secrets.') -%}
+          {%- endif -%}
+          {%- if app_gitlab_runner__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_gitlab_runner__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs gitlab-runner as root, config.toml contains the token of the runner
+    - name: 'Create the home directory'
+      ansible.builtin.file:
+        path: "{{ app_gitlab_runner__podman_home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0700'
+        state: 'directory'
+
+    # config.toml belongs to the runner, the role only creates it without runners, register adds the runner
+    - name: 'Create config.toml without runners'
+      ansible.builtin.copy:
+        content: "concurrent = 1\ncheck_interval = 0\n"
+        dest: "{{ app_gitlab_runner__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0600'
+        force: false
+
+    - name: 'Read config.toml'
+      ansible.builtin.slurp:
+        src: "{{ app_gitlab_runner__config_file }}"
+      register: 'app_gitlab_runner__config_current'
+      check_mode: false
+      failed_when: false
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_gitlab_runner__secrets_valid }}"
+
+    # register runs once in its own container, the token is only part of this container
+    - name: 'Register the runner'
+      when:
+        - not ansible_check_mode
+        - app_gitlab_runner__token_secret | length > 0
+        - (app_gitlab_runner__config_current.content | default('') | b64decode) is not search('(?m)^\s*\[\[runners\]\]')
+      block:
+
+        - name: 'Write the template of the runner'
+          ansible.builtin.copy:
+            content: "{{ { 'runners': [ app_gitlab_runner__config ] } | community.general.to_toml }}"
+            dest: "{{ app_gitlab_runner__register_file }}"
+            owner: 'root'
+            group: 'root'
+            mode: '0600'
+
+        # register cannot read the token from a file, it reads CI_SERVER_TOKEN
+        - name: 'Run gitlab-runner register'
+          ansible.builtin.command:
+            argv:
+              - 'podman'
+              - 'run'
+              - '--rm'
+              - '--name'
+              - "{{ app_gitlab_runner__register_name }}"
+              - '--network'
+              - "{{ app_gitlab_runner__container.network }}"
+              - '--volume'
+              - "{{ app_gitlab_runner__podman_home }}:/etc/gitlab-runner"
+              - '--secret'
+              - "{{ app_gitlab_runner__token_secret }},type=env,target={{ app_gitlab_runner__secrets_env }}"
+              - "{{ app_gitlab_runner__container.image }}"
+              - 'register'
+              - '--non-interactive'
+              - '--url'
+              - "{{ app_gitlab_runner__url }}"
+              - '--name'
+              - "{{ app_gitlab_runner__hostname }}"
+              - '--executor'
+              - "{{ app_gitlab_runner__config.executor }}"
+              - '--template-config'
+              - "/etc/gitlab-runner/{{ app_gitlab_runner__register_file | basename }}"
+          register: 'app_gitlab_runner__register'
+          changed_when: true
+          failed_when: false
+
+        - name: 'Assert the registration of the runner'
+          ansible.builtin.assert:
+            that:
+              - app_gitlab_runner__register.rc == 0
+            fail_msg: >-
+              {{ [ 'gitlab-runner register failed, config.toml has no runner, the container ' ~ app_gitlab_runner__register_name ~ ' is removed:' ]
+                 + app_gitlab_runner__register.stdout_lines + app_gitlab_runner__register.stderr_lines }}
+            quiet: true
+
+      always:
+
+        - name: 'Remove the template of the runner'
+          ansible.builtin.file:
+            path: "{{ app_gitlab_runner__register_file }}"
+            state: 'absent'
+
+        - name: 'Remove the container of the registration'
+          containers.podman.podman_container:
+            name: "{{ app_gitlab_runner__register_name }}"
+            state: 'absent'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_gitlab_runner__container.name }}"
+        hostname: "{{ app_gitlab_runner__container.hostname }}"
+        image: "{{ app_gitlab_runner__container.image }}"
+        ip: "{{ app_gitlab_runner__container.ip }}"
+        ip6: "{{ app_gitlab_runner__container.ipv6 | default(omit) }}"
+        network: "{{ app_gitlab_runner__container.network }}"
+        timezone: "{{ app_gitlab_runner__container.timezone }}"
+        command: "{{ app_gitlab_runner__container.command | default(omit) }}"
+        env: "{{ app_gitlab_runner__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_gitlab_runner__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_gitlab_runner__container.expose | default(omit) }}"
+        label: "{{ app_gitlab_runner__container.labels | default(omit) }}"
+        publish: "{{ app_gitlab_runner__container.publish | default(omit) }}"
+        volume: "{{ app_gitlab_runner__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_gitlab_runner__container.requires is defined %}
+          Requires={{ app_gitlab_runner__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_runner__container.wants is defined %}
+          Wants={{ app_gitlab_runner__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_runner__container.after is defined %}
+          After={{ app_gitlab_runner__container.after | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_runner__container.part_of is defined %}
+          PartOf={{ app_gitlab_runner__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_runner__container.binds_to is defined %}
+          BindsTo={{ app_gitlab_runner__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_gitlab_runner__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_gitlab_runner__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_gitlab_runner__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start GitLab Runner'
+      when: 'not ansible_check_mode'
+      block:
+
+        # The runner reloads config.toml itself, only a changed quadlet unit restarts it
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_gitlab_runner__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_gitlab_runner__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_gitlab_runner__running: >-
+              {{ (ansible_facts.services[app_gitlab_runner__container.name + '.service'].state | default('')) == 'running' }}
+            app_gitlab_runner__restart: "{{ app_gitlab_runner__running | bool and app_gitlab_runner__quadlet_result is changed }}"
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv:
+              - 'journalctl'
+              - '-u'
+              - "{{ app_gitlab_runner__container.name }}"
+              - '-n'
+              - '80'
+              - '--no-pager'
+          register: 'app_gitlab_runner__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ app_gitlab_runner__container.name ~ ' did not start' ] + app_gitlab_runner__start_journal.stdout_lines }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_gitlab_runner__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_gitlab_runner__container.name }}"
+        container_image: "{{ app_gitlab_runner__container.image }}"
+        container_schedule: "{{ app_gitlab_runner__autoupdate_schedule }}"

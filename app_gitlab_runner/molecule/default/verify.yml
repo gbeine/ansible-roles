@@ -1,0 +1,156 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_gitlab_runner__test_case: "{{ app_gitlab_runner__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_gitlab_runner__expect: "{{ app_gitlab_runner__test_case.expect }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_gitlab_runner__test_quadlet_path }}"
+      register: 'app_gitlab_runner__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_gitlab_runner__test_image) in app_gitlab_runner__test_quadlet_lines
+          - ('IP=' + app_gitlab_runner__expect.ip) in app_gitlab_runner__test_quadlet_lines
+          - app_gitlab_runner__expect.ip6 is none or ('IP6=' + app_gitlab_runner__expect.ip6) in app_gitlab_runner__test_quadlet_lines
+          - app_gitlab_runner__expect.ip6 is not none or app_gitlab_runner__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - ('Timezone=' + app_gitlab_runner__test_case.role_vars.gitlab_runner_timezone) in app_gitlab_runner__test_quadlet_lines
+          - app_gitlab_runner__expect.quadlet | reject('in', app_gitlab_runner__test_quadlet_lines) | list | length == 0
+          # The absent lines are parts of lines, e.g. the token variable of the registration
+          - app_gitlab_runner__test_quadlet_lines | select('search', '(' ~ (app_gitlab_runner__expect.quadlet_absent | map('regex_escape') | join('|')) ~ ')') | list | length == 0
+        fail_msg: "{{ app_gitlab_runner__test_quadlet.content | b64decode }}"
+      vars:
+        app_gitlab_runner__test_quadlet_lines: "{{ (app_gitlab_runner__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read config.toml'
+      ansible.builtin.slurp:
+        src: "{{ app_gitlab_runner__expect.home }}/config.toml"
+      register: 'app_gitlab_runner__test_config'
+
+    - name: 'Read the files of the home directory'
+      ansible.builtin.stat:
+        path: "{{ app_gitlab_runner__expect.home }}/{{ item }}"
+      loop: [ '', 'config.toml', 'register.toml' ]
+      register: 'app_gitlab_runner__test_files'
+
+    # The container of the registration is removed after the registration
+    - name: 'Read the container of the registration'
+      ansible.builtin.command:
+        argv: [ 'podman', 'container', 'exists', 'gitlab-runner-init' ]
+      register: 'app_gitlab_runner__test_init'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert config.toml, the home directory and the removed registration'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__expect.config | reject('in', app_gitlab_runner__test_config_lines) | list | length == 0
+          - app_gitlab_runner__expect.registered or app_gitlab_runner__test_config_lines | select('match', '\[\[runners\]\]') | list | length == 0
+          - app_gitlab_runner__test_files.results[0].stat.mode == '0700'
+          - app_gitlab_runner__test_files.results[1].stat.mode == '0600'
+          - not app_gitlab_runner__test_files.results[2].stat.exists
+          - app_gitlab_runner__test_init.rc == 1
+        fail_msg: >-
+          config.toml {{ app_gitlab_runner__test_config_lines | reject('search', 'token') | list }},
+          modes {{ app_gitlab_runner__test_files.results | map(attribute='stat') | map(attribute='mode', default='absent') | list }},
+          init container {{ app_gitlab_runner__test_init.rc }}
+      vars:
+        app_gitlab_runner__test_config_lines: "{{ (app_gitlab_runner__test_config.content | b64decode).splitlines() | map('trim') | list }}"
+
+    - name: 'Read the state of the GitLab Runner service'
+      ansible.builtin.command: 'systemctl is-active gitlab-runner'
+      register: 'app_gitlab_runner__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the GitLab Runner container'
+      ansible.builtin.command: 'podman inspect gitlab-runner'
+      register: 'app_gitlab_runner__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses, the time zone and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__test_service.stdout == 'active'
+          - app_gitlab_runner__test_net.IPAddress == app_gitlab_runner__expect.ip
+          - app_gitlab_runner__expect.ip6 is none or app_gitlab_runner__test_net.GlobalIPv6Address == app_gitlab_runner__expect.ip6
+          - app_gitlab_runner__test_container.Config.Timezone == app_gitlab_runner__test_case.role_vars.gitlab_runner_timezone
+          - app_gitlab_runner__expect.env | reject('in', app_gitlab_runner__test_env) | list | length == 0
+          - app_gitlab_runner__test_env | select('match', '(TZ|CI_SERVER_TOKEN)=') | list | length == 0
+        fail_msg: >-
+          service {{ app_gitlab_runner__test_service.stdout }}, time zone {{ app_gitlab_runner__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_gitlab_runner__test_net.IPAddress }}, IPv6 {{ app_gitlab_runner__test_net.GlobalIPv6Address }},
+          environment {{ app_gitlab_runner__test_env | join(', ') }}
+      vars:
+        app_gitlab_runner__test_container: "{{ (app_gitlab_runner__test_inspect.stdout | from_json)[0] }}"
+        app_gitlab_runner__test_net: "{{ app_gitlab_runner__test_container.NetworkSettings.Networks[app_gitlab_runner__test_case.role_vars.gitlab_runner_network] }}"
+        app_gitlab_runner__test_env: "{{ app_gitlab_runner__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'gitlab-runner' ]
+      register: 'app_gitlab_runner__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'gitlab-runner', '-n', '80', '--no-pager' ]
+      register: 'app_gitlab_runner__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_gitlab_runner__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_gitlab_runner__test_restarts.stdout ] + app_gitlab_runner__test_journal.stdout_lines | default([]) }}"
+
+    # The registered runner authenticates at GitLab with its token and polls for jobs
+    - name: 'Check the registered runner at GitLab'
+      when: app_gitlab_runner__expect.registered
+      block:
+
+        - name: 'Verify the runner with gitlab-runner verify'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'gitlab-runner', 'gitlab-runner', 'verify' ]
+          register: 'app_gitlab_runner__test_verify'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Read the state of the runner in GitLab'
+          ansible.builtin.command:
+            argv:
+              - 'podman'
+              - 'exec'
+              - "{{ app_gitlab_runner__test_gitlab.name }}"
+              - 'gitlab-rails'
+              - 'runner'
+              - "print Ci::Runner.find_by(description: 'molecule').online?"
+          register: 'app_gitlab_runner__test_online'
+          until: app_gitlab_runner__test_online.stdout_lines | last | default('') == 'true'
+          retries: 6
+          delay: 10
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert that the runner is valid and online in GitLab'
+          ansible.builtin.assert:
+            that:
+              - app_gitlab_runner__test_verify.rc == 0
+              - (app_gitlab_runner__test_verify.stdout ~ app_gitlab_runner__test_verify.stderr) is search('is valid|is alive')
+              - app_gitlab_runner__test_online.stdout_lines | last | default('') == 'true'
+            fail_msg: >-
+              verify: {{ app_gitlab_runner__test_verify.stdout_lines + app_gitlab_runner__test_verify.stderr_lines }},
+              online: {{ app_gitlab_runner__test_online.stdout }} {{ app_gitlab_runner__test_online.stderr | default('') | regex_replace('\n.*', '') }}

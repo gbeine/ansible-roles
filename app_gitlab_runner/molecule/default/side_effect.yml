@@ -1,0 +1,169 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_gitlab_runner__test_case: "{{ app_gitlab_runner__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_gitlab_runner__test_checked_files:
+      - "{{ app_gitlab_runner__test_quadlet_path }}"
+      - "{{ app_gitlab_runner__test_case.expect.home }}/config.toml"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_gitlab_runner__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Set the token of the runner'
+      ansible.builtin.include_tasks: 'tasks/token.yml'
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_gitlab_runner__test_checked_files }}"
+      register: 'app_gitlab_runner__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run app_gitlab_runner with gitlab_runner_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_container: [ 'environment' ]
+        app_gitlab_runner__test_invalid:
+          message: 'gitlab_runner_container is not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_gitlab_runner with gitlab_runner_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_config: [ 'executor' ]
+        app_gitlab_runner__test_invalid:
+          message: 'gitlab_runner_config is not a dictionary'
+          search: 'failed to combine variables, expected dicts|^gitlab_runner_config has to be a dictionary\.$'
+
+    - name: 'Run app_gitlab_runner with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_config: { dokker: { image: 'alpine' } }
+        app_gitlab_runner__test_invalid:
+          message: 'an unknown option'
+          search: 'Unknown options in gitlab_runner_config: dokker\.'
+
+    - name: 'Run app_gitlab_runner with the token in the template (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_config: { token: 'glrt-molecule' }
+        app_gitlab_runner__test_invalid:
+          message: 'the token in the template'
+          search: 'The options token are set by the role'
+
+    - name: 'Run app_gitlab_runner with an unknown executor (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_config: { executor: 'podman' }
+        app_gitlab_runner__test_invalid:
+          message: 'an unknown executor'
+          search: 'The executor of gitlab_runner_config has to be one of'
+
+    - name: 'Run app_gitlab_runner with a line break in the template (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_config: { docker: { image: "alpine\nfoo" } }
+        app_gitlab_runner__test_invalid:
+          message: 'a line break in the template'
+          search: 'Values must not contain line breaks: docker\.image\.'
+
+    - name: 'Run app_gitlab_runner with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_secrets:
+          - name: 'gitlab_runner_registration'
+            data: 'molecule'
+            target: 'registration_token'
+        app_gitlab_runner__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: registration_token'
+
+    - name: 'Run app_gitlab_runner with a token without gitlab_runner_url (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_url: ''
+        gitlab_runner_secrets:
+          - name: 'gitlab_runner_token'
+            data: 'glrt-molecule'
+            target: 'token'
+        app_gitlab_runner__test_invalid:
+          message: 'a token without gitlab_runner_url'
+          search: 'The registration with the token of gitlab_runner_secrets needs gitlab_runner_url\.'
+
+    - name: 'Run app_gitlab_runner with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_environment: { CI_SERVER_TOKEN: 'glrt-molecule' }
+        app_gitlab_runner__test_invalid:
+          message: 'an unknown environment variable'
+          search: 'Unknown environment variables: CI_SERVER_TOKEN\.'
+
+    - name: 'Run app_gitlab_runner with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_environment: { LOG_LEVEL: "info\nfoo" }
+        app_gitlab_runner__test_invalid:
+          message: 'a line break in the environment'
+          search: 'must not contain line breaks: LOG_LEVEL\.'
+
+    - name: 'Run app_gitlab_runner with a relative home directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        gitlab_runner_home: 'relative/gitlab-runner'
+        app_gitlab_runner__test_invalid:
+          message: 'a relative home directory'
+          search: 'gitlab_runner_home has to be an absolute path\.'
+
+    # molecule-gitlab-runner changes the environment and has to restart, the changed template does not register again,
+    # molecule-gitlab-runner-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'gitlab-runner' ]
+      register: 'app_gitlab_runner__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed role variables'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_gitlab_runner__test_case.side_effect.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run app_gitlab_runner with the changed role variables'
+      ansible.builtin.include_role:
+        name: 'app_gitlab_runner'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'gitlab-runner' ]
+      register: 'app_gitlab_runner__test_started_after'
+      changed_when: false
+
+    - name: 'Assert the restart of the service and no second registration'
+      ansible.builtin.assert:
+        that:
+          - (app_gitlab_runner__quadlet_result is changed) == app_gitlab_runner__test_case.expect.restart
+          - app_gitlab_runner__register is not defined or app_gitlab_runner__register is skipped
+          - (app_gitlab_runner__test_started_after.stdout | int > app_gitlab_runner__test_started_before.stdout | int) == app_gitlab_runner__test_case.expect.restart
+        fail_msg: >-
+          quadlet changed: {{ app_gitlab_runner__quadlet_result is changed }},
+          registered again: {{ app_gitlab_runner__register is defined and app_gitlab_runner__register is not skipped }},
+          start before {{ app_gitlab_runner__test_started_before.stdout }}, after {{ app_gitlab_runner__test_started_after.stdout }}
