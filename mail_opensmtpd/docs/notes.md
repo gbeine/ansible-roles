@@ -8,7 +8,7 @@ The init of baseimage-alpine hands `/config` over to its user `abc` at the start
 |---|---|
 | `smtpd.conf` | the configuration written from `opensmtpd_config`, mode `0644`, mounted read-only as `/etc/smtpd/smtpd.conf` |
 | `mailname` | the mail name of `opensmtpd_mailname`, mode `0644`, mounted read-only as `/etc/smtpd/mailname`, absent without the variable |
-| `filters/` | the filters of the role, `0755`, and their license, owned by root (see Filters) |
+| `filter/` | the filter of the role, `0755`, and their license, owned by root (see filter) |
 | `tls/fullchain.pem`, `tls/privkey.pem` | the certificate of the realm of `opensmtpd_tls`, copied by `ExecStartPre` on every start, `0644` and `0600`, owned by root |
 | `secrets` | an empty file, the mount point of the secret |
 | `spool` | the queue of OpenSMTPD, created by the image owned by root with `0711` (`/var/spool/smtpd` links to it) |
@@ -73,19 +73,19 @@ Without the variable the file does not exist and OpenSMTPD uses the host name of
 opensmtpd_mailname: 'mail.example.org'
 ```
 
-### Filters
+### filter
 
-The role installs the filters of `files/` to `<opensmtpd_home>/filters`, they are executed by `smtpd` with `proc-exec` as `/config/filters/<filter>`:
+The role installs the filter of `files/` to `<opensmtpd_home>/filter`, they are executed by `smtpd` with `proc-exec` as `/config/filter/<filter>`:
 
 | Filter | Arguments | Function |
 |---|---|---|
-| `filter-rewrite-from` | `<mailaddr>` | rewrites the address of `MAIL FROM` and of the header `From` to `<mailaddr>`, a display name is kept ([opensmtpd-rewrite-from](https://github.com/jirutka/opensmtpd-rewrite-from) of Jakub Jirutka, ISC license in `filters/LICENSE`) |
+| `filter-rewrite-from` | `<mailaddr>` | rewrites the address of `MAIL FROM` and of the header `From` to `<mailaddr>`, a display name is kept ([opensmtpd-rewrite-from](https://github.com/jirutka/opensmtpd-rewrite-from) of Jakub Jirutka, ISC license in `filter/LICENSE`) |
 | `filter-rewrite-to` | `<old-domain> <new-domain>` | rewrites the domain of the addresses of the header `To`, addresses without a domain get `<new-domain>` |
 
 ```yaml
 opensmtpd_config:
   filter:
-    rewrite: 'proc-exec "/config/filters/filter-rewrite-from noreply@example.org"'
+    rewrite: 'proc-exec "/config/filter/filter-rewrite-from noreply@example.org"'
   listen:
     - 'on 0.0.0.0 port 587 tls-require pki mx.example.org auth <secrets> filter "rewrite"'
 ```
@@ -189,7 +189,7 @@ The role is new, there are no former variables.
 
 - The image starts `smtpd -d -f /etc/smtpd/smtpd.conf` since the build of 2026-11-20, the former build read `/config/smtpd.conf`.
   The role mounts `smtpd.conf` of the home directory there, older builds of the image do not work with the role anymore.
-- `opensmtpd_mailname` and the filters in `<opensmtpd_home>/filters` are new.
+- `opensmtpd_mailname` and the filter in `<opensmtpd_home>/filter` are new.
 
 ### Tests
 
