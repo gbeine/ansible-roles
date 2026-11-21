@@ -11,7 +11,8 @@
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - security_keycloak__container | length > 0
-          - security_keycloak__config | length > 0
+          - security_keycloak__config is mapping
+        fail_msg: 'keycloak_config has to be a dictionary of the options of Keycloak.'
         quiet: true
 
     - name: 'Validate the keys'
@@ -70,14 +71,14 @@
           {%- set errors = [] -%}
           {%- set secrets = security_keycloak__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('keycloak_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`keycloak_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('keycloak_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`keycloak_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of keycloak_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `keycloak_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -92,53 +93,54 @@
       vars:
         security_keycloak__errors: >-
           {%- set errors = [] -%}
-          {%- set config = security_keycloak__config_custom -%}
-          {%- if config is not mapping -%}
-          {%-   set _ = errors.append('keycloak_config has to be a dictionary of the options of Keycloak.') -%}
-          {%- else -%}
-          {%-   set config = security_keycloak__config -%}
-          {%-   set ns = namespace(unknown=[], secrets=[], values=[], lines=[], booleans=[]) -%}
-          {%-   for key, value in config.items() -%}
-          {%-     if key in security_keycloak__secrets_allowed -%}
-          {%-       set ns.secrets = ns.secrets + [ key ] -%}
-          {%-     elif key not in security_keycloak__config_allowed -%}
-          {%-       set ns.unknown = ns.unknown + [ key | string ] -%}
-          {%-     endif -%}
-          {%-     set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
-          {%-     if value is mapping or items | select('mapping') | list | length > 0
-                     or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
-          {%-       set ns.values = ns.values + [ key | string ] -%}
-          {%-     elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
-          {%-       set ns.lines = ns.lines + [ key | string ] -%}
-          {%-     elif key in security_keycloak__config_booleans and value is not none and value is not boolean -%}
-          {%-       set ns.booleans = ns.booleans + [ key ] -%}
-          {%-     endif -%}
-          {%-   endfor -%}
-          {%-   set missing = security_keycloak__config_required | reject('in', config | dict2items | rejectattr('value', 'in', [ none, '' ]) | map(attribute='key') | list) | list -%}
-          {%-   if ns.unknown | length > 0 -%}
-          {%-     set _ = errors.append('Unknown options in keycloak_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of Keycloak (security_keycloak__config_allowed),'
-                                      ~ ' options with keys in their names (e.g. db-url-host-<datasource>) need the keys in keycloak_keys.') -%}
+          {%- set config = security_keycloak__config -%}
+          {%- set ns = namespace(unknown=[], secrets=[], values=[], lines=[], booleans=[], tls=[]) -%}
+          {%- for key, value in config.items() -%}
+          {%-   if key in security_keycloak__secrets_allowed -%}
+          {%-     set ns.secrets = ns.secrets + [ key ] -%}
+          {%-   elif key not in security_keycloak__config_allowed -%}
+          {%-     set ns.unknown = ns.unknown + [ key | string ] -%}
           {%-   endif -%}
-          {%-   if ns.secrets | length > 0 -%}
-          {%-     set _ = errors.append('Passwords are set with keycloak_secrets, not in keycloak_config: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%-   set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-   if value is mapping or items | select('mapping') | list | length > 0
+                   or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+          {%-     set ns.values = ns.values + [ key | string ] -%}
+          {%-   elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-     set ns.lines = ns.lines + [ key | string ] -%}
+          {%-   elif key in security_keycloak__config_booleans and value is not none and value is not boolean -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
           {%-   endif -%}
-          {%-   if ns.values | length > 0 -%}
-          {%-     set _ = errors.append('The values of keycloak_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
-          {%-   endif -%}
-          {%-   if ns.lines | length > 0 -%}
-          {%-     set _ = errors.append('The values of keycloak_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
-          {%-   endif -%}
-          {%-   if ns.booleans | length > 0 -%}
-          {%-     set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
-          {%-   endif -%}
-          {%-   if missing | length > 0 -%}
-          {%-     set _ = errors.append('Keycloak needs the options ' ~ (security_keycloak__config_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
-          {%-   endif -%}
+          {%- endfor -%}
+          {%- for key, value in security_keycloak__config_tls.items() if config[key] | default(none) != value -%}
+          {%-   set ns.tls = ns.tls + [ key ] -%}
+          {%- endfor -%}
+          {%- set missing = security_keycloak__config_required | reject('in', config | dict2items | rejectattr('value', 'in', [ none, '' ]) | map(attribute='key') | list) | list -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in keycloak_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of Keycloak (security_keycloak__config_allowed),'
+                                    ~ ' options with keys in their names (e.g. db-url-host-<datasource>) need the keys in keycloak_keys.') -%}
+          {%- endif -%}
+          {%- if ns.secrets | length > 0 -%}
+          {%-   set _ = errors.append('Passwords are set with keycloak_secrets, not in keycloak_config: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('The values of keycloak_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of keycloak_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.tls | length > 0 -%}
+          {%-   set _ = errors.append('Options set for keycloak_tls must not be set in keycloak_config: ' ~ (ns.tls | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Keycloak needs the options ' ~ (security_keycloak__config_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
     # The database password and the password of the admin are mandatory
-    - name: 'Validate environment and secrets'
+    - name: 'Validate the values of the secrets'
       ansible.builtin.assert:
         that:
           - security_keycloak__errors | length == 0
@@ -149,13 +151,11 @@
         security_keycloak__targets: "{{ security_keycloak__secrets | map(attribute='target') | list }}"
         security_keycloak__secrets_missing: "{{ security_keycloak__secrets_required | reject('in', security_keycloak__targets) | list }}"
         security_keycloak__secrets_duplicate: "{{ security_keycloak__targets | unique | select('in', security_keycloak__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list) | list }}"
+        # The secrets are environment variables KC_*, Keycloak expands ${ in them
         security_keycloak__secrets_invalid: >-
           {{ security_keycloak__secrets | rejectattr('data', 'string') | map(attribute='name') | list
              + security_keycloak__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]|\$\{') | map(attribute='name') | list
              + security_keycloak__secrets | selectattr('data', 'string') | selectattr('data', 'eq', '') | map(attribute='name') | list }}
-        security_keycloak__options_in_environment: "{{ security_keycloak__environment.keys() | select('match', '^KC_') | reject('in', security_keycloak__environment_allowed) | list }}"
-        security_keycloak__environment_lines: >-
-          {{ security_keycloak__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
         security_keycloak__errors: >-
           {%- set errors = [] -%}
           {%- if security_keycloak__secrets_missing | length > 0 -%}
@@ -167,11 +167,28 @@
           {%- if security_keycloak__secrets_invalid | length > 0 -%}
           {%-   set _ = errors.append('Secrets are strings without line breaks and without ${, Keycloak would expand it: ' ~ (security_keycloak__secrets_invalid | unique | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if security_keycloak__options_in_environment | length > 0 -%}
-          {%-   set _ = errors.append('The options of Keycloak are set with keycloak_config and keycloak_secrets, not in keycloak_environment: ' ~ (security_keycloak__options_in_environment | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if security_keycloak__environment_lines | length > 0 -%}
-          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (security_keycloak__environment_lines | join(', ')) ~ '.') -%}
+          {{ errors }}
+
+    # Without keycloak_environment the quadlet unit has no environment and there is nothing to check
+    - name: 'Validate the environment'
+      when: security_keycloak__environment is defined
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_keycloak__environment is not mapping -%}
+          {%-   set _ = errors.append('keycloak_environment has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set options = security_keycloak__environment.keys() | map('string') | select('match', '^KC(_|RAW_|KEY_)')
+                               | reject('in', security_keycloak__environment_allowed) | list -%}
+          {%-   if options | length > 0 -%}
+          {%-     set _ = errors.append('The options of Keycloak are set with keycloak_config and keycloak_secrets, not in keycloak_environment: ' ~ (options | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
@@ -241,7 +258,7 @@
           {%- endif -%}
           {{ errors }}
 
-    # Checks the environment and the secrets after merging keycloak_container,
+    # Checks the environment (only if it is a dictionary, without keycloak_environment it is omitted) and the secrets after merging keycloak_container,
     # unknown variables or secrets would change the behavior unexpectedly
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
@@ -251,8 +268,13 @@
         fail_msg: "{{ security_keycloak__errors | join(' ') }}"
         quiet: true
       vars:
+        security_keycloak__container_environment: >-
+          {{ security_keycloak__container.environment if security_keycloak__container.environment | default(none) is mapping else {} }}
         security_keycloak__environment_unknown: >-
-          {{ (security_keycloak__container.environment | default({})).keys() | reject('in', security_keycloak__environment_allowed) | list }}
+          {{ security_keycloak__container_environment.keys() | map('string') | reject('in', security_keycloak__environment_allowed) | list }}
+        security_keycloak__environment_line_breaks: >-
+          {{ security_keycloak__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         security_keycloak__secrets_unknown: >-
           {{ security_keycloak__secrets | map(attribute='target') | map('string') | reject('in', security_keycloak__secrets_allowed) | list }}
         security_keycloak__errors: >-
@@ -263,21 +285,122 @@
           {%- if security_keycloak__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (security_keycloak__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
-          {%- if errors | length > 0 -%}
+          {%- if security_keycloak__environment_unknown | length > 0 or security_keycloak__secrets_unknown | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables ' ~ (security_keycloak__environment_allowed | join(', ')) ~ ' and the secrets '
                                     ~ (security_keycloak__secrets_allowed | join(', ')) ~ ', the options of Keycloak are set with keycloak_config,'
                                     ~ ' options with keys in their names (e.g. db-password-<datasource>) need the keys in keycloak_keys.') -%}
           {%- endif -%}
+          {%- if security_keycloak__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (security_keycloak__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {{ errors }}
 
-    # keycloak.conf contains the passwords, it is a podman secret mounted into the container
-    - name: 'Create the secret of keycloak.conf'
+    - name: 'Validate the certificate'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_keycloak__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_keycloak__errors: >-
+          {%- set errors = [] -%}
+          {%- set tls = security_keycloak__tls -%}
+          {%- if tls is not mapping -%}
+          {%-   set _ = errors.append('keycloak_tls has to be a dictionary with the realm, e.g. { "realm": "sso.example.org" }.') -%}
+          {%- elif tls | length > 0 -%}
+          {%-   set unknown = tls.keys() | map('string') | reject('in', security_keycloak__tls_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in keycloak_tls: ' ~ (unknown | join(', ')) ~ ', allowed are realm and dir.') -%}
+          {%-   endif -%}
+          {%-   if not (security_keycloak__tls_realm is string and security_keycloak__tls_realm is match(security_keycloak__tls_realm_pattern)) -%}
+          {%-     set _ = errors.append('keycloak_tls.realm is the name of a realm of letters, digits, _, . and -.') -%}
+          {%-   endif -%}
+          {%-   if not security_keycloak__tls_dir_valid | bool -%}
+          {%-     set _ = errors.append('keycloak_tls.dir has to be an absolute path without line breaks, e.g. /opt/certbot/etc/live.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the home directory'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__home is string
+          - security_keycloak__home is match('/')
+          - security_keycloak__home is not search('[\n\r]')
+        fail_msg: 'keycloak_home has to be an absolute path.'
+        quiet: true
+
+    # The realm is deployed on the host by pki_easyrsa_deploy or pki_certbot
+    - name: 'Find the certificate of the realm'
+      ansible.builtin.stat:
+        path: "{{ item.src }}"
+      loop: "{{ security_keycloak__tls_files if security_keycloak__tls_valid | bool else [] }}"
+      loop_control:
+        label: "{{ item.src }}"
+      register: 'security_keycloak__tls_stat'
+
+    # In check mode pki_easyrsa_deploy and pki_certbot do not create a new realm, the missing files are only reported
+    - name: 'Validate the certificate of the realm'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or security_keycloak__tls_missing | length == 0
+        fail_msg: "{{ security_keycloak__tls_message }}"
+        quiet: true
+      vars:
+        security_keycloak__tls_missing: "{{ security_keycloak__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+        security_keycloak__tls_message: >-
+          These files of the realm {{ security_keycloak__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ security_keycloak__tls_missing | join(', ') }}.
+
+    - name: 'Report the missing certificate of the realm in check mode'
+      ansible.builtin.debug:
+        msg: >-
+          These files of the realm {{ security_keycloak__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ security_keycloak__tls_missing | join(', ') }}.
+      when:
+        - ansible_check_mode
+        - security_keycloak__tls_missing | length > 0
+      vars:
+        security_keycloak__tls_missing: "{{ security_keycloak__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+
+    - name: 'Create the directory of Keycloak'
+      ansible.builtin.file:
+        path: "{{ security_keycloak__podman_home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+
+    # ExecStartPre copies the certificate of the realm into it, the user keycloak of the image reads it
+    - name: 'Create the directory of the certificate'
+      when: security_keycloak__tls_valid | bool
+      ansible.builtin.file:
+        path: "{{ security_keycloak__podman_tls_dir }}"
+        owner: "{{ security_keycloak__uid }}"
+        group: "{{ security_keycloak__gid }}"
+        mode: '0700'
+        state: 'directory'
+
+    # keycloak.conf contains no passwords, they are passed as environment variables of the secrets
+    - name: 'Create keycloak.conf'
+      ansible.builtin.template:
+        src: 'keycloak.conf.j2'
+        dest: "{{ security_keycloak__conf_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'security_keycloak__conf_result'
+
+    - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
-        name: "{{ security_keycloak__conf_secret }}"
-        data: "{{ lookup('ansible.builtin.template', 'keycloak.conf.j2', template_vars={ 'security_keycloak__conf_options': security_keycloak__conf }) }}"
         state: 'present'
-      register: 'security_keycloak__conf_result'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ security_keycloak__secrets }}"
+      register: 'security_keycloak__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -297,7 +420,7 @@
         expose: "{{ security_keycloak__container.expose | default(omit) }}"
         label: "{{ security_keycloak__container.labels | default(omit) }}"
         publish: "{{ security_keycloak__container.publish | default(omit) }}"
-        secrets: [ "{{ security_keycloak__conf_secret }},{{ security_keycloak__secret_mount }}" ]
+        secrets: "{{ security_keycloak__container.secrets | default(omit) }}"
         shm_size: "{{ security_keycloak__container.shm_size | default(omit) }}"
         volume: "{{ security_keycloak__container.volumes | default(omit) }}"
         quadlet_options: |
@@ -305,12 +428,30 @@
           WantedBy=default.target
 
           [Service]
+          {% for command in security_keycloak__container.exec_start_pre | default([]) %}
+          ExecStartPre={{ command }}
+          {% endfor %}
           RestartSec=5
           Restart=always
 
           [Unit]
           {% if security_keycloak__container.requires is defined %}
           Requires={{ security_keycloak__container.requires | join(' ') }}
+          {% endif %}
+          {% if security_keycloak__container.wants is defined %}
+          Wants={{ security_keycloak__container.wants | join(' ') }}
+          {% endif %}
+          {% if security_keycloak__container.after is defined %}
+          After={{ security_keycloak__container.after | join(' ') }}
+          {% endif %}
+          {% if security_keycloak__container.part_of is defined %}
+          PartOf={{ security_keycloak__container.part_of | join(' ') }}
+          {% endif %}
+          {% if security_keycloak__container.binds_to is defined %}
+          BindsTo={{ security_keycloak__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if security_keycloak__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ security_keycloak__container.requires_mounts_for | join(' ') }}
           {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
@@ -339,7 +480,8 @@
               {{ (ansible_facts.services[security_keycloak__container.name + '.service'].state | default('')) == 'running' }}
             security_keycloak__restart: >-
               {{ security_keycloak__running | bool
-                 and (security_keycloak__conf_result is changed or security_keycloak__quadlet_result is changed) }}
+                 and (security_keycloak__conf_result is changed or security_keycloak__secrets_result is changed
+                      or security_keycloak__quadlet_result is changed) }}
 
       rescue:
 
@@ -426,3 +568,15 @@
         container_name: "{{ security_keycloak__container.name }}"
         container_image: "{{ security_keycloak__container.image }}"
         container_schedule: "{{ security_keycloak__autoupdate_schedule }}"
+
+    # ExecStartPre copies the certificate only at the start, the timer restarts Keycloak after a renewal
+    - name: 'Enable the restart after a renewal of the certificate'
+      when:
+        - security_keycloak__tls_valid | bool
+        - security_keycloak__pki_update_enabled | bool
+      ansible.builtin.include_role:
+        name: 'pki_update'
+      vars:
+        pki_service: "{{ security_keycloak__container.name }}"
+        pki_certificate: "{{ security_keycloak__tls_files[0].src }}"
+        pki_schedule: "{{ security_keycloak__pki_update_schedule }}"

@@ -11,6 +11,14 @@ security_keycloak__test_network:
 
 security_keycloak__test_image: 'quay.io/keycloak/keycloak:latest'
 security_keycloak__test_quadlet_path: '/etc/containers/systemd/keycloak.container'
+security_keycloak__test_home: '/opt/keycloak'
+
+# The CA and the certificate of the realm, created by prepare.yml with openssl on the controller,
+# the certificate names the realm and the address of molecule-keycloak
+security_keycloak__test_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+security_keycloak__test_realm: 'sso.molecule.test'
+security_keycloak__test_realms_dir: '/etc/pki/realms'
+security_keycloak__test_tls_ip: '10.89.0.121'
 
 security_keycloak__test_cases:
 
@@ -27,6 +35,7 @@ security_keycloak__test_cases:
         MARIADB_PASSWORD: 'molecule-db-password'
         MARIADB_RANDOM_ROOT_PASSWORD: '1'
     role_vars:
+      keycloak_home: "{{ security_keycloak__test_home }}"
       keycloak_ip: '10.89.0.120'
       keycloak_network: 'podman-molecule'
       keycloak_hostname: 'keycloak-default'
@@ -41,9 +50,19 @@ security_keycloak__test_cases:
         - name: 'keycloak_admin_password'
           data: 'molecule-admin-password'
           target: 'bootstrap-admin-password'
+    # Runs again without a change, Keycloak must not restart
+    side_effect:
+      config: {}
     expect:
+      restart: false
       ip: '10.89.0.120'
       ip6: ~
+      url: 'http://10.89.0.120:8080'
+      management_url: 'http://10.89.0.120:9000'
+      tls: false
+      quadlet:
+        - 'Volume=/opt/keycloak/keycloak.conf:/opt/keycloak/conf/keycloak.conf:ro'
+        - 'Secret=keycloak_db_password,type=env,target=KC_DB_PASSWORD'
       admin: 'admin'
       admin_password: 'molecule-admin-password'
       conf:
@@ -70,7 +89,8 @@ security_keycloak__test_cases:
         POSTGRES_USER: 'molecule_kc'
         POSTGRES_PASSWORD: 'molecule-pg-password'
     role_vars:
-      keycloak_ip: '10.89.0.121'
+      keycloak_home: "{{ security_keycloak__test_home }}"
+      keycloak_ip: "{{ security_keycloak__test_tls_ip }}"
       keycloak_ipv6: 'fd00:89::121'
       keycloak_network: 'podman-molecule'
       keycloak_hostname: 'keycloak-molecule'
@@ -81,7 +101,11 @@ security_keycloak__test_cases:
         JAVA_OPTS_KC_HEAP: '-XX:MaxRAMPercentage=40'
       keycloak_keys:
         log_category: [ 'org.keycloak.events' ]
+      # The certificate of the realm, Keycloak only answers with https
+      keycloak_tls:
+        realm: "{{ security_keycloak__test_realm }}"
       keycloak_config:
+        http-enabled: false
         hostname: 'https://sso.molecule.test'
         db: 'postgres'
         db-url-host: '10.89.0.21'
@@ -116,12 +140,24 @@ security_keycloak__test_cases:
               standard_flow_enabled: false
               service_accounts_enabled: true
     # side_effect changes the log level, keycloak.conf changes and Keycloak has to restart without a new initialization
+    # keycloak.conf changes and Keycloak has to restart
     side_effect:
       config:
         log-level: 'WARN'
     expect:
+      restart: true
       ip: '10.89.0.121'
       ip6: 'fd00:89::121'
+      url: 'https://10.89.0.121:8443'
+      management_url: 'https://10.89.0.121:9000'
+      tls: true
+      quadlet:
+        - 'Volume=/opt/keycloak/keycloak.conf:/opt/keycloak/conf/keycloak.conf:ro'
+        - 'Volume=/opt/keycloak/tls:/opt/keycloak/conf/tls:ro'
+        - 'Secret=keycloak_db_password,type=env,target=KC_DB_PASSWORD'
+        - 'ExecStartPre=install -o 1000 -g 0 -m 0644 /etc/pki/realms/sso.molecule.test/fullchain.pem /opt/keycloak/tls/fullchain.pem'
+        - 'ExecStartPre=install -o 1000 -g 0 -m 0600 /etc/pki/realms/sso.molecule.test/privkey.pem /opt/keycloak/tls/privkey.pem'
+      pki_certificate: '/etc/pki/realms/sso.molecule.test/fullchain.pem'
       admin: 'molecule-admin'
       admin_password: 'molecule-admin-password'
       conf:
@@ -134,6 +170,9 @@ security_keycloak__test_cases:
         - 'log-level-org.keycloak.events=debug'
         - 'features-disabled=impersonation'
         - 'metrics-enabled=true'
+        - 'http-enabled=false'
+        - 'https-certificate-file=/opt/keycloak/conf/tls/fullchain.pem'
+        - 'https-certificate-key-file=/opt/keycloak/conf/tls/privkey.pem'
       realm: 'molecule'
       client:
         id: 'molecule-service'

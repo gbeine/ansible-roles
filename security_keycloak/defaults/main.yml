@@ -5,6 +5,8 @@
 # https://ansible-roles.org/roles/keycloak
 #
 
+# Contains keycloak.conf and the copies of the certificate, keycloak.conf is mounted read-only
+security_keycloak__home: "{{ keycloak_home | mandatory }}"
 security_keycloak__ip: "{{ keycloak_ip | mandatory }}"
 security_keycloak__ipv6: "{{ keycloak_ipv6 }}"
 security_keycloak__network: "{{ keycloak_network | mandatory }}"
@@ -16,17 +18,23 @@ security_keycloak__version: "{{ keycloak_version | default('latest') }}"
 
 security_keycloak__container: "{{ security_keycloak__podman_container_default | combine(keycloak_container | default({})) }}"
 
-# Variables of the start script and the JVM, e.g. JAVA_OPTS_APPEND, the options of Keycloak are set with keycloak_config
-security_keycloak__environment: "{{ security_keycloak__environment_default | combine(keycloak_environment | default({})) }}"
-
-# Options of Keycloak written to keycloak.conf, e.g. hostname, db, db-url-host, http-enabled
-security_keycloak__config: "{{ security_keycloak__config_default | combine(keycloak_config | default({})) }}"
-
-# Keys of the options with a free part in their names, e.g. { 'datasource': [ 'audit' ], 'log_category': [ 'org.keycloak' ] }
-security_keycloak__keys: "{{ keycloak_keys | default({}) }}"
+# Variables of the start script and the JVM, e.g. JAVA_OPTS_APPEND, the options of Keycloak are set with keycloak_config,
+# Keycloak has no default environment
+security_keycloak__environment: "{{ keycloak_environment }}"
 
 # Secrets with name, data and target, the targets are the password options of Keycloak, e.g. db-password
 security_keycloak__secrets: "{{ keycloak_secrets | default([]) }}"
+
+# Options of Keycloak written to keycloak.conf, e.g. hostname, db, db-url-host, http-enabled
+security_keycloak__config: "{{ security_keycloak__config_default | combine(security_keycloak__config_tls, keycloak_config | default({})) }}"
+
+# The certificate of the host: { realm: <name> } copies fullchain.pem and privkey.pem of <dir>/<name> to <home>/tls on every start
+# of the container and writes the options of the certificate, empty without TLS; dir defaults to the realms of common_globals,
+# e.g. /opt/certbot/etc/live for pki_certbot
+security_keycloak__tls: "{{ keycloak_tls | default({}) }}"
+
+# Keys of the options with a free part in their names, e.g. { 'datasource': [ 'audit' ], 'log_category': [ 'org.keycloak' ] }
+security_keycloak__keys: "{{ keycloak_keys | default({}) }}"
 
 # Realms with their clients, required actions and user federations
 security_keycloak__realms: "{{ keycloak_realms | default([]) }}"
@@ -34,12 +42,13 @@ security_keycloak__realms: "{{ keycloak_realms | default([]) }}"
 security_keycloak__autoupdate_enabled: "{{ keycloak_autoupdate_enabled | default(false) }}"
 security_keycloak__autoupdate_schedule: "{{ keycloak_autoupdate_schedule }}"
 
+# The timer of pki_update restarts Keycloak after a renewal of the certificate of keycloak_tls
+security_keycloak__pki_update_enabled: "{{ keycloak_pki_update_enabled | default(true) }}"
+security_keycloak__pki_update_schedule: "{{ keycloak_pki_update_schedule | default('*-*-* 00/4:00:00') }}"
+
 #
 # Defaults - do not change
 #
-
-security_keycloak__environment_default:
-  TZ: "{{ security_keycloak__timezone }}"
 
 security_keycloak__config_default:
   db: 'mariadb'
@@ -50,19 +59,18 @@ security_keycloak__config_default:
   health-enabled: true
   log: 'console'
 
-# The options of keycloak_config and keycloak_keys, the defaults are empty, so the role checks that they are dictionaries
-security_keycloak__config_custom: "{{ keycloak_config | default({}) }}"
-
 security_keycloak__config_required: [ 'hostname', 'db-url-host' ]
 
 # Options only used for the initialization and the login of the role, never written to the keycloak.conf of the service
 security_keycloak__init_options: [ 'bootstrap-admin-username' ]
 security_keycloak__admin_username: "{{ security_keycloak__config['bootstrap-admin-username'] | default('admin', true) }}"
 
-# Options set for the initialization only: no cluster with a running Keycloak, the admin is created before the start is reported
-security_keycloak__init_config:
-  cache: 'local'
-  server-async-bootstrap: false
+# The environment of the initialization only: the admin, no cluster with a running Keycloak, the admin is created before the start is reported,
+# the environment takes precedence over keycloak.conf
+security_keycloak__init_environment:
+  KC_BOOTSTRAP_ADMIN_USERNAME: "{{ security_keycloak__admin_username }}"
+  KC_CACHE: 'local'
+  KC_SERVER_ASYNC_BOOTSTRAP: 'false'
 
 # The ports and the path of the API used by the role
 security_keycloak__https_only: "{{ not (security_keycloak__config['http-enabled'] | default(false) | bool) }}"
@@ -157,30 +165,29 @@ security_keycloak__config_allowed: "{{ security_keycloak__config_allowed_options
 security_keycloak__config_booleans: "{{ security_keycloak__config_booleans_options + security_keycloak__config_booleans_keys }}"
 security_keycloak__secrets_allowed: "{{ security_keycloak__secrets_allowed_options + security_keycloak__secrets_allowed_keys }}"
 
-# The options written to keycloak.conf: the configuration without the options of the initialization and the secrets,
-# entries without name, data or target are left out, the validation of the secrets reports them
-security_keycloak__secret_options: >-
-  {%- set options = {} -%}
-  {%- if security_keycloak__secrets is sequence and security_keycloak__secrets is not string and security_keycloak__secrets is not mapping -%}
-  {%-   for secret in security_keycloak__secrets
-          if secret is mapping and secret.name is defined and secret.data is defined and secret.target is defined -%}
-  {%-     set _ = options.update({ secret.target | string: secret.data | string }) -%}
-  {%-   endfor -%}
-  {%- endif -%}
-  {{ options }}
+# The secrets with name, data and target, entries without name, data or target are left out, the validation of the secrets reports them
+security_keycloak__secrets_valid: >-
+  {{ (security_keycloak__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('data', 'defined')
+      | selectattr('target', 'defined') | list)
+     if (security_keycloak__secrets is sequence and security_keycloak__secrets is not string and security_keycloak__secrets is not mapping) else [] }}
 
-security_keycloak__conf: >-
-  {{ security_keycloak__config | dict2items | rejectattr('key', 'in', security_keycloak__init_options) | items2dict
-     | combine(security_keycloak__secret_options | dict2items | rejectattr('key', 'in', security_keycloak__secrets_init) | items2dict) }}
+# Keycloak reads no files, the passwords are passed as environment variables KC_<OPTION> (upper case, other characters as _),
+# the environment takes precedence over keycloak.conf
+security_keycloak__secrets_env: >-
+  {%- set secrets = [] -%}
+  {%- for secret in security_keycloak__secrets_valid -%}
+  {%-   set _ = secrets.append({ 'name': secret.name, 'target': secret.target | string,
+                                 'mount': secret.name ~ ',type=env,target=KC_' ~ (secret.target | string | regex_replace('[^A-Za-z0-9]', '_') | upper) }) -%}
+  {%- endfor -%}
+  {{ secrets }}
+security_keycloak__podman_secrets: "{{ security_keycloak__secrets_env | rejectattr('target', 'in', security_keycloak__secrets_init) | map(attribute='mount') | list }}"
+security_keycloak__init_secrets: "{{ security_keycloak__secrets_env | map(attribute='mount') | list }}"
 
-# The options of the initialization: the admin, a local cache and the creation of the admin before the start is reported
-security_keycloak__init_conf: >-
-  {{ security_keycloak__conf
-     | combine({ 'bootstrap-admin-username': security_keycloak__admin_username })
-     | combine(security_keycloak__secret_options | dict2items | selectattr('key', 'in', security_keycloak__secrets_init) | items2dict)
-     | combine(security_keycloak__init_config) }}
+# The options written to keycloak.conf: the configuration without the options of the initialization, the passwords are no part of it
+security_keycloak__conf: "{{ security_keycloak__config | dict2items | rejectattr('key', 'in', security_keycloak__init_options) | items2dict }}"
 
-security_keycloak__admin_password: "{{ security_keycloak__secret_options['bootstrap-admin-password'] | default('') }}"
+security_keycloak__admin_password: >-
+  {{ security_keycloak__secrets_valid | selectattr('target', 'eq', 'bootstrap-admin-password') | map(attribute='data') | first | default('') }}
 
 # The keys of the entries of keycloak_realms, their clients and user federations, booleans are checked
 security_keycloak__realm_keys: [ 'realm', 'id', 'display_name', 'enabled', 'login_with_email', 'required_actions', 'clients', 'user_federation' ]
@@ -215,12 +222,44 @@ security_keycloak__podman_name: 'keycloak'
 security_keycloak__podman_image: 'quay.io/keycloak/keycloak'
 security_keycloak__podman_tag: "{{ security_keycloak__version }}"
 
-# keycloak.conf with the passwords is a podman secret, the user keycloak (1000) of the image reads it
-security_keycloak__conf_file: '/opt/keycloak/conf/keycloak.conf'
-security_keycloak__conf_secret: "{{ security_keycloak__container.name }}-config"
+security_keycloak__podman_home: "{{ security_keycloak__home }}"
+
+# keycloak.conf without passwords, mounted read-only, the user keycloak (1000) of the image reads it
+security_keycloak__conf_file: "{{ security_keycloak__podman_home }}/keycloak.conf"
+security_keycloak__conf_target: '/opt/keycloak/conf/keycloak.conf'
 security_keycloak__init_name: "{{ security_keycloak__container.name }}-init"
-security_keycloak__init_secret: "{{ security_keycloak__container.name }}-init-config"
-security_keycloak__secret_mount: "type=mount,target={{ security_keycloak__conf_file }},uid=1000,gid=0,mode=0400"
+
+# The certificate of the realm in the realms of common_globals (pki_easyrsa_deploy) or in keycloak_tls.dir (e.g. pki_certbot),
+# ExecStartPre of the quadlet unit copies the files to <home>/tls, the user keycloak (1000) of the image reads them
+security_keycloak__uid: 1000
+security_keycloak__gid: 0
+security_keycloak__realms_dir: "{{ common_globals__pki_realms_dir }}"
+security_keycloak__podman_tls_dir: "{{ security_keycloak__podman_home }}/tls"
+security_keycloak__tls_target: '/opt/keycloak/conf/tls'
+security_keycloak__tls_keys: [ 'realm', 'dir' ]
+security_keycloak__tls_realm_pattern: '^[A-Za-z0-9_.-]+$'
+security_keycloak__tls_realm: "{{ security_keycloak__tls.realm | default('') if security_keycloak__tls is mapping else '' }}"
+security_keycloak__tls_dir: "{{ security_keycloak__tls.dir | default(security_keycloak__realms_dir) if security_keycloak__tls is mapping else security_keycloak__realms_dir }}"
+security_keycloak__tls_dir_valid: "{{ security_keycloak__tls_dir is string and security_keycloak__tls_dir is match('/') and security_keycloak__tls_dir is not search('[\\n\\r]') }}"
+security_keycloak__tls_valid: >-
+  {{ security_keycloak__tls_realm is string and security_keycloak__tls_realm is match(security_keycloak__tls_realm_pattern)
+     and security_keycloak__tls_dir_valid | bool }}
+security_keycloak__tls_files:
+  - src: "{{ security_keycloak__tls_dir }}/{{ security_keycloak__tls_realm }}/fullchain.pem"
+    dest: "{{ security_keycloak__podman_tls_dir }}/fullchain.pem"
+    mode: '0644'
+  - src: "{{ security_keycloak__tls_dir }}/{{ security_keycloak__tls_realm }}/privkey.pem"
+    dest: "{{ security_keycloak__podman_tls_dir }}/privkey.pem"
+    mode: '0600'
+# The commands of ExecStartPre, install follows the links of the realm
+security_keycloak__tls_commands: >-
+  {{ security_keycloak__tls_files | map(attribute='mode') | zip(security_keycloak__tls_files | map(attribute='src'), security_keycloak__tls_files | map(attribute='dest'))
+     | map('join', ' ') | map('regex_replace', '^', 'install -o ' ~ security_keycloak__uid ~ ' -g ' ~ security_keycloak__gid ~ ' -m ') | list
+     if security_keycloak__tls_valid | bool else [] }}
+security_keycloak__config_tls: >-
+  {{ { 'https-certificate-file': security_keycloak__tls_target ~ '/fullchain.pem',
+       'https-certificate-key-file': security_keycloak__tls_target ~ '/privkey.pem' }
+     if security_keycloak__tls_valid | bool else {} }}
 
 # The log messages of the initialization: the admin was created on a new installation, Keycloak started without creating it
 security_keycloak__init_created: 'Created temporary admin user with username'
@@ -234,11 +273,17 @@ security_keycloak__podman_container_default:
   ipv6: "{{ security_keycloak__ipv6 | default(omit) }}"
   network: "{{ security_keycloak__network }}"
   timezone: "{{ security_keycloak__timezone }}"
-  # Set with keycloak_environment, merged over the default
-  environment: "{{ security_keycloak__environment }}"
+  environment: "{{ security_keycloak__environment | default(omit) }}"
   labels: "{{ security_keycloak__labels | default(omit) }}"
   shm_size: '256m'
   command: 'start'
+  secrets: "{{ security_keycloak__podman_secrets if security_keycloak__podman_secrets | length > 0 else omit }}"
+  # keycloak_container.volumes replaces the list completely
+  volumes: >-
+    {{ [ security_keycloak__conf_file ~ ':' ~ security_keycloak__conf_target ~ ':ro' ]
+       + ([ security_keycloak__podman_tls_dir ~ ':' ~ security_keycloak__tls_target ~ ':ro' ] if security_keycloak__tls_valid | bool else []) }}
+  # Copies the certificate of the realm on every start, a renewed certificate is used after the next restart
+  exec_start_pre: "{{ security_keycloak__tls_commands }}"
 
 # Generated from quarkus/config-api/src/main/java/org/keycloak/config/*Options.java of Keycloak 26.8.2,
 # the families of keycloak_keys with the options composed from a key, <key> is replaced by the key:

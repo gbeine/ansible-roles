@@ -2,17 +2,18 @@
 
 # Keycloak creates the realm master and the admin of bootstrap-admin-* only on a new installation, an existing installation
 # starts without creating it. The container of the initialization starts Keycloak once with the options of the admin,
-# a local cache and a synchronous bootstrap, it is removed afterwards. The quadlet unit never contains the options of the admin.
+# a local cache and a synchronous bootstrap in the environment, it is removed afterwards.
+# The quadlet unit never contains the admin or its password.
 
 - name: 'Run the initialization of Keycloak'
   block:
 
-    - name: 'Create the secret of keycloak.conf of the initialization'
-      no_log: true
-      containers.podman.podman_secret:
-        name: "{{ security_keycloak__init_secret }}"
-        data: "{{ lookup('ansible.builtin.template', 'keycloak.conf.j2', template_vars={ 'security_keycloak__conf_options': security_keycloak__init_conf }) }}"
-        state: 'present'
+    # The copies of ExecStartPre do not exist before the first start of the quadlet unit
+    - name: 'Copy the certificate of the realm for the initialization'
+      ansible.builtin.command:
+        argv: "{{ item | split(' ') }}"
+      loop: "{{ security_keycloak__container.exec_start_pre | default([]) }}"
+      changed_when: true
 
     # The initialization needs the network of the database, it gets no address and no ports of the service
     - name: 'Start the initialization'
@@ -21,9 +22,11 @@
         image: "{{ security_keycloak__container.image }}"
         network: "{{ security_keycloak__container.network }}"
         command: "{{ security_keycloak__container.command }}"
-        env: "{{ security_keycloak__container.environment | default(omit) }}"
+        env: >-
+          {{ (security_keycloak__container.environment if security_keycloak__container.environment | default(none) is mapping else {})
+             | combine(security_keycloak__init_environment) }}
         etc_hosts: "{{ security_keycloak__container.etc_hosts | default(omit) }}"
-        secrets: [ "{{ security_keycloak__init_secret }},{{ security_keycloak__secret_mount }}" ]
+        secrets: "{{ security_keycloak__init_secrets }}"
         shm_size: "{{ security_keycloak__container.shm_size | default(omit) }}"
         volume: "{{ security_keycloak__container.volumes | default(omit) }}"
         detach: true
@@ -65,9 +68,4 @@
     - name: 'Remove the container of the initialization'
       containers.podman.podman_container:
         name: "{{ security_keycloak__init_name }}"
-        state: 'absent'
-
-    - name: 'Remove the secret of the initialization'
-      containers.podman.podman_secret:
-        name: "{{ security_keycloak__init_secret }}"
         state: 'absent'

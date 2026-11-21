@@ -5,6 +5,7 @@ required actions and user federations with the modules `community.general.keyclo
 ### Configuration
 
 ```yaml
+keycloak_home: '/srv/container/keycloak'
 keycloak_ip: '192.168.99.70'
 keycloak_network: 'podman99'
 keycloak_hostname: 'keycloak'
@@ -27,6 +28,9 @@ keycloak_secrets:
     target: 'bootstrap-admin-password'
 ```
 
+The role writes `keycloak_config` to `<keycloak_home>/keycloak.conf` (root, `0644`), it is mounted read-only to `/opt/keycloak/conf/keycloak.conf`.
+`keycloak_home` is mandatory. The file contains no passwords, they are passed as environment variables (see Secrets).
+
 `keycloak_config` contains the options of Keycloak as they are written in `keycloak.conf`
 (see the [configuration of Keycloak](https://www.keycloak.org/server/all-config)), it is merged over the default of the role:
 `db: mariadb`, `db-username: keycloak`, `db-url-database: keycloak`, `http-enabled: true`, `proxy-headers: xforwarded`,
@@ -40,8 +44,9 @@ keycloak_secrets:
 `bootstrap-admin-username` is the name of the admin (`admin` by default), it is only used for the initialization and the login of the role,
 it is never written to the `keycloak.conf` of the service.
 
-`keycloak_environment` is merged over the default of the role (`TZ`) and only takes the variables of the start script and the JVM,
-e.g. `JAVA_OPTS_APPEND` or `JAVA_OPTS_KC_HEAP`, the options of Keycloak (`KC_*`) are set with `keycloak_config`.
+`keycloak_environment` only takes the variables of the start script and the JVM, e.g. `JAVA_OPTS_APPEND` or `JAVA_OPTS_KC_HEAP`,
+the options of Keycloak (`KC_*`) are set with `keycloak_config`. It has no default, without it the quadlet unit has no environment,
+the time zone is set by podman with `keycloak_timezone`.
 
 ### Options with keys
 
@@ -78,23 +83,51 @@ The secrets are set with `keycloak_secrets`, every entry needs `name`, `data` an
 and the passwords of the key stores, trust stores and keys of `https-*` and `https-management-*`, plus the passwords of the datasources of `keycloak_keys`.
 `db-password` and `bootstrap-admin-password` are mandatory. The password options must not be set in `keycloak_config`.
 
-Keycloak cannot read single options from files, there are no `*_FILE` variables, and it reads exactly one configuration file.
-Therefore the role renders `keycloak.conf` with the options and the passwords and stores it as podman secret `<name>-config`,
-it is mounted with `type=mount` to `/opt/keycloak/conf/keycloak.conf`, readable by the user `keycloak` (1000) of the image only.
-The passwords are neither part of the environment nor of a file of the host or the quadlet unit.
-The names of the entries of `keycloak_secrets` are only used to identify them, the role creates no podman secret per entry.
+Keycloak cannot read single options from files: there are no `*_FILE` variables, and `keycloak.conf` cannot reference files.
+The only file source of Keycloak is a Java KeyStore (`config-keystore`), its password would have to be passed in plain text again.
+Therefore every entry is a podman secret passed to the environment with `type=env,target=KC_<OPTION>`, the option in upper case with `_` for other characters,
+e.g. `db-password` becomes `KC_DB_PASSWORD` and `db-password-audit` becomes `KC_DB_PASSWORD_AUDIT`.
+Keycloak reads the environment before `keycloak.conf`, so the passwords are neither part of `keycloak.conf` nor of the quadlet unit in plain text.
+A changed secret restarts the running service.
 Secrets must not contain line breaks or `${`, Keycloak would expand it as expression.
 
-`bootstrap-admin-password` is only used for the initialization and the login of the role, it is not part of the `keycloak.conf` of the service.
+`bootstrap-admin-password` is only used for the initialization and the login of the role, it is not part of the quadlet unit.
+
+### TLS
+
+`keycloak_tls` sets the certificate of a realm deployed on the host by `pki_easyrsa_deploy` or `pki_certbot`:
+
+```yaml
+keycloak_tls:
+  realm: 'sso.example.org'
+  # optional, the realms of common_globals by default, e.g. /opt/certbot/etc/live for pki_certbot
+  dir: '/opt/certbot/etc/live'
+keycloak_config:
+  http-enabled: false
+keycloak_container:
+  publish:
+    - '8443:8443'
+```
+
+`ExecStartPre` of the quadlet unit copies `fullchain.pem` (`0644`) and `privkey.pem` (`0600`) of `<dir>/<realm>` with `install` to `<keycloak_home>/tls`
+(`0700`) at every start, owned by the user `keycloak` (1000) of the image, `install` follows the links of the realm.
+The directory is mounted read-only to `/opt/keycloak/conf/tls`, the role writes `https-certificate-file` and `https-certificate-key-file` to `keycloak.conf`,
+they must not be set in `keycloak_config` then. The ports and `http-enabled` stay with `keycloak_config` and `keycloak_container`.
+The files of the realm have to exist before the role runs, in check mode missing files are only reported.
+
+The copies only change at a start, so `https-certificates-reload-period` of Keycloak does not see a renewal.
+The timer of `pki_update` (`pki-update@keycloak.timer`) checks the certificate of the realm and restarts Keycloak if the certificate is newer than the start,
+`keycloak_pki_update_enabled` (`true`) and `keycloak_pki_update_schedule` (`*-*-* 00/4:00:00`) control it.
 
 ### Initialization
 
 Keycloak creates the realm `master` and the admin of `bootstrap-admin-*` only on a new installation, the database is the installation.
-If Keycloak is not running, the role starts the container `<name>-init` once before the service: same image, network, environment and volumes,
-without address and ports, with the podman secret `<name>-init-config` containing `keycloak.conf` plus the options of the admin,
-`cache=local` and `server-async-bootstrap=false`.
+If Keycloak is not running, the role starts the container `<name>-init` once before the service: same image, network, environment, secrets
+and volumes (including `keycloak.conf`), without address and ports, plus the secret `bootstrap-admin-password` as `KC_BOOTSTRAP_ADMIN_PASSWORD`
+and the environment `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_CACHE=local` and `KC_SERVER_ASYNC_BOOTSTRAP=false`, the environment takes precedence over `keycloak.conf`.
+With `keycloak_tls` the role copies the certificate like `ExecStartPre` before, the copies do not exist before the first start of the service.
 The role waits until Keycloak reports the created admin (`Created temporary admin user`) or, on an existing installation, its start,
-and removes the container and its secret afterwards, also if the initialization failed.
+and removes the container afterwards, also if the initialization failed.
 If the initialization fails, Keycloak may have created a part of its tables, drop them before the next run.
 
 If Keycloak is running, the initialization is skipped. After every start the role logs in as admin to the realm `master`,
@@ -147,16 +180,16 @@ The check of the environment uses the environment of the container after merging
 
 ### Container
 
-Ports, volumes (e.g. certificates or providers), additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `keycloak_container`,
-it is merged over the default of the container. The merge is not recursive, `keycloak_container.environment` replaces the environment
-including `keycloak_environment`, use `keycloak_environment` instead. The container publishes no ports by default, a reverse proxy uses the address of the container.
+Ports, volumes (e.g. providers), additional hosts (`etc_hosts`) and the dependencies are changed with `keycloak_container`,
+it is merged over the default of the container. The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+The merge is not recursive, `keycloak_container.volumes` replaces `keycloak.conf` and the certificate, `keycloak_container.environment` replaces
+`keycloak_environment`, `keycloak_container.secrets` the secrets. The container publishes no ports by default, a reverse proxy uses the address of the container.
 
 ```yaml
 keycloak_container:
-  publish:
-    - '8443:8443'
-  volumes:
-    - '/srv/container/keycloak/certs:/opt/keycloak/certs:ro'
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
 ```
 
 ### Validation
@@ -164,19 +197,27 @@ keycloak_container:
 The role checks before any change:
 
 - `keycloak_keys` is a dictionary of the known families with lists of valid and unique keys
+- `keycloak_home` is an absolute path
+- `keycloak_tls` is a dictionary with a valid realm and an absolute `dir`, the files of the realm exist, the options of the certificate are not set in `keycloak_config`
 - `keycloak_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a known password option and set once,
   `db-password` and `bootstrap-admin-password` are set, no secret contains a line break or `${`
 - `keycloak_config` contains known options with strings, numbers, booleans, `null` or lists of them without line breaks,
   the boolean options are `true` or `false`, no password option, `hostname` and `db-url-host` are set
-- `keycloak_environment` contains no option of Keycloak and no line breaks, only allowed environment variables are set in the container
+- `keycloak_environment` is a dictionary without options of Keycloak, only allowed environment variables without line breaks are set in the container
 - `keycloak_realms` is a list of realms with known keys, booleans, lists and clients with `client_id` and user federations with `federation_name` and `provider_id`
 
 If `keycloak_container` or `keycloak_config` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter. Keycloak checks the values of the options at the start.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the home directory, `keycloak.conf`, the secrets, the quadlet unit
+and the timer of `pki_update`. The initialization, the start, the login and the realms do not run in check mode.
+
 ### Restart and updates
 
-Keycloak is restarted if it was running and `keycloak.conf` or the quadlet unit changed, otherwise it is started and enabled.
+Keycloak is restarted if it was running and `keycloak.conf`, a secret or the quadlet unit changed, otherwise it is started and enabled.
+A renewed certificate restarts Keycloak by the timer of `pki_update` (see TLS).
 If the start fails, the role shows the journal of the service.
 Afterwards the role waits up to 300 seconds until the realm `master` answers and shows the journal otherwise.
 Keycloak builds itself at the start if build options changed, e.g. `db` or `features`.
@@ -199,6 +240,15 @@ without `keycloak_autoupdate_schedule` the schedule of `container_update` is use
 | none | `keycloak_environment`, `keycloak_config`, `keycloak_keys`, `keycloak_secrets`, `keycloak_container`, `keycloak_autoupdate_schedule` |
 | `podman___update_mode` | Removed, updates are done by `container_update` |
 
+Changes of this revision:
+
+- `keycloak_home` is mandatory, `keycloak.conf` is written to it and mounted read-only instead of the podman secret `<name>-config`
+- the passwords are podman secrets per entry of `keycloak_secrets` passed as `KC_*` variables with `type=env`, the targets stay the same
+- the podman secrets `keycloak-config` and `keycloak-init-config` are not used anymore, remove them with `podman secret rm keycloak-config keycloak-init-config`
+- `keycloak_tls`, `keycloak_pki_update_enabled` and `keycloak_pki_update_schedule` are new, a certificate mounted with `keycloak_container.volumes` can be replaced by `keycloak_tls`
+- `TZ` is no default of the environment anymore, the time zone is set by podman
+- the messages of the validation of the secrets name the variable in backticks
+
 In `keycloak_realms` `required_actions`, `user_federation` and the keys of the clients except `client_id` are optional now, `id` defaults to `realm`.
 
 Fixed bugs:
@@ -209,12 +259,12 @@ Fixed bugs:
 Changed behavior:
 
 - Keycloak runs in production mode (`start`) instead of `start-dev`, `http-enabled: true` is the default for a reverse proxy
-- the passwords are part of `keycloak.conf` in a podman secret instead of the environment
+- the passwords are podman secrets in the environment of the container instead of plain environment variables
 - the admin is created once by `<name>-init`, the quadlet unit no longer contains `KEYCLOAK_ADMIN` and its password,
   an existing installation keeps its admin, the role checks the login
-- `/etc/localtime` and `/etc/timezone` are no longer mounted, the time zone is set with `keycloak_timezone` and `TZ`
+- `/etc/localtime` and `/etc/timezone` are no longer mounted, the time zone is set by podman with `keycloak_timezone`
 - the configuration, the environment, the secrets and the realms are checked before any change
-- the role restarts Keycloak only if `keycloak.conf` or the quadlet unit changed and waits until Keycloak answers
+- the role restarts Keycloak only if `keycloak.conf`, a secret or the quadlet unit changed and waits until Keycloak answers
 - the tags are `security` and `security_keycloak`
 
 ### Tests
@@ -225,17 +275,23 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-keycloak-default` | Only the mandatory variables with MariaDB |
-| `molecule-keycloak` | PostgreSQL, IPv6, labels, another admin, log levels with a key, a disabled feature, metrics and a realm with a client and a required action |
+| `molecule-keycloak` | PostgreSQL, IPv6, labels, another admin, log levels with a key, a disabled feature, metrics, a realm with a client and a required action, the certificate of a realm with https only |
 
-`prepare` creates the podman network, pulls the images and starts the database.
+`prepare` creates the podman network, pulls the images and starts the database, on `molecule-keycloak` it creates a CA and the certificate of the realm
+with openssl on the controller and deploys the realm in the structure of `pki_easyrsa_deploy`.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `keycloak_container` not a dictionary, `keycloak_secrets` not a list, a secret without target, an unknown secret,
-without the database password, a password in `keycloak_config`, an option in `keycloak_environment`, unknown options and a boolean as string,
-invalid `keycloak_keys`, without `db-url-host` and invalid realms and checks that it fails with the expected message and the quadlet unit is unchanged
-(tasks marked `expect ERROR`), then it changes the log level on `molecule-keycloak`, `keycloak.conf` changes, Keycloak has to restart
-and the initialization must not run again.
-`verify` checks the quadlet unit without passwords, options of the admin and mounts of the time zone, the service, that the container and the secret
-of the initialization are removed, `keycloak.conf` in the container, the login of the admin, the health, the realm, a token of the client
-with its secret and the metrics.
+without the database password, a password in `keycloak_config`, an option in `keycloak_environment`, a line break in the environment, unknown options and a boolean as string,
+invalid `keycloak_keys`, without `db-url-host`, invalid realms, `keycloak_tls` not a dictionary, with an unknown key, an invalid realm or a relative directory,
+a realm without certificate, an option of the certificate in `keycloak_config` and a relative home
+and checks that it fails with the expected message and the quadlet unit and `keycloak.conf` are unchanged (tasks marked `expect ERROR`),
+then it changes the log level on `molecule-keycloak`, `keycloak.conf` changes, Keycloak has to restart and the initialization must not run again,
+`molecule-keycloak-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the volumes, the secret of the database as environment, `ExecStartPre` and without passwords, the admin and the time zone,
+the service without automatic restarts, the removed container of the initialization and the former secrets, `keycloak.conf` in the home and in the container
+without passwords, the copies of the certificate, the time zone of the container, the timer of `pki_update`, the login of the admin, the health,
+the realm, a token of the client with its secret and the metrics, on `molecule-keycloak` the certificate is verified with `openssl s_client`
+and the CA of the realm on both ports, the requests use https.
 
 | Environment variable | Default | Description |
 |---|---|---|

@@ -9,8 +9,10 @@
   vars:
     security_keycloak__test_case: "{{ security_keycloak__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     security_keycloak__expect: "{{ security_keycloak__test_case.expect }}"
-    security_keycloak__test_url: "http://{{ security_keycloak__expect.ip }}:8080"
-    security_keycloak__test_management_url: "http://{{ security_keycloak__expect.ip }}:9000"
+    security_keycloak__test_url: "{{ security_keycloak__expect.url }}"
+    security_keycloak__test_management_url: "{{ security_keycloak__expect.management_url }}"
+    # The certificate of the realm is verified with the CA of the PKI by openssl, without TLS the requests use http
+    security_keycloak__test_ca: "{{ security_keycloak__test_realms_dir }}/{{ security_keycloak__test_realm }}/public/ca.crt"
 
   tasks:
 
@@ -27,17 +29,20 @@
           - ('IP=' + security_keycloak__expect.ip) in security_keycloak__test_quadlet_lines
           - security_keycloak__expect.ip6 is none or ('IP6=' + security_keycloak__expect.ip6) in security_keycloak__test_quadlet_lines
           - security_keycloak__expect.ip6 is not none or security_keycloak__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
-          - ('Environment=TZ=' + security_keycloak__test_case.role_vars.keycloak_timezone) in security_keycloak__test_quadlet_lines
-          - "'Secret=keycloak-config,type=mount,target=/opt/keycloak/conf/keycloak.conf,uid=1000,gid=0,mode=0400' in security_keycloak__test_quadlet_lines"
+          - security_keycloak__expect.quadlet | reject('in', security_keycloak__test_quadlet_lines) | list | length == 0
+          - security_keycloak__expect.tls or security_keycloak__test_quadlet_lines | select('match', 'ExecStartPre=') | list | length == 0
           - security_keycloak__test_quadlet_lines | select('match', 'Exec=') | join(' ') is search('start')
-          # The time zone is set with TZ, /etc/localtime is not mounted
+          # The time zone is set by podman, neither TZ nor /etc/localtime
+          - security_keycloak__test_quadlet_lines | select('match', 'Environment=TZ=') | list | length == 0
           - security_keycloak__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
-          # Neither a password nor the options of the initialization are part of the quadlet unit
-          - security_keycloak__test_quadlet_lines | select('search', '(?i)password|bootstrap|molecule-admin') | list | length == 0
+          # The password of the database is a secret in the environment, the admin and its password are only part of the initialization
+          - security_keycloak__test_quadlet_lines | select('search', '(?i)bootstrap|molecule-admin|keycloak_admin_password') | list | length == 0
+          - security_keycloak__test_plain | select('in', security_keycloak__test_quadlet.content | b64decode) | list | length == 0
         fail_msg: "{{ security_keycloak__test_quadlet_lines | to_json }}"
       vars:
         security_keycloak__test_quadlet_lines: >-
           {{ (security_keycloak__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}
+        security_keycloak__test_plain: "{{ security_keycloak__test_case.role_vars.keycloak_secrets | map(attribute='data') | list }}"
 
     - name: 'Read the state of the service'
       ansible.builtin.command:
@@ -46,41 +51,145 @@
       changed_when: false
       failed_when: false
 
-    - name: 'Check the container and the secrets of the initialization and the secret of keycloak.conf'
+    - name: 'Check the container of the initialization and the former secrets of keycloak.conf'
       ansible.builtin.command:
         argv: "{{ item }}"
       loop:
         - [ 'podman', 'container', 'exists', 'keycloak-init' ]
         - [ 'podman', 'secret', 'exists', 'keycloak-init-config' ]
         - [ 'podman', 'secret', 'exists', 'keycloak-config' ]
+        - [ 'podman', 'secret', 'exists', 'keycloak_db_password' ]
       register: 'security_keycloak__test_exists'
       changed_when: false
       failed_when: false
 
-    # keycloak.conf contains the passwords, only the names of the password options are compared
+    - name: 'Read keycloak.conf in the home directory'
+      ansible.builtin.slurp:
+        src: "{{ security_keycloak__test_home }}/keycloak.conf"
+      register: 'security_keycloak__test_conf_file'
+
     - name: 'Read keycloak.conf in the container'
       ansible.builtin.command:
         argv: [ 'podman', 'exec', 'keycloak', 'cat', '/opt/keycloak/conf/keycloak.conf' ]
       register: 'security_keycloak__test_conf'
       changed_when: false
-      no_log: true
 
-    - name: 'Assert the service, the initialization and keycloak.conf'
+    - name: 'Read the owner and the mode of the files of Keycloak'
+      ansible.builtin.stat:
+        path: "{{ security_keycloak__test_home }}/{{ item }}"
+      loop: [ 'keycloak.conf', 'tls', 'tls/fullchain.pem', 'tls/privkey.pem' ]
+      register: 'security_keycloak__test_stat'
+
+    - name: 'Inspect the keycloak container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', 'keycloak' ]
+      register: 'security_keycloak__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the initialization, keycloak.conf, the certificate and the container'
       ansible.builtin.assert:
         that:
           - security_keycloak__test_service.stdout == 'active'
-          - security_keycloak__test_exists.results | map(attribute='rc') | list == [ 1, 1, 0 ]
-          - security_keycloak__expect.conf | reject('in', security_keycloak__test_conf_lines) | list | length == 0
-          - "'db-password' in security_keycloak__test_conf_names"
-          - security_keycloak__test_conf_names | select('match', 'bootstrap-admin') | list | length == 0
+          - security_keycloak__test_exists.results | map(attribute='rc') | list == [ 1, 1, 1, 0 ]
+          - security_keycloak__test_conf.stdout == (security_keycloak__test_conf_file.content | b64decode).rstrip('\n')
+          - security_keycloak__expect.conf | reject('in', security_keycloak__test_conf.stdout_lines) | list | length == 0
+          # Neither a password nor the options of the initialization are part of keycloak.conf
+          - security_keycloak__test_conf.stdout_lines | select('search', '(?i)password|bootstrap') | list | length == 0
+          - security_keycloak__test_plain | select('in', security_keycloak__test_conf.stdout) | list | length == 0
+          - security_keycloak__test_modes['keycloak.conf'] == '0644 0'
+          - security_keycloak__test_modes['tls'] == ('0700 1000' if security_keycloak__expect.tls else 'absent')
+          - security_keycloak__test_modes['tls/fullchain.pem'] == ('0644 1000' if security_keycloak__expect.tls else 'absent')
+          - security_keycloak__test_modes['tls/privkey.pem'] == ('0600 1000' if security_keycloak__expect.tls else 'absent')
+          - security_keycloak__test_container.Config.Timezone == security_keycloak__test_case.role_vars.keycloak_timezone
+          - security_keycloak__test_container.Config.Env | select('match', 'TZ=') | list | length == 0
         fail_msg: >-
           service {{ security_keycloak__test_service.stdout }},
           exists {{ security_keycloak__test_exists.results | map(attribute='rc') | list }},
-          missing {{ security_keycloak__expect.conf | reject('in', security_keycloak__test_conf_lines) | list }},
-          options {{ security_keycloak__test_conf_names }}
+          missing {{ security_keycloak__expect.conf | reject('in', security_keycloak__test_conf.stdout_lines) | list }},
+          modes {{ security_keycloak__test_modes }}, time zone {{ security_keycloak__test_container.Config.Timezone | default('') }}
       vars:
-        security_keycloak__test_conf_lines: "{{ security_keycloak__test_conf.stdout_lines | reject('search', 'password') | list }}"
-        security_keycloak__test_conf_names: "{{ security_keycloak__test_conf.stdout_lines | reject('match', '#') | map('regex_replace', '=.*$', '') | list }}"
+        security_keycloak__test_plain: "{{ security_keycloak__test_case.role_vars.keycloak_secrets | map(attribute='data') | list }}"
+        security_keycloak__test_container: "{{ (security_keycloak__test_inspect.stdout | from_json)[0] }}"
+        security_keycloak__test_modes: >-
+          {%- set modes = {} -%}
+          {%- for result in security_keycloak__test_stat.results -%}
+          {%-   set _ = modes.update({ result.item: (result.stat.mode ~ ' ' ~ result.stat.uid) if result.stat.exists else 'absent' }) -%}
+          {%- endfor -%}
+          {{ modes }}
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'keycloak' ]
+      register: 'security_keycloak__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'keycloak', '-n', '80', '--no-pager' ]
+      register: 'security_keycloak__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ security_keycloak__test_restarts.stdout ] + security_keycloak__test_journal.stdout_lines | default([]) }}"
+
+    # pki_update restarts Keycloak after a renewal of the certificate of the realm, only with TLS
+    - name: 'Read the override of pki_update'
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/pki-update@keycloak.service.d/override.conf'
+      register: 'security_keycloak__test_pki_update'
+
+    - name: 'Read the override and the timer of pki_update'
+      when: security_keycloak__expect.tls
+      block:
+
+        - name: 'Read the override of the service of pki_update'
+          ansible.builtin.slurp:
+            src: '/etc/systemd/system/pki-update@keycloak.service.d/override.conf'
+          register: 'security_keycloak__test_pki_update_override'
+
+        - name: 'Read the state of the timer of pki_update'
+          ansible.builtin.command: 'systemctl is-active pki-update@keycloak.timer'
+          register: 'security_keycloak__test_pki_update_timer'
+          changed_when: false
+          failed_when: false
+
+    - name: 'Assert the timer of pki_update'
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__test_pki_update.stat.exists == security_keycloak__expect.tls
+          - not security_keycloak__expect.tls or security_keycloak__test_pki_update_timer.stdout == 'active'
+          - >-
+            not security_keycloak__expect.tls
+            or ('Environment=PKI_CERTIFICATE=' ~ security_keycloak__expect.pki_certificate) in (security_keycloak__test_pki_update_override.content | b64decode)
+        fail_msg: >-
+          override exists: {{ security_keycloak__test_pki_update.stat.exists }},
+          timer: {{ security_keycloak__test_pki_update_timer.stdout | default('') }},
+          override: {{ security_keycloak__test_pki_update_override.content | default('') | b64decode }}
+
+    # The requests below use https without validation, the certificate is verified once per port with the CA of the realm
+    - name: 'Verify the certificate of Keycloak with the CA of the realm'
+      when: security_keycloak__expect.tls
+      ansible.builtin.command:
+        argv: [ 'openssl', 's_client', '-connect', "{{ security_keycloak__expect.ip }}:{{ item }}", '-CAfile', "{{ security_keycloak__test_ca }}",
+                '-verify_ip', "{{ security_keycloak__expect.ip }}", '-verify_return_error', '-brief' ]
+        stdin: ''
+      loop: [ 8443, 9000 ]
+      register: 'security_keycloak__test_tls'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the certificate of Keycloak'
+      when: security_keycloak__expect.tls
+      ansible.builtin.assert:
+        that:
+          - security_keycloak__test_tls.results | rejectattr('rc', 'eq', 0) | list | length == 0
+          - "security_keycloak__test_tls.results | rejectattr('stderr', 'search', 'Verification: OK') | list | length == 0"
+        fail_msg: "{{ security_keycloak__test_tls.results | map(attribute='stderr') | list | to_json }}"
 
     # The request contains the password of the admin
     - name: 'Log in as admin'
@@ -93,6 +202,7 @@
           client_id: 'admin-cli'
           username: "{{ security_keycloak__expect.admin }}"
           password: "{{ security_keycloak__expect.admin_password }}"
+        validate_certs: false
         status_code: [ 200, 400, 401 ]
       register: 'security_keycloak__test_login'
       no_log: true
@@ -100,6 +210,7 @@
     - name: 'Read the health of Keycloak'
       ansible.builtin.uri:
         url: "{{ security_keycloak__test_management_url }}/health/ready"
+        validate_certs: false
         status_code: [ 200, 503 ]
       register: 'security_keycloak__test_health'
 
@@ -107,6 +218,7 @@
       when: security_keycloak__expect.realm is not none
       ansible.builtin.uri:
         url: "{{ security_keycloak__test_url }}/realms/{{ security_keycloak__expect.realm }}"
+        validate_certs: false
         status_code: [ 200, 404 ]
       register: 'security_keycloak__test_realm'
 
@@ -120,6 +232,7 @@
           grant_type: 'client_credentials'
           client_id: "{{ security_keycloak__expect.client.id }}"
           client_secret: "{{ security_keycloak__expect.client.secret }}"
+        validate_certs: false
         status_code: [ 200, 400, 401 ]
       register: 'security_keycloak__test_client'
       no_log: true
@@ -128,6 +241,7 @@
       when: security_keycloak__test_case.role_vars.keycloak_config['metrics-enabled'] | default(false)
       ansible.builtin.uri:
         url: "{{ security_keycloak__test_management_url }}/metrics"
+        validate_certs: false
         status_code: [ 200, 404 ]
       register: 'security_keycloak__test_metrics'
 
@@ -142,4 +256,5 @@
         fail_msg: >-
           login {{ security_keycloak__test_login.status }}, health {{ security_keycloak__test_health.status }},
           realm {{ security_keycloak__test_realm.status | default('skipped') }}, client {{ security_keycloak__test_client.status | default('skipped') }},
+          client URL {{ security_keycloak__test_url }}/realms/{{ security_keycloak__expect.realm }}/protocol/openid-connect/token,
           metrics {{ security_keycloak__test_metrics.status | default('skipped') }}

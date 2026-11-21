@@ -1,0 +1,63 @@
+---
+# Creates the CA and the certificate of the realm with openssl on the controller,
+# the certificate names the realm and the address of molecule-keycloak, so TLS is verified with the address
+
+- name: 'Create the directory of the PKI'
+  ansible.builtin.file:
+    path: "{{ security_keycloak__test_pki }}"
+    state: 'directory'
+    mode: '0700'
+
+- name: 'Write the configuration of openssl'
+  ansible.builtin.copy:
+    dest: "{{ security_keycloak__test_pki }}/openssl.cnf"
+    mode: '0600'
+    content: |
+      [req]
+      distinguished_name = dn
+      [dn]
+      [ca]
+      basicConstraints = critical, CA:TRUE
+      keyUsage = critical, keyCertSign, cRLSign
+      subjectKeyIdentifier = hash
+
+- name: 'Write the extensions of the certificate'
+  ansible.builtin.copy:
+    dest: "{{ security_keycloak__test_pki }}/realm.ext"
+    mode: '0600'
+    content: |
+      basicConstraints = CA:FALSE
+      keyUsage = critical, digitalSignature
+      extendedKeyUsage = serverAuth
+      # VERIFY_X509_STRICT of Python 3.13 requires the key identifiers
+      subjectKeyIdentifier = hash
+      authorityKeyIdentifier = keyid,issuer
+      subjectAltName = DNS:{{ security_keycloak__test_realm }}, IP:{{ security_keycloak__test_tls_ip }}
+
+# genpkey writes PKCS#8 keys like certbot
+- name: 'Create the keys of the CA and the realm'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', "{{ security_keycloak__test_pki }}/{{ item }}.key" ]
+    creates: "{{ security_keycloak__test_pki }}/{{ item }}.key"
+  loop: [ 'ca', 'realm' ]
+
+- name: 'Create the certificate of the CA'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'req', '-x509', '-new', '-key', "{{ security_keycloak__test_pki }}/ca.key", '-subj', '/CN=Molecule Keycloak CA',
+            '-days', '30', '-config', "{{ security_keycloak__test_pki }}/openssl.cnf", '-extensions', 'ca',
+            '-out', "{{ security_keycloak__test_pki }}/ca.crt" ]
+    creates: "{{ security_keycloak__test_pki }}/ca.crt"
+
+- name: 'Create the request of the realm'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'req', '-new', '-key', "{{ security_keycloak__test_pki }}/realm.key", '-subj', "/CN={{ security_keycloak__test_realm }}",
+            '-config', "{{ security_keycloak__test_pki }}/openssl.cnf", '-out', "{{ security_keycloak__test_pki }}/realm.csr" ]
+    creates: "{{ security_keycloak__test_pki }}/realm.csr"
+
+- name: 'Create the certificate of the realm'
+  ansible.builtin.command:
+    argv: [ 'openssl', 'x509', '-req', '-in', "{{ security_keycloak__test_pki }}/realm.csr",
+            '-CA', "{{ security_keycloak__test_pki }}/ca.crt", '-CAkey', "{{ security_keycloak__test_pki }}/ca.key",
+            '-set_serial', '10', '-days', '30', '-extfile', "{{ security_keycloak__test_pki }}/realm.ext",
+            '-out', "{{ security_keycloak__test_pki }}/realm.crt" ]
+    creates: "{{ security_keycloak__test_pki }}/realm.crt"
