@@ -15,12 +15,16 @@
       loop: "{{ security_keycloak__container.exec_start_pre | default([]) }}"
       changed_when: true
 
-    # The initialization needs the network of the database, it gets no address and no ports of the service
+    # The initialization needs the network of the database, it uses the address of the service, the database may only allow it,
+    # the address is free because the initialization only runs while the service is not running, it gets no ports
     - name: 'Start the initialization'
       containers.podman.podman_container:
         name: "{{ security_keycloak__init_name }}"
         image: "{{ security_keycloak__container.image }}"
+        hostname: "{{ security_keycloak__container.hostname }}"
         network: "{{ security_keycloak__container.network }}"
+        ip: "{{ security_keycloak__container.ip }}"
+        ip6: "{{ security_keycloak__container.ipv6 | default(omit) }}"
         command: "{{ security_keycloak__container.command }}"
         env: >-
           {{ (security_keycloak__container.environment if security_keycloak__container.environment | default(none) is mapping else {})
@@ -32,10 +36,17 @@
         detach: true
         state: 'started'
 
-    # Keycloak reports the admin of a new installation, an existing installation only reports the start
+    # Keycloak reports the admin of a new installation, an existing installation only reports the start,
+    # a failed start ends the container, its state ends the wait
     - name: 'Wait for the end of the initialization'
       ansible.builtin.command:
-        argv: [ 'podman', 'logs', "{{ security_keycloak__init_name }}" ]
+        argv:
+          - 'sh'
+          - '-c'
+          - >-
+            podman logs "$1" 2>&1; podman container inspect --format "STATE={% raw %}{{.State.Status}}{% endraw %}" "$1"
+          - 'sh'
+          - "{{ security_keycloak__init_name }}"
       register: 'security_keycloak__init_log'
       changed_when: false
       failed_when: false
@@ -43,6 +54,7 @@
         security_keycloak__init_created in security_keycloak__init_output
         or security_keycloak__init_output is search(security_keycloak__init_started)
         or security_keycloak__init_output is search('ERROR')
+        or security_keycloak__init_output is search('STATE=exited')
       retries: 100
       delay: 3
       vars:
@@ -56,7 +68,7 @@
             or (security_keycloak__init_output is search(security_keycloak__init_started)
                 and security_keycloak__init_output is not search('ERROR'))
         fail_msg: >-
-          The initialization of Keycloak failed. Check the database and its options in keycloak_config,
+          The initialization of Keycloak failed. Check the database and the options in keycloak_config,
           if Keycloak created a part of its tables, drop the tables of the database before the next run.
           {{ (security_keycloak__init_output | split('\n'))[-30:] }}
         quiet: true

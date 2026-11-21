@@ -114,6 +114,8 @@ keycloak_container:
 The directory is mounted read-only to `/opt/keycloak/conf/tls`, the role writes `https-certificate-file` and `https-certificate-key-file` to `keycloak.conf`,
 they must not be set in `keycloak_config` then. The ports and `http-enabled` stay with `keycloak_config` and `keycloak_container`.
 The files of the realm have to exist before the role runs, in check mode missing files are only reported.
+If `http-enabled` is `false`, Keycloak only serves HTTPS and needs a certificate: `keycloak_tls`, `https-certificate-file` or `https-key-store-file`,
+the role stops before any change otherwise.
 
 The copies only change at a start, so `https-certificates-reload-period` of Keycloak does not see a renewal.
 The timer of `pki_update` (`pki-update@keycloak.timer`) checks the certificate of the realm and restarts Keycloak if the certificate is newer than the start,
@@ -122,12 +124,13 @@ The timer of `pki_update` (`pki-update@keycloak.timer`) checks the certificate o
 ### Initialization
 
 Keycloak creates the realm `master` and the admin of `bootstrap-admin-*` only on a new installation, the database is the installation.
-If Keycloak is not running, the role starts the container `<name>-init` once before the service: same image, network, environment, secrets
-and volumes (including `keycloak.conf`), without address and ports, plus the secret `bootstrap-admin-password` as `KC_BOOTSTRAP_ADMIN_PASSWORD`
+If Keycloak is not running, the role starts the container `<name>-init` once before the service: same image, network, address, host name,
+environment, secrets and volumes (including `keycloak.conf`), without ports. It uses the address of the service, because the database may only allow it,
+the address is free while the service is not running, plus the secret `bootstrap-admin-password` as `KC_BOOTSTRAP_ADMIN_PASSWORD`
 and the environment `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_CACHE=local` and `KC_SERVER_ASYNC_BOOTSTRAP=false`, the environment takes precedence over `keycloak.conf`.
 With `keycloak_tls` the role copies the certificate like `ExecStartPre` before, the copies do not exist before the first start of the service.
 The role waits until Keycloak reports the created admin (`Created temporary admin user`) or, on an existing installation, its start,
-and removes the container afterwards, also if the initialization failed.
+or the end of the container, e.g. after a wrong option, and removes the container afterwards, also if the initialization failed.
 If the initialization fails, Keycloak may have created a part of its tables, drop them before the next run.
 
 If Keycloak is running, the initialization is skipped. After every start the role logs in as admin to the realm `master`,
@@ -202,7 +205,8 @@ The role checks before any change:
 - `keycloak_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a known password option and set once,
   `db-password` and `bootstrap-admin-password` are set, no secret contains a line break or `${`
 - `keycloak_config` contains known options with strings, numbers, booleans, `null` or lists of them without line breaks,
-  the boolean options are `true` or `false`, no password option, `hostname` and `db-url-host` are set
+  the boolean options are `true` or `false`, no password option, `hostname` and `db-url-host` are set,
+  a certificate is set if `http-enabled` is `false`
 - `keycloak_environment` is a dictionary without options of Keycloak, only allowed environment variables without line breaks are set in the container
 - `keycloak_realms` is a list of realms with known keys, booleans, lists and clients with `client_id` and user federations with `federation_name` and `provider_id`
 
@@ -283,7 +287,7 @@ with openssl on the controller and deploys the realm in the structure of `pki_ea
 `side_effect` runs the role with `keycloak_container` not a dictionary, `keycloak_secrets` not a list, a secret without target, an unknown secret,
 without the database password, a password in `keycloak_config`, an option in `keycloak_environment`, a line break in the environment, unknown options and a boolean as string,
 invalid `keycloak_keys`, without `db-url-host`, invalid realms, `keycloak_tls` not a dictionary, with an unknown key, an invalid realm or a relative directory,
-a realm without certificate, an option of the certificate in `keycloak_config` and a relative home
+a realm without certificate, an option of the certificate in `keycloak_config`, HTTPS only without a certificate and a relative home
 and checks that it fails with the expected message and the quadlet unit and `keycloak.conf` are unchanged (tasks marked `expect ERROR`),
 then it changes the log level on `molecule-keycloak`, `keycloak.conf` changes, Keycloak has to restart and the initialization must not run again,
 `molecule-keycloak-default` runs again without a change and must not restart.
