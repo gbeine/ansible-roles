@@ -8,7 +8,7 @@ The role mounts only its configuration and the state of Icinga, everything else 
 | `<icinga_master_home>/lib` | `/data/var/lib/icinga2` (certificates, API, state) |
 | `<icinga_master_home>/log` | `/data/var/log/icinga2` |
 | `<icinga_master_home>/spool` | `/data/var/spool/icinga2` |
-| `<icinga_master_home>/etc/icinga2/<file>` | `/data/etc/icinga2/<file>`, read-only, for `icinga2.conf`, `constants.conf`, `zones.conf`, `endpoints.conf`, `conf.d`, `features-enabled` and `zones.d` |
+| `<icinga_master_home>/etc/<file>` | `/data/etc/icinga2/<file>`, read-only, for `icinga2.conf`, `constants.conf`, `zones.conf`, `endpoints.conf`, `conf.d`, `features-enabled` and `zones.d` |
 | `<icinga_master_home>/tmp` | `/tmp` |
 | `<icinga_master_home>/plugins` | `/usr/local/lib/nagios/plugins`, read-only |
 
@@ -220,9 +220,10 @@ Changed behavior:
 - the files are written for the user 5665 with `0400`, the directories with `0750`
 - `<icinga_master_home>/data` is not mounted to `/data` anymore, it hid the files of the image, e.g. the scripts of the mail notifications
   `mail-host-notification` and `mail-service-notification` of `icinga_master_commands`. The directories on the host are
-  `lib`, `log`, `spool` and `etc/icinga2` now, the role does not move the files of former versions.
+  `lib`, `log`, `spool` and `etc` now, the role does not move the files of former versions.
   Move the state before the first run and remove `<icinga_master_home>/data` afterwards:
   `mv <icinga_master_home>/data/var/lib/icinga2 <icinga_master_home>/lib`, `mv <icinga_master_home>/data/var/log/icinga2 <icinga_master_home>/log`,
+  `mv <icinga_master_home>/data/var/spool/icinga2 <icinga_master_home>/spool`,
   `mv <icinga_master_home>/data/var/spool/icinga2 <icinga_master_home>/spool`
 - the mail notifications use `mail` of the image (msmtp), they need `/var/lib/icinga2/.msmtprc` (`<icinga_master_home>/lib/.msmtprc`),
   the role does not manage it yet
