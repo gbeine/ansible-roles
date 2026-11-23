@@ -9,6 +9,12 @@ wallabag is configured with `wallabag_environment`, which is merged over the def
 see the [parameters of wallabag](https://doc.wallabag.org/admin/parameters) and the [image](https://github.com/wallabag/docker).
 `SYMFONY__ENV__DOMAIN_NAME` is mandatory, it is the public URL of wallabag used in links and emails.
 Booleans may be written as YAML booleans, the role passes them as `true` and `false`.
+The time zone of the container is `wallabag_timezone`, the image sets no `TZ` and the role sets no default for it.
+
+wallabag stays configured with the environment, the role writes no configuration file:
+`entrypoint.sh` of the image writes `app/config/parameters.yml` from its template with `envsubst` on every start,
+a file of the role would be overwritten, and the entrypoint reads `SYMFONY__ENV__DATABASE_DRIVER`, `_HOST` and `_PORT` itself
+to wait for the database and to install wallabag with sqlite. `parameters.yml` cannot read files.
 
 ```yaml
 wallabag_environment:
@@ -83,7 +89,7 @@ the passwords of RabbitMQ and Redis and the DSN of Sentry with its key.
 The role only allows the environment variables in `app_wallabag__environment_allowed` and the secrets in `app_wallabag__secrets_allowed`,
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo, a deprecated variable or a variable that has to be passed as secret.
-The variables are generated from `root/etc/wallabag/parameters.template.yml` and `php-wallabag.template.ini` of the image for wallabag 2.6.15,
+The variables are generated from `root/etc/wallabag/parameters.template.yml` and `php-wallabag.template.ini` of the image for wallabag 2.6.18,
 the image ignores every other variable, without the secrets.
 `POPULATE_DATABASE`, `MYSQL_ROOT_PASSWORD`, `POSTGRES_USER` and `POSTGRES_PASSWORD` of the initialization with the root password of the database are not allowed.
 The booleans (`app_wallabag__environment_booleans`) are `SYMFONY__ENV__FOSUSER_REGISTRATION` and `SYMFONY__ENV__FOSUSER_CONFIRMATION`.
@@ -93,10 +99,19 @@ so variables set with `wallabag_container.environment` or `wallabag_container.se
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `wallabag_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `wallabag_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `wallabag_container.volumes` replaces the three directories,
 `wallabag_container.environment` replaces the environment including `wallabag_environment`.
+For a reverse proxy, e.g. Traefik, the labels are set with `wallabag_labels`.
 The image runs `composer install` on every start before nginx listens, the role waits until `/api/info` answers, it shows the log of the service otherwise.
+
+```yaml
+wallabag_container:
+  requires: [ 'mariadb.service' ]
+  after: [ 'mariadb.service' ]
+```
 
 ### Validation
 
@@ -106,14 +121,21 @@ The role checks before any change:
 - `SYMFONY__ENV__DOMAIN_NAME` is set, `SYMFONY__ENV__DATABASE_DRIVER` is `pdo_sqlite`, `pdo_mysql` or `pdo_pgsql`,
   `pdo_mysql` and `pdo_pgsql` have the host, the port and the secret `SYMFONY__ENV__DATABASE_PASSWORD`
 - no secret is set in `wallabag_environment`, the booleans are `true` or `false`, values have no line breaks
-- `wallabag_admin` has a valid name, a valid email and a password with at least 8 characters
-- only allowed environment variables and secrets are set in the container
+- `wallabag_admin` has a valid name, a valid email and a password with at least 8 characters without line breaks
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
-If `wallabag_container` is no dictionary, merging it with the default fails before anything changes.
+If `wallabag_container` or `wallabag_environment` is no dictionary, merging it with the default fails before anything changes,
+the same applies to a failing template in the variables, e.g. an unknown filter.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start, the wait for wallabag and the administrator do not run in check mode.
 
 ### Restart and updates
 
 wallabag is restarted if it was running and a secret or the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role shows the error and the journal of the service.
 A changed password of the administrator needs no restart.
 Updates of the image are done by `container_update` with `wallabag_autoupdate_enabled: true` and `wallabag_autoupdate_schedule`,
 without `wallabag_autoupdate_schedule` the schedule of `container_update` is used.
@@ -133,7 +155,8 @@ without `wallabag_autoupdate_schedule` the schedule of `container_update` is use
 - `wallabag_mysql_root_password`, `wallabag_postgres_password` and `wallabag_postgres_user` are removed, the root passwords are not part of the quadlet unit anymore,
   the database and its user have to exist, the role installs wallabag if its tables are missing.
 - `wallabag_admin` is new and mandatory, it takes over `wallabag` or a user with the same name.
-- `wallabag_environment`, `wallabag_secrets` and `wallabag_autoupdate_schedule` are new.
+- `wallabag_environment`, `wallabag_secrets` and `wallabag_autoupdate_schedule` are new, `wallabag_labels` has no default anymore.
+- The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `wallabag_container` are new.
 - The service is not stopped on every run anymore, `podman___update_mode` is removed.
 - The tag `app_wallabag` stays, the tag `app` is added.
 
@@ -148,13 +171,15 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-wallabag` | IPv6, labels, MariaDB with the secret `SYMFONY__ENV__DATABASE_PASSWORD`, the DSN of the mailer, the name of the server, a boolean and the administrator |
 
 `prepare` creates the podman network, pulls the images and starts MariaDB with the database and the user `wallabag` on `molecule-wallabag`.
-`side_effect` runs the role with `wallabag_container` not a dictionary, a secret without `target`, no `SYMFONY__ENV__SECRET`, the root password of the database as secret,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `wallabag_container` and `wallabag_environment` not a dictionary, an unknown environment variable, a secret without `target`, no `SYMFONY__ENV__SECRET`, the root password of the database as secret,
 the database password in the environment, no `SYMFONY__ENV__DOMAIN_NAME`, an invalid database driver, `pdo_mysql` without the port, an invalid boolean,
 a line break in a value, an administrator without password and a short password
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes the name of the server and the password of the administrator on `molecule-wallabag`,
-wallabag has to restart and the password changes without a new user and without a new installation.
-`verify` checks the quadlet unit with the secrets and without their values, the service, the addresses and the environment of the container, the API,
+wallabag has to restart and the password changes without a new user and without a new installation,
+`molecule-wallabag-default` runs again without a change and wallabag must not restart.
+`verify` checks the quadlet unit with the secrets and without their values, the service without automatic restarts, the addresses, the time zone and the environment of the container, the API,
 the login with the password, the refused former password and the refused default administrator, the administration of the users and the database.
 The logins use the module `app_wallabag_test_login` in `molecule/default/library/`, it keeps the cookies of the session in one cookie jar,
 because Symfony changes the session on the login and sets several cookies in the redirect.

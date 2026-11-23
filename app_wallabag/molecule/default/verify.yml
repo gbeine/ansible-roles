@@ -62,14 +62,36 @@
           - app_wallabag__expect.env | reject('in', app_wallabag__test_env) | list | length == 0
           - app_wallabag__test_env | select('match', '(MYSQL_ROOT_PASSWORD|POSTGRES_PASSWORD)=') | list | length == 0
           - app_wallabag__test_passwords | select('in', app_wallabag__test_env | join(' ')) | list | length == 0
+          - app_wallabag__test_env | select('match', 'TZ=') | list | length == 0
+          - app_wallabag__test_container.Config.Timezone == app_wallabag__test_case.role_vars.wallabag_timezone
         fail_msg: >-
-          service {{ app_wallabag__test_service.stdout }},
+          service {{ app_wallabag__test_service.stdout }}, time zone {{ app_wallabag__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_wallabag__test_net.IPAddress }}, IPv6 {{ app_wallabag__test_net.GlobalIPv6Address }},
           environment {{ app_wallabag__test_env | reject('match', 'SYMFONY__ENV__(SECRET|DATABASE_PASSWORD|MAILER_DSN)=') | join(', ') }}
       vars:
         app_wallabag__test_container: "{{ (app_wallabag__test_inspect.stdout | from_json)[0] }}"
         app_wallabag__test_net: "{{ app_wallabag__test_container.NetworkSettings.Networks[app_wallabag__test_case.role_vars.wallabag_network] }}"
         app_wallabag__test_env: "{{ app_wallabag__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'wallabag' ]
+      register: 'app_wallabag__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'wallabag', '-n', '80', '--no-pager' ]
+      register: 'app_wallabag__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_wallabag__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_wallabag__test_restarts.stdout ] + app_wallabag__test_journal.stdout_lines | default([]) }}"
 
     - name: 'Read the information of the API'
       ansible.builtin.uri:
