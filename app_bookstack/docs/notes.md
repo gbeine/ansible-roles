@@ -20,7 +20,7 @@ bookstack_config:
 
 `bookstack_environment` only takes the variables of the linuxserver image, e.g. `UMASK`.
 `PUID` and `PGID` are set from `bookstack_uid` and `bookstack_gid` (defaults to `bookstack_uid`), they define the owner of the files in `bookstack_home`.
-The time zone is set by podman with `bookstack_timezone` (`/etc/localtime` of the container).
+The time zone is set by podman with `bookstack_timezone` (`/etc/localtime` of the container) and as `TZ` in the environment, the linuxserver image reads it.
 
 ### Secrets
 
@@ -118,7 +118,7 @@ Later changes of the role:
 - The keys of BookStack moved from `bookstack_environment` to `bookstack_config`, the role writes `www/.env` again.
   Every key keeps its name, e.g. `bookstack_environment.APP_URL` is `bookstack_config.APP_URL`, in `bookstack_environment` they are unknown variables now.
   `DB_DATABASE` and `DB_USERNAME` are defaults of `bookstack_config`.
-- `/etc/timezone` and `/etc/localtime` of the host are not mounted anymore, the time zone is set by podman with `bookstack_timezone`.
+- `/etc/timezone` and `/etc/localtime` of the host are not mounted anymore, the time zone is set by podman and `TZ` with `bookstack_timezone`.
 - `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `bookstack_container` are new, `requires` was supported before.
 - `podman___update_mode` is not evaluated anymore, the role neither stops the container nor pulls the image or recreates the container.
 - The tags are `app` and `app_bookstack`.

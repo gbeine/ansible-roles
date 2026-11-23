@@ -44,7 +44,7 @@ hedgedoc_environment:
   DB_NAME: 'hedgedoc'
 ```
 
-`hedgedoc_environment` is merged over the default of the role (`PUID` and `PGID`), it only takes the variables of the image.
+`hedgedoc_environment` is merged over the default of the role (`PUID`, `PGID` and `TZ` from `hedgedoc_timezone`), it only takes the variables of the image.
 The role manages no users, users log in with OAuth2, LDAP, SAML or another provider, or register themselves with `allowEmailRegister`.
 
 ### Secrets
@@ -291,7 +291,6 @@ The `CMD_*` variables of `hedgedoc_environment`, generated from `lib/config/envi
 | `CMD_EXTERNAL_LINK_WARNING` | `externalLinkWarning` |
 | `CMD_EXTERNAL_LINK_WHITELIST` | `externalLinkWhitelist` |
 
-- `TZ` is no default of the environment anymore, the time zone is set by podman with `hedgedoc_timezone`.
 - Booleans in the environment were written as `true` and `false`, booleans in `hedgedoc_config` are YAML booleans.
 - Lists in the environment were separated by commas (e.g. `CMD_FORBIDDEN_NOTE_IDS`), they are YAML lists in `hedgedoc_config`.
 - The former role set many variables with defaults (e.g. `CMD_ALLOW_GRAVATAR: true`, `CMD_HSTS_MAX_AGE: 31536000`), the role sets none of them now,
@@ -326,7 +325,7 @@ and checks that it fails with the expected message and the quadlet unit and `con
 then it changes `allowGravatar` on `molecule-hedgedoc`, `config.json` changes and HedgeDoc has to restart,
 `molecule-hedgedoc-default` runs again without a change and must not restart.
 `verify` checks the quadlet unit with the secrets as files, the service without automatic restarts, the addresses, the time zone and the environment of the container
-without options of HedgeDoc and without `TZ`, `config.json` with the options and without secrets, its owner and mode, `/status`,
+without options of HedgeDoc and with `TZ`, `config.json` with the options and without secrets, its owner and mode, `/status`,
 a note created without login and readable on `molecule-hedgedoc-default`, the refused note without login and the login with OAuth2 on `molecule-hedgedoc`
 and the tables of HedgeDoc in PostgreSQL.
 

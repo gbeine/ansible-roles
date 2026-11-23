@@ -111,9 +111,9 @@ The options are generated from the sources of MariaDB 11.8.9, the version of the
 
 New versions of MariaDB may add options, the lists are generated again.
 
-The environment allows `PUID`, `PGID`, `TZ`, `UMASK`, `CLI_OPTS` and `REMOTE_SQL`, the role sets `PUID` and `PGID`,
+The environment allows `PUID`, `PGID`, `TZ`, `UMASK`, `CLI_OPTS` and `REMOTE_SQL`, the role sets `PUID`, `PGID` and `TZ`,
 `REMOTE_SQL` and `FILE__MYSQL_ROOT_PASSWORD` are only set in the container of the initialization.
-The time zone is set by podman with `mariadb_timezone` (`/etc/localtime` of the container), `TZ` is not needed.
+The time zone is set by podman with `mariadb_timezone` (`/etc/localtime` of the container) and as `TZ` in the environment, the linuxserver image reads it.
 `MYSQL_DATABASE`, `MYSQL_USER` and `MYSQL_PASSWORD` of the image are unknown variables, databases and accounts are managed by the role.
 The values of the environment must not contain line breaks.
 The check uses the container after merging `mariadb_container`, so variables set with `mariadb_container.environment` are checked as well.
@@ -182,7 +182,6 @@ without `mariadb_autoupdate_schedule` the schedule of `container_update` is used
 - The initialization runs once in `mariadb-init`, the quadlet unit has no secret, no `FILE__MYSQL_ROOT_PASSWORD` and no `REMOTE_SQL` anymore,
   existing installations are not initialized again. Without the root password in the container the image does not log the hint about a needed `mariadb-upgrade` anymore.
 - The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `mariadb_container` are supported besides `requires`.
-- `TZ` is not set in the environment anymore, the time zone is set by podman with `mariadb_timezone`.
 - The databases and accounts are managed with the collection `ansible.mariadb` instead of `community.mysql`, `community.mysql` drops the support of MariaDB with version 6.0.0.
   The controller needs `ansible.mariadb`, `community.mysql` is not needed by the role anymore.
 
@@ -205,7 +204,7 @@ an unknown environment variable in `mariadb_container.environment` and a line br
 and checks that it fails with the expected message and the quadlet unit and `custom.cnf` are unchanged (tasks marked `expect ERROR`),
 then it changes `max_connections` on `molecule-mariadb`, `custom.cnf` changes and MariaDB has to restart without a second initialization,
 `molecule-mariadb-default` runs again without a change and must not restart.
-`verify` checks the quadlet unit without the secret and `TZ`, that `mariadb-init` does not exist, the service, the addresses, the time zone and the environment of the container, `custom.cnf` without passwords,
+`verify` checks the quadlet unit without the secret and with `TZ`, that `mariadb-init` does not exist, the service, the addresses, the time zone and the environment of the container, `custom.cnf` without passwords,
 the variables, the databases and the accounts as root, that `app` may write, `reader` may only read and that a wrong password is rejected,
 it connects like the role with `ansible.mariadb` from the VM to the address of the container.
 
