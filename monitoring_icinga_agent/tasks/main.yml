@@ -39,6 +39,53 @@
               'icinga_cert_source_dir': monitoring_icinga_agent__cert_source_dir}
              | dict2items | selectattr('value', 'eq', '') | map(attribute='key') | list }}
 
+    - name: 'Validate the dependencies of the unit'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_agent__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_agent__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icinga_agent__errors: >-
+          {%- set errors = [] -%}
+          {%- set unit = monitoring_icinga_agent__unit -%}
+          {%- set allowed = monitoring_icinga_agent__unit_directives.keys() | list -%}
+          {%- if unit is not mapping -%}
+          {%-   set _ = errors.append('icinga_agent_unit has to be a dictionary of the dependencies ' ~ (allowed | join(', ')) ~ '.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(unknown=[], lists=[], invalid=[], paths=[]) -%}
+          {%-   for key, value in unit.items() -%}
+          {%-     if key not in allowed -%}
+          {%-       set ns.unknown = ns.unknown + [ key | string ] -%}
+          {%-     elif value is not sequence or value is string or value is mapping -%}
+          {%-       set ns.lists = ns.lists + [ key ] -%}
+          {%-     else -%}
+          {%-       if value | reject('string') | list | length > 0 or value | select('string') | select('search', '\\s') | list | length > 0
+                       or value | select('string') | select('eq', '') | list | length > 0 -%}
+          {%-         set ns.invalid = ns.invalid + [ key ] -%}
+          {%-       elif key == 'requires_mounts_for' and value | reject('match', '/') | list | length > 0 -%}
+          {%-         set ns.paths = ns.paths + [ key ] -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown dependencies in icinga_agent_unit: ' ~ (ns.unknown | join(', '))
+                                      ~ ', allowed are ' ~ (allowed | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lists | length > 0 -%}
+          {%-     set _ = errors.append('The dependencies of icinga_agent_unit have to be lists: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.invalid | length > 0 -%}
+          {%-     set _ = errors.append('The dependencies of icinga_agent_unit have to be names without spaces and line breaks: '
+                                      ~ (ns.invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.paths | length > 0 -%}
+          {%-     set _ = errors.append('requires_mounts_for of icinga_agent_unit has to contain absolute paths.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
     # certbot issues the certificates only in a real run, in check mode missing certificates are only reported
     - name: 'Find the certificates'
       ansible.builtin.stat:

@@ -8,7 +8,7 @@ Additional plugins and their `CheckCommand`s are installed by `monitoring_plugin
 | `/etc/icinga2/icinga2.conf` | ITL, plugins, enabled features and everything below `/usr/local/etc/icinga2` |
 | `/etc/icinga2/zones.conf` | Endpoint and zone of the parent, endpoint and zone of the agent, global zones `global-templates` and `director-global` |
 | `/etc/icinga2/features-available/{api,checker,mainlog}.conf` | The features of the agent |
-| `/etc/systemd/system/icinga2.service.d/override.conf` | Installs the certificates with `install` before every start |
+| `/etc/systemd/system/icinga2.service.d/override.conf` | Installs the certificates with `install` before every start, the dependencies of `icinga_agent_unit` |
 
 ### Required settings
 
@@ -32,6 +32,23 @@ the package creates it. Both are absolute paths without quotes and line breaks, 
 icinga_plugin_local_dir: '/opt/monitoring/plugins'
 icinga_plugin_contrib_dir: '/usr/lib/nagios/plugins'
 ```
+
+### Unit dependencies
+
+`icinga_agent_unit` adds dependencies to `icinga2.service` of the package, like the dependencies of the podman quadlets of the other roles.
+The keys are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units, `requires_mounts_for` are absolute paths.
+The role writes them to `[Unit]` of the systemd override as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`,
+they add to the dependencies of the unit of the package. A changed override reloads systemd and restarts Icinga 2.
+
+```yaml
+icinga_agent_unit:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/var/lib/icinga2' ]
+```
+
+The role fails before any change if `icinga_agent_unit` is no dictionary, contains unknown keys or values that are no lists of names without spaces and line breaks,
+or relative paths in `requires_mounts_for`.
 
 ### Certificates
 
@@ -108,7 +125,7 @@ The molecule scenario `default` runs the role in two [tart](https://tart.run) VM
 | Platform | Test case |
 |---|---|
 | `molecule-icinga-agent-default` | The mandatory values only, Icinga 2 is not installed before, `check` runs without the packages |
-| `molecule-icinga-agent` | `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running), `icinga_parent_host`, an own schedule of `pki_update` and an own `icinga_plugin_local_dir` |
+| `molecule-icinga-agent` | `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running), `icinga_parent_host`, an own schedule of `pki_update`, an own `icinga_plugin_local_dir` and dependencies in `icinga_agent_unit` |
 
 `side_effect` changes `icinga_main_log_severity` and checks that Icinga 2 was restarted.
 `verify` checks the service, `icinga2 daemon -C`, the enabled features, `zones.conf` with the `host` of the parent, owner and mode of the certificates,
