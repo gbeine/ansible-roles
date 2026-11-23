@@ -89,7 +89,7 @@ The role only allows the values of `app_nextcloud__config_allowed` in `nextcloud
 and the secrets `dbpassword` and `mail_smtppassword`, it stops before any change if unknown values, variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a value Nextcloud does not know.
 
-The values are generated from the keys of the first level of `config/config.sample.php` of Nextcloud 35.0.2 plus `dbport` and `filelocking.enabled`,
+The values are generated from the keys of the first level of `config/config.sample.php` of Nextcloud 35.0.3 plus `dbport` and `filelocking.enabled`,
 without the values set by Nextcloud, the installation or the role (`installed`, `version`, `instanceid`, `passwordsalt`, `secret`, `datadirectory`,
 `data-fingerprint`, `copied_sample_config`) and the passwords. `dbtype` only allows `mysql` and `pgsql`.
 Values of apps that are not part of `config.sample.php` are not allowed. New versions of Nextcloud may add values, the list is generated again.
@@ -99,12 +99,21 @@ The check uses the container after merging `nextcloud_container`, so variables s
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `nextcloud_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `nextcloud_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `nextcloud_container.volumes` replaces `/config`, `/data` and the certificates of the host,
 `nextcloud_container.environment` replaces the environment including `nextcloud_environment`.
 `/usr/local/share/ca-certificates` of the host is mounted read-only, the image adds these certificates to its trust store.
 The role waits until `/status.php` answers with `nextcloud_hostname` as host, the image copies Nextcloud and runs `occ upgrade` before nginx starts,
 an installed Nextcloud answers 400 if `nextcloud_hostname` is no trusted domain, the role shows the log of the service if Nextcloud does not answer.
+
+```yaml
+nextcloud_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+  requires_mounts_for: [ '/srv/nextcloud' ]
+```
 
 ### Validation
 
@@ -117,14 +126,20 @@ The role checks before any change:
 - `nextcloud_users` has at least one administrator, valid and unique names, `admin` is a boolean, `groups` is a list without `admin`,
   `display_name` and `email` have no line breaks
 - every user has a password with at least 10 characters, `nextcloud_passwords` has no passwords of unknown users
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
 If `nextcloud_container` or `nextcloud_config` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories and the quadlet unit.
+The start, the wait for Nextcloud, the installation, `config.php` and the users do not run in check mode.
+
 ### Restart and updates
 
 Nextcloud is restarted if it was running and the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role shows the error and the journal of the service.
 Changes of `config.php` and of the users need no restart, Nextcloud reads them with every request.
 Updates of the image are done by `container_update` with `nextcloud_autoupdate_enabled: true` and `nextcloud_autoupdate_schedule`,
 without `nextcloud_autoupdate_schedule` the schedule of `container_update` is used. The image runs `occ upgrade` after an update.
@@ -145,6 +160,7 @@ without `nextcloud_autoupdate_schedule` the schedule of `container_update` is us
   `nextcloud_environment`, `nextcloud_secrets`, `nextcloud_users` and `nextcloud_passwords` are new.
 - The service is not stopped on every run anymore, `podman___update_mode` is removed.
 - The tag `app_nextcloud` stays, the tag `app` is added.
+- `nextcloud_labels` has no default anymore, without it the quadlet unit has no labels like before.
 
 ### Tests
 
@@ -157,13 +173,16 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-nextcloud` | IPv6, labels, PostgreSQL, values of `config.php`, the secret `mail_smtppassword`, an administrator and a user with a group |
 
 `prepare` creates the podman network, pulls the images and starts MariaDB on `molecule-nextcloud-default` and PostgreSQL on `molecule-nextcloud`.
-`side_effect` runs the role with `nextcloud_container` not a dictionary, a secret without `target`, no database password, an unknown secret,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `nextcloud_container` and `nextcloud_config` not a dictionary, a secret without `target`, no database password, an unknown secret,
 an unknown value, `dbpassword` and `passwordsalt` in `nextcloud_config`, sqlite, no database host, a line break in a value, no administrator,
 a user without password, a short password and an unknown environment variable
 and checks that it fails with the expected message and the quadlet unit and `config.php` are unchanged (tasks marked `expect ERROR`),
 then it sets `UMASK`, changes `default_language` and the password of a user on `molecule-nextcloud`,
-Nextcloud has to restart, `config.php` and the password change without a second installation.
-`verify` checks the quadlet unit without secrets, the service, the addresses and the environment of the container, mode, owner and values of `config.php`,
+Nextcloud has to restart, `config.php` and the password change without a second installation,
+`molecule-nextcloud-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit without secrets, the service without automatic restarts, the addresses, the time zone and the environment of the container,
+mode, owner and values of `config.php`,
 `/status.php`, the login to the OCS API with the passwords and the refused former password, the groups of the users and the tables of Nextcloud in the database.
 
 | Environment variable | Default | Description |

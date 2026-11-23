@@ -59,14 +59,35 @@
           - app_nextcloud__expect.ip6 is none or app_nextcloud__test_net.GlobalIPv6Address == app_nextcloud__expect.ip6
           - app_nextcloud__expect.env | reject('in', app_nextcloud__test_env) | list | length == 0
           - app_nextcloud__test_plain | select('in', app_nextcloud__test_env | join(' ')) | list | length == 0
+          - app_nextcloud__test_container.Config.Timezone == app_nextcloud__test_case.role_vars.nextcloud_timezone
         fail_msg: >-
-          service {{ app_nextcloud__test_service.stdout }},
+          service {{ app_nextcloud__test_service.stdout }}, time zone {{ app_nextcloud__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_nextcloud__test_net.IPAddress }}, IPv6 {{ app_nextcloud__test_net.GlobalIPv6Address }},
           environment {{ app_nextcloud__test_env | join(', ') }}
       vars:
         app_nextcloud__test_container: "{{ (app_nextcloud__test_inspect.stdout | from_json)[0] }}"
         app_nextcloud__test_net: "{{ app_nextcloud__test_container.NetworkSettings.Networks[app_nextcloud__test_case.role_vars.nextcloud_network] }}"
         app_nextcloud__test_env: "{{ app_nextcloud__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'nextcloud' ]
+      register: 'app_nextcloud__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'nextcloud', '-n', '80', '--no-pager' ]
+      register: 'app_nextcloud__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_nextcloud__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_nextcloud__test_restarts.stdout ] + app_nextcloud__test_journal.stdout_lines | default([]) }}"
 
     - name: 'Read the state of config.php'
       ansible.builtin.stat:

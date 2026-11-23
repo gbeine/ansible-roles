@@ -17,6 +17,11 @@
       - "{{ app_nextcloud__test_quadlet_path }}"
       - "{{ app_nextcloud__test_config_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -44,13 +49,21 @@
           # combine of the defaults fails before the role checks anything
           search: 'failed to combine variables, expected dicts|expected a dictionary|has no attribute'
 
+    - name: 'Run app_nextcloud with nextcloud_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nextcloud_config: [ 'default_language' ]
+        app_nextcloud__test_invalid:
+          message: 'nextcloud_config not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
     - name: 'Run app_nextcloud with a secret without target (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         nextcloud_secrets: [ { name: 'nextcloud_db_password', data: 'x' } ]
         app_nextcloud__test_invalid:
           message: 'a secret without target'
-          search: '^nextcloud_secrets entries need name, data and target$'
+          search: '^`nextcloud_secrets` entries need name, data and target$'
 
     - name: 'Run app_nextcloud without the database password (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -182,3 +195,36 @@
               changed values: {{ app_nextcloud__config_result.changed_keys | default([]) }},
               changed users: {{ app_nextcloud__users_result.results | default([]) | selectattr('changed') | map(attribute='item.name') | list }},
               start before {{ app_nextcloud__test_started_before.stdout }}, after {{ app_nextcloud__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_nextcloud__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nextcloud' ]
+          register: 'app_nextcloud__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_nextcloud without a change'
+          ansible.builtin.include_role:
+            name: 'app_nextcloud'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nextcloud' ]
+          register: 'app_nextcloud__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_nextcloud__quadlet_result is not changed
+              - app_nextcloud__install_result is not changed
+              - app_nextcloud__config_result is not changed
+              - app_nextcloud__users_result is not changed
+              - app_nextcloud__test_unchanged_after.stdout == app_nextcloud__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_nextcloud__quadlet_result is changed }}, installed: {{ app_nextcloud__install_result is changed }},
+              configuration changed: {{ app_nextcloud__config_result is changed }}, users changed: {{ app_nextcloud__users_result is changed }},
+              start before {{ app_nextcloud__test_unchanged_before.stdout }}, after {{ app_nextcloud__test_unchanged_after.stdout }}
