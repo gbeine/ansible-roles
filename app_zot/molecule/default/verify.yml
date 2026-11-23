@@ -43,6 +43,9 @@
           - app_zot__expect.ip6 is not none or app_zot__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - app_zot__expect.quadlet | reject('in', app_zot__test_quadlet_lines) | list | length == 0
           - app_zot__test_plain | select('in', app_zot__test_quadlet.content | b64decode) | list | length == 0
+          # Without zot_environment the quadlet unit has no environment
+          - app_zot__expect.env | length > 0 or app_zot__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
+          - app_zot__test_quadlet_lines | select('match', 'Environment=TZ=') | list | length == 0
         fail_msg: "{{ app_zot__test_quadlet_lines | to_json }}"
       vars:
         app_zot__test_quadlet_lines: "{{ (app_zot__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -66,14 +69,36 @@
           - app_zot__expect.ip6 is none or app_zot__test_net.GlobalIPv6Address == app_zot__expect.ip6
           - app_zot__expect.env | reject('in', app_zot__test_env) | list | length == 0
           - app_zot__test_plain | select('in', app_zot__test_env | join(' ')) | list | length == 0
+          - app_zot__test_env | select('match', 'TZ=') | list | length == 0
+          - app_zot__test_container.Config.Timezone == app_zot__test_case.role_vars.zot_timezone
         fail_msg: >-
-          service {{ app_zot__test_service.stdout }},
+          service {{ app_zot__test_service.stdout }}, time zone {{ app_zot__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_zot__test_net.IPAddress }}, IPv6 {{ app_zot__test_net.GlobalIPv6Address }},
           environment {{ app_zot__test_env | join(', ') }}
       vars:
         app_zot__test_container: "{{ (app_zot__test_inspect.stdout | from_json)[0] }}"
         app_zot__test_net: "{{ app_zot__test_container.NetworkSettings.Networks[app_zot__test_case.role_vars.zot_network] }}"
         app_zot__test_env: "{{ app_zot__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'zot' ]
+      register: 'app_zot__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'zot', '-n', '80', '--no-pager' ]
+      register: 'app_zot__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_zot__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_zot__test_restarts.stdout ] + app_zot__test_journal.stdout_lines | default([]) }}"
 
     - name: 'Read the files of zot'
       ansible.builtin.stat:

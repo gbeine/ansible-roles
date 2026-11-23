@@ -26,14 +26,14 @@
           {%- set errors = [] -%}
           {%- set secrets = app_zot__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('zot_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`zot_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('zot_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`zot_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of zot_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `zot_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -70,10 +70,13 @@
         app_zot__openid_missing: >-
           {{ ((app_zot__auth.openid | default({})).providers | default({})).keys()
              | map('upper') | map('regex_replace', '^(.*)$', 'ZOT_OPENID_\1_CREDENTIALS') | reject('in', app_zot__targets) | list }}
+        # Without zot_environment the container has no environment and nothing is checked
+        app_zot__environment_input: "{{ app_zot__environment if app_zot__environment is defined else {} }}"
+        app_zot__environment_checked: "{{ app_zot__environment_input if app_zot__environment_input is mapping else {} }}"
         app_zot__secrets_in_environment: >-
-          {{ (app_zot__targets + app_zot__secrets_allowed) | select('in', app_zot__environment.keys() | list) | unique | list }}
+          {{ (app_zot__targets + app_zot__secrets_allowed) | select('in', app_zot__environment_checked.keys() | map('string') | list) | unique | list }}
         app_zot__lines: >-
-          {{ app_zot__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+          {{ app_zot__environment_checked | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
         app_zot__secrets_env_lines: >-
           {{ app_zot__secrets | selectattr('target', 'in', app_zot__secrets_env)
              | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
@@ -100,6 +103,9 @@
           {%- endif -%}
           {%- if app_zot__openid_missing | length > 0 -%}
           {%-   set _ = errors.append('OpenID needs the secrets with clientid and clientsecret of its providers, missing: ' ~ (app_zot__openid_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_zot__environment_input is not mapping -%}
+          {%-   set _ = errors.append('`zot_environment` has to be a dictionary.') -%}
           {%- endif -%}
           {%- if app_zot__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets must not be set in zot_environment: ' ~ (app_zot__secrets_in_environment | join(', ')) ~ '.') -%}
@@ -162,8 +168,14 @@
         fail_msg: "{{ app_zot__errors | join(' ') }}"
         quiet: true
       vars:
+        # An environment that is no mapping is not checked here, the validation of zot_environment reports it
+        app_zot__container_environment: >-
+          {{ app_zot__container.environment if app_zot__container.environment | default(none) is mapping else {} }}
         app_zot__environment_unknown: >-
-          {{ (app_zot__container.environment | default({})).keys() | reject('in', app_zot__environment_allowed) | list }}
+          {{ app_zot__container_environment.keys() | map('string') | reject('in', app_zot__environment_allowed) | list }}
+        app_zot__environment_line_breaks: >-
+          {{ app_zot__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         # The targets are read from the container, zot_container may replace the secrets
         app_zot__container_targets: >-
           {{ (app_zot__container.secrets
@@ -183,6 +195,10 @@
           {%- endif -%}
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables ' ~ (app_zot__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_zot__secrets_allowed | join(', ')) ~ ', zot is configured with zot_config.') -%}
+          {%- endif -%}
+          {%- if app_zot__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_zot__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -405,12 +421,16 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ app_zot__container.name ~ ' did not start' ] + app_zot__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ app_zot__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_zot__start_journal.stdout_lines }}
 
     # The health checks answer without login
     - name: 'Wait for zot'
       ansible.builtin.uri:
         url: "http://{{ app_zot__ip }}:{{ app_zot__port }}/readyz"
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
       register: 'app_zot__ready'
       until: app_zot__ready.status | default(-1) == 200
       retries: 60

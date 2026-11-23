@@ -108,7 +108,9 @@ zot_secrets:
 
 ### Allowed variables
 
-zot reads no environment variables, the role only allows `TZ` and the variables of the SDKs of S3 and Azure
+zot reads no environment variables, the time zone is set by podman with `zot_timezone`, the image sets no `TZ` and the role sets no default for it.
+Without `zot_environment` the quadlet unit has no environment.
+The role only allows `TZ` and the variables of the SDKs of S3 and Azure
 (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`, `AWS_REGION`, `AZURE_CLIENT_CERTIFICATE_PATH`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`) in `zot_environment`
 and the secrets listed above. This prevents unexpected behavior by accident, e.g. by a variable meant for another image.
 The check uses the environment and the secrets of the container after merging `zot_container`.
@@ -137,12 +139,13 @@ The directories belong to root with the mode `0750`, `config.json` and `htpasswd
 The role checks before any change:
 
 - `zot_secrets` is a list of entries with `name`, `data` and `target` and unique names
+- `zot_environment` is a dictionary, if it is set
 - `zot_login` is a boolean, a login is configured unless `zot_login` is `false`, without login neither `zot_users` nor `zot_config.http.auth` is set
 - LDAP and OpenID have their secrets
 - `zot_config` contains no key set by the role and no secret
 - the environment contains no secret and no line breaks
 - the users have valid names and passwords of 8 to 72 characters
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 - `zot verify` accepts the configuration, zot rejects e.g. unknown keys (`… has invalid keys`)
 
 For `zot verify` the role pulls the image and writes the configuration and the secrets to a temporary directory in `/run` (tmpfs, mode `0700`),
@@ -162,7 +165,7 @@ the users are not compared while `python3-bcrypt` is not installed yet.
 
 zot is restarted if it was running and a secret, `config.json` or the quadlet unit changed, otherwise it is started and enabled.
 zot only reloads parts of a changed configuration itself, so the role restarts it. Changed users need no restart.
-If the start fails, the role shows the journal of the service.
+If the start fails, the role shows the error and the journal of the service.
 Afterwards the role waits up to 120 seconds for `/readyz` and shows the journal if zot does not answer.
 Updates of the image are done by `container_update` with `zot_autoupdate_enabled: true` and `zot_autoupdate_schedule`,
 without `zot_autoupdate_schedule` the schedule of `container_update` is used.
@@ -170,6 +173,9 @@ without `zot_autoupdate_schedule` the schedule of `container_update` is used.
 ### Migration
 
 The role is new, there are no former variables.
+
+- `TZ` is not set anymore, the time zone is set by podman with `zot_timezone`, zot reads `/etc/localtime`.
+  `zot_environment` has no default anymore, without it the quadlet unit has no environment.
 
 ### Tests
 
@@ -179,18 +185,19 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-zot-default` | Only the mandatory variables and one user, `side_effect` switches the login off |
-| `molecule-zot` | IPv6, labels, access control with a reader and anonymous reading of `public`, the keys of the sessions and the metrics |
+| `molecule-zot` | IPv6, labels, `AWS_REGION` in `zot_environment`, access control with a reader and anonymous reading of `public`, the keys of the sessions and the metrics |
 
 `prepare` creates the podman network, installs `curl`, `skopeo` and `python3-bcrypt` and pulls the image.
 `check` runs `converge` with `--check` on the VMs where the role never ran.
-`side_effect` runs the role with `zot_config` not a dictionary, a secret without `target`, without login, `zot_login` no boolean,
+`side_effect` runs the role with `zot_config` and `zot_environment` not a dictionary, `zot_secrets` not a list, a secret without `target`, without login, `zot_login` no boolean,
 `zot_login: false` with users, the port in `zot_config`,
 a client secret in `zot_config`, LDAP without its secret, an unknown secret, an unknown variable, a colon in the name of a user,
 a short password and an unknown key of zot rejected by `zot verify`
 and checks that it fails with the expected message and the quadlet unit, `config.json` and `htpasswd` are unchanged (tasks marked `expect ERROR`),
 then it changes the log level and the password of the reader on `molecule-zot`, `config.json` and `htpasswd` change and zot has to restart,
 on `molecule-zot-default` it sets `zot_login: false` without users, `config.json` changes and zot has to restart.
-`verify` checks the quadlet unit with the secret, the service, the addresses, the environment, the files with their modes,
+`verify` checks the quadlet unit with the secret and without `TZ`, without `zot_environment` without any environment,
+the service without automatic restarts, the addresses, the time zone, the environment, the files with their modes,
 the bcrypt hashes of `htpasswd` matching the passwords, the values of the role in `config.json` without secrets,
 the health check and the web interface, copies `busybox` into the registry with skopeo as administrator,
 reads its tags as administrator (200), without login and with a wrong password (401) and the catalog.
