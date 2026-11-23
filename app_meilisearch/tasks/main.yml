@@ -4,13 +4,15 @@
   tags: [ 'app', 'app_meilisearch' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or meilisearch_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, meilisearch_container, meilisearch_config
+    # or meilisearch_environment not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - app_meilisearch__container | length > 0
+          - app_meilisearch__config | length > 0
         quiet: true
 
     - name: 'Validate the secrets'
@@ -25,14 +27,57 @@
           {%- set errors = [] -%}
           {%- set secrets = app_meilisearch__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('meilisearch_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`meilisearch_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('meilisearch_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`meilisearch_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of meilisearch_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `meilisearch_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Meilisearch refuses unknown options of the configuration file, TOML is typed
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_meilisearch__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_meilisearch__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_meilisearch__config_set: "{{ app_meilisearch__config | dict2items | rejectattr('value', 'none') | items2dict }}"
+        app_meilisearch__errors: >-
+          {%- set errors = [] -%}
+          {%- set keys = app_meilisearch__config_set.keys() | map('string') | list -%}
+          {%- set secrets = keys | select('in', app_meilisearch__config_secrets.keys() | list) | list -%}
+          {%- set unknown = keys | reject('in', app_meilisearch__config_allowed) | reject('in', secrets) | list -%}
+          {%- set booleans = app_meilisearch__config_set | dict2items | selectattr('key', 'in', app_meilisearch__config_booleans)
+                             | rejectattr('value', 'boolean') | map(attribute='key') | list -%}
+          {%- set schedule = app_meilisearch__config_set[app_meilisearch__config_schedule] | default(true) -%}
+          {%- set lines = app_meilisearch__config_set | dict2items | selectattr('value', 'string')
+                          | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%- if secrets | length > 0 -%}
+          {%-   set _ = errors.append('These options are passed as secrets with meilisearch_secrets, not in meilisearch_config: '
+                                    ~ (secrets | map('extract', app_meilisearch__config_secrets) | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in meilisearch_config: ' ~ (unknown | join(', '))
+                                    ~ '. Allowed are the options of Meilisearch (app_meilisearch__config_allowed).') -%}
+          {%- endif -%}
+          {%- if (app_meilisearch__config_set.env | default('') | string) not in app_meilisearch__environments -%}
+          {%-   set _ = errors.append('env has to be one of ' ~ (app_meilisearch__environments | join(', '))
+                                    ~ ', got ' ~ (app_meilisearch__config_set.env | default('')) ~ '.') -%}
+          {%- endif -%}
+          {%- if booleans | length > 0 -%}
+          {%-   set _ = errors.append('These options are booleans, use true or false without quotes: ' ~ (booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if schedule is not boolean and not (schedule is integer and schedule > 0) -%}
+          {%-   set _ = errors.append('schedule_snapshot is true, false or the interval in seconds.') -%}
+          {%- endif -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('Options must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -49,9 +94,10 @@
         app_meilisearch__secrets_missing: "{{ app_meilisearch__secrets_required | reject('in', app_meilisearch__targets) | list }}"
         app_meilisearch__master_key: >-
           {{ app_meilisearch__secrets | selectattr('target', 'eq', 'MEILI_MASTER_KEY') | map(attribute='data') | map('string') | first | default('') }}
-        app_meilisearch__env: "{{ app_meilisearch__environment.MEILI_ENV | default('') | string }}"
         app_meilisearch__secrets_in_environment: >-
           {{ (app_meilisearch__targets + app_meilisearch__secret_variables) | select('in', app_meilisearch__environment.keys() | list) | unique | list }}
+        app_meilisearch__role_in_environment: >-
+          {{ app_meilisearch__environment_role.keys() | select('in', app_meilisearch__environment.keys() | list) | list }}
         app_meilisearch__secrets_lines: >-
           {{ app_meilisearch__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
         app_meilisearch__errors: >-
@@ -61,8 +107,9 @@
           {%- elif (app_meilisearch__master_key | length) < app_meilisearch__master_key_length -%}
           {%-   set _ = errors.append('The secret MEILI_MASTER_KEY needs at least ' ~ app_meilisearch__master_key_length ~ ' characters.') -%}
           {%- endif -%}
-          {%- if app_meilisearch__env not in app_meilisearch__environments -%}
-          {%-   set _ = errors.append('MEILI_ENV has to be one of ' ~ (app_meilisearch__environments | join(', ')) ~ ', got ' ~ app_meilisearch__env ~ '.') -%}
+          {%- if app_meilisearch__role_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('These variables are set by the role and must not be set in meilisearch_environment: '
+                                    ~ (app_meilisearch__role_in_environment | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if app_meilisearch__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets must not be set in meilisearch_environment: ' ~ (app_meilisearch__secrets_in_environment | join(', ')) ~ '.') -%}
@@ -84,22 +131,34 @@
           {%- set errors = [] -%}
           {%- set ns = namespace(booleans=[], lines=[]) -%}
           {%- for key, value in app_meilisearch__environment.items() if value is not none -%}
-          {%-   if key in app_meilisearch__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-   if key in app_meilisearch__environment_booleans and value not in [ 'true', 'false' ] -%}
           {%-     set ns.booleans = ns.booleans + [ key ] -%}
           {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
           {%-     set ns.lines = ns.lines + [ key ] -%}
           {%-   endif -%}
           {%- endfor -%}
           {%- if ns.booleans | length > 0 -%}
-          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%-   set _ = errors.append('These variables have to be the strings true or false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if ns.lines | length > 0 -%}
           {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
           {%- endif -%}
+          {%- set set_variables = app_meilisearch__environment | dict2items | rejectattr('value', 'in', [ '', none ]) | map(attribute='key') | list -%}
+          {%- for variable, import in app_meilisearch__environment_requires.items()
+                if (app_meilisearch__environment[variable] | default('') | string) == 'true' and import not in set_variables -%}
+          {%-   set _ = errors.append(variable ~ ' needs ' ~ import ~ '.') -%}
+          {%- endfor -%}
+          {%- for import, ignore in app_meilisearch__environment_imports.items()
+                if import in set_variables and (app_meilisearch__environment[ignore] | default('') | string) != 'true' -%}
+          {%-   set _ = errors.append(import ~ ' needs ' ~ ignore ~ ": 'true', the quadlet unit imports on every start.") -%}
+          {%- endfor -%}
+          {%- if app_meilisearch__environment_imports.keys() | reject('in', set_variables) | list | length == 0 -%}
+          {%-   set _ = errors.append(app_meilisearch__environment_imports.keys() | join(' and ') ~ ' cannot be set together.') -%}
+          {%- endif -%}
           {{ errors }}
 
     # Checks the environment and the secrets of the container after merging meilisearch_container,
-    # unknown variables would change the behavior unexpectedly
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
@@ -113,8 +172,15 @@
           {{ app_meilisearch__container.secrets
              if (app_meilisearch__container.secrets is defined and app_meilisearch__container.secrets is sequence and app_meilisearch__container.secrets is not string)
              else [] }}
+        app_meilisearch__container_environment: >-
+          {{ app_meilisearch__container.environment if app_meilisearch__container.environment | default(none) is mapping else {} }}
+        # The variables set by the role (MEILI_CONFIG_FILE_PATH) are part of the environment of the container, not of the allow list
         app_meilisearch__environment_unknown: >-
-          {{ (app_meilisearch__container.environment | default({})).keys() | reject('in', app_meilisearch__environment_allowed) | list }}
+          {{ app_meilisearch__container_environment.keys() | map('string')
+             | reject('in', app_meilisearch__environment_allowed + (app_meilisearch__environment_role.keys() | list)) | list }}
+        app_meilisearch__environment_line_breaks: >-
+          {{ app_meilisearch__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_meilisearch__secrets_unknown: >-
           {{ app_meilisearch__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
              | reject('in', app_meilisearch__secrets_allowed) | list }}
@@ -127,7 +193,12 @@
           {%-   set _ = errors.append('Unknown secrets: ' ~ (app_meilisearch__secrets_unknown | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if errors | length > 0 -%}
-          {%-   set _ = errors.append('Allowed are the variables of Meilisearch (app_meilisearch__environment_allowed) and the secrets ' ~ (app_meilisearch__secrets_allowed | join(', ')) ~ '.') -%}
+          {%-   set _ = errors.append('Allowed are the variables of Meilisearch (app_meilisearch__environment_allowed) and the secrets ' ~ (app_meilisearch__secrets_allowed | join(', '))
+                                    ~ ', the options are set with meilisearch_config.') -%}
+          {%- endif -%}
+          {%- if app_meilisearch__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_meilisearch__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -140,8 +211,17 @@
         mode: '0750'
         state: 'directory'
       loop:
-        - "{{ app_meilisearch__home }}"
-        - "{{ app_meilisearch__home }}/data"
+        - "{{ app_meilisearch__podman_home }}"
+        - "{{ app_meilisearch__podman_home }}/data"
+
+    - name: 'Write the configuration file'
+      ansible.builtin.copy:
+        content: "{{ '#\n# Ansible managed\n#\n\n' ~ (app_meilisearch__config_content | community.general.to_toml) }}"
+        dest: "{{ app_meilisearch__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0640'
+      register: 'app_meilisearch__config_result'
 
     - name: 'Create secrets'
       no_log: true
@@ -184,6 +264,21 @@
           {% if app_meilisearch__container.requires is defined %}
           Requires={{ app_meilisearch__container.requires | join(' ') }}
           {% endif %}
+          {% if app_meilisearch__container.wants is defined %}
+          Wants={{ app_meilisearch__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_meilisearch__container.after is defined %}
+          After={{ app_meilisearch__container.after | join(' ') }}
+          {% endif %}
+          {% if app_meilisearch__container.part_of is defined %}
+          PartOf={{ app_meilisearch__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_meilisearch__container.binds_to is defined %}
+          BindsTo={{ app_meilisearch__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_meilisearch__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_meilisearch__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_meilisearch__quadlet_result'
@@ -204,7 +299,8 @@
               {{ (ansible_facts.services[app_meilisearch__container.name + '.service'].state | default('')) == 'running' }}
             app_meilisearch__restart: >-
               {{ app_meilisearch__running | bool
-                 and (app_meilisearch__secrets_result is changed or app_meilisearch__quadlet_result is changed) }}
+                 and (app_meilisearch__config_result is changed or app_meilisearch__secrets_result is changed
+                      or app_meilisearch__quadlet_result is changed) }}
 
       rescue:
 
@@ -216,13 +312,17 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ app_meilisearch__container.name ~ ' did not start' ] + app_meilisearch__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ app_meilisearch__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_meilisearch__start_journal.stdout_lines }}
 
     # The health check is the only route without the master key
     - name: 'Wait for Meilisearch'
       ansible.builtin.uri:
         url: "http://{{ app_meilisearch__ip }}:{{ app_meilisearch__port }}/health"
         return_content: true
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
       register: 'app_meilisearch__ready'
       until: (app_meilisearch__ready.json | default({})).status | default('') == 'available'
       retries: 60

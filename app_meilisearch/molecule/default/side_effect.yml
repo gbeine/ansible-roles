@@ -12,8 +12,15 @@
     app_meilisearch__test_environment: "{{ app_meilisearch__test_vars.meilisearch_environment | default({}) }}"
     app_meilisearch__test_secrets: "{{ app_meilisearch__test_vars.meilisearch_secrets }}"
     app_meilisearch__test_url: "http://{{ app_meilisearch__test_case.expect.ip }}:7700"
+    app_meilisearch__test_config: "{{ app_meilisearch__test_vars.meilisearch_config | default({}) }}"
     app_meilisearch__test_checked_files:
       - "{{ app_meilisearch__test_quadlet_path }}"
+      - "{{ app_meilisearch__test_config_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
@@ -47,7 +54,7 @@
         meilisearch_secrets: "{{ app_meilisearch__test_secrets + [ { 'name': 'meilisearch_other', 'data': 'x' } ] }}"
         app_meilisearch__test_invalid:
           message: 'a secret without target'
-          search: '^meilisearch_secrets entries need name, data and target$'
+          search: '^`meilisearch_secrets` entries need name, data and target$'
 
     - name: 'Run app_meilisearch without the master key (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -76,29 +83,115 @@
           message: 'the master key in the environment'
           search: '^Secrets must not be set in meilisearch_environment: MEILI_MASTER_KEY\.$'
 
+    - name: 'Run app_meilisearch with meilisearch_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_config: [ 'log_level' ]
+        app_meilisearch__test_invalid:
+          message: 'meilisearch_config not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_meilisearch with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_config: "{{ app_meilisearch__test_config | combine({ 'experimental_dumpless_upgrade': true }) }}"
+        app_meilisearch__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in meilisearch_config: experimental_dumpless_upgrade\.'
+
+    - name: 'Run app_meilisearch with the master key in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_config: "{{ app_meilisearch__test_config | combine({ 'master_key': 'molecule-master-key-plain' }) }}"
+        app_meilisearch__test_invalid:
+          message: 'the master key in the configuration'
+          search: '^These options are passed as secrets with meilisearch_secrets, not in meilisearch_config: MEILI_MASTER_KEY\.$'
+
     - name: 'Run app_meilisearch with an invalid environment of Meilisearch (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_ENV': 'test' }) }}"
+        meilisearch_config: "{{ app_meilisearch__test_config | combine({ 'env': 'test' }) }}"
         app_meilisearch__test_invalid:
           message: 'an invalid environment of Meilisearch'
-          search: '^MEILI_ENV has to be one of production, development, got test\.$'
+          search: '^env has to be one of production, development, got test\.$'
 
-    - name: 'Run app_meilisearch with an invalid boolean (expect ERROR)'
+    - name: 'Run app_meilisearch with a string as boolean in the configuration (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_NO_ANALYTICS': 'yes' }) }}"
+        meilisearch_config: "{{ app_meilisearch__test_config | combine({ 'no_analytics': 'true' }) }}"
         app_meilisearch__test_invalid:
-          message: 'an invalid boolean'
-          search: '^These variables are booleans, allowed are true and false: MEILI_NO_ANALYTICS\.$'
+          message: 'a string as boolean in the configuration'
+          search: '^These options are booleans, use true or false without quotes: no_analytics\.$'
+
+    - name: 'Run app_meilisearch with a line break in an option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_config: "{{ app_meilisearch__test_config | combine({ 'log_level': 'WARN\nDEBUG' }) }}"
+        app_meilisearch__test_invalid:
+          message: 'a line break in an option'
+          search: '^Options must not contain line breaks: log_level\.$'
+
+    - name: 'Run app_meilisearch with an invalid boolean in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_IGNORE_MISSING_DUMP': 'yes' }) }}"
+        app_meilisearch__test_invalid:
+          message: 'an invalid boolean in the environment'
+          search: '^These variables have to be the strings true or false: MEILI_IGNORE_MISSING_DUMP\.$'
 
     - name: 'Run app_meilisearch with a line break in a value (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_LOG_LEVEL': 'WARN\nDEBUG' }) }}"
+        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_IMPORT_DUMP': '/meili_data/dumps/a.dump\nb', 'MEILI_IGNORE_DUMP_IF_DB_EXISTS': 'true' }) }}"
         app_meilisearch__test_invalid:
           message: 'a line break in a value'
-          search: '^Values must not contain line breaks: MEILI_LOG_LEVEL\.$'
+          search: '^Values must not contain line breaks: MEILI_IMPORT_DUMP\.$'
+
+    - name: 'Run app_meilisearch with MEILI_IGNORE_MISSING_DUMP without MEILI_IMPORT_DUMP (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_environment:
+          MEILI_IGNORE_MISSING_DUMP: 'true'
+        app_meilisearch__test_invalid:
+          message: 'MEILI_IGNORE_MISSING_DUMP without MEILI_IMPORT_DUMP'
+          search: '^MEILI_IGNORE_MISSING_DUMP needs MEILI_IMPORT_DUMP\.$'
+
+    - name: 'Run app_meilisearch with MEILI_IMPORT_DUMP without MEILI_IGNORE_DUMP_IF_DB_EXISTS (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_environment:
+          MEILI_IMPORT_DUMP: '/meili_data/dumps/molecule.dump'
+        app_meilisearch__test_invalid:
+          message: 'MEILI_IMPORT_DUMP without MEILI_IGNORE_DUMP_IF_DB_EXISTS'
+          search: "^MEILI_IMPORT_DUMP needs MEILI_IGNORE_DUMP_IF_DB_EXISTS: 'true', the quadlet unit imports on every start\\.$"
+
+    - name: 'Run app_meilisearch with MEILI_IMPORT_DUMP and MEILI_IMPORT_SNAPSHOT (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_environment:
+          MEILI_IMPORT_DUMP: '/meili_data/dumps/molecule.dump'
+          MEILI_IGNORE_DUMP_IF_DB_EXISTS: 'true'
+          MEILI_IMPORT_SNAPSHOT: '/meili_data/snapshots/molecule.snapshot'
+          MEILI_IGNORE_SNAPSHOT_IF_DB_EXISTS: 'true'
+        app_meilisearch__test_invalid:
+          message: 'MEILI_IMPORT_DUMP and MEILI_IMPORT_SNAPSHOT'
+          search: '^MEILI_IMPORT_DUMP and MEILI_IMPORT_SNAPSHOT cannot be set together\.$'
+
+    - name: 'Run app_meilisearch with MEILI_CONFIG_FILE_PATH in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_CONFIG_FILE_PATH': '/meili_data/config.toml' }) }}"
+        app_meilisearch__test_invalid:
+          message: 'MEILI_CONFIG_FILE_PATH in the environment'
+          search: '^These variables are set by the role and must not be set in meilisearch_environment: MEILI_CONFIG_FILE_PATH\.$'
+
+    - name: 'Run app_meilisearch with an option in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        meilisearch_environment: "{{ app_meilisearch__test_environment | combine({ 'MEILI_LOG_LEVEL': 'DEBUG' }) }}"
+        app_meilisearch__test_invalid:
+          message: 'an option in the environment'
+          search: '^Unknown environment variables: MEILI_LOG_LEVEL\.'
 
     - name: 'Run app_meilisearch with an unknown environment variable (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -130,11 +223,11 @@
           register: 'app_meilisearch__test_started_before'
           changed_when: false
 
-        - name: 'Set the changed environment'
+        - name: 'Set the changed configuration'
           ansible.builtin.set_fact:
-            meilisearch_environment: "{{ app_meilisearch__test_case.side_effect.meilisearch_environment }}"
+            meilisearch_config: "{{ app_meilisearch__test_case.side_effect.meilisearch_config }}"
 
-        - name: 'Run app_meilisearch with the changed environment'
+        - name: 'Run app_meilisearch with the changed configuration'
           ansible.builtin.include_role:
             name: 'app_meilisearch'
 
@@ -144,11 +237,45 @@
           register: 'app_meilisearch__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed quadlet unit and the restart of the service'
+        # Only the configuration file changes, the quadlet unit is unchanged
+        - name: 'Assert the changed configuration file and the restart of the service'
           ansible.builtin.assert:
             that:
-              - app_meilisearch__quadlet_result is changed
+              - app_meilisearch__config_result is changed
+              - app_meilisearch__quadlet_result is not changed
               - app_meilisearch__test_started_after.stdout | int > app_meilisearch__test_started_before.stdout | int
             fail_msg: >-
-              quadlet changed: {{ app_meilisearch__quadlet_result is changed }},
+              configuration changed: {{ app_meilisearch__config_result is changed }}, quadlet changed: {{ app_meilisearch__quadlet_result is changed }},
               start before {{ app_meilisearch__test_started_before.stdout }}, after {{ app_meilisearch__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_meilisearch__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'meilisearch' ]
+          register: 'app_meilisearch__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_meilisearch without a change'
+          ansible.builtin.include_role:
+            name: 'app_meilisearch'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'meilisearch' ]
+          register: 'app_meilisearch__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_meilisearch__config_result is not changed
+              - app_meilisearch__quadlet_result is not changed
+              - app_meilisearch__secrets_result is not changed
+              - app_meilisearch__test_unchanged_after.stdout == app_meilisearch__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ app_meilisearch__config_result is changed }}, quadlet changed: {{ app_meilisearch__quadlet_result is changed }},
+              secrets changed: {{ app_meilisearch__secrets_result is changed }},
+              start before {{ app_meilisearch__test_unchanged_before.stdout }}, after {{ app_meilisearch__test_unchanged_after.stdout }}

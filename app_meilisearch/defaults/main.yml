@@ -13,14 +13,17 @@ app_meilisearch__hostname: "{{ meilisearch_hostname | mandatory }}"
 app_meilisearch__timezone: "{{ meilisearch_timezone | mandatory }}"
 app_meilisearch__labels: "{{ meilisearch_labels }}"
 
-# Meilisearch migrates its database between versions only with a dump or MEILI_EXPERIMENTAL_DUMPLESS_UPGRADE,
+# Meilisearch opens the database of another version only with upgrade_db: true in meilisearch_config,
 # so the default is a fixed version
-app_meilisearch__version: "{{ meilisearch_version | default('v1.41.0') }}"
+app_meilisearch__version: "{{ meilisearch_version | default('v1.58') }}"
 
 app_meilisearch__container: "{{ app_meilisearch__podman_container_default | combine(meilisearch_container | default({})) }}"
 
-# The configuration of Meilisearch, merged over the default
-app_meilisearch__environment: "{{ app_meilisearch__environment_default | combine(meilisearch_environment | default({})) }}"
+# The options of config.toml of Meilisearch, merged over the default
+app_meilisearch__config: "{{ app_meilisearch__config_default | combine(meilisearch_config | default({})) }}"
+
+# The variables of the image that are no options of the configuration file, e.g. the import of a dump
+app_meilisearch__environment: "{{ meilisearch_environment | default({}) }}"
 
 # Secrets with name, data and target, MEILI_MASTER_KEY is mandatory
 app_meilisearch__secrets: "{{ meilisearch_secrets | default([]) }}"
@@ -34,40 +37,45 @@ app_meilisearch__autoupdate_schedule: "{{ meilisearch_autoupdate_schedule }}"
 
 app_meilisearch__podman_name: 'meilisearch'
 app_meilisearch__podman_image: 'docker.io/getmeili/meilisearch'
+app_meilisearch__podman_tag: "{{ app_meilisearch__version }}"
+
+app_meilisearch__podman_home: "{{ app_meilisearch__home }}"
+
 app_meilisearch__port: 7700
 
-app_meilisearch__environment_default:
-  TZ: "{{ app_meilisearch__timezone }}"
-  MEILI_ENV: 'production'
-  MEILI_NO_ANALYTICS: true
+app_meilisearch__config_file: "{{ app_meilisearch__podman_home }}/config.toml"
+
+app_meilisearch__config_default:
+  env: 'production'
+  no_analytics: true
 
 app_meilisearch__environments: [ 'production', 'development' ]
+
+# The configuration file is mounted outside of the data directory, Meilisearch reads it from MEILI_CONFIG_FILE_PATH
+app_meilisearch__environment_role:
+  MEILI_CONFIG_FILE_PATH: '/etc/meilisearch/config.toml'
 
 # In production Meilisearch protects all routes except GET /health with the master key
 app_meilisearch__secrets_required: [ 'MEILI_MASTER_KEY' ]
 app_meilisearch__master_key_length: 16
 
-# The environment of the container, booleans in lower case
-app_meilisearch__environment_container: >-
-  {%- set environment = {} -%}
-  {%- for key, value in app_meilisearch__environment.items() -%}
-  {%-   set _ = environment.update({ key: (value | string | lower) if value is boolean else value }) -%}
-  {%- endfor -%}
-  {{ environment }}
+# The content of config.toml, null removes an option
+app_meilisearch__config_content: "{{ app_meilisearch__config | dict2items | rejectattr('value', 'none') | items2dict }}"
 
 app_meilisearch__podman_container_default:
   name: "{{ app_meilisearch__podman_name }}"
   hostname: "{{ app_meilisearch__hostname }}"
-  image: "{{ app_meilisearch__podman_image }}:{{ app_meilisearch__version }}"
+  image: "{{ app_meilisearch__podman_image }}:{{ app_meilisearch__podman_tag }}"
   ip: "{{ app_meilisearch__ip }}"
   ipv6: "{{ app_meilisearch__ipv6 | default(omit) }}"
   network: "{{ app_meilisearch__network }}"
   timezone: "{{ app_meilisearch__timezone }}"
   labels: "{{ app_meilisearch__labels | default(omit) }}"
-  # Set with meilisearch_environment, merged over the default
-  environment: "{{ app_meilisearch__environment_container }}"
+  # Set with meilisearch_environment, MEILI_CONFIG_FILE_PATH is set by the role
+  environment: "{{ app_meilisearch__environment_role | combine(app_meilisearch__environment) }}"
   volumes:
-    - "{{ app_meilisearch__home }}/data:/meili_data:Z"
+    - "{{ app_meilisearch__podman_home }}/data:/meili_data:Z"
+    - "{{ app_meilisearch__config_file }}:/etc/meilisearch/config.toml:ro,Z"
   # Meilisearch reads the secrets only from the environment,
   # entries without name or target are left out, the validation of the secrets reports them
   secrets: >-
@@ -82,69 +90,113 @@ app_meilisearch__secrets_allowed:
   - 'MEILI_MASTER_KEY'
   - 'MEILI_TASK_WEBHOOK_AUTHORIZATION_HEADER'
   - 'MEILI_EXPERIMENTAL_PERSONALIZATION_API_KEY'
+  - 'MEILI_S3_SECRET_KEY'
 
 app_meilisearch__secret_variables: "{{ app_meilisearch__secrets_allowed }}"
 
-# The options of crates/meilisearch/src/option.rs of Meilisearch v1.41.0 with the type bool
-app_meilisearch__environment_booleans:
-  - 'MEILI_NO_ANALYTICS'
-  - 'MEILI_SSL_REQUIRE_AUTH'
-  - 'MEILI_SSL_RESUMPTION'
-  - 'MEILI_SSL_TICKETS'
-  - 'MEILI_IGNORE_MISSING_SNAPSHOT'
-  - 'MEILI_IGNORE_SNAPSHOT_IF_DB_EXISTS'
-  - 'MEILI_IGNORE_MISSING_DUMP'
-  - 'MEILI_IGNORE_DUMP_IF_DB_EXISTS'
-  - 'MEILI_EXPERIMENTAL_CONTAINS_FILTER'
-  - 'MEILI_EXPERIMENTAL_ENABLE_METRICS'
-  - 'MEILI_EXPERIMENTAL_DUMPLESS_UPGRADE'
-  - 'MEILI_EXPERIMENTAL_ENABLE_LOGS_ROUTE'
-  - 'MEILI_EXPERIMENTAL_REPLICATION_PARAMETERS'
-  - 'MEILI_EXPERIMENTAL_REDUCE_INDEXING_MEMORY_USAGE'
-  - 'MEILI_EXPERIMENTAL_NO_SNAPSHOT_COMPACTION'
+# The options of the configuration file that are secrets, they are passed with meilisearch_secrets
+app_meilisearch__config_secrets:
+  master_key: 'MEILI_MASTER_KEY'
+  task_webhook_authorization_header: 'MEILI_TASK_WEBHOOK_AUTHORIZATION_HEADER'
+  experimental_personalization_api_key: 'MEILI_EXPERIMENTAL_PERSONALIZATION_API_KEY'
+  s3_secret_key: 'MEILI_S3_SECRET_KEY'
 
-# Generated from the MEILI_* constants of crates/meilisearch/src/option.rs of Meilisearch v1.41.0 without the secrets,
-# update with new versions of the image
+# The fields of Opt, IndexerOpts and S3SnapshotOpts of crates/meilisearch/src/option.rs of Meilisearch v1.58.0 with the type bool,
+# TOML is typed, the values are YAML booleans
+app_meilisearch__config_booleans:
+  - 'experimental_contains_filter'
+  - 'experimental_enable_logs_route'
+  - 'experimental_enable_metrics'
+  - 'experimental_enable_tasks_streaming_route'
+  - 'experimental_legacy_search_default'
+  - 'experimental_no_edition_2024_for_settings'
+  - 'experimental_reduce_indexing_memory_usage'
+  - 'no_analytics'
+  - 'ssl_require_auth'
+  - 'ssl_resumption'
+  - 'ssl_tickets'
+  - 'upgrade_db'
+
+# schedule_snapshot is a boolean or the interval in seconds
+app_meilisearch__config_schedule: 'schedule_snapshot'
+
+# Generated from the fields of Opt, IndexerOpts and S3SnapshotOpts of crates/meilisearch/src/option.rs of Meilisearch v1.58.0
+# without the secrets, config_file_path, the fields skipped by serde and import_dump, import_snapshot and the ignore_* options,
+# Meilisearch ignores them in the configuration file, update with new versions of the image
+app_meilisearch__config_allowed:
+  - 'db_path'
+  - 'dump_dir'
+  - 'env'
+  - 'experimental_allowed_ip_networks'
+  - 'experimental_contains_filter'
+  - 'experimental_drop_search_after'
+  - 'experimental_embedding_cache_entries'
+  - 'experimental_enable_logs_route'
+  - 'experimental_enable_metrics'
+  - 'experimental_enable_tasks_streaming_route'
+  - 'experimental_legacy_search_default'
+  - 'experimental_limit_batched_tasks_total_size'
+  - 'experimental_logs_mode'
+  - 'experimental_max_number_of_batched_tasks'
+  - 'experimental_nb_searches_per_core'
+  - 'experimental_no_edition_2024_for_settings'
+  - 'experimental_reduce_indexing_memory_usage'
+  - 'experimental_s3_compression_level'
+  - 'experimental_s3_max_in_flight_parts'
+  - 'experimental_s3_multipart_part_size'
+  - 'experimental_s3_role_arn'
+  - 'experimental_s3_signature_duration_seconds'
+  - 'experimental_s3_web_identity_token_file'
+  - 'experimental_search_queue_size'
+  - 'http_addr'
+  - 'http_payload_size_limit'
+  - 'log_level'
+  - 'max_indexing_memory'
+  - 'max_indexing_threads'
+  - 'no_analytics'
+  - 's3_access_key'
+  - 's3_bucket_name'
+  - 's3_bucket_region'
+  - 's3_bucket_url'
+  - 's3_snapshot_prefix'
+  - 'schedule_snapshot'
+  - 'snapshot_dir'
+  - 'ssl_auth_path'
+  - 'ssl_cert_path'
+  - 'ssl_key_path'
+  - 'ssl_ocsp_path'
+  - 'ssl_require_auth'
+  - 'ssl_resumption'
+  - 'ssl_tickets'
+  - 'task_webhook_url'
+  - 'upgrade_db'
+
+# The variables of the options of crates/meilisearch/src/option.rs of Meilisearch v1.58.0 that the configuration file ignores, and TZ
 app_meilisearch__environment_allowed:
-  - 'MEILI_CONFIG_FILE_PATH'
-  - 'MEILI_DB_PATH'
-  - 'MEILI_DUMP_DIR'
-  - 'MEILI_ENV'
-  - 'MEILI_EXPERIMENTAL_ALLOWED_IP_NETWORKS'
-  - 'MEILI_EXPERIMENTAL_CONTAINS_FILTER'
-  - 'MEILI_EXPERIMENTAL_DROP_SEARCH_AFTER'
-  - 'MEILI_EXPERIMENTAL_DUMPLESS_UPGRADE'
-  - 'MEILI_EXPERIMENTAL_EMBEDDING_CACHE_ENTRIES'
-  - 'MEILI_EXPERIMENTAL_ENABLE_LOGS_ROUTE'
-  - 'MEILI_EXPERIMENTAL_ENABLE_METRICS'
-  - 'MEILI_EXPERIMENTAL_LIMIT_BATCHED_TASKS_TOTAL_SIZE'
-  - 'MEILI_EXPERIMENTAL_LOGS_MODE'
-  - 'MEILI_EXPERIMENTAL_MAX_NUMBER_OF_BATCHED_TASKS'
-  - 'MEILI_EXPERIMENTAL_NB_SEARCHES_PER_CORE'
-  - 'MEILI_EXPERIMENTAL_NO_SNAPSHOT_COMPACTION'
-  - 'MEILI_EXPERIMENTAL_REDUCE_INDEXING_MEMORY_USAGE'
-  - 'MEILI_EXPERIMENTAL_REPLICATION_PARAMETERS'
-  - 'MEILI_EXPERIMENTAL_SEARCH_QUEUE_SIZE'
-  - 'MEILI_HTTP_ADDR'
-  - 'MEILI_HTTP_PAYLOAD_SIZE_LIMIT'
   - 'MEILI_IGNORE_DUMP_IF_DB_EXISTS'
   - 'MEILI_IGNORE_MISSING_DUMP'
   - 'MEILI_IGNORE_MISSING_SNAPSHOT'
   - 'MEILI_IGNORE_SNAPSHOT_IF_DB_EXISTS'
   - 'MEILI_IMPORT_DUMP'
   - 'MEILI_IMPORT_SNAPSHOT'
-  - 'MEILI_LOG_LEVEL'
-  - 'MEILI_MAX_INDEXING_MEMORY'
-  - 'MEILI_MAX_INDEXING_THREADS'
-  - 'MEILI_NO_ANALYTICS'
-  - 'MEILI_SCHEDULE_SNAPSHOT'
-  - 'MEILI_SNAPSHOT_DIR'
-  - 'MEILI_SSL_AUTH_PATH'
-  - 'MEILI_SSL_CERT_PATH'
-  - 'MEILI_SSL_KEY_PATH'
-  - 'MEILI_SSL_OCSP_PATH'
-  - 'MEILI_SSL_REQUIRE_AUTH'
-  - 'MEILI_SSL_RESUMPTION'
-  - 'MEILI_SSL_TICKETS'
-  - 'MEILI_TASK_WEBHOOK_URL'
   - 'TZ'
+
+# The ignore_* options of crates/meilisearch/src/option.rs of Meilisearch v1.58.0 require their import,
+# MEILI_IMPORT_DUMP conflicts with MEILI_IMPORT_SNAPSHOT
+app_meilisearch__environment_requires:
+  MEILI_IGNORE_DUMP_IF_DB_EXISTS: 'MEILI_IMPORT_DUMP'
+  MEILI_IGNORE_MISSING_DUMP: 'MEILI_IMPORT_DUMP'
+  MEILI_IGNORE_MISSING_SNAPSHOT: 'MEILI_IMPORT_SNAPSHOT'
+  MEILI_IGNORE_SNAPSHOT_IF_DB_EXISTS: 'MEILI_IMPORT_SNAPSHOT'
+# The quadlet unit starts Meilisearch with the import on every start, it fails once the database exists
+# without the ignore_*_if_db_exists option of the import
+app_meilisearch__environment_imports:
+  MEILI_IMPORT_DUMP: 'MEILI_IGNORE_DUMP_IF_DB_EXISTS'
+  MEILI_IMPORT_SNAPSHOT: 'MEILI_IGNORE_SNAPSHOT_IF_DB_EXISTS'
+
+# The booleans of the environment, Meilisearch only accepts true and false
+app_meilisearch__environment_booleans:
+  - 'MEILI_IGNORE_DUMP_IF_DB_EXISTS'
+  - 'MEILI_IGNORE_MISSING_DUMP'
+  - 'MEILI_IGNORE_MISSING_SNAPSHOT'
+  - 'MEILI_IGNORE_SNAPSHOT_IF_DB_EXISTS'
