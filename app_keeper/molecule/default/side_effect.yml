@@ -1,0 +1,217 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_keeper__test_case: "{{ app_keeper__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_keeper__test_vars: "{{ app_keeper__test_case.role_vars }}"
+    app_keeper__test_environment: "{{ app_keeper__test_vars.keeper_environment }}"
+    app_keeper__test_secrets: "{{ app_keeper__test_vars.keeper_secrets }}"
+    app_keeper__test_checked_files:
+      - "{{ app_keeper__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_keeper__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_keeper__test_checked_files }}"
+      register: 'app_keeper__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_keeper with keeper_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_container: [ 'environment' ]
+        app_keeper__test_invalid:
+          message: 'keeper_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_keeper with keeper_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: [ 'BETTER_AUTH_URL' ]
+        app_keeper__test_invalid:
+          message: 'keeper_environment not a dictionary'
+          search: '^`keeper_environment` has to be a dictionary\.$'
+
+    - name: 'Run app_keeper with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_secrets: "{{ app_keeper__test_secrets + [ { 'name': 'keeper_other', 'data': 'x' } ] }}"
+        app_keeper__test_invalid:
+          message: 'a secret without target'
+          search: '^`keeper_secrets` entries need name, data and target$'
+
+    - name: 'Run app_keeper without DATABASE_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_secrets: "{{ app_keeper__test_secrets | rejectattr('target', 'eq', 'DATABASE_URL') | list }}"
+        app_keeper__test_invalid:
+          message: 'no DATABASE_URL'
+          search: '^Keeper needs the secrets DATABASE_URL, BETTER_AUTH_SECRET, ENCRYPTION_KEY, missing: DATABASE_URL\.$'
+
+    - name: 'Run app_keeper without BETTER_AUTH_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | dict2items | rejectattr('key', 'eq', 'BETTER_AUTH_URL') | items2dict }}"
+        app_keeper__test_invalid:
+          message: 'no BETTER_AUTH_URL'
+          search: '^Keeper needs the environment variables BETTER_AUTH_URL, missing or empty: BETTER_AUTH_URL\.$'
+
+    - name: 'Run app_keeper without REDIS_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | dict2items | rejectattr('key', 'eq', 'REDIS_URL') | items2dict }}"
+        keeper_secrets: "{{ app_keeper__test_secrets | rejectattr('target', 'eq', 'REDIS_URL') | list }}"
+        app_keeper__test_invalid:
+          message: 'no REDIS_URL'
+          search: '^Keeper needs REDIS_URL in keeper_environment or as secret\.$'
+
+    - name: 'Run app_keeper with REDIS_URL in the environment and as secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | combine({ 'REDIS_URL': 'redis://10.89.0.21:6379/' }) }}"
+        keeper_secrets: "{{ app_keeper__test_secrets | rejectattr('target', 'eq', 'REDIS_URL') | list
+                            + [ { 'name': 'keeper_redis_url', 'data': app_keeper__test_redis_url, 'target': 'REDIS_URL' } ] }}"
+        app_keeper__test_invalid:
+          message: 'REDIS_URL twice'
+          search: '^REDIS_URL is set in keeper_environment and as secret, set it only once\.$'
+
+    - name: 'Run app_keeper with BETTER_AUTH_SECRET in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | combine({ 'BETTER_AUTH_SECRET': 'molecule-plain-secret' }) }}"
+        app_keeper__test_invalid:
+          message: 'BETTER_AUTH_SECRET in the environment'
+          search: '^Secrets must not be set in keeper_environment: BETTER_AUTH_SECRET\.$'
+
+    - name: 'Run app_keeper with an invalid ENCRYPTION_KEY (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_secrets: "{{ app_keeper__test_secrets | rejectattr('target', 'eq', 'ENCRYPTION_KEY') | list
+                            + [ { 'name': 'keeper_encryption_key', 'data': 'molecule-too-short', 'target': 'ENCRYPTION_KEY' } ] }}"
+        app_keeper__test_invalid:
+          message: 'an invalid ENCRYPTION_KEY'
+          search: '^The secret ENCRYPTION_KEY has to be 32 bytes in base64, e\.g\. from openssl rand -base64 32\.$'
+
+    - name: 'Run app_keeper with a YAML boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | combine({ 'CRON_JOBS_ENABLED': true }) }}"
+        app_keeper__test_invalid:
+          message: 'a YAML boolean'
+          search: '^These variables have to be the strings true or false: CRON_JOBS_ENABLED\.$'
+
+    - name: 'Run app_keeper with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | combine({ 'TRUSTED_ORIGINS': 'http://a.example.org\nhttp://b.example.org' }) }}"
+        app_keeper__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: TRUSTED_ORIGINS\.$'
+
+    - name: 'Run app_keeper with an invalid BETTER_AUTH_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | combine({ 'BETTER_AUTH_URL': 'keeper.example.org' }) }}"
+        app_keeper__test_invalid:
+          message: 'an invalid BETTER_AUTH_URL'
+          search: '^BETTER_AUTH_URL has to be an http or https URL\.$'
+
+    - name: 'Run app_keeper with the commercial mode (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_environment: "{{ app_keeper__test_environment | combine({ 'COMMERCIAL_MODE': 'true' }) }}"
+        app_keeper__test_invalid:
+          message: 'the commercial mode'
+          search: '^Unknown environment variables: COMMERCIAL_MODE\.'
+
+    - name: 'Run app_keeper with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        keeper_secrets: "{{ app_keeper__test_secrets + [ { 'name': 'keeper_polar_token', 'data': 'x', 'target': 'POLAR_ACCESS_TOKEN' } ] }}"
+        app_keeper__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: POLAR_ACCESS_TOKEN\.'
+
+    - name: 'Change the environment'
+      when: app_keeper__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'keeper' ]
+          register: 'app_keeper__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            keeper_environment: "{{ app_keeper__test_case.side_effect.environment }}"
+
+        - name: 'Run app_keeper with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_keeper'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'keeper' ]
+          register: 'app_keeper__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart'
+          ansible.builtin.assert:
+            that:
+              - app_keeper__quadlet_result is changed
+              - app_keeper__test_started_after.stdout | int > app_keeper__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_keeper__quadlet_result is changed }},
+              start before {{ app_keeper__test_started_before.stdout }}, after {{ app_keeper__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_keeper__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'keeper' ]
+          register: 'app_keeper__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_keeper without a change'
+          ansible.builtin.include_role:
+            name: 'app_keeper'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'keeper' ]
+          register: 'app_keeper__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_keeper__quadlet_result is not changed
+              - app_keeper__secrets_result is not changed
+              - app_keeper__test_unchanged_after.stdout == app_keeper__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_keeper__quadlet_result is changed }}, secrets changed: {{ app_keeper__secrets_result is changed }},
+              start before {{ app_keeper__test_unchanged_before.stdout }}, after {{ app_keeper__test_unchanged_after.stdout }}

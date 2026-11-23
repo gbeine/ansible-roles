@@ -10,24 +10,20 @@ app_keeper__ipv6: "{{ keeper_ipv6 }}"
 app_keeper__network: "{{ keeper_network | mandatory }}"
 app_keeper__hostname: "{{ keeper_hostname | mandatory }}"
 app_keeper__timezone: "{{ keeper_timezone | mandatory }}"
-app_keeper__labels: "{{ keeper_labels | default({}) }}"
+app_keeper__labels: "{{ keeper_labels }}"
 
-app_keeper__version: "{{ keeper_version | default('2.11') }}"
+app_keeper__version: "{{ keeper_version | default('2.34') }}"
 
 app_keeper__container: "{{ app_keeper__podman_container_default | combine(keeper_container | default({})) }}"
 
-app_keeper__db_host: "{{ keeper_db_host | mandatory }}"
-app_keeper__db_port: "{{ keeper_db_port | default(5432) }}"
-app_keeper__db_user: "{{ keeper_db_user | default('keeper') }}"
-app_keeper__db_pass: "{{ keeper_db_pass | mandatory }}"
-app_keeper__db_name: "{{ keeper_db_name | default('keeper') }}"
+# The configuration of Keeper, BETTER_AUTH_URL is mandatory, REDIS_URL is set here or as secret
+app_keeper__environment: "{{ keeper_environment | mandatory }}"
 
-app_keeper__redis_host: "{{ keeper_redis_host | mandatory }}"
-app_keeper__redis_port: "{{ keeper_redis_port | default(6379) }}"
+# Secrets with name, data and target, DATABASE_URL, BETTER_AUTH_SECRET and ENCRYPTION_KEY are mandatory
+app_keeper__secrets: "{{ keeper_secrets | default([]) }}"
 
-app_keeper__url: "{{ keeper_url | mandatory }}"
-app_keeper__encryption_key: "{{ keeper_encryption_key }}"
-app_keeper__better_auth_secret: "{{ keeper_better_auth_secret }}"
+app_keeper__autoupdate_enabled: "{{ keeper_autoupdate_enabled | default(false) }}"
+app_keeper__autoupdate_schedule: "{{ keeper_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
@@ -37,7 +33,21 @@ app_keeper__podman_name: 'keeper'
 app_keeper__podman_image: 'ghcr.io/ridafkih/keeper-services'
 app_keeper__podman_tag: "{{ app_keeper__version }}"
 
-app_keeper__db_url: "postgres://{{ app_keeper__db_user }}:{{ app_keeper__db_pass }}@{{ app_keeper__db_host }}:{{ app_keeper__db_port }}/{{ app_keeper__db_name }}"
+# The web server, it proxies /api to the API
+app_keeper__port: 3000
+
+# BETTER_AUTH_URL is the public URL of Keeper, it is used for the redirects and the checks of the origin
+app_keeper__environment_required: [ 'BETTER_AUTH_URL' ]
+app_keeper__url_pattern: '^https?://[^\s/]+(/\S*)?$'
+
+# DATABASE_URL connects PostgreSQL, BETTER_AUTH_SECRET signs the sessions, ENCRYPTION_KEY encrypts the CalDAV passwords
+app_keeper__secrets_required: [ 'DATABASE_URL', 'BETTER_AUTH_SECRET', 'ENCRYPTION_KEY' ]
+
+# REDIS_URL may contain a password, it is set in keeper_environment or as secret
+app_keeper__redis_variable: 'REDIS_URL'
+
+# packages/database/src/encryption.ts of Keeper v2.34.2: base64 of 32 bytes
+app_keeper__encryption_key_pattern: '^[A-Za-z0-9+/]{43}=$'
 
 app_keeper__podman_container_default:
   name: "{{ app_keeper__podman_name }}"
@@ -47,23 +57,93 @@ app_keeper__podman_container_default:
   ipv6: "{{ app_keeper__ipv6 | default(omit) }}"
   network: "{{ app_keeper__network }}"
   timezone: "{{ app_keeper__timezone }}"
-  environment:
-    WORKER_JOB_QUEUE_ENABLED: 'true'
-    TRUSTED_ORIGINS: "{{ app_keeper__url }}"
-    BETTER_AUTH_URL: 'http://localhost:3000/'
-    REDIS_URL: "redis://{{ app_keeper__redis_host }}:{{ app_keeper__redis_port }}/"
-#    PASSKEY_RP_ID
-#    PASSKEY_RP_NAME
-#    PASSKEY_ORIGIN
-#    GOOGLE_CLIENT_ID
-#    MICROSOFT_CLIENT_ID
-  labels: "{{ app_keeper__labels }}"
-  secrets:
-    - "keeper_database_url,type=env,target=DATABASE_URL"
-    - "keeper_encryption_key,type=env,target=ENCRYPTION_KEY"
-    - "keeper_better_auth_secret,type=env,target=BETTER_AUTH_SECRET"
-#    GOOGLE_CLIENT_SECRET8
-#    MICROSOFT_CLIENT_SECRET
-  volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
+  labels: "{{ app_keeper__labels | default(omit) }}"
+  # Set with keeper_environment
+  environment: "{{ app_keeper__environment }}"
+  # Keeper reads the secrets only from the environment,
+  # entries without name or target are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (app_keeper__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='name')
+        | zip(app_keeper__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='target'))
+        | map('join', ',type=env,target=') | list)
+      if (app_keeper__secrets is sequence and app_keeper__secrets is not string and app_keeper__secrets | length > 0)
+      else omit }}
+
+# Targets of the secrets in keeper_secrets, Keeper reads them only from the environment
+app_keeper__secrets_allowed:
+  - 'BETTER_AUTH_SECRET'
+  - 'DATABASE_URL'
+  - 'ENCRYPTION_KEY'
+  - 'GOOGLE_CLIENT_SECRET'
+  - 'MICROSOFT_CLIENT_SECRET'
+  - 'OIDC_CLIENT_SECRET'
+  - 'OTEL_EXPORTER_OTLP_HEADERS'
+  - 'REDIS_URL'
+  - 'RESEND_API_KEY'
+
+# The secrets must not be set in keeper_environment, REDIS_URL may be set there without password
+app_keeper__secret_variables: "{{ app_keeper__secrets_allowed | reject('eq', app_keeper__redis_variable) | list }}"
+
+# The boolean fields of services/api, cron and worker/src/env.ts of Keeper v2.34.2, arkenv only accepts the strings true and false
+app_keeper__environment_booleans:
+  - 'BLOCK_PRIVATE_RESOLUTION'
+  - 'CALENDAR_REDISCOVERY_ENABLED'
+  - 'CRON_JOBS_ENABLED'
+  - 'DISABLE_LOCAL_AUTH'
+  - 'INGEST_LOOP_ENABLED'
+  - 'OIDC_TRUST_EMAIL_VERIFIED'
+  - 'WORKER_JOB_QUEUE_ENABLED'
+
+# Generated from services/api, cron and worker/src/env.ts, applications/web/src/server/config.ts
+# and the OpenTelemetry variables of the README of Keeper v2.34.2 with TZ,
+# without the secrets, ENV, PORT, API_PORT, VITE_API_URL, ICU_TIMEZONE_FILES_DIR, VERSION and COMMIT_SHA set by the image
+# and the variables of the commercial service keeper.sh: COMMERCIAL_MODE, POLAR_*, PASSKEY_* (only with COMMERCIAL_MODE),
+# VITE_GOOGLE_*, VITE_VISITORS_NOW_TOKEN and OPENAI_APPS_CHALLENGE_TOKEN,
+# update with new versions of the image
+app_keeper__environment_allowed:
+  - 'BETTER_AUTH_URL'
+  - 'BLOCK_PRIVATE_RESOLUTION'
+  - 'CALENDAR_REDISCOVERY_ENABLED'
+  - 'CRON_FLUSH_POOL_MAX'
+  - 'CRON_JOBS_ENABLED'
+  - 'DATABASE_POOL_MAX'
+  - 'DISABLE_LOCAL_AUTH'
+  - 'FEEDBACK_EMAIL'
+  - 'GOOGLE_CLIENT_ID'
+  - 'GOOGLE_PROJECT_REQUESTS_PER_MINUTE'
+  - 'INGEST_CLAIM_BATCH'
+  - 'INGEST_DORMANT_AFTER_DAYS'
+  - 'INGEST_DORMANT_POLL_SECONDS'
+  - 'INGEST_FLEET_CONCURRENCY'
+  - 'INGEST_FLEET_IDLE_MS'
+  - 'INGEST_FREE_POLL_SECONDS'
+  - 'INGEST_FREE_SAFETY_POLL_SECONDS'
+  - 'INGEST_LEASE_SECONDS'
+  - 'INGEST_LOOP_ENABLED'
+  - 'INGEST_PRO_POLL_SECONDS'
+  - 'INGEST_PRO_SAFETY_POLL_SECONDS'
+  - 'INGEST_WAKE_CONCURRENCY'
+  - 'INGEST_WAKE_IDLE_MS'
+  - 'MCP_API_URL'
+  - 'MCP_PUBLIC_URL'
+  - 'MICROSOFT_CLIENT_ID'
+  - 'OIDC_CLIENT_ID'
+  - 'OIDC_ISSUER_URL'
+  - 'OIDC_PROVIDER_NAME'
+  - 'OIDC_SCOPES'
+  - 'OIDC_TRUST_EMAIL_VERIFIED'
+  - 'OTEL_EXPORTER_OTLP_ENDPOINT'
+  - 'OTEL_EXPORTER_OTLP_PROTOCOL'
+  - 'OUTLOOK_INGEST_REQUESTS_PER_MINUTE'
+  - 'PRIVATE_RESOLUTION_WHITELIST'
+  - 'REDIS_URL'
+  - 'REGISTRATION_EMAIL_DOMAINS'
+  - 'TRACE_SAMPLE_RATIO'
+  - 'TRACE_SLOW_THRESHOLD_MS'
+  - 'TRUSTED_ORIGINS'
+  - 'TZ'
+  - 'VITE_MCP_URL'
+  - 'WEBHOOK_PUBLIC_URL'
+  - 'WEBSOCKET_URL'
+  - 'WORKER_CONCURRENCY'
+  - 'WORKER_JOB_QUEUE_ENABLED'

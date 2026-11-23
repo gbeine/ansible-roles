@@ -1,0 +1,123 @@
+---
+# Network created by container_podman in prepare.yml
+app_keeper__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_keeper__test_image: 'ghcr.io/ridafkih/keeper-services:2.34'
+app_keeper__test_quadlet_path: '/etc/containers/systemd/keeper.container'
+
+# PostgreSQL and Redis started by prepare.yml on every VM, test credentials only
+app_keeper__test_database:
+  name: 'molecule-postgres'
+  image: 'docker.io/library/postgres:17'
+  ip: '10.89.0.20'
+  password: 'molecule-db-password'
+  env:
+    POSTGRES_USER: 'keeper'
+    POSTGRES_PASSWORD: 'molecule-db-password'
+    POSTGRES_DB: 'keeper'
+  command: []
+  ready: [ 'pg_isready', '-h', '127.0.0.1', '-U', 'keeper', '-d', 'keeper' ]
+app_keeper__test_redis:
+  name: 'molecule-redis'
+  image: 'docker.io/library/redis:7-alpine'
+  ip: '10.89.0.21'
+  password: 'molecule-redis-password'
+  env: {}
+  command: [ 'redis-server', '--requirepass', 'molecule-redis-password' ]
+  ready: [ 'redis-cli', '-a', 'molecule-redis-password', '--no-auth-warning', 'ping' ]
+
+app_keeper__test_database_url: 'postgres://keeper:molecule-db-password@10.89.0.20:5432/keeper'
+app_keeper__test_redis_url: 'redis://:molecule-redis-password@10.89.0.21:6379/'
+
+# The user signed up by verify.yml
+app_keeper__test_user:
+  username: 'molecule'
+  password: 'molecule-user-password'
+
+app_keeper__test_cases:
+
+  # Only the mandatory variables, REDIS_URL in the environment
+  - name: 'molecule-keeper-default'
+    role_vars:
+      keeper_ip: '10.89.0.100'
+      keeper_network: 'podman-molecule'
+      keeper_hostname: 'keeper-default'
+      keeper_timezone: 'Europe/Berlin'
+      keeper_environment:
+        BETTER_AUTH_URL: 'http://10.89.0.100:3000'
+        REDIS_URL: "{{ app_keeper__test_redis_url }}"
+      keeper_secrets:
+        - name: 'keeper_database_url'
+          data: "{{ app_keeper__test_database_url }}"
+          target: 'DATABASE_URL'
+        - name: 'keeper_better_auth_secret'
+          data: 'molecule-better-auth-secret-default'
+          target: 'BETTER_AUTH_SECRET'
+        - name: 'keeper_encryption_key'
+          data: 'bW9sZWN1bGUta2VlcGVyLWVuY3J5cHRpb24ta2V5LTM='
+          target: 'ENCRYPTION_KEY'
+    expect:
+      ip: '10.89.0.100'
+      ip6: ~
+      url: 'http://10.89.0.100:3000'
+      quadlet:
+        - 'Secret=keeper_database_url,type=env,target=DATABASE_URL'
+        - 'Secret=keeper_better_auth_secret,type=env,target=BETTER_AUTH_SECRET'
+        - 'Secret=keeper_encryption_key,type=env,target=ENCRYPTION_KEY'
+      env:
+        - 'BETTER_AUTH_URL=http://10.89.0.100:3000'
+
+  # IPv6, labels, TRUSTED_ORIGINS, a boolean and REDIS_URL as secret
+  - name: 'molecule-keeper'
+    role_vars:
+      keeper_ip: '10.89.0.101'
+      keeper_ipv6: 'fd00:89::101'
+      keeper_network: 'podman-molecule'
+      keeper_hostname: 'keeper-molecule'
+      keeper_timezone: 'Europe/Berlin'
+      keeper_labels:
+        traefik.enable: 'true'
+      keeper_environment:
+        BETTER_AUTH_URL: 'http://10.89.0.101:3000'
+        TRUSTED_ORIGINS: 'http://10.89.0.101:3000'
+        CRON_JOBS_ENABLED: 'true'
+      keeper_secrets:
+        - name: 'keeper_database_url'
+          data: "{{ app_keeper__test_database_url }}"
+          target: 'DATABASE_URL'
+        - name: 'keeper_better_auth_secret'
+          data: 'molecule-better-auth-secret'
+          target: 'BETTER_AUTH_SECRET'
+        - name: 'keeper_encryption_key'
+          data: 'bW9sZWN1bGUta2VlcGVyLWVuY3J5cHRpb24ta2V5LTM='
+          target: 'ENCRYPTION_KEY'
+        - name: 'keeper_redis_url'
+          data: "{{ app_keeper__test_redis_url }}"
+          target: 'REDIS_URL'
+    # A valid change, the quadlet unit changes and Keeper has to restart
+    side_effect:
+      environment:
+        BETTER_AUTH_URL: 'http://10.89.0.101:3000'
+        TRUSTED_ORIGINS: 'http://10.89.0.101:3000,https://keeper.example.org'
+        CRON_JOBS_ENABLED: 'true'
+    expect:
+      ip: '10.89.0.101'
+      ip6: 'fd00:89::101'
+      url: 'http://10.89.0.101:3000'
+      quadlet:
+        - 'Secret=keeper_database_url,type=env,target=DATABASE_URL'
+        - 'Secret=keeper_better_auth_secret,type=env,target=BETTER_AUTH_SECRET'
+        - 'Secret=keeper_encryption_key,type=env,target=ENCRYPTION_KEY'
+        - 'Secret=keeper_redis_url,type=env,target=REDIS_URL'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'BETTER_AUTH_URL=http://10.89.0.101:3000'
+        - 'TRUSTED_ORIGINS=http://10.89.0.101:3000,https://keeper.example.org'
+        - 'CRON_JOBS_ENABLED=true'

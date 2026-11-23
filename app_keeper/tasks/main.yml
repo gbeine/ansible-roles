@@ -1,8 +1,161 @@
 ---
 
-- name: 'Deploy Keeper container'
-  tags: [ 'app_keeper' ]
+- name: 'Deploy Keeper'
+  tags: [ 'app', 'app_keeper' ]
   block:
+
+    # A failing template in the variables (e.g. an unknown filter or keeper_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_keeper__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_keeper__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_keeper__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_keeper__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_keeper__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`keeper_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`keeper_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `keeper_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # BETTER_AUTH_URL, DATABASE_URL, BETTER_AUTH_SECRET and ENCRYPTION_KEY are mandatory,
+    # REDIS_URL is set in keeper_environment or as secret
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_keeper__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_keeper__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_keeper__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_keeper__environment is not mapping -%}
+          {%-   set _ = errors.append('`keeper_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set set_variables = app_keeper__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list -%}
+          {%-   set targets = app_keeper__secrets | map(attribute='target') | list -%}
+          {%-   set environment_missing = app_keeper__environment_required | reject('in', set_variables) | list -%}
+          {%-   set secrets_missing = app_keeper__secrets_required | reject('in', targets) | list -%}
+          {%-   set secrets_in_environment = (targets + app_keeper__secret_variables) | reject('eq', app_keeper__redis_variable)
+                                             | select('in', app_keeper__environment.keys() | list) | unique | list -%}
+          {%-   set encryption_keys = app_keeper__secrets | selectattr('target', 'eq', 'ENCRYPTION_KEY') | map(attribute='data') | list -%}
+          {%-   set secrets_lines = app_keeper__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list -%}
+          {%-   if environment_missing | length > 0 -%}
+          {%-     set _ = errors.append('Keeper needs the environment variables ' ~ (app_keeper__environment_required | join(', '))
+                                      ~ ', missing or empty: ' ~ (environment_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if secrets_missing | length > 0 -%}
+          {%-     set _ = errors.append('Keeper needs the secrets ' ~ (app_keeper__secrets_required | join(', '))
+                                      ~ ', missing: ' ~ (secrets_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if app_keeper__redis_variable not in set_variables and app_keeper__redis_variable not in targets -%}
+          {%-     set _ = errors.append('Keeper needs REDIS_URL in keeper_environment or as secret.') -%}
+          {%-   elif app_keeper__redis_variable in app_keeper__environment.keys() and app_keeper__redis_variable in targets -%}
+          {%-     set _ = errors.append('REDIS_URL is set in keeper_environment and as secret, set it only once.') -%}
+          {%-   endif -%}
+          {%-   if secrets_in_environment | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not be set in keeper_environment: ' ~ (secrets_in_environment | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if encryption_keys | reject('string') | list | length > 0
+                   or encryption_keys | select('string') | reject('match', app_keeper__encryption_key_pattern) | list | length > 0 -%}
+          {%-     set _ = errors.append('The secret ENCRYPTION_KEY has to be 32 bytes in base64, e.g. from openssl rand -base64 32.') -%}
+          {%-   endif -%}
+          {%-   if secrets_lines | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not contain line breaks: ' ~ (secrets_lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_keeper__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_keeper__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_keeper__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_keeper__environment.items() if value is not none -%}
+          {%-   if key in app_keeper__environment_booleans and value not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be the strings true or false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length == 0 and (app_keeper__environment.BETTER_AUTH_URL | default('') | string) is not match(app_keeper__url_pattern) -%}
+          {%-   set _ = errors.append('BETTER_AUTH_URL has to be an http or https URL.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging keeper_container,
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_keeper__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_keeper__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without keeper_secrets
+        app_keeper__container_secrets: >-
+          {{ app_keeper__container.secrets
+             if (app_keeper__container.secrets is defined and app_keeper__container.secrets is sequence and app_keeper__container.secrets is not string)
+             else [] }}
+        app_keeper__container_environment: >-
+          {{ app_keeper__container.environment if app_keeper__container.environment | default(none) is mapping else {} }}
+        app_keeper__environment_unknown: >-
+          {{ app_keeper__container_environment.keys() | map('string') | reject('in', app_keeper__environment_allowed) | list }}
+        app_keeper__environment_line_breaks: >-
+          {{ app_keeper__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_keeper__secrets_unknown: >-
+          {{ app_keeper__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_keeper__secrets_allowed) | list }}
+        app_keeper__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_keeper__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_keeper__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_keeper__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_keeper__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Keeper (app_keeper__environment_allowed) and the secrets '
+                                    ~ (app_keeper__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_keeper__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_keeper__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create secrets'
       no_log: true
@@ -10,28 +163,11 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items:
-        - name: 'keeper_database_url'
-          data: "{{ app_keeper__db_url }}"
-        - name: 'keeper_encryption_key'
-          data: "{{ app_keeper__encryption_key }}"
-        - name: 'keeper_better_auth_secret'
-          data: "{{ app_keeper__better_auth_secret }}"
+      loop: "{{ app_keeper__secrets }}"
+      register: 'app_keeper__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_keeper__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_keeper__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_keeper__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -42,6 +178,7 @@
         ip6: "{{ app_keeper__container.ipv6 | default(omit) }}"
         network: "{{ app_keeper__container.network }}"
         timezone: "{{ app_keeper__container.timezone }}"
+        command: "{{ app_keeper__container.command | default(omit) }}"
         env: "{{ app_keeper__container.environment | default(omit) }}"
         etc_hosts: "{{ app_keeper__container.etc_hosts | default(omit) }}"
         expose: "{{ app_keeper__container.expose | default(omit) }}"
@@ -53,18 +190,99 @@
           [Install]
           WantedBy=default.target
 
+          [Service]
+          RestartSec=5
+          Restart=always
+
           [Unit]
           {% if app_keeper__container.requires is defined %}
           Requires={{ app_keeper__container.requires | join(' ') }}
           {% endif %}
+          {% if app_keeper__container.wants is defined %}
+          Wants={{ app_keeper__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_keeper__container.after is defined %}
+          After={{ app_keeper__container.after | join(' ') }}
+          {% endif %}
+          {% if app_keeper__container.part_of is defined %}
+          PartOf={{ app_keeper__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_keeper__container.binds_to is defined %}
+          BindsTo={{ app_keeper__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_keeper__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_keeper__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_keeper__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ app_keeper__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Keeper'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_keeper__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_keeper__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_keeper__running: >-
+              {{ (ansible_facts.services[app_keeper__container.name + '.service'].state | default('')) == 'running' }}
+            app_keeper__restart: >-
+              {{ app_keeper__running | bool
+                 and (app_keeper__secrets_result is changed or app_keeper__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_keeper__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_keeper__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_keeper__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_keeper__start_journal.stdout_lines }}
+
+    # s6 migrates the database before it starts the API, the web server proxies /api to it
+    - name: 'Wait for Keeper'
+      ansible.builtin.uri:
+        url: "http://{{ app_keeper__ip }}:{{ app_keeper__port }}/api/health"
+        return_content: true
+      register: 'app_keeper__ready'
+      until: (app_keeper__ready.json | default({})).status | default('') == 'ok'
+      retries: 90
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Keeper'
+      when:
+        - not ansible_check_mode
+        - (app_keeper__ready.json | default({})).status | default('') != 'ok'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_keeper__container.name }}", '-n', '150', '--no-pager' ]
+      register: 'app_keeper__journal'
+      changed_when: false
+
+    - name: 'Assert that Keeper answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_keeper__journal is skipped
+        fail_msg: "{{ app_keeper__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_keeper__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_keeper__container.name }}"
+        container_image: "{{ app_keeper__container.image }}"
+        container_schedule: "{{ app_keeper__autoupdate_schedule }}"
