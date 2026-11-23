@@ -36,7 +36,6 @@ monitoring_plugins:
 | `pushover` | `pushover.sh` | `push-host-notification`, `push-service-notification` | |
 | `raid` | `check_raid` of `monitoring-plugins-contrib` | `raid` | `dmsetup` |
 | `reboot` | `check_reboot` | `reboot` | |
-| `rocketchat` | `notify_rocketchat` (amd64, arm64, arm) | `rocketchat` | |
 | `running_kernel` | `check_running_kernel` of `monitoring-plugins-contrib` | none, see the ITL | |
 | `smart` | `check_smart.pl` of `monitoring-plugins-check-smart` | `sudo-smartpl` | `check_smart.pl`, `smartctl` |
 | `systemd` | `check_systemd` of `monitoring-plugins-systemd` | none, see the ITL | |
@@ -45,8 +44,14 @@ monitoring_plugins:
 `check_memory` of madrisan (`madrisan-memory` of the plugin `madrisan`) is preferred to check the memory,
 the former plugin `mem` with `check_mem.pl` is removed.
 
-The role fails before it changes anything if `monitoring_plugins` contains an unknown plugin.
-The plugins, their files, configurations and sudoers entries are listed in `vars/main.yml`, the packages in `vars/Debian-13.yml`.
+The plugins, their files, configurations and sudoers entries are listed in `monitoring_plugins__catalog` at the end of `defaults/main.yml`,
+the packages in `vars/Debian-13.yml`.
+
+### Icinga user and directories
+
+The Icinga configuration and the credential files belong to `monitoring_plugins_user` (default `nagios`) and `monitoring_plugins_group`
+(default the user), the sudoers entries are written for this user. The plugins are copied to `monitoring_plugins_local_dir`
+(default `/usr/local/lib/nagios/plugins`), the Icinga configuration is written to `monitoring_plugins_etc_dir` (default `/usr/local/etc/icinga2`).
 
 ### Printer
 
@@ -104,7 +109,23 @@ monitoring_plugins_mysql_credentials:
   password: 'secret'
 ```
 
-All credential files belong to the Icinga user and have mode `0400`.
+All credential files belong to the Icinga user and have mode `0400`. `:` and `\` in the fields of `.pgpass` are escaped as `\:` and `\\`.
+
+### Validation
+
+The role checks before any change:
+
+- `monitoring_plugins` is a list of known plugins, `monitoring_plugins_prune` is a boolean
+- `pgactivity` has user and password in `monitoring_plugins_postgresql_credentials`
+- `monitoring_plugins_mysql_credentials` is a dictionary, with `mysql` or `mariadb` and credentials set it has user and password
+- the credentials contain no line breaks
+
+If `monitoring_plugins_postgresql_credentials` is no dictionary, merging it with the default fails before anything changes.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the packages, the directories, the plugins,
+the Icinga configuration, the sudoers entries and the credential files.
 
 ### Pruning
 
@@ -121,25 +142,36 @@ Files of other roles or plugins not known to the role are not touched.
 | `monitoring_check_docker`, `monitoring_check_podman` | `container_stats_docker`, `container_stats_podman` |
 | `monitoring_check_ide_smart` | `smart`, only `check_smart.pl` (`sudo-smartpl`), Debian 13 does not ship `check_ide_smart` anymore, `sudo-smart` is gone |
 | `monitoring_check_phpfpm`, `monitoring_check_nginx` | `phpfpm`, `nginx` |
-| `monitoring_pushover`, `monitoring_rocketchat` | `pushover`, `rocketchat` |
+| `monitoring_pushover` | `pushover` |
+| `monitoring_rocketchat` | removed, see `rocketchat` below |
 | `monitoring_credentials_mariadb*`, `monitoring_credentials_mysql*` | `monitoring_plugins_mysql_credentials` with `user` and `password`, only used with the plugin `mysql` or `mariadb` |
 | `monitoring_credentials_postgresql_*` | `monitoring_plugins_postgresql_credentials` with `host`, `port`, `user` and `password` |
+| `icinga_user`, `icinga_group` | `monitoring_plugins_user`, `monitoring_plugins_group` |
+| `monitoring_plugin_local_dir`, `monitoring_plugin_etc_dir` | `monitoring_plugins_local_dir`, `monitoring_plugins_etc_dir` |
+| `rocketchat` (`notify_rocketchat`) | removed, `rocketchat` is an unknown plugin now; remove `/usr/local/lib/nagios/plugins/notify_rocketchat` and `/usr/local/etc/icinga2/rocketchat.conf` by hand |
 | `mem` (`check_mem.pl`) | removed, `madrisan` with `madrisan-memory` (`check_memory`), `mem` is an unknown plugin now; the role does not prune `check_mem.pl` anymore, remove `/usr/local/lib/nagios/plugins/check_mem.pl` by hand |
 
-Fixed errors of the old role:
+Fixed errors:
 
+- a `:` or `\` in the credentials of PostgreSQL broke `.pgpass`, they are escaped now,
 - `tls_cert` was never installed, the package list overwrote the switch, the plugin is now installed as `check_tls_cert.py` as the `CheckCommand` expects,
 - `pushover` installed `pushover.pl`, the `NotificationCommand` runs `pushover.sh`,
-- the configuration of `rocketchat` was written to `notifiy_rocketchat.conf`, now `rocketchat.conf`,
-- sudoers entries use the Icinga user (`icinga_user`) instead of a fixed `nagios`, the entry of the podman plugin is now `icinga-run-container-stats-podman`.
+- sudoers entries use the Icinga user (`monitoring_plugins_user`) instead of a fixed `nagios`, the entry of the podman plugin is now `icinga-run-container-stats-podman`.
 
 ### Tests
 
 The molecule scenario `default` uses tart with two VMs, both with Icinga 2 installed in `prepare`:
 
 - `molecule-plugins-default` runs the role without variables, only the directories are created,
-- `molecule-plugins` installs all plugins with credentials, `side_effect` removes `pushover`, `reboot`, `mysql` and `mariadb` again,
-  `.my.cnf` has to be removed with them.
+- `molecule-plugins` installs all plugins with credentials, the password of PostgreSQL contains `:`,
+  `side_effect` removes `pushover`, `reboot`, `mysql` and `mariadb` again, `.my.cnf` has to be removed with them.
+
+`check` runs `converge` with `--check` on the new VMs.
+Before the removal `side_effect` runs the role on `molecule-plugins` with `monitoring_plugins` not a list, an unknown plugin (`rocketchat`),
+`monitoring_plugins_prune` not a boolean, `pgactivity` without password, the credentials of MySQL without password,
+the credentials of PostgreSQL and MySQL not a dictionary and a line break in a password and checks that it fails with the expected message
+and the configuration and `.pgpass` are unchanged (tasks marked `expect ERROR`).
+`molecule-plugins-default` runs the role again, it must not write a plugin.
 
 `verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, the packages of `mysql`, `mariadb`, `dsa` and `madrisan`, `visudo -c`,
 the sudo commands of the Icinga user, the syntax and dependencies of the plugins (`perl -c`, `bash -n`, `--help`),

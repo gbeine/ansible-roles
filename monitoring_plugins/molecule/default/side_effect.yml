@@ -1,6 +1,6 @@
 ---
 - name: 'Side effect'
-  hosts: 'molecule-plugins'
+  hosts: 'all'
   become: true
 
   vars_files:
@@ -8,20 +8,124 @@
 
   vars:
     monitoring_plugins__test_case: "{{ monitoring_plugins__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_plugins__test_vars: "{{ monitoring_plugins__test_case.role_vars }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
-    - name: 'Set the role variables without the removed plugins'
+    - name: 'Set the role variables of the test case'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ monitoring_plugins__test_case.role_vars
-           | combine({'monitoring_plugins': monitoring_plugins__test_case.role_vars.monitoring_plugins
-                                            | reject('in', monitoring_plugins__test_case.side_effect_remove) | list})
-           | dict2items }}
+      loop: "{{ monitoring_plugins__test_vars | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Run monitoring_plugins without the removed plugins'
-      ansible.builtin.include_role:
-        name: 'monitoring_plugins'
+    - name: 'Run the role with invalid variables and without some plugins'
+      when: monitoring_plugins__test_case.side_effect_remove is defined
+      block:
+
+        - name: 'Read the checksums of the checked files before the invalid runs'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: 'md5'
+          loop: "{{ monitoring_plugins__test_case.checked_files }}"
+          register: 'monitoring_plugins__test_md5_before'
+
+        # Include parameters take precedence over set_fact and only exist inside the include
+
+        - name: 'Run monitoring_plugins with monitoring_plugins not a list (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins: 'reboot'
+            monitoring_plugins__test_invalid:
+              message: 'monitoring_plugins not a list'
+              search: '^`monitoring_plugins` has to be a list of plugins\.$'
+
+        - name: 'Run monitoring_plugins with an unknown plugin (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins: "{{ monitoring_plugins__test_vars.monitoring_plugins + [ 'rocketchat' ] }}"
+            monitoring_plugins__test_invalid:
+              message: 'an unknown plugin'
+              search: '^Unknown plugins in `monitoring_plugins`: rocketchat, allowed are '
+
+        - name: 'Run monitoring_plugins with monitoring_plugins_prune not a boolean (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins_prune: 'yes'
+            monitoring_plugins__test_invalid:
+              message: 'monitoring_plugins_prune not a boolean'
+              search: '^`monitoring_plugins_prune` has to be true or false\.$'
+
+        - name: 'Run monitoring_plugins with pgactivity without password (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins_postgresql_credentials: { 'user': 'molecule' }
+            monitoring_plugins__test_invalid:
+              message: 'pgactivity without password'
+              search: '^The plugin pgactivity needs user and password in `monitoring_plugins_postgresql_credentials`\.$'
+
+        - name: 'Run monitoring_plugins with the credentials of MySQL without password (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins_mysql_credentials: { 'user': 'molecule' }
+            monitoring_plugins__test_invalid:
+              message: 'the credentials of MySQL without password'
+              search: '^`monitoring_plugins_mysql_credentials` needs user and password\.$'
+
+        - name: 'Run monitoring_plugins with the credentials of PostgreSQL not a dictionary (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins_postgresql_credentials: [ 'molecule' ]
+            monitoring_plugins__test_invalid:
+              message: 'the credentials of PostgreSQL not a dictionary'
+              search: 'failed to combine variables, expected dicts'
+
+        - name: 'Run monitoring_plugins with the credentials of MySQL not a dictionary (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins_mysql_credentials: 'molecule'
+            monitoring_plugins__test_invalid:
+              message: 'the credentials of MySQL not a dictionary'
+              search: '`monitoring_plugins_mysql_credentials` has to be a dictionary\.'
+
+        - name: 'Run monitoring_plugins with a line break in a password (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            monitoring_plugins_postgresql_credentials: { 'user': 'molecule', 'password': "molecule\npassword" }
+            monitoring_plugins__test_invalid:
+              message: 'a line break in a password'
+              search: '^The credentials must not contain line breaks\.$'
+
+        - name: 'Set the role variables without the removed plugins'
+          ansible.builtin.set_fact:
+            monitoring_plugins: >-
+              {{ monitoring_plugins__test_vars.monitoring_plugins | reject('in', monitoring_plugins__test_case.side_effect_remove) | list }}
+
+        - name: 'Run monitoring_plugins without the removed plugins'
+          ansible.builtin.include_role:
+            name: 'monitoring_plugins'
+
+    - name: 'Run the role again without a change'
+      when: monitoring_plugins__test_case.side_effect_remove is not defined
+      block:
+
+        - name: 'Run monitoring_plugins without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_plugins'
+
+        # The role has no service, the files are the result
+        - name: 'Read the files of the plugins'
+          ansible.builtin.find:
+            paths: [ '/usr/local/lib/nagios/plugins', '/usr/local/etc/icinga2' ]
+          register: 'monitoring_plugins__test_files'
+
+        - name: 'Assert that no file of a plugin was written'
+          ansible.builtin.assert:
+            that:
+              - monitoring_plugins__test_files.files | length == 0
+            fail_msg: "{{ monitoring_plugins__test_files.files | map(attribute='path') | list }}"

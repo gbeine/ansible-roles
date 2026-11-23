@@ -1,7 +1,7 @@
 ---
 
 - name: 'Install and configure monitoring plugins'
-  tags: [ 'monitoring_plugins' ]
+  tags: [ 'monitoring', 'monitoring_plugins' ]
   block:
 
     - name: 'Include OS-specific variables'
@@ -12,32 +12,57 @@
           - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
           - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
 
-    - name: 'Validate plugins and credentials'
+    # A failing template in the variables (e.g. an unknown filter or monitoring_plugins_postgresql_credentials not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
-          - monitoring_plugins__plugins is iterable and monitoring_plugins__plugins is not string and monitoring_plugins__plugins is not mapping
-          - monitoring_plugins__unknown | length == 0
-          - "'rocketchat' not in monitoring_plugins__plugins or monitoring_plugins__rocketchat_plugin | length > 0"
-          - >-
-            'pgactivity' not in monitoring_plugins__plugins
-            or (monitoring_plugins__postgresql_credentials.user | default('') | string | length > 0
-                and monitoring_plugins__postgresql_credentials.password | default('') | string | length > 0)
-          - >-
-            not monitoring_plugins__mysql_enabled | bool
-            or monitoring_plugins__mysql_credentials | length == 0
-            or (monitoring_plugins__mysql_credentials.user | default('') | string | length > 0
-                and monitoring_plugins__mysql_credentials.password | default('') | string | length > 0)
-        fail_msg: >-
-          monitoring_plugins must be a list of known plugins ({{ monitoring_plugins__catalog | map(attribute='name') | join(', ') }}),
-          unknown: {{ monitoring_plugins__unknown | join(', ') | default('none', true) }}.
-          rocketchat needs one of the architectures {{ monitoring_plugins__rocketchat_plugins.keys() | join(', ') }}.
-          pgactivity needs user and password in monitoring_plugins_postgresql_credentials,
-          monitoring_plugins_mysql_credentials needs user and password if set for mysql or mariadb.
+          - monitoring_plugins__plugins | length >= 0
+          - monitoring_plugins__postgresql_credentials | length > 0
+          - monitoring_plugins__mysql_credentials | length >= 0
+        quiet: true
+
+    - name: 'Validate the variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_plugins__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_plugins__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_plugins__unknown: >-
-          {{ (monitoring_plugins__plugins if monitoring_plugins__plugins is not string else [monitoring_plugins__plugins])
-             | reject('in', monitoring_plugins__catalog | map(attribute='name') | list) | list }}
+        monitoring_plugins__errors: >-
+          {%- set errors = [] -%}
+          {%- set plugins = monitoring_plugins__plugins -%}
+          {%- set mysql = monitoring_plugins__mysql_credentials -%}
+          {%- set postgresql = monitoring_plugins__postgresql_credentials -%}
+          {%- if plugins is not sequence or plugins is string or plugins is mapping -%}
+          {%-   set _ = errors.append('`monitoring_plugins` has to be a list of plugins.') -%}
+          {%- else -%}
+          {%-   set unknown = plugins | map('string') | reject('in', monitoring_plugins__catalog | map(attribute='name') | list) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown plugins in `monitoring_plugins`: ' ~ (unknown | join(', ')) ~ ', allowed are '
+                                      ~ (monitoring_plugins__catalog | map(attribute='name') | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if 'pgactivity' in plugins and (postgresql.user | default('') | string | length == 0 or postgresql.password | default('') | string | length == 0) -%}
+          {%-     set _ = errors.append('The plugin pgactivity needs user and password in `monitoring_plugins_postgresql_credentials`.') -%}
+          {%-   endif -%}
+          {%-   if mysql is mapping and plugins | select('in', [ 'mysql', 'mariadb' ]) | list | length > 0 and mysql | length > 0
+                   and (mysql.user | default('') | string | length == 0 or mysql.password | default('') | string | length == 0) -%}
+          {%-     set _ = errors.append('`monitoring_plugins_mysql_credentials` needs user and password.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- if monitoring_plugins__prune is not boolean -%}
+          {%-   set _ = errors.append('`monitoring_plugins_prune` has to be true or false.') -%}
+          {%- endif -%}
+          {%- if mysql is not mapping -%}
+          {%-   set _ = errors.append('`monitoring_plugins_mysql_credentials` has to be a dictionary.') -%}
+          {%- endif -%}
+          {%- set lines = (postgresql | dict2items | map(attribute='value') | map('string') | select('search', '[\r\n]') | list | length > 0)
+                          or (mysql is mapping and mysql | dict2items | map(attribute='value') | map('string') | select('search', '[\r\n]') | list | length > 0) -%}
+          {%- if lines -%}
+          {%-   set _ = errors.append('The credentials must not contain line breaks.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Install packages of the plugins'
       ansible.builtin.apt:
@@ -69,7 +94,7 @@
 
     - name: 'Copy plugins'
       ansible.builtin.copy:
-        src: "{{ monitoring_plugins__file_sources[item.1] | default(item.1) }}"
+        src: "{{ item.1 }}"
         dest: "{{ monitoring_plugins__plugin_local_dir }}/{{ item.1 }}"
         owner: 'root'
         group: 'root'
@@ -115,11 +140,17 @@
             host={{ monitoring_plugins__postgresql_credentials.host }}
             port={{ monitoring_plugins__postgresql_credentials.port }}
             user={{ monitoring_plugins__postgresql_credentials.user }}
+        # libpq reads \\ as \ and \: as : in the fields of .pgpass
         - name: '.pgpass'
           content: |
             {{ [monitoring_plugins__postgresql_credentials.host, monitoring_plugins__postgresql_credentials.port, 'postgres',
-                monitoring_plugins__postgresql_credentials.user, monitoring_plugins__postgresql_credentials.password] | join(':') }}
+                monitoring_plugins__postgresql_credentials.user, monitoring_plugins__postgresql_credentials.password]
+               | map('string') | map('replace', monitoring_plugins__backslash, monitoring_plugins__backslash ~ monitoring_plugins__backslash)
+               | map('replace', ':', monitoring_plugins__backslash ~ ':') | join(':') }}
       when: "'pgactivity' in monitoring_plugins__plugins"
+      vars:
+        # A single backslash, Jinja keeps backslashes in strings of templates
+        monitoring_plugins__backslash: '\'
 
     - name: 'Store MySQL credentials'
       no_log: true
