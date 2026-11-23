@@ -176,6 +176,61 @@
           message: 'an unknown environment variable'
           search: '^Unknown environment variables: MSMTPRC\.'
 
+    # The role writes the configuration, icinga2 daemon -C rejects it and the running Icinga is not restarted
+    - name: 'Run monitoring_icinga_master with a configuration that Icinga rejects (expect ERROR)'
+      when: monitoring_icinga_master__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the rejected configuration'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+          register: 'monitoring_icinga_master__test_rejected_before'
+          changed_when: false
+
+        - name: 'Run monitoring_icinga_master with a host of an unknown check command (expect ERROR)'
+          block:
+
+            - name: 'Run monitoring_icinga_master, it has to fail (expect ERROR)'
+              ansible.builtin.include_role:
+                name: 'monitoring_icinga_master'
+              vars:
+                icinga_master_hosts:
+                  - name: 'molecule-host'
+                    address: '127.0.0.1'
+                    check_command: 'molecule-missing-command'
+
+            - name: 'Fail because the rejected configuration was accepted'
+              ansible.builtin.fail:
+                msg: 'icinga2 daemon -C accepted a host with an unknown check command'
+
+          rescue:
+
+            - name: 'Read the start time of the service after the rejected configuration'
+              ansible.builtin.command:
+                argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+              register: 'monitoring_icinga_master__test_rejected_after'
+              changed_when: false
+
+            - name: 'Read the state of the service after the rejected configuration'
+              ansible.builtin.command:
+                argv: [ 'systemctl', 'is-active', 'icinga-master' ]
+              register: 'monitoring_icinga_master__test_rejected_state'
+              changed_when: false
+              failed_when: false
+
+            - name: 'Assert the rejected configuration without restart'
+              ansible.builtin.assert:
+                that:
+                  - monitoring_icinga_master__test_rejected_failure is search('icinga2 daemon -C rejects the configuration, Icinga is not restarted')
+                  - monitoring_icinga_master__test_rejected_after.stdout == monitoring_icinga_master__test_rejected_before.stdout
+                  - monitoring_icinga_master__test_rejected_state.stdout == 'active'
+                fail_msg: >-
+                  failure: {{ monitoring_icinga_master__test_rejected_failure }},
+                  start before {{ monitoring_icinga_master__test_rejected_before.stdout }},
+                  after {{ monitoring_icinga_master__test_rejected_after.stdout }}, state {{ monitoring_icinga_master__test_rejected_state.stdout }}
+              vars:
+                monitoring_icinga_master__test_rejected_failure: "{{ ansible_failed_result.msg | default('') | string }}"
+
     - name: 'Run monitoring_icinga_master with the changed configuration'
       when: monitoring_icinga_master__test_case.side_effect is defined
       block:

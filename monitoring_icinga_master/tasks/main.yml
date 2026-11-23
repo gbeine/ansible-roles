@@ -419,6 +419,41 @@
         state: 'quadlet'
       register: 'monitoring_icinga_master__quadlet_result'
 
+    - name: 'Decide the restart of Icinga'
+      ansible.builtin.set_fact:
+        monitoring_icinga_master__restart: >-
+          {{ (ansible_facts.services[monitoring_icinga_master__container.name + '.service'].state | default('')) == 'running'
+             and (monitoring_icinga_master__config_result is changed
+                  or monitoring_icinga_master__features_result is changed
+                  or monitoring_icinga_master__features_removed is changed
+                  or monitoring_icinga_master__zone_hosts_result is changed
+                  or monitoring_icinga_master__zone_services_result is changed
+                  or monitoring_icinga_master__secret_result is changed
+                  or monitoring_icinga_master__quadlet_result is changed) }}
+
+    # A running Icinga is only restarted with a valid configuration, it keeps running with the former configuration otherwise
+    - name: 'Check the configuration with icinga2 daemon -C'
+      when:
+        - not ansible_check_mode
+        - monitoring_icinga_master__restart | bool
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ monitoring_icinga_master__container.name }}", 'icinga2', 'daemon', '-C' ]
+      register: 'monitoring_icinga_master__config_check'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert that Icinga accepts the configuration'
+      when:
+        - not ansible_check_mode
+        - monitoring_icinga_master__restart | bool
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__config_check.rc == 0
+        fail_msg: >-
+          {{ [ 'icinga2 daemon -C rejects the configuration, Icinga is not restarted:' ]
+             + monitoring_icinga_master__config_check.stdout_lines + monitoring_icinga_master__config_check.stderr_lines }}
+        quiet: true
+
     # A failed start of the service only reports the exit code, the reason is in the journal
     - name: 'Start Icinga'
       when: 'not ansible_check_mode'
@@ -430,18 +465,6 @@
             daemon_reload: true
             state: "{{ 'restarted' if monitoring_icinga_master__restart | bool else 'started' }}"
             enabled: true
-          vars:
-            monitoring_icinga_master__running: >-
-              {{ (ansible_facts.services[monitoring_icinga_master__container.name + '.service'].state | default('')) == 'running' }}
-            monitoring_icinga_master__restart: >-
-              {{ monitoring_icinga_master__running | bool
-                 and (monitoring_icinga_master__config_result is changed
-                      or monitoring_icinga_master__features_result is changed
-                      or monitoring_icinga_master__features_removed is changed
-                      or monitoring_icinga_master__zone_hosts_result is changed
-                      or monitoring_icinga_master__zone_services_result is changed
-                      or monitoring_icinga_master__secret_result is changed
-                      or monitoring_icinga_master__quadlet_result is changed) }}
 
       rescue:
 

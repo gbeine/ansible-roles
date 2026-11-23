@@ -183,6 +183,11 @@ Icinga checks the objects and the values of the attributes at the start.
 ### Restart and updates
 
 Icinga is restarted if it was running and a file of the configuration, a feature, the podman secret or the quadlet unit changed, otherwise it is started and enabled.
+Before the restart the role checks the configuration with `icinga2 daemon -C` in the running container. If Icinga rejects it, the role does not restart Icinga
+and fails with the output of the check, Icinga keeps running with the former configuration. The files on the host are written already,
+a second run without a change does not restart Icinga either, fix the configuration and run the role again.
+`icinga2.conf`, `constants.conf`, `zones.conf` and `endpoints.conf` are single files mounted into the container, the running container may still see
+their former version, `conf.d`, `features-enabled` and `zones.d` are directories and show the new files.
 If the start fails, the role shows the journal of the service. With the feature `api` the role waits until the API answers and shows the journal otherwise,
 Icinga exits if the configuration is invalid.
 Updates of the image are done by `container_update` with `icinga_master_autoupdate_enabled: true` and `icinga_master_autoupdate_schedule`,
@@ -247,6 +252,7 @@ an unknown attribute, a boolean that is no boolean, a password in `icinga_master
 an unknown secret, the secret of a missing API user and of a disabled feature, a secret name that is no constant, a former variable,
 `icinga_master_hosts` not a list and an unknown environment variable and checks that it fails with the expected message
 and the quadlet unit, `mainlog.conf` and `api-users.conf` are unchanged (tasks marked `expect ERROR`),
+then it writes a host with an unknown check command on `molecule-icinga-master`, `icinga2 daemon -C` has to reject it and Icinga must not restart,
 then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes, Icinga has to restart and the container has to mount the new file.
 `verify` checks the quadlet unit with the `install` lines of `ExecStartPre`, owner and mode of the key, the timer of `pki_update`, the enabled features and their files, the lines of the configuration with the constants of the secrets,
 that no password is part of the files, the quadlet unit or the environment, the mounted podman secret, the service,
