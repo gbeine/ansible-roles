@@ -28,18 +28,15 @@ Loki runs with `-config.file=/etc/loki/config.yaml -config.expand-env=true`, the
 
 ### Secrets
 
-Loki reads its secrets (e.g. `secret_access_key` of S3 or the password of the Alertmanager) only from its configuration, there are no file variables.
-So the secrets are passed in the environment with `type=env,target=<target>` and referenced in `loki_config` with `${TARGET}` or `${TARGET:-default}`,
-Loki expands them with `-config.expand-env=true`. `config.yaml` only contains the references, not the secrets.
+Loki reads its secrets (e.g. `secret_access_key` of S3 or the password of the Alertmanager) only from its configuration,
+the configuration cannot read files and there are no file variables. So the secrets are passed in the environment
+with `type=env` and referenced in `config.yaml`, Loki expands the references with `-config.expand-env=true`.
 
-`loki_secrets` is a list of podman secrets with `name`, `data` and `target`:
-
-- the targets have to match `^LOKI_[A-Z0-9_]+$`, they are distinct from `TZ` and the variables of the image
-- every target has to be referenced in `loki_config`
-- no target may be set in `loki_environment`
-
-The fields `secret_access_key`, `password`, `basic_auth_password`, `client_secret`, `account_key`, `sas_token`, `session_token`, `secret_key`
-and `service_account` have to reference a secret anywhere in `loki_config`, a password in plain text is rejected.
+`loki_secrets` is a list of podman secrets with `name`, `data` and `target`, the target is the path of the option in `loki_config`,
+e.g. `common.storage.s3.secret_access_key`. The last key of the path is one of the fields carrying secrets:
+`secret_access_key`, `password`, `basic_auth_password`, `client_secret`, `account_key`, `sas_token`, `session_token`, `secret_key`
+and `service_account`. The role passes the secret as `LOKI_SECRET_<PATH>` (the path in upper case, dots replaced by `_`)
+and writes the reference `${LOKI_SECRET_<PATH>}` to the option in `config.yaml`, `config.yaml` and the quadlet unit never contain the secret.
 
 ```yaml
 loki_config:
@@ -54,51 +51,74 @@ loki_config:
         endpoint: 's3.example.org'
         bucketnames: 'loki'
         access_key_id: 'loki'
-        secret_access_key: '${LOKI_S3_SECRET_ACCESS_KEY}'
 loki_secrets:
   - name: 'loki_s3_secret_access_key'
     data: "{{ vault_loki_s3_secret_access_key }}"
-    target: 'LOKI_S3_SECRET_ACCESS_KEY'
+    target: 'common.storage.s3.secret_access_key'
 ```
+
+The fields carrying secrets must not be set in `loki_config`, neither a password in plain text nor a reference.
+The dictionaries on the path of a target may be missing in `loki_config`, the role creates them, a list or a value on the path is rejected.
 
 ### Allowed variables
 
-Loki reads no environment variables besides those referenced by the configuration, the role only allows `TZ` in `loki_environment`
-and the secrets of `loki_secrets`. This prevents unexpected behavior by accident, e.g. by a variable meant for another image.
-The check uses the environment of the container after merging `loki_container`.
+The role only allows the keys of `monitoring_loki__config_allowed` on the first level of `loki_config`, generated from `Config` in `pkg/loki/loki.go`
+of Loki v3.7.10, Loki itself checks the keys below with `-verify-config`. `loki_environment` has no default and only takes `TZ`,
+Loki reads no other variables. The secrets of the container have to be the secrets of `loki_secrets`.
+This prevents unexpected behavior by accident, e.g. by a typo, a variable meant for another image or a password that has to be passed as secret.
+The check of the environment uses the environment of the container after merging `loki_container`.
+The time zone of the container is `loki_timezone`, set by podman, the image sets no `TZ`.
 
 ### Container
 
-The flags (`command`), ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `loki_container`,
-it is merged over the default of the container. The merge is not recursive, `loki_container.volumes` replaces the configuration and the data.
+The flags (`command`), ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `loki_container`,
+it is merged over the default of the container. The merge is not recursive, `loki_container.volumes` replaces the configuration and the data,
+`loki_container.command` replaces the flags, the secrets need `-config.expand-env=true`.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 For a reverse proxy, e.g. Traefik, the labels are set with `loki_labels`.
 `<loki_home>` and `config.yaml` belong to root (`0755`, `0644`), the data directory belongs to `loki` (10001) with the mode `0750`.
+
+```yaml
+loki_container:
+  requires_mounts_for: [ '/srv/loki' ]
+```
 
 ### Validation
 
 The role checks before any change:
 
-- `loki_secrets` is a list of entries with `name`, `data` and `target`, unique names and targets matching `^LOKI_[A-Z0-9_]+$`
-- every secret is referenced in `loki_config`, no field carrying a secret contains a value in plain text
-- no secret is set in `loki_environment`, values and secrets contain no line breaks
-- only `TZ` is set in the environment of the container
+- `loki_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a path ending in a field carrying secrets
+  and set once, it is not set in `loki_config` and leads through dictionaries only, the data are strings without line breaks,
+  podman checks the names of the secrets
+- `loki_config` contains only known keys on the first level and no field carrying secrets
+- `loki_environment`, if set, is a dictionary without line breaks
+- only `TZ` without line breaks and the secrets of `loki_secrets` are set in the container
 - Loki accepts the configuration: the role writes `config.yaml` only after `loki -verify-config` of the image succeeded in a throwaway container without network,
   Loki rejects e.g. unknown fields. The secrets are replaced by placeholders there, they are never part of a command line.
 
 If `loki_config` or `loki_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, `config.yaml`, the secrets and the quadlet unit.
+`-verify-config`, the start and the wait for Loki do not run in check mode.
+
 ### Restart and updates
 
 Loki is restarted if it was running and a secret, `config.yaml` or the quadlet unit changed, otherwise it is started and enabled.
-If the start fails, the role shows the journal of the service.
+If the start fails, the role shows the error and the journal of the service.
 Afterwards the role waits up to 120 seconds until `/ready` answers, the ingester reports ready some seconds after the start, and shows the journal if Loki does not answer.
 Updates of the image are done by `container_update` with `loki_autoupdate_enabled: true` and `loki_autoupdate_schedule`,
 without `loki_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
 
-The role is new, there are no former variables.
+- The targets of `loki_secrets` are the paths of the options now, e.g. `ruler.alertmanager_client.basic_auth_password` instead of `LOKI_ALERTMANAGER_PASSWORD`.
+  Remove the references `${LOKI_…}` from `loki_config`, the role writes the references itself.
+- `TZ` is not set by default anymore, the time zone is set by podman with `loki_timezone`.
+- Unknown keys on the first level of `loki_config` are rejected, `requires_mounts_for`, `wants`, `after`, `part_of` and `binds_to` of `loki_container` are new.
 
 ### Tests
 
@@ -108,15 +128,18 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-loki-default` | Only the mandatory variables |
-| `molecule-loki` | IPv6, labels, limits and the password of the Alertmanager of the ruler as secret |
+| `molecule-loki` | IPv6, labels, limits and the password of the Alertmanager of the ruler as secret with its path as target |
 
 `prepare` creates the podman network, installs `curl` and pulls the image.
-`side_effect` runs the role with `loki_container` and `loki_config` not a dictionary, a secret without `target`, a target against the pattern,
-a secret not referenced in the configuration, a password in plain text, a secret in the environment, an unknown variable, a line break in a value
-and an unknown field rejected by `loki -verify-config`
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `loki_container` and `loki_config` not a dictionary, an unknown key, a password in `loki_config`,
+a secret without `target`, an unknown secret, a target set twice, a secret in a list, `loki_environment` not a dictionary,
+an unknown variable, a line break in a value and an unknown field rejected by `loki -verify-config`
 and checks that it fails with the expected message and the quadlet unit and `config.yaml` are unchanged (tasks marked `expect ERROR`),
-then it pushes a log line and changes the limits on `molecule-loki`, `config.yaml` changes and Loki has to restart.
-`verify` checks the quadlet unit with the flags and the secret without its value, the service, the addresses, the environment,
+then it pushes a log line and changes the limits on `molecule-loki`, `config.yaml` changes and Loki has to restart,
+`molecule-loki-default` runs again without a change and Loki must not restart.
+`verify` checks the quadlet unit with the flags and the secret without its value, the service without automatic restarts, the addresses,
+the time zone and no `TZ` in the environment,
 the files and that `config.yaml` references the secret, `/ready`, the version and the running configuration of `/config`
 (no reports of the usage, the limits, the expanded password of the Alertmanager),
 pushes a log line and finds it with `query_range`, on `molecule-loki` also the line pushed before the restart.

@@ -54,16 +54,39 @@
           - monitoring_loki__test_service.stdout == 'active'
           - monitoring_loki__test_net.IPAddress == monitoring_loki__expect.ip
           - monitoring_loki__expect.ip6 is none or monitoring_loki__test_net.GlobalIPv6Address == monitoring_loki__expect.ip6
-          - monitoring_loki__expect.env | reject('in', monitoring_loki__test_env) | list | length == 0
+          # The time zone is set by podman, the role sets no TZ
+          - monitoring_loki__test_container.Config.Timezone == monitoring_loki__test_case.role_vars.loki_timezone
+          - monitoring_loki__test_env | select('match', 'TZ=') | list | length == 0
           - monitoring_loki__test_plain | select('in', monitoring_loki__test_env | join(' ')) | list | length == 0
         fail_msg: >-
           service {{ monitoring_loki__test_service.stdout }},
           IPv4 {{ monitoring_loki__test_net.IPAddress }}, IPv6 {{ monitoring_loki__test_net.GlobalIPv6Address }},
+          time zone {{ monitoring_loki__test_container.Config.Timezone | default('') }},
           environment {{ monitoring_loki__test_env | reject('search', 'PASSWORD') | join(', ') }}
       vars:
         monitoring_loki__test_container: "{{ (monitoring_loki__test_inspect.stdout | from_json)[0] }}"
         monitoring_loki__test_net: "{{ monitoring_loki__test_container.NetworkSettings.Networks[monitoring_loki__test_case.role_vars.loki_network] }}"
         monitoring_loki__test_env: "{{ monitoring_loki__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'loki' ]
+      register: 'monitoring_loki__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'loki', '-n', '80', '--no-pager' ]
+      register: 'monitoring_loki__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert that the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_loki__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ monitoring_loki__test_restarts.stdout ] + monitoring_loki__test_journal.stdout_lines | default([]) }}"
 
     - name: 'Read the files of Loki'
       ansible.builtin.stat:
@@ -83,7 +106,7 @@
           - monitoring_loki__test_files.results[0].stat.mode == '0644'
           - monitoring_loki__test_files.results[1].stat.uid == 10001
           - monitoring_loki__test_plain | select('in', monitoring_loki__test_config_content) | list | length == 0
-          - not (monitoring_loki__expect.alertmanager_password | default(false)) or '${LOKI_ALERTMANAGER_PASSWORD}' in monitoring_loki__test_config_content
+          - monitoring_loki__expect.alertmanager_password is not defined or monitoring_loki__expect.alertmanager_password in monitoring_loki__test_config_content
         fail_msg: "files {{ monitoring_loki__test_files.results | map(attribute='stat.mode') | list }}, {{ monitoring_loki__test_files.results | map(attribute='stat.uid') | list }}"
       vars:
         monitoring_loki__test_config_content: "{{ monitoring_loki__test_config_file.content | b64decode }}"
@@ -104,7 +127,7 @@
           - monitoring_loki__test_running.analytics.reporting_enabled == false
           - monitoring_loki__test_running.limits_config.max_query_series | int == monitoring_loki__expect.max_query_series
           - >-
-            not (monitoring_loki__expect.alertmanager_password | default(false))
+            monitoring_loki__expect.alertmanager_password is not defined
             or (monitoring_loki__test_running.ruler.alertmanager_client.basic_auth_password | default('') | string | length > 0)
           - monitoring_loki__test_plain | select('in', monitoring_loki__test_api.results[2].content) | list | length == 0
         fail_msg: >-

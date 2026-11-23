@@ -16,6 +16,11 @@
       - "{{ monitoring_loki__test_quadlet_path }}"
       - "{{ monitoring_loki__test_config_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -50,31 +55,15 @@
           message: 'loki_config not a dictionary'
           search: 'failed to combine variables, expected dicts'
 
-    - name: 'Run monitoring_loki with a secret without target (expect ERROR)'
+    - name: 'Run monitoring_loki with an unknown key (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        loki_secrets: "{{ monitoring_loki__test_secrets + [ { 'name': 'loki_other', 'data': 'x' } ] }}"
+        loki_config: "{{ monitoring_loki__test_config | combine({ 'storage': { 'type': 'filesystem' } }) }}"
         monitoring_loki__test_invalid:
-          message: 'a secret without target'
-          search: '^loki_secrets entries need name, data and target$'
+          message: 'an unknown key'
+          search: '^Unknown keys in `loki_config`: storage, allowed are the keys of `monitoring_loki__config_allowed`\.$'
 
-    - name: 'Run monitoring_loki with a target against the pattern (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        loki_secrets: "{{ monitoring_loki__test_secrets + [ { 'name': 'loki_lowercase', 'data': 'x', 'target': 'lowercase' } ] }}"
-        monitoring_loki__test_invalid:
-          message: 'a target against the pattern'
-          search: '^the targets of loki_secrets have to match \^LOKI_\[A-Z0-9_\]\+\$: lowercase$'
-
-    - name: 'Run monitoring_loki with a secret not referenced in the configuration (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        loki_secrets: "{{ monitoring_loki__test_secrets + [ { 'name': 'loki_unused', 'data': 'x', 'target': 'LOKI_UNUSED' } ] }}"
-        monitoring_loki__test_invalid:
-          message: 'a secret not referenced in the configuration'
-          search: '^These secrets are not referenced in loki_config with \$\{TARGET\}: LOKI_UNUSED\.$'
-
-    - name: 'Run monitoring_loki with a password in plain text (expect ERROR)'
+    - name: 'Run monitoring_loki with a password in loki_config (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         loki_config: >-
@@ -82,20 +71,50 @@
                'alertmanager_client': { 'basic_auth_username': 'molecule', 'basic_auth_password': 'molecule-plain-password' } } }) }}
         loki_secrets: []
         monitoring_loki__test_invalid:
-          message: 'a password in plain text'
-          search: '^These fields of loki_config carry secrets and have to reference a secret of loki_secrets with \$\{TARGET\}: basic_auth_password\.$'
+          message: 'a password in loki_config'
+          search: '^These fields carry secrets, they are set with `loki_secrets`, not in `loki_config`: basic_auth_password\.$'
 
-    - name: 'Run monitoring_loki with a secret in the environment (expect ERROR)'
+    - name: 'Run monitoring_loki with a secret without target (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        loki_config: >-
-          {{ monitoring_loki__test_config | combine({ 'ruler': { 'alertmanager_url': 'http://localhost:9093',
-               'alertmanager_client': { 'basic_auth_username': 'molecule', 'basic_auth_password': '${LOKI_ALERTMANAGER_PASSWORD}' } } }) }}
-        loki_secrets: [ { 'name': 'loki_alertmanager_password', 'data': 'x', 'target': 'LOKI_ALERTMANAGER_PASSWORD' } ]
-        loki_environment: { 'LOKI_ALERTMANAGER_PASSWORD': 'molecule-plain-password' }
+        loki_secrets: "{{ monitoring_loki__test_secrets + [ { 'name': 'loki_other', 'data': 'x' } ] }}"
         monitoring_loki__test_invalid:
-          message: 'a secret in the environment'
-          search: '^Secrets must not be set in loki_environment: LOKI_ALERTMANAGER_PASSWORD\.$'
+          message: 'a secret without target'
+          search: '^`loki_secrets` entries need name, data and target$'
+
+    - name: 'Run monitoring_loki with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        loki_secrets: "{{ monitoring_loki__test_secrets + [ { 'name': 'loki_port', 'data': 'x', 'target': 'server.http_listen_port' } ] }}"
+        monitoring_loki__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: server\.http_listen_port, the targets are paths of options of `loki_config` ending in '
+
+    - name: 'Run monitoring_loki with a target set twice (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        loki_secrets:
+          - { 'name': 'loki_s3_one', 'data': 'x', 'target': 'common.storage.s3.secret_access_key' }
+          - { 'name': 'loki_s3_two', 'data': 'y', 'target': 'common.storage.s3.secret_access_key' }
+        monitoring_loki__test_invalid:
+          message: 'a target set twice'
+          search: '^Every target of `loki_secrets` is set once: common\.storage\.s3\.secret_access_key\.$'
+
+    - name: 'Run monitoring_loki with a secret in a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        loki_secrets: "{{ monitoring_loki__test_secrets + [ { 'name': 'loki_schema', 'data': 'x', 'target': 'schema_config.configs.secret_key' } ] }}"
+        monitoring_loki__test_invalid:
+          message: 'a secret in a list'
+          search: '^The paths of these secrets lead through values of `loki_config` that are no dictionaries: schema_config\.configs\.secret_key\.$'
+
+    - name: 'Run monitoring_loki with loki_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        loki_environment: [ 'TZ' ]
+        monitoring_loki__test_invalid:
+          message: 'loki_environment not a dictionary'
+          search: '^`loki_environment` has to be a dictionary\.$'
 
     - name: 'Run monitoring_loki with an unknown variable (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -111,7 +130,7 @@
         loki_environment: { 'TZ': "Europe/Berlin\nUTC" }
         monitoring_loki__test_invalid:
           message: 'a line break in a value'
-          search: '^Values and secrets must not contain line breaks: TZ\.$'
+          search: '^The values of `loki_environment` must not contain line breaks: TZ\.$'
 
     # The key is valid for the checks of the role, Loki itself rejects it
     - name: 'Run monitoring_loki with an unknown key of Loki (expect ERROR)'
@@ -161,3 +180,36 @@
             fail_msg: >-
               configuration changed: {{ monitoring_loki__config_result is changed }}, quadlet changed: {{ monitoring_loki__quadlet_result is changed }},
               start before {{ monitoring_loki__test_started_before.stdout }}, after {{ monitoring_loki__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_loki__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'loki' ]
+          register: 'monitoring_loki__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_loki without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_loki'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'loki' ]
+          register: 'monitoring_loki__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_loki__config_result is not changed
+              - monitoring_loki__secrets_result is not changed
+              - monitoring_loki__quadlet_result is not changed
+              - monitoring_loki__test_unchanged_after.stdout == monitoring_loki__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ monitoring_loki__config_result is changed }},
+              secrets changed: {{ monitoring_loki__secrets_result is changed }},
+              quadlet changed: {{ monitoring_loki__quadlet_result is changed }},
+              start before {{ monitoring_loki__test_unchanged_before.stdout }}, after {{ monitoring_loki__test_unchanged_after.stdout }}

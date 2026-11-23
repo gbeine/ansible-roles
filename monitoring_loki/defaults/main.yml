@@ -20,10 +20,11 @@ monitoring_loki__container: "{{ monitoring_loki__podman_container_default | comb
 # The configuration of Loki, every key replaces the key of the default (the local-config.yaml of the image)
 monitoring_loki__config: "{{ monitoring_loki__config_default | combine(loki_config | default({})) }}"
 
-# Loki reads no variables besides TZ, the configuration references the secrets with ${TARGET}
-monitoring_loki__environment: "{{ monitoring_loki__environment_default | combine(loki_environment | default({})) }}"
+# Loki reads no variables besides TZ, without loki_environment the container has no environment
+monitoring_loki__environment: "{{ loki_environment }}"
 
-# Secrets with name, data and target, passed in the environment and referenced in loki_config with ${TARGET}
+# Secrets with name, data and target, the target is the path of the option in loki_config,
+# e.g. common.storage.s3.secret_access_key, the role references the secret in config.yaml
 monitoring_loki__secrets: "{{ loki_secrets | default([]) }}"
 
 monitoring_loki__autoupdate_enabled: "{{ loki_autoupdate_enabled | default(false) }}"
@@ -40,11 +41,11 @@ monitoring_loki__config_default:
     http_listen_port: 3100
   common:
     instance_addr: '127.0.0.1'
-    path_prefix: "{{ monitoring_loki__data_dir }}"
+    path_prefix: '/loki'
     storage:
       filesystem:
-        chunks_directory: "{{ monitoring_loki__data_dir }}/chunks"
-        rules_directory: "{{ monitoring_loki__data_dir }}/rules"
+        chunks_directory: '/loki/chunks'
+        rules_directory: '/loki/rules'
     replication_factor: 1
     ring:
       kvstore:
@@ -65,15 +66,63 @@ monitoring_loki__config_default:
 
 monitoring_loki__port: 3100
 
-monitoring_loki__environment_default:
-  TZ: "{{ monitoring_loki__timezone }}"
+# Generated from the yaml tags of Config in pkg/loki/loki.go of Loki v3.7.10, update with new versions of the image,
+# Loki checks the keys below with -verify-config
+monitoring_loki__config_allowed:
+  - 'target'
+  - 'auth_enabled'
+  - 'http_prefix'
+  - 'ballast_bytes'
+  - 'server'
+  - 'internal_server'
+  - 'ui'
+  - 'distributor'
+  - 'querier'
+  - 'query_engine'
+  - 'query_scheduler'
+  - 'frontend'
+  - 'query_range'
+  - 'ruler'
+  - 'ruler_storage'
+  - 'ingester_client'
+  - 'ingester'
+  - 'pattern_ingester'
+  - 'index_gateway'
+  - 'bloom_build'
+  - 'bloom_gateway'
+  - 'storage_config'
+  - 'chunk_store_config'
+  - 'schema_config'
+  - 'compactor'
+  - 'compactor_client'
+  - 'compactor_grpc_client'
+  - 'limits_config'
+  - 'frontend_worker'
+  - 'table_manager'
+  - 'memberlist'
+  - 'kafka_config'
+  - 'dataobj'
+  - 'ingest_limits'
+  - 'ingest_limits_frontend'
+  - 'ingest_limits_frontend_client'
+  - 'runtime_config'
+  - 'operational_config'
+  - 'tracing'
+  - 'analytics'
+  - 'profiling'
+  - 'tenant_limits_allow_publish'
+  - 'legacy_read_target'
+  - 'common'
+  - 'shutdown_delay'
+  - 'metrics_namespace'
 
+# The variables of the image, Loki reads no other variables
 monitoring_loki__environment_allowed: [ 'TZ' ]
 
-# The targets of the secrets, distinct from TZ and the variables of the image
-monitoring_loki__secret_pattern: '^LOKI_[A-Z0-9_]+$'
+# The environment variables of the secrets are the prefix and the target in upper case, dots replaced by _
+monitoring_loki__secret_prefix: 'LOKI_SECRET_'
 
-# Fields of the configuration carrying secrets, their values have to reference a secret with ${TARGET}
+# Fields of the configuration carrying secrets, they are set with loki_secrets, the last key of a target is one of them
 monitoring_loki__config_secret_keys:
   - 'secret_access_key'
   - 'password'
@@ -89,10 +138,6 @@ monitoring_loki__config_secret_keys:
 monitoring_loki__uid: 10001
 monitoring_loki__gid: 10001
 
-# The directories in the container
-monitoring_loki__config_file: '/etc/loki/config.yaml'
-monitoring_loki__data_dir: '/loki'
-
 monitoring_loki__podman_name: 'loki'
 monitoring_loki__podman_image: 'docker.io/grafana/loki'
 monitoring_loki__podman_tag: "{{ monitoring_loki__version }}"
@@ -100,6 +145,34 @@ monitoring_loki__podman_tag: "{{ monitoring_loki__version }}"
 monitoring_loki__podman_home: "{{ monitoring_loki__home }}"
 monitoring_loki__podman_config_file: "{{ monitoring_loki__podman_home }}/config.yaml"
 monitoring_loki__podman_data_dir: "{{ monitoring_loki__podman_home }}/data"
+
+# The valid secrets with their path and environment variable, broken entries are left out, the validation reports them
+monitoring_loki__secrets_valid: >-
+  {%- set result = [] -%}
+  {%- if monitoring_loki__secrets is sequence and monitoring_loki__secrets is not string and monitoring_loki__secrets is not mapping -%}
+  {%-   for secret in monitoring_loki__secrets if secret is mapping and secret.name is defined and secret.target is defined
+                                                and secret.target is string and secret.target is match('^[a-z0-9_]+(\.[a-z0-9_]+)+$')
+                                                and (secret.target | split('.') | last) in monitoring_loki__config_secret_keys -%}
+  {%-     set _ = result.append({ 'name': secret.name, 'path': secret.target | split('.'),
+                                  'variable': monitoring_loki__secret_prefix ~ (secret.target | replace('.', '_') | upper) }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ result }}
+
+# The references of the secrets as nested dictionaries, e.g. { 'ruler': { 'alertmanager_client': { 'basic_auth_password': '${LOKI_SECRET_…}' } } }
+monitoring_loki__config_secrets: >-
+  {%- set ns = namespace(result={}) -%}
+  {%- for secret in monitoring_loki__secrets_valid -%}
+  {%-   set node = namespace(value='${' ~ secret.variable ~ '}') -%}
+  {%-   for key in secret.path | reverse -%}
+  {%-     set node.value = { key: node.value } -%}
+  {%-   endfor -%}
+  {%-   set ns.result = ns.result | combine(node.value, recursive=true) -%}
+  {%- endfor -%}
+  {{ ns.result }}
+
+# The content of config.yaml: the configuration with the references of the secrets
+monitoring_loki__config_rendered: "{{ monitoring_loki__config | combine(monitoring_loki__config_secrets, recursive=true) }}"
 
 monitoring_loki__podman_container_default:
   name: "{{ monitoring_loki__podman_name }}"
@@ -109,20 +182,18 @@ monitoring_loki__podman_container_default:
   ipv6: "{{ monitoring_loki__ipv6 | default(omit) }}"
   network: "{{ monitoring_loki__network }}"
   timezone: "{{ monitoring_loki__timezone }}"
-  environment: "{{ monitoring_loki__environment }}"
+  environment: "{{ monitoring_loki__environment | default(omit) }}"
   labels: "{{ monitoring_loki__labels | default(omit) }}"
   # loki_container.command replaces the flags completely, the secrets need -config.expand-env=true
   command:
-    - "-config.file={{ monitoring_loki__config_file }}"
+    - '-config.file=/etc/loki/config.yaml'
     - '-config.expand-env=true'
+  # Loki reads no files, the secrets are variables referenced in config.yaml
   secrets: >-
-    {{ (monitoring_loki__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined')
-        | map(attribute='name') | zip(monitoring_loki__secrets | select('mapping') | selectattr('name', 'defined')
-                                      | selectattr('target', 'defined') | map(attribute='target'))
-        | map('join', ',type=env,target=') | list)
-       if (monitoring_loki__secrets is sequence and monitoring_loki__secrets is not string and monitoring_loki__secrets | length > 0)
-       else omit }}
+    {{ (monitoring_loki__secrets_valid | map(attribute='name')
+        | zip(monitoring_loki__secrets_valid | map(attribute='variable')) | map('join', ',type=env,target=') | list)
+       if monitoring_loki__secrets_valid | length > 0 else omit }}
   # loki_container.volumes replaces the configuration and the data
   volumes:
-    - "{{ monitoring_loki__podman_config_file }}:{{ monitoring_loki__config_file }}:ro,Z"
-    - "{{ monitoring_loki__podman_data_dir }}:{{ monitoring_loki__data_dir }}:Z"
+    - "{{ monitoring_loki__podman_config_file }}:/etc/loki/config.yaml:ro,Z"
+    - "{{ monitoring_loki__podman_data_dir }}:/loki:Z"
