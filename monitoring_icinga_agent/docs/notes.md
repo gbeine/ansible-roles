@@ -4,7 +4,7 @@ Additional plugins and their `CheckCommand`s are installed by `monitoring_plugin
 
 | File | Content |
 |---|---|
-| `/etc/icinga2/constants.conf` | `NodeName`, `ZoneName`, `TicketSalt`, the plugin directories, `PluginLocalDir` and `PluginContribDir` are `/usr/local/lib/nagios/plugins` |
+| `/etc/icinga2/constants.conf` | `NodeName`, `ZoneName`, `TicketSalt` and the plugin directories, `PluginLocalDir` is `icinga_plugin_local_dir`, `PluginContribDir` is `icinga_plugin_contrib_dir` |
 | `/etc/icinga2/icinga2.conf` | ITL, plugins, enabled features and everything below `/usr/local/etc/icinga2` |
 | `/etc/icinga2/zones.conf` | Endpoint and zone of the parent, endpoint and zone of the agent, global zones `global-templates` and `director-global` |
 | `/etc/icinga2/features-available/{api,checker,mainlog}.conf` | The features of the agent |
@@ -21,6 +21,17 @@ icinga_cert_source_dir: '/etc/letsencrypt/live'
 ```
 
 The role fails before it changes anything if one of these settings is missing.
+
+### Plugin directories
+
+`icinga_plugin_local_dir` is `PluginLocalDir` (default `/usr/local/lib/nagios/plugins`), the directory of the local plugins, e.g. installed by `monitoring_plugins`,
+the role creates it (root, `0755`). `icinga_plugin_contrib_dir` is `PluginContribDir` (default `/usr/lib/nagios/plugins`), the plugins of `monitoring-plugins-contrib`,
+the package creates it. Both are absolute paths without quotes and line breaks, the role fails before any change otherwise.
+
+```yaml
+icinga_plugin_local_dir: '/opt/monitoring/plugins'
+icinga_plugin_contrib_dir: '/usr/lib/nagios/plugins'
+```
 
 ### Certificates
 
@@ -86,6 +97,7 @@ The role runs with `--check`, also on a host where Icinga 2 is not installed yet
 | handler `Restart Icinga` | restart in the role after `icinga2 daemon -C` |
 | the systemd override copies with `cp -uL`, `chown` and `chmod` | the systemd override uses `install`, independent of the timestamps |
 | the role copies renewed certificates and restarts Icinga 2 | the role only copies missing certificates, the timer of `pki_update` restarts Icinga 2 after a renewal |
+| `PluginContribDir` was `/usr/local/lib/nagios/plugins` | `icinga_plugin_contrib_dir`, default `/usr/lib/nagios/plugins`, `icinga_plugin_local_dir` sets `PluginLocalDir` |
 
 ### Tests
 
@@ -96,7 +108,7 @@ The molecule scenario `default` runs the role in two [tart](https://tart.run) VM
 | Platform | Test case |
 |---|---|
 | `molecule-icinga-agent-default` | The mandatory values only, Icinga 2 is not installed before, `check` runs without the packages |
-| `molecule-icinga-agent` | `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running), `icinga_parent_host` and an own schedule of `pki_update` |
+| `molecule-icinga-agent` | `prepare` installs Icinga 2 with the defaults of the package (feature `notification` enabled, service running), `icinga_parent_host`, an own schedule of `pki_update` and an own `icinga_plugin_local_dir` |
 
 `side_effect` changes `icinga_main_log_severity` and checks that Icinga 2 was restarted.
 `verify` checks the service, `icinga2 daemon -C`, the enabled features, `zones.conf` with the `host` of the parent, owner and mode of the certificates,
