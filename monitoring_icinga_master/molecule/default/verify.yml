@@ -142,6 +142,36 @@
           - monitoring_icinga_master__test_container.stdout is not search('ICINGA_MASTER')
         fail_msg: "Secret: {{ monitoring_icinga_master__test_container.stdout_lines[0] }}, the environment contains a password or ICINGA_MASTER"
 
+    - name: 'Read the time zone and the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'icinga-master' ]
+      register: 'monitoring_icinga_master__test_inspect'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'icinga-master' ]
+      register: 'monitoring_icinga_master__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'icinga-master', '-n', '80', '--no-pager' ]
+      register: 'monitoring_icinga_master__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the time zone, no TZ and that the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icinga_master__test_restarts.stdout | int == 0
+          - (monitoring_icinga_master__test_inspect.stdout.split(' ', 1) | first) == monitoring_icinga_master__test_vars.icinga_master_timezone
+          - (monitoring_icinga_master__test_inspect.stdout.split(' ', 1) | last | from_json) | select('match', 'TZ=') | list | length == 0
+        fail_msg: >-
+          {{ [ 'inspect ' ~ monitoring_icinga_master__test_inspect.stdout, 'automatic restarts: ' ~ monitoring_icinga_master__test_restarts.stdout ]
+             + monitoring_icinga_master__test_journal.stdout_lines | default([]) }}
+
     # /data comes from the image, the role mounts its configuration and the state only
     - name: 'Read the files of the image and the enabled features in the container'
       ansible.builtin.command:

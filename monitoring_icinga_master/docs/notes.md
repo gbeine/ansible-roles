@@ -129,7 +129,8 @@ The role only allows the features of `monitoring_icinga_master__features` with t
 the secrets of `monitoring_icinga_master__secrets_allowed` and the environment variables in `monitoring_icinga_master__environment_allowed`,
 it stops before any change if unknown features, attributes, secrets or variables are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a password that has to be passed as secret.
-The attributes are generated from `lib/*/*.ti` of Icinga 2 v2.16.0, without deprecated attributes.
+The attributes are generated from `lib/*/*.ti` of Icinga 2 v2.16.6, without deprecated attributes,
+e.g. `enforce_filter_expression_permission` of `api`, new with v2.16.6.
 The attribute `basic_auth` of `influxdb` contains a password, it is not allowed, use `username` and the secret `influxdb.password`.
 
 `icinga_master_environment` has no default and only takes `ICINGA_LOG_LEVEL` of the image, without it the quadlet unit has no environment.
@@ -142,8 +143,8 @@ The check of the environment uses the environment of the container after merging
 Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `icinga_master_container`, it is merged over the default of the container.
 The merge is not recursive, `publish` and `volumes` replace the values of the default completely,
 `icinga_master_container.environment` replaces the environment including `icinga_master_environment`.
-The dependencies of the quadlet unit are lists of units in `icinga_master_container`: `requires`, `wants`, `after`, `part_of` and `binds_to`
-are written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 
 ```yaml
 icinga_master_container:
@@ -173,14 +174,19 @@ The role checks before any change:
   every target is a known secret of an enabled feature or of an API user and set once, names are names of constants, the data are strings without line breaks
 - `icinga_master_config` contains known features with dictionaries, `null` or `false`, known attributes, booleans for boolean attributes,
   no secrets and no line breaks
-- the former single variables of the role are not set, the message names their replacement
 - the lists of objects are lists of dictionaries, the entries of `api_users`, `commands`, `host_groups`, `hosts`, `service_groups`, `timeperiods`,
   `user_groups`, `users` and `zones` have unique names, the API users have no `password`,
   `icinga_master_zone_hosts` and `icinga_master_zone_services` are dictionaries of lists
-- `icinga_master_environment`, if set, is a dictionary without line breaks, only allowed environment variables are set in the container
+- `icinga_master_environment`, if set, is a dictionary without line breaks, only allowed environment variables without line breaks are set in the container
 
-If `icinga_master_container` or `icinga_master_config` is no dictionary, merging it with the default fails before anything changes.
+If `icinga_master_container` or `icinga_master_config` is no dictionary, merging it with the default fails before anything changes,
+the same applies to a failing template in the variables, e.g. an unknown filter.
 Icinga checks the objects and the values of the attributes at the start.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the configuration, the features, the secret and the quadlet unit.
+`icinga2 daemon -C`, the start and the wait for the API do not run in check mode.
 
 ### Restart and updates
 
@@ -190,7 +196,7 @@ and fails with the output of the check, Icinga keeps running with the former con
 a second run without a change does not restart Icinga either, fix the configuration and run the role again.
 `icinga2.conf`, `constants.conf`, `zones.conf` and `endpoints.conf` are single files mounted into the container, the running container may still see
 their former version, `conf.d`, `features-enabled` and `zones.d` are directories and show the new files.
-If the start fails, the role shows the journal of the service. With the feature `api` the role waits until the API answers and shows the journal otherwise,
+If the start fails, the role shows the error and the journal of the service. With the feature `api` the role waits until the API answers and shows the journal otherwise,
 Icinga exits if the configuration is invalid.
 Updates of the image are done by `container_update` with `icinga_master_autoupdate_enabled: true` and `icinga_master_autoupdate_schedule`,
 without `icinga_master_autoupdate_schedule` the schedule of `container_update` is used.
@@ -198,7 +204,7 @@ A renewed certificate restarts Icinga by `pki_update` with `icinga_master_pki_up
 
 ### Migration
 
-The features are set with `icinga_master_config` now, the passwords with `icinga_master_secrets`. The role rejects the former variables and names their replacement.
+The features are set with `icinga_master_config` now, the passwords with `icinga_master_secrets`. The role ignores the former variables.
 
 | Former variable | Replacement |
 |---|---|
@@ -239,6 +245,7 @@ Changed behavior:
 - Icinga is restarted if the configuration changed, the handler is removed, the tags are `monitoring` and `monitoring_icinga_master`
 - `ExecStartPre` uses `install` instead of `cp -uL`, `chown` and `chmod`, it does not depend on the timestamps anymore,
   the timer of `pki_update` restarts Icinga after a renewal of the certificate
+- `requires_mounts_for` of `icinga_master_container` is new
 
 Fixed bugs:
 
@@ -249,15 +256,18 @@ Fixed bugs:
 
 The molecule scenario `default` uses tart with the VMs `molecule-icinga-master-default` with the mandatory variables and `molecule-icinga-master` with the options.
 `prepare` creates a CA and the certificate of the node with `openssl` in `icinga_cert_source_dir`, pulls the image and starts Redis with a password on `molecule-icinga-master`.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `icinga_master_container` and `icinga_master_config` not a dictionary, an unknown feature, a feature that is no dictionary,
 an unknown attribute, a boolean that is no boolean, a password in `icinga_master_config` and in `icinga_master_api_users`, a secret without target,
-an unknown secret, the secret of a missing API user and of a disabled feature, a secret name that is no constant, a former variable,
+an unknown secret, the secret of a missing API user and of a disabled feature, a secret name that is no constant,
 `icinga_master_hosts` not a list and an unknown environment variable and checks that it fails with the expected message
 and the quadlet unit, `mainlog.conf` and `api-users.conf` are unchanged (tasks marked `expect ERROR`),
 then it writes a host with an unknown check command on `molecule-icinga-master`, `icinga2 daemon -C` has to reject it and Icinga must not restart,
-then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes, Icinga has to restart and the container has to mount the new file.
+then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes, Icinga has to restart and the container has to mount the new file,
+`molecule-icinga-master-default` runs again without a change and Icinga must not restart.
 `verify` checks the quadlet unit with the `install` lines of `ExecStartPre`, owner and mode of the key, the timer of `pki_update`, the enabled features and their files, the lines of the configuration with the constants of the secrets,
-that no password is part of the files, the quadlet unit or the environment, the mounted podman secret, the service,
+that no password is part of the files, the quadlet unit or the environment, the mounted podman secret, the service without automatic restarts,
+the time zone without `TZ`, `enforce_filter_expression_permission` in `api.conf`,
 `icinga2 daemon -C` in the container, the scripts of the mail notifications and `features-available` of the image in the container, the API without login (401), the hosts of the API with the API user and the secret password
 and the objects that Icinga writes to Redis with the password of `icingadb`.
 

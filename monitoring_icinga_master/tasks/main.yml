@@ -26,14 +26,14 @@
           {%- set errors = [] -%}
           {%- set secrets = monitoring_icinga_master__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('icinga_master_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`icinga_master_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('icinga_master_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`icinga_master_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of icinga_master_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `icinga_master_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -46,8 +46,6 @@
         fail_msg: "{{ monitoring_icinga_master__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_icinga_master__former: >-
-          {{ query('ansible.builtin.varnames', '^(' ~ (monitoring_icinga_master__former_variables.keys() | join('|')) ~ ')$') | sort }}
         monitoring_icinga_master__errors: >-
           {%- set errors = [] -%}
           {%- set ns = namespace(unknown=[], values=[], attributes=[], secrets=[], booleans=[], lines=[]) -%}
@@ -89,13 +87,6 @@
           {%- endif -%}
           {%- if ns.lines | length > 0 -%}
           {%-   set _ = errors.append('The values of icinga_master_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if monitoring_icinga_master__former | length > 0 -%}
-          {%-   set names = [] -%}
-          {%-   for name in monitoring_icinga_master__former -%}
-          {%-     set _ = names.append(name ~ ' (' ~ monitoring_icinga_master__former_variables[name] ~ ')') -%}
-          {%-   endfor -%}
-          {%-   set _ = errors.append('The features are set with icinga_master_config now: ' ~ (names | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -228,7 +219,7 @@
           {%- set errors = [] -%}
           {%- set environment = monitoring_icinga_master__environment -%}
           {%- if environment is not mapping -%}
-          {%-   set _ = errors.append('icinga_master_environment has to be a dictionary.') -%}
+          {%-   set _ = errors.append('`icinga_master_environment` has to be a dictionary.') -%}
           {%- else -%}
           {%-   set lines = environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
           {%-   if lines | length > 0 -%}
@@ -239,19 +230,33 @@
 
     # Checks the environment of the container after merging icinga_master_container,
     # unknown variables would change the behavior unexpectedly, e.g. ICINGA_* of the node setup or MSMTPRC with a password
+    # An environment that is no mapping is not checked here, the validation of icinga_master_environment reports it
     - name: 'Validate the allowed environment variables'
-      when: monitoring_icinga_master__container.environment is mapping
       ansible.builtin.assert:
         that:
-          - monitoring_icinga_master__unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ monitoring_icinga_master__unknown | join(', ') }}.
-          Allowed are the variables {{ monitoring_icinga_master__environment_allowed | join(', ') }},
-          the features are set with icinga_master_config and the passwords with icinga_master_secrets.
+          - monitoring_icinga_master__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icinga_master__errors | join(' ') }}"
         quiet: true
       vars:
+        monitoring_icinga_master__container_environment: >-
+          {{ monitoring_icinga_master__container.environment if monitoring_icinga_master__container.environment | default(none) is mapping else {} }}
         monitoring_icinga_master__unknown: >-
-          {{ monitoring_icinga_master__container.environment.keys() | reject('in', monitoring_icinga_master__environment_allowed) | list }}
+          {{ monitoring_icinga_master__container_environment.keys() | map('string') | reject('in', monitoring_icinga_master__environment_allowed) | list }}
+        monitoring_icinga_master__line_breaks: >-
+          {{ monitoring_icinga_master__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_icinga_master__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_icinga_master__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_icinga_master__unknown | join(', ')) ~ '. Allowed are the variables '
+                                    ~ (monitoring_icinga_master__environment_allowed | join(', '))
+                                    ~ ', the features are set with icinga_master_config and the passwords with icinga_master_secrets.') -%}
+          {%- endif -%}
+          {%- if monitoring_icinga_master__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_icinga_master__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
@@ -415,6 +420,9 @@
           {% if monitoring_icinga_master__container.binds_to is defined %}
           BindsTo={{ monitoring_icinga_master__container.binds_to | join(' ') }}
           {% endif %}
+          {% if monitoring_icinga_master__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_icinga_master__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_icinga_master__quadlet_result'
@@ -489,6 +497,8 @@
         url: "https://{{ monitoring_icinga_master__container.ip }}:{{ monitoring_icinga_master__config.api.bind_port | default(5665) }}/v1"
         validate_certs: false
         status_code: [ 200, 401 ]
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
       register: 'monitoring_icinga_master__ready'
       until: monitoring_icinga_master__ready.status | default(-1) in [ 200, 401 ]
       retries: 40

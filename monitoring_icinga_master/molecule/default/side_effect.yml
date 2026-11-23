@@ -113,7 +113,7 @@
             data: 'molecule-ticket-salt'
         monitoring_icinga_master__test_invalid:
           message: 'a secret without target'
-          search: '^icinga_master_secrets entries need name, data and target$'
+          search: '^`icinga_master_secrets` entries need name, data and target$'
 
     - name: 'Run monitoring_icinga_master with an unknown secret (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -149,14 +149,6 @@
         monitoring_icinga_master__test_invalid:
           message: 'a secret name that is no constant'
           search: '^The names of icinga_master_secrets are names of constants of Icinga, .*: icinga-ticket-salt\.$'
-
-    - name: 'Run monitoring_icinga_master with a former variable (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        icinga_master_api_bind_port: 5666
-        monitoring_icinga_master__test_invalid:
-          message: 'a former variable'
-          search: '^The features are set with icinga_master_config now: icinga_master_api_bind_port \(api\.bind_port\)\.$'
 
     - name: 'Run monitoring_icinga_master with icinga_master_hosts not a list (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -274,3 +266,38 @@
               features changed: {{ monitoring_icinga_master__features_result is changed }},
               quadlet changed: {{ monitoring_icinga_master__quadlet_result is changed }},
               start before {{ monitoring_icinga_master__test_started_before.stdout }}, after {{ monitoring_icinga_master__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_icinga_master__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+          register: 'monitoring_icinga_master__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_icinga_master without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_icinga_master'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+          register: 'monitoring_icinga_master__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_icinga_master__config_result is not changed
+              - monitoring_icinga_master__features_result is not changed
+              - monitoring_icinga_master__secret_result is not changed
+              - monitoring_icinga_master__quadlet_result is not changed
+              - monitoring_icinga_master__test_unchanged_after.stdout == monitoring_icinga_master__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ monitoring_icinga_master__config_result is changed }},
+              features changed: {{ monitoring_icinga_master__features_result is changed }},
+              secret changed: {{ monitoring_icinga_master__secret_result is changed }},
+              quadlet changed: {{ monitoring_icinga_master__quadlet_result is changed }},
+              start before {{ monitoring_icinga_master__test_unchanged_before.stdout }}, after {{ monitoring_icinga_master__test_unchanged_after.stdout }}
