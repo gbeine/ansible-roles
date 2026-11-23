@@ -16,6 +16,11 @@
       - "{{ monitoring_dozzle__test_quadlet_path }}"
       - "{{ monitoring_dozzle__test_users_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -42,13 +47,21 @@
           message: 'dozzle_container not a dictionary'
           search: 'failed to combine variables, expected dicts'
 
+    - name: 'Run monitoring_dozzle with dozzle_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        dozzle_environment: [ 'DOZZLE_LEVEL' ]
+        monitoring_dozzle__test_invalid:
+          message: 'dozzle_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
     - name: 'Run monitoring_dozzle with a secret without target (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         dozzle_secrets: "{{ monitoring_dozzle__test_secrets + [ { 'name': 'dozzle_other', 'data': 'x' } ] }}"
         monitoring_dozzle__test_invalid:
           message: 'a secret without target'
-          search: '^dozzle_secrets entries need name, data and target$'
+          search: '^`dozzle_secrets` entries need name, data and target$'
 
     - name: 'Run monitoring_dozzle without login (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -182,3 +195,35 @@
             fail_msg: >-
               quadlet changed: {{ monitoring_dozzle__quadlet_result is changed }}, users changed: {{ monitoring_dozzle__users_result is changed }},
               start before {{ monitoring_dozzle__test_started_before.stdout }}, after {{ monitoring_dozzle__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_dozzle__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_dozzle without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_dozzle'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_dozzle__quadlet_result is not changed
+              - monitoring_dozzle__secrets_result is not changed
+              - monitoring_dozzle__users_result is not changed
+              - monitoring_dozzle__test_unchanged_after.stdout == monitoring_dozzle__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ monitoring_dozzle__quadlet_result is changed }}, secrets changed: {{ monitoring_dozzle__secrets_result is changed }},
+              users changed: {{ monitoring_dozzle__users_result is changed }},
+              start before {{ monitoring_dozzle__test_unchanged_before.stdout }}, after {{ monitoring_dozzle__test_unchanged_after.stdout }}

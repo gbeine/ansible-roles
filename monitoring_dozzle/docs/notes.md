@@ -10,10 +10,12 @@ Dozzle is configured with environment variables in `dozzle_environment`, merged 
 Booleans may be given as YAML booleans, the role passes them as `true` or `false`.
 The variables are described in the [documentation of Dozzle](https://dozzle.dev/guide/supported-env-vars).
 
-The default sets `TZ` to `dozzle_timezone`, `DOZZLE_AUTH_PROVIDER` to `simple`, `DOZZLE_NO_ANALYTICS` to `true`,
+The default sets `DOZZLE_AUTH_PROVIDER` to `simple`, `DOZZLE_NO_ANALYTICS` to `true`,
 `DOZZLE_ENABLE_ACTIONS` and `DOZZLE_ENABLE_SHELL` to `false` and `DOZZLE_AUTO_UPDATE` and `DOZZLE_AUTO_CLEANUP` to `off`.
 Settings set by a variable are locked, the file `dozzle.yml` written by the setup wizard cannot change them,
 so nobody can enable the actions, the shell or the updates of the containers in the web interface.
+The time zone of the container is `dozzle_timezone`, set by podman. The image sets no `TZ`, Dozzle contains the time zones of Go
+and reads `/etc/localtime`, the role sets no default for `TZ`.
 The image of Dozzle is updated by `container_update`, not by Dozzle itself.
 
 The role sets `DOZZLE_DISABLE_SETUP_WIZARD` to `true`, `DOZZLE_MODE` to `server` and `DOZZLE_ADDR` to `:8080`, they must not be set in `dozzle_environment`.
@@ -95,12 +97,14 @@ The role only allows the environment variables in `monitoring_dozzle__environmen
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret, Dozzle itself only warns about unknown variables.
 The check uses the environment and the secrets of the container after merging `dozzle_container`.
-The list is generated from the `env` tags of `internal/cli/args.go` of Dozzle v11.4.3 without the secrets,
+The list is generated from the `env` tags of `internal/cli/args.go` of Dozzle v11.5.0 without the secrets,
 `DOZZLE_NAMESPACE` of k8s and `DOZZLE_CERT` and `DOZZLE_KEY` of the agents, new versions of the image may add variables.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `dozzle_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `dozzle_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `dozzle_container.environment` replaces the environment including `dozzle_environment`, use `dozzle_environment` instead,
 `dozzle_container.volumes` replaces the data directory and the socket.
 For a reverse proxy, e.g. Traefik, the labels are set with `dozzle_labels`.
@@ -116,15 +120,20 @@ The role checks before any change:
 - the token of MCP has at least 32 characters without whitespace
 - values contain no line breaks, booleans are `true` or `false`
 - the users have valid names, known keys, passwords of 8 to 72 characters or a login at GitHub, valid emails, known roles and no line breaks
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
-If `dozzle_container` is no dictionary, merging it with the default fails before anything changes,
+If `dozzle_container` or `dozzle_environment` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start and the wait for Dozzle do not run in check mode, the users are not compared while `python3-bcrypt` is not installed yet.
 
 ### Restart and updates
 
 Dozzle is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `dozzle_environment`,
-otherwise it is started and enabled. Changed users need no restart. If the start fails, the role shows the journal of the service.
+otherwise it is started and enabled. Changed users need no restart. If the start fails, the role shows the error and the journal of the service.
 Afterwards the role waits up to 120 seconds for `/healthcheck` and shows the journal if Dozzle does not answer.
 Updates of the image are done by `container_update` with `dozzle_autoupdate_enabled: true` and `dozzle_autoupdate_schedule`,
 without `dozzle_autoupdate_schedule` the schedule of `container_update` is used.
@@ -132,6 +141,9 @@ without `dozzle_autoupdate_schedule` the schedule of `container_update` is used.
 ### Migration
 
 The role is new, there are no former variables.
+
+- `TZ` is not set anymore, the time zone is set by podman with `dozzle_timezone`.
+- The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `dozzle_container` are new.
 
 ### Tests
 
@@ -145,12 +157,15 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 `prepare` creates the podman network with the socket, installs `curl` and `python3-bcrypt`, pulls the images
 and starts the container `molecule-logger`, which writes a line every two seconds.
-`side_effect` runs the role with `dozzle_container` not a dictionary, a secret without `target`, without login, the provider `simple` without users,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `dozzle_container` and `dozzle_environment` not a dictionary, a secret without `target`, without login, the provider `simple` without users,
 OIDC without issuer, the token of MCP in the environment, `DOZZLE_MODE` in the environment, a short token of MCP, an unknown variable, an unknown secret,
 an invalid boolean, a line break in a value, a short password and an unknown role of a user
 and checks that it fails with the expected message and the quadlet unit and `users.yml` are unchanged (tasks marked `expect ERROR`),
-then it changes `DOZZLE_LEVEL` and the password of the administrator on `molecule-dozzle`, the quadlet unit and `users.yml` change and Dozzle has to restart.
-`verify` checks the quadlet unit with the socket and the secret without its value, the service, the addresses and the environment,
+then it changes `DOZZLE_LEVEL` and the password of the administrator on `molecule-dozzle`, the quadlet unit and `users.yml` change and Dozzle has to restart,
+`molecule-dozzle-default` runs again without a change and Dozzle must not restart.
+`verify` checks the quadlet unit with the socket and the secret without its value, the service without automatic restarts,
+the addresses, the time zone and the environment without `TZ`,
 `users.yml` with its mode, the bcrypt hashes matching the passwords and no password in plain text, the health check,
 the login with the passwords (200), a wrong one and the former one (401), the version with and without session (401)
 and that the stream of the events of the administrator contains `molecule-logger`, the guest with its filter does not see it.

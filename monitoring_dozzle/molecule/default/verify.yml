@@ -64,14 +64,36 @@
           - monitoring_dozzle__expect.ip6 is none or monitoring_dozzle__test_net.GlobalIPv6Address == monitoring_dozzle__expect.ip6
           - monitoring_dozzle__expect.env | reject('in', monitoring_dozzle__test_env) | list | length == 0
           - monitoring_dozzle__test_plain | select('in', monitoring_dozzle__test_env | join(' ')) | list | length == 0
+          - monitoring_dozzle__test_env | select('match', 'TZ=') | list | length == 0
+          - monitoring_dozzle__test_container.Config.Timezone == monitoring_dozzle__test_case.role_vars.dozzle_timezone
         fail_msg: >-
-          service {{ monitoring_dozzle__test_service.stdout }},
+          service {{ monitoring_dozzle__test_service.stdout }}, time zone {{ monitoring_dozzle__test_container.Config.Timezone | default('') }},
           IPv4 {{ monitoring_dozzle__test_net.IPAddress }}, IPv6 {{ monitoring_dozzle__test_net.GlobalIPv6Address }},
           environment {{ monitoring_dozzle__test_env | reject('search', 'TOKEN=') | join(', ') }}
       vars:
         monitoring_dozzle__test_container: "{{ (monitoring_dozzle__test_inspect.stdout | from_json)[0] }}"
         monitoring_dozzle__test_net: "{{ monitoring_dozzle__test_container.NetworkSettings.Networks[monitoring_dozzle__test_case.role_vars.dozzle_network] }}"
         monitoring_dozzle__test_env: "{{ monitoring_dozzle__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'dozzle' ]
+      register: 'monitoring_dozzle__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'dozzle', '-n', '80', '--no-pager' ]
+      register: 'monitoring_dozzle__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ monitoring_dozzle__test_restarts.stdout ] + monitoring_dozzle__test_journal.stdout_lines | default([]) }}"
 
     - name: 'Read the users of Dozzle'
       ansible.builtin.stat:
