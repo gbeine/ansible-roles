@@ -24,7 +24,9 @@ monitoring_plugins:
 | `container_stats_docker` | `check_container_stats_docker.py` | `container-stats-docker`, `sudo-container-stats-docker` | |
 | `container_stats_podman` | `check_container_stats_podman.py` | `container-stats-podman`, `sudo-container-stats-podman` | yes |
 | `logfiles` | `check_logfiles` of `monitoring-plugins-check-logfiles` | none, see the ITL | |
+| `mariadb` | `monitoring-plugins-contrib` and `libmariadb3`, alias of `mysql` | none, see the ITL | |
 | `mem` | `check_mem.pl` | none, see the ITL | |
+| `mysql` | `monitoring-plugins-contrib` and `libmariadb3` | none, see the ITL | |
 | `nginx` | `check_nginx_status.pl` | `nginx-status` | |
 | `pass_alive` | `check_pass_alive` | `pass-alive` | yes |
 | `pgactivity` | `check_pgactivity.pl` | `pgactivity` | |
@@ -88,7 +90,9 @@ monitoring_plugins_postgresql_credentials:
   password: 'secret'
 ```
 
-Plugins for MariaDB or MySQL of the Debian packages read `~nagios/.my.cnf`, the role writes it if `monitoring_plugins_mysql_credentials` is set:
+The plugins for MariaDB or MySQL of the Debian packages (`mariadb` or `mysql`) read `~nagios/.my.cnf`,
+the role writes it if `monitoring_plugins_mysql_credentials` is set and `mysql` or `mariadb` is in `monitoring_plugins`.
+Without one of these plugins the credentials are ignored, they are neither checked nor written and an existing `.my.cnf` is removed when pruning:
 
 ```yaml
 monitoring_plugins_mysql_credentials:
@@ -101,7 +105,7 @@ All credential files belong to the Icinga user and have mode `0400`.
 ### Pruning
 
 With `monitoring_plugins_prune: true` (default) the role removes the plugins, configurations and sudoers entries of all plugins of the role
-that are not in `monitoring_plugins` and the credential files that are not configured.
+that are not in `monitoring_plugins` and the credential files that are not configured or whose plugins are not selected.
 Packages are never removed.
 Files of other roles or plugins not known to the role are not touched.
 
@@ -114,7 +118,7 @@ Files of other roles or plugins not known to the role are not touched.
 | `monitoring_check_ide_smart` | `smart`, only `check_smart.pl` (`sudo-smartpl`), Debian 13 does not ship `check_ide_smart` anymore, `sudo-smart` is gone |
 | `monitoring_check_phpfpm`, `monitoring_check_nginx` | `phpfpm`, `nginx` |
 | `monitoring_pushover`, `monitoring_rocketchat` | `pushover`, `rocketchat` |
-| `monitoring_credentials_mariadb*`, `monitoring_credentials_mysql*` | `monitoring_plugins_mysql_credentials` with `user` and `password` |
+| `monitoring_credentials_mariadb*`, `monitoring_credentials_mysql*` | `monitoring_plugins_mysql_credentials` with `user` and `password`, only used with the plugin `mysql` or `mariadb` |
 | `monitoring_credentials_postgresql_*` | `monitoring_plugins_postgresql_credentials` with `host`, `port`, `user` and `password` |
 
 Fixed errors of the old role:
@@ -129,9 +133,10 @@ Fixed errors of the old role:
 The molecule scenario `default` uses tart with two VMs, both with Icinga 2 installed in `prepare`:
 
 - `molecule-plugins-default` runs the role without variables, only the directories are created,
-- `molecule-plugins` installs all plugins with credentials, `side_effect` removes `pushover` and `reboot` again.
+- `molecule-plugins` installs all plugins with credentials, `side_effect` removes `pushover`, `reboot`, `mysql` and `mariadb` again,
+  `.my.cnf` has to be removed with them.
 
-`verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, `visudo -c`,
+`verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, the packages of `mysql` and `mariadb`, `visudo -c`,
 the sudo commands of the Icinga user, the syntax and dependencies of the plugins (`perl -c`, `bash -n`, `--help`),
 runs `check_mem.pl` and `check_systemd` as the Icinga user,
 runs `check_printer_snmp.py` as the Icinga user against `127.0.0.1` without SNMP agent, it has to return UNKNOWN with an SNMP error,
