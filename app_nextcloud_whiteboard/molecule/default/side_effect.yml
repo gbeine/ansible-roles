@@ -14,6 +14,11 @@
     app_nextcloud_whiteboard__test_checked_files:
       - "{{ app_nextcloud_whiteboard__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -47,7 +52,7 @@
         whiteboard_secrets: [ { name: 'whiteboard_jwt_secret', data: 'x' } ]
         app_nextcloud_whiteboard__test_invalid:
           message: 'a secret without target'
-          search: '^whiteboard_secrets entries need name, data and target$'
+          search: '^`whiteboard_secrets` entries need name, data and target$'
 
     - name: 'Run app_nextcloud_whiteboard without the JWT secret (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -103,7 +108,23 @@
         whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'TLS': 'yes' }) }}"
         app_nextcloud_whiteboard__test_invalid:
           message: 'an invalid boolean'
-          search: '^These variables are booleans, allowed are true and false: TLS\.$'
+          search: '^These variables have to be the strings true or false: TLS\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with a YAML boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: "{{ app_nextcloud_whiteboard__test_environment | combine({ 'COMPRESSION_ENABLED': true }) }}"
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'a YAML boolean'
+          search: '^These variables have to be the strings true or false: COMPRESSION_ENABLED\.$'
+
+    - name: 'Run app_nextcloud_whiteboard with whiteboard_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        whiteboard_environment: [ 'NEXTCLOUD_URL' ]
+        app_nextcloud_whiteboard__test_invalid:
+          message: 'whiteboard_environment not a dictionary'
+          search: '^`whiteboard_environment` has to be a dictionary\.'
 
     - name: 'Run app_nextcloud_whiteboard with a line break in a value (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -154,3 +175,34 @@
             fail_msg: >-
               secrets changed: {{ app_nextcloud_whiteboard__secrets_result is changed }}, quadlet changed: {{ app_nextcloud_whiteboard__quadlet_result is changed }},
               start before {{ app_nextcloud_whiteboard__test_started_before.stdout }}, after {{ app_nextcloud_whiteboard__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_nextcloud_whiteboard__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'whiteboard' ]
+          register: 'app_nextcloud_whiteboard__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_nextcloud_whiteboard without a change'
+          ansible.builtin.include_role:
+            name: 'app_nextcloud_whiteboard'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'whiteboard' ]
+          register: 'app_nextcloud_whiteboard__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_nextcloud_whiteboard__quadlet_result is not changed
+              - app_nextcloud_whiteboard__secrets_result is not changed
+              - app_nextcloud_whiteboard__test_unchanged_after.stdout == app_nextcloud_whiteboard__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_nextcloud_whiteboard__quadlet_result is changed }},
+              secrets changed: {{ app_nextcloud_whiteboard__secrets_result is changed }},
+              start before {{ app_nextcloud_whiteboard__test_unchanged_before.stdout }}, after {{ app_nextcloud_whiteboard__test_unchanged_after.stdout }}
