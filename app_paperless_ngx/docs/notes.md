@@ -9,6 +9,11 @@ the webserver listens on port 8000. Paperless-ngx needs Redis as broker.
 Paperless-ngx is configured with `paperless_ngx_environment`, which is merged over the defaults of the role (`USERMAP_UID`, `USERMAP_GID` and `PAPERLESS_TIME_ZONE`),
 see the [configuration of Paperless-ngx](https://docs.paperless-ngx.com/configuration/).
 Booleans may be written as YAML booleans, the role passes them as `true` and `false`.
+The time zone of Paperless-ngx is `PAPERLESS_TIME_ZONE` from `paperless_ngx_timezone`, the image sets no `TZ` and Paperless-ngx does not read it.
+
+Paperless-ngx also reads `paperless.conf`, but the role stays with the environment: the s6 scripts of the image only read the environment,
+e.g. to wait for the database (`PAPERLESS_DBHOST`, `PAPERLESS_DBENGINE`) and Redis (`PAPERLESS_REDIS`), to create the administrator
+or to set the user (`USERMAP_UID`), the options would be split between the file and the environment.
 
 ```yaml
 paperless_ngx_environment:
@@ -74,7 +79,7 @@ and `PAPERLESS_SOCIALACCOUNT_PROVIDERS`, which contains the client secrets of th
 The role only allows the environment variables in `app_paperless_ngx__environment_allowed` and the secrets in `app_paperless_ngx__secret_files`,
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo, a deprecated variable or a variable that has to be passed as secret.
-The variables are generated from all `PAPERLESS_*` variables in `src` of Paperless-ngx v3.4.2 without the tests and the variables of the s6 scripts of the image
+The variables are generated from all `PAPERLESS_*` variables in `src` of Paperless-ngx v3.5.1 without the tests and the variables of the s6 scripts of the image
 (`USERMAP_UID`, `USERMAP_GID`, `PAPERLESS_OCR_LANGUAGES`, `PAPERLESS_PORT`, `PAPERLESS_BIND_ADDR`, `PAPERLESS_WEBSERVER_WORKERS`, `PAPERLESS_ENABLE_FLOWER`, `PAPERLESS_CONSUMER_DISABLE`),
 without the secrets and `PAPERLESS_ADMIN_*`, plus the file variables of the secrets.
 The booleans (`app_paperless_ngx__environment_booleans`) are the variables read with `get_bool_from_env`.
@@ -83,10 +88,18 @@ The check uses the environment of the container after merging `paperless_ngx_con
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `paperless_ngx_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `paperless_ngx_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `paperless_ngx_container.volumes` replaces the four directories,
 `paperless_ngx_container.environment` replaces the environment including `paperless_ngx_environment`.
 The role waits until the login page of Paperless-ngx answers, the image migrates the database before the webserver starts, it shows the log of the service otherwise.
+
+```yaml
+paperless_ngx_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+```
 
 ### Validation
 
@@ -96,13 +109,19 @@ The role checks before any change:
 - `PAPERLESS_DBENGINE` is `sqlite`, `postgresql` or `mariadb`, `postgresql` and `mariadb` have `PAPERLESS_DBHOST` and the secret `PAPERLESS_DBPASS`
 - neither a secret nor its file variable is set in `paperless_ngx_environment`, the booleans are `true` or `false`, values and secrets have no line breaks
 - `paperless_ngx_admin` has a valid name, a valid email and a password with at least 8 characters
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
 If `paperless_ngx_container` is no dictionary, merging it with the default fails before anything changes.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start, the wait for Paperless-ngx and the administrator do not run in check mode.
 
 ### Restart and updates
 
 Paperless-ngx is restarted if it was running and a secret or the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role shows the error and the journal of the service.
 A changed password of the administrator needs no restart.
 Updates of the image are done by `container_update` with `paperless_ngx_autoupdate_enabled: true` and `paperless_ngx_autoupdate_schedule`,
 without `paperless_ngx_autoupdate_schedule` the schedule of `container_update` is used.
@@ -117,6 +136,7 @@ without `paperless_ngx_autoupdate_schedule` the schedule of `container_update` i
 - The volumes `/etc/localtime` and `/etc/timezone` are removed, the timezone is set by podman and `PAPERLESS_TIME_ZONE`.
 - The service is not stopped on every run anymore, `podman___update_mode` is removed.
 - The tag `app_paperless_ngx` stays, the tag `app` is added.
+- `paperless_ngx_labels` has no default anymore, without it the quadlet unit has no labels like before.
 
 ### Tests
 
@@ -129,12 +149,15 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-paperless` | IPv6, labels, PostgreSQL with the secret `PAPERLESS_DBPASS`, options, a boolean and the administrator |
 
 `prepare` creates the podman network, pulls the images and starts Redis on both platforms and PostgreSQL on `molecule-paperless`.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `paperless_ngx_container` not a dictionary, a secret without `target`, no `PAPERLESS_SECRET_KEY`, an unknown secret,
 the database password in the environment, `postgresql` without the host, an invalid database engine, an invalid boolean, a line break in a value,
 `PAPERLESS_ADMIN_PASSWORD` in the environment, an administrator without password and a short password
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes the title and the password of the administrator on `molecule-paperless`, Paperless-ngx has to restart and the password changes without a new user.
-`verify` checks the quadlet unit with the secrets as files and without their values, the service, the addresses and the environment of the container,
+then it changes the title and the password of the administrator on `molecule-paperless`, Paperless-ngx has to restart and the password changes without a new user,
+`molecule-paperless-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets as files and without their values, the service without automatic restarts,
+the addresses, the time zone and the environment of the container,
 the login to the API with the password and the refused former password, the superuser, the title and the database.
 
 | Environment variable | Default | Description |

@@ -14,6 +14,11 @@
     app_paperless_ngx__test_checked_files:
       - "{{ app_paperless_ngx__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -47,7 +52,7 @@
         paperless_ngx_secrets: [ { name: 'paperless_secret_key', data: 'x' } ]
         app_paperless_ngx__test_invalid:
           message: 'a secret without target'
-          search: '^paperless_ngx_secrets entries need name, data and target$'
+          search: '^`paperless_ngx_secrets` entries need name, data and target$'
 
     - name: 'Run app_paperless_ngx without PAPERLESS_SECRET_KEY (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -165,3 +170,35 @@
               quadlet changed: {{ app_paperless_ngx__quadlet_result is changed }}, administrator changed: {{ app_paperless_ngx__admin_result is changed }},
               created: {{ app_paperless_ngx__admin_result.created | default('') }},
               start before {{ app_paperless_ngx__test_started_before.stdout }}, after {{ app_paperless_ngx__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_paperless_ngx__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'paperless-ngx' ]
+          register: 'app_paperless_ngx__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_paperless_ngx without a change'
+          ansible.builtin.include_role:
+            name: 'app_paperless_ngx'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'paperless-ngx' ]
+          register: 'app_paperless_ngx__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_paperless_ngx__quadlet_result is not changed
+              - app_paperless_ngx__secrets_result is not changed
+              - app_paperless_ngx__admin_result is not changed
+              - app_paperless_ngx__test_unchanged_after.stdout == app_paperless_ngx__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_paperless_ngx__quadlet_result is changed }}, secrets changed: {{ app_paperless_ngx__secrets_result is changed }},
+              administrator changed: {{ app_paperless_ngx__admin_result is changed }},
+              start before {{ app_paperless_ngx__test_unchanged_before.stdout }}, after {{ app_paperless_ngx__test_unchanged_after.stdout }}
