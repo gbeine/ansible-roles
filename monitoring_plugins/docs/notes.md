@@ -23,7 +23,9 @@ monitoring_plugins:
 | `certexp` | `check_certexp.pl` | `certexp` | |
 | `container_stats_docker` | `check_container_stats_docker.py` | `container-stats-docker`, `sudo-container-stats-docker` | |
 | `container_stats_podman` | `check_container_stats_podman.py` | `container-stats-podman`, `sudo-container-stats-podman` | yes |
+| `dsa` | `monitoring-plugins-contrib`, `openssl` and `libnet-dns-perl` | `dsa-*`, e.g. `dsa-cert-expire`, `dsa-entropy`, `dsa-soas` | |
 | `logfiles` | `check_logfiles` of `monitoring-plugins-check-logfiles` | none, see the ITL | |
+| `madrisan` | `monitoring-plugins-contrib` | `madrisan-*`, e.g. `madrisan-cpu`, `madrisan-memory`, `madrisan-network` | |
 | `mariadb` | `monitoring-plugins-contrib` and `libmariadb3`, alias of `mysql` | none, see the ITL | |
 | `mem` | `check_mem.pl` | none, see the ITL | |
 | `mysql` | `monitoring-plugins-contrib` and `libmariadb3` | none, see the ITL | |
@@ -136,7 +138,7 @@ The molecule scenario `default` uses tart with two VMs, both with Icinga 2 insta
 - `molecule-plugins` installs all plugins with credentials, `side_effect` removes `pushover`, `reboot`, `mysql` and `mariadb` again,
   `.my.cnf` has to be removed with them.
 
-`verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, the packages of `mysql` and `mariadb`, `visudo -c`,
+`verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, the packages of `mysql`, `mariadb`, `dsa` and `madrisan`, `visudo -c`,
 the sudo commands of the Icinga user, the syntax and dependencies of the plugins (`perl -c`, `bash -n`, `--help`),
 runs `check_mem.pl` and `check_systemd` as the Icinga user,
 runs `check_printer_snmp.py` as the Icinga user against `127.0.0.1` without SNMP agent, it has to return UNKNOWN with an SNMP error,
