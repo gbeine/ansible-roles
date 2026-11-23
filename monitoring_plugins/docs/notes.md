@@ -27,7 +27,6 @@ monitoring_plugins:
 | `logfiles` | `check_logfiles` of `monitoring-plugins-check-logfiles` | none, see the ITL | |
 | `madrisan` | `monitoring-plugins-contrib` | `madrisan-*`, e.g. `madrisan-cpu`, `madrisan-memory`, `madrisan-network` | |
 | `mariadb` | `monitoring-plugins-contrib` and `libmariadb3`, alias of `mysql` | none, see the ITL | |
-| `mem` | `check_mem.pl` | none, see the ITL | |
 | `mysql` | `monitoring-plugins-contrib` and `libmariadb3` | none, see the ITL | |
 | `nginx` | `check_nginx_status.pl` | `nginx-status` | |
 | `pass_alive` | `check_pass_alive` | `pass-alive` | yes |
@@ -42,6 +41,9 @@ monitoring_plugins:
 | `smart` | `check_smart.pl` of `monitoring-plugins-check-smart` | `sudo-smartpl` | `check_smart.pl`, `smartctl` |
 | `systemd` | `check_systemd` of `monitoring-plugins-systemd` | none, see the ITL | |
 | `tls_cert` | `check_tls_cert.py` | `tls_cert` | |
+
+`check_memory` of madrisan (`madrisan-memory` of the plugin `madrisan`) is preferred to check the memory,
+the former plugin `mem` with `check_mem.pl` is removed.
 
 The role fails before it changes anything if `monitoring_plugins` contains an unknown plugin.
 The plugins, their files, configurations and sudoers entries are listed in `vars/main.yml`, the packages in `vars/Debian-13.yml`.
@@ -122,6 +124,7 @@ Files of other roles or plugins not known to the role are not touched.
 | `monitoring_pushover`, `monitoring_rocketchat` | `pushover`, `rocketchat` |
 | `monitoring_credentials_mariadb*`, `monitoring_credentials_mysql*` | `monitoring_plugins_mysql_credentials` with `user` and `password`, only used with the plugin `mysql` or `mariadb` |
 | `monitoring_credentials_postgresql_*` | `monitoring_plugins_postgresql_credentials` with `host`, `port`, `user` and `password` |
+| `mem` (`check_mem.pl`) | removed, `madrisan` with `madrisan-memory` (`check_memory`), `mem` is an unknown plugin now; the role does not prune `check_mem.pl` anymore, remove `/usr/local/lib/nagios/plugins/check_mem.pl` by hand |
 
 Fixed errors of the old role:
 
@@ -140,7 +143,7 @@ The molecule scenario `default` uses tart with two VMs, both with Icinga 2 insta
 
 `verify` checks that exactly the expected files, configurations and sudoers entries exist, the credential files, the packages of `mysql`, `mariadb`, `dsa` and `madrisan`, `visudo -c`,
 the sudo commands of the Icinga user, the syntax and dependencies of the plugins (`perl -c`, `bash -n`, `--help`),
-runs `check_mem.pl` and `check_systemd` as the Icinga user,
+runs `check_systemd` as the Icinga user,
 runs `check_printer_snmp.py` as the Icinga user against `127.0.0.1` without SNMP agent, it has to return UNKNOWN with an SNMP error,
 which shows that `snmpwalk` is installed, and validates the Icinga configuration with `icinga2 daemon -C`.
 
