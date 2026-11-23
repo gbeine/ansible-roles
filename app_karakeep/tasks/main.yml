@@ -4,7 +4,7 @@
   tags: [ 'app', 'app_karakeep' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or karakeep_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, karakeep_container or karakeep_environment not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
@@ -25,14 +25,14 @@
           {%- set errors = [] -%}
           {%- set secrets = app_karakeep__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('karakeep_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`karakeep_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('karakeep_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`karakeep_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of karakeep_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `karakeep_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -140,7 +140,7 @@
           {{ errors }}
 
     # Checks the environment and the secrets of the container after merging karakeep_container,
-    # unknown variables would change the behavior unexpectedly
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
@@ -154,10 +154,15 @@
           {{ app_karakeep__container.secrets
              if (app_karakeep__container.secrets is defined and app_karakeep__container.secrets is sequence and app_karakeep__container.secrets is not string)
              else [] }}
+        app_karakeep__container_environment: >-
+          {{ app_karakeep__container.environment if app_karakeep__container.environment | default(none) is mapping else {} }}
         # The variables set by the role (DATA_DIR) are part of the environment of the container, not of the allow list
         app_karakeep__environment_unknown: >-
-          {{ (app_karakeep__container.environment | default({})).keys()
+          {{ app_karakeep__container_environment.keys() | map('string')
              | reject('in', app_karakeep__environment_allowed + (app_karakeep__environment_role.keys() | list)) | list }}
+        app_karakeep__environment_line_breaks: >-
+          {{ app_karakeep__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_karakeep__secrets_unknown: >-
           {{ app_karakeep__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
              | reject('in', app_karakeep__secrets_allowed) | list }}
@@ -173,6 +178,10 @@
           {%-   set _ = errors.append('Allowed are the variables of Karakeep (app_karakeep__environment_allowed) and the secrets ' ~ (app_karakeep__secrets_allowed | join(', '))
                                     ~ ', the administrator is set with karakeep_admin.') -%}
           {%- endif -%}
+          {%- if app_karakeep__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_karakeep__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {{ errors }}
 
     # The image runs the migration, the web interface and the workers as root
@@ -184,8 +193,8 @@
         mode: '0750'
         state: 'directory'
       loop:
-        - "{{ app_karakeep__home }}"
-        - "{{ app_karakeep__home }}/data"
+        - "{{ app_karakeep__podman_home }}"
+        - "{{ app_karakeep__podman_data_dir }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -228,6 +237,21 @@
           {% if app_karakeep__container.requires is defined %}
           Requires={{ app_karakeep__container.requires | join(' ') }}
           {% endif %}
+          {% if app_karakeep__container.wants is defined %}
+          Wants={{ app_karakeep__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_karakeep__container.after is defined %}
+          After={{ app_karakeep__container.after | join(' ') }}
+          {% endif %}
+          {% if app_karakeep__container.part_of is defined %}
+          PartOf={{ app_karakeep__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_karakeep__container.binds_to is defined %}
+          BindsTo={{ app_karakeep__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_karakeep__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_karakeep__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_karakeep__quadlet_result'
@@ -260,7 +284,9 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ app_karakeep__container.name ~ ' did not start' ] + app_karakeep__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ app_karakeep__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_karakeep__start_journal.stdout_lines }}
 
     # s6 starts the web interface after the migration of the database, the health check answers then
     - name: 'Wait for Karakeep'

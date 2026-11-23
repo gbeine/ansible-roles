@@ -5,7 +5,8 @@ The search and the crawling with a browser are optional and provided by the role
 
 ### Configuration
 
-Karakeep is configured with environment variables in `karakeep_environment`, merged over the default of the role, which sets `TZ` to `karakeep_timezone`.
+Karakeep is configured with environment variables in `karakeep_environment`, it is mandatory.
+The time zone of the container is `karakeep_timezone`, the image sets no `TZ` and the role sets no default for it.
 `NEXTAUTH_URL`, the public URL of Karakeep, is mandatory, better-auth only accepts requests from this origin.
 The role sets `DATA_DIR` to `/data`, it must not be set in `karakeep_environment`.
 Booleans may be given as YAML booleans, the role passes them as `true` or `false`.
@@ -71,8 +72,18 @@ and `DEMO_MODE`, `DEMO_MODE_EMAIL` and `DEMO_MODE_PASSWORD`, the demo mode makes
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `karakeep_container`, it is merged over the default of the container.
-The merge is not recursive, `karakeep_container.environment` replaces the environment including `karakeep_environment`, use `karakeep_environment` instead.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `karakeep_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+The merge is not recursive, `karakeep_container.volumes` replaces the data directory (`<karakeep_home>/data`),
+`karakeep_container.environment` replaces the environment including `karakeep_environment`, use `karakeep_environment` instead.
+
+```yaml
+karakeep_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+```
+
 For a reverse proxy, e.g. Traefik, the labels are set with `karakeep_labels`.
 The image runs Karakeep as root, the directories belong to root with the mode `0750`.
 
@@ -80,19 +91,25 @@ The image runs Karakeep as root, the directories belong to root with the mode `0
 
 The role checks before any change:
 
+- `karakeep_environment` is a dictionary
 - `karakeep_secrets` is a list of entries with `name`, `data` and `target` and unique names
 - `NEXTAUTH_URL` and the secret `NEXTAUTH_SECRET` are set, `MEILI_ADDR` and the secret `MEILI_MASTER_KEY` are only set together
 - no secret and not `DATA_DIR` is set in `karakeep_environment`, secrets and values contain no line breaks, booleans are `true` or `false`
 - `karakeep_admin` has a name of up to 128 characters, a valid email and a password of 8 to 128 characters, the limits of Karakeep
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
-If `karakeep_container` is no dictionary, merging it with the default fails before anything changes,
+If `karakeep_container` or `karakeep_environment` is no dictionary, merging it fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start, the wait for Karakeep and the administrator do not run in check mode.
 
 ### Restart and updates
 
 Karakeep is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `karakeep_environment`,
-otherwise it is started and enabled. If the start fails, the role shows the journal of the service.
+otherwise it is started and enabled. If the start fails, the role shows the error and the journal of the service.
 Afterwards the role waits up to 300 seconds until `/api/health` reports `ok` and shows the journal if Karakeep does not answer,
 then it creates or updates the administrator.
 Updates of the image are done by `container_update` with `karakeep_autoupdate_enabled: true` and `karakeep_autoupdate_schedule`,
@@ -100,7 +117,8 @@ without `karakeep_autoupdate_schedule` the schedule of `container_update` is use
 
 ### Migration
 
-The role is new, there are no former variables.
+The role sets no default for `TZ` anymore, the time zone of the container is `karakeep_timezone`.
+If needed, `TZ` is set in `karakeep_environment`.
 
 ### Tests
 
@@ -113,13 +131,16 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-karakeep` | IPv6, labels, Meilisearch, Chrome, `DISABLE_SIGNUPS` and `CRAWLER_STORE_SCREENSHOT` |
 
 `prepare` creates the podman network and pulls the image, on `molecule-karakeep` it deploys Meilisearch and Chrome with `app_meilisearch` and `app_karakeep_chrome`.
-`side_effect` runs the role with `karakeep_container` not a dictionary, a secret without `target`, without `NEXTAUTH_SECRET`, without `NEXTAUTH_URL`,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `karakeep_container` and `karakeep_environment` not a dictionary, a secret without `target`, without `NEXTAUTH_SECRET`, without `NEXTAUTH_URL`,
 `MEILI_ADDR` without the master key, a secret and `DATA_DIR` in the environment, the demo mode, an unknown secret, an invalid boolean, a line break in a value,
 an administrator without password and a password of 7 characters
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `CRAWLER_STORE_SCREENSHOT`, the name and the password of the administrator on `molecule-karakeep`,
-the quadlet unit changes, Karakeep has to restart and the administrator is updated, not created.
-`verify` checks the quadlet unit with the secrets in the environment without their values, the service, the addresses, the environment and the database,
+the quadlet unit changes, Karakeep has to restart and the administrator is updated, not created,
+`molecule-karakeep-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets in the environment without their values, the service without automatic restarts, the addresses,
+the time zone of the container without `TZ`, the environment and the database,
 the health check, the sign-in with the password (200), a wrong one and the former one (401), the signed in user of the API with the session and without one (401)
 and that the database contains only the administrator with the role `admin`.
 On `molecule-karakeep` it creates a text bookmark, finds it with the search of Meilisearch and reads the version of Chrome from the container of Karakeep.
