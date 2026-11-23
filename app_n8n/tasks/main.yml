@@ -25,14 +25,14 @@
           {%- set errors = [] -%}
           {%- set secrets = app_n8n__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('n8n_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`n8n_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('n8n_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`n8n_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of n8n_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `n8n_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -139,8 +139,13 @@
         fail_msg: "{{ app_n8n__errors | join(' ') }}"
         quiet: true
       vars:
+        app_n8n__container_environment: >-
+          {{ app_n8n__container.environment if app_n8n__container.environment | default(none) is mapping else {} }}
         app_n8n__environment_unknown: >-
-          {{ (app_n8n__container.environment | default({})).keys() | reject('in', app_n8n__environment_allowed) | list }}
+          {{ app_n8n__container_environment.keys() | map('string') | reject('in', app_n8n__environment_allowed) | list }}
+        app_n8n__environment_line_breaks: >-
+          {{ app_n8n__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_n8n__secrets_unknown: >-
           {{ app_n8n__secrets | map(attribute='target') | reject('in', app_n8n__secret_variables) | list }}
         app_n8n__errors: >-
@@ -153,6 +158,10 @@
           {%- endif -%}
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of n8n (app_n8n__environment_allowed) and the secrets ' ~ (app_n8n__secret_variables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_n8n__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_n8n__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -172,8 +181,8 @@
         mode: '0700'
         state: 'directory'
       loop:
-        - "{{ app_n8n__home }}"
-        - "{{ app_n8n__home }}/data"
+        - "{{ app_n8n__podman_home }}"
+        - "{{ app_n8n__podman_data_dir }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -225,23 +234,56 @@
           {% if app_n8n__container.requires is defined %}
           Requires={{ app_n8n__container.requires | join(' ') }}
           {% endif %}
+          {% if app_n8n__container.wants is defined %}
+          Wants={{ app_n8n__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_n8n__container.after is defined %}
+          After={{ app_n8n__container.after | join(' ') }}
+          {% endif %}
+          {% if app_n8n__container.part_of is defined %}
+          PartOf={{ app_n8n__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_n8n__container.binds_to is defined %}
+          BindsTo={{ app_n8n__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_n8n__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_n8n__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_n8n__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_n8n__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_n8n__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_n8n__running: >-
-          {{ (ansible_facts.services[app_n8n__container.name + '.service'].state | default('')) == 'running' }}
-        app_n8n__restart: >-
-          {{ app_n8n__running | bool
-             and (app_n8n__secrets_result is changed or app_n8n__owner_result is changed or app_n8n__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start n8n'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_n8n__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_n8n__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_n8n__running: >-
+              {{ (ansible_facts.services[app_n8n__container.name + '.service'].state | default('')) == 'running' }}
+            app_n8n__restart: >-
+              {{ app_n8n__running | bool
+                 and (app_n8n__secrets_result is changed or app_n8n__owner_result is changed or app_n8n__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_n8n__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_n8n__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_n8n__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_n8n__start_journal.stdout_lines }}
 
     # n8n migrates the database and applies the owner on every start
     - name: 'Wait for n8n'

@@ -14,6 +14,11 @@
     app_n8n__test_checked_files:
       - "{{ app_n8n__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -47,7 +52,7 @@
         n8n_secrets: [ { name: 'n8n_db_password', data: 'x' } ]
         app_n8n__test_invalid:
           message: 'a secret without target'
-          search: '^n8n_secrets entries need name, data and target$'
+          search: '^`n8n_secrets` entries need name, data and target$'
 
     - name: 'Run app_n8n with the database password in the environment (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -163,3 +168,35 @@
             fail_msg: >-
               owner secret changed: {{ app_n8n__owner_result is changed }}, quadlet changed: {{ app_n8n__quadlet_result is changed }},
               start before {{ app_n8n__test_started_before.stdout }}, after {{ app_n8n__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_n8n__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'n8n' ]
+          register: 'app_n8n__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_n8n without a change'
+          ansible.builtin.include_role:
+            name: 'app_n8n'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'n8n' ]
+          register: 'app_n8n__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_n8n__quadlet_result is not changed
+              - app_n8n__secrets_result is not changed
+              - app_n8n__owner_result is not changed
+              - app_n8n__test_unchanged_after.stdout == app_n8n__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_n8n__quadlet_result is changed }}, secrets changed: {{ app_n8n__secrets_result is changed }},
+              owner secret changed: {{ app_n8n__owner_result is changed }},
+              start before {{ app_n8n__test_unchanged_before.stdout }}, after {{ app_n8n__test_unchanged_after.stdout }}

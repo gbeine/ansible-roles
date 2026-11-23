@@ -17,7 +17,7 @@ app_n8n__version: "{{ n8n_version | default('latest') }}"
 
 app_n8n__container: "{{ app_n8n__podman_container_default | combine(n8n_container | default({})) }}"
 
-# The configuration of n8n, the role sets TZ, GENERIC_TIMEZONE and the variables of the owner
+# The configuration of n8n, the role sets GENERIC_TIMEZONE and the variables of the owner
 app_n8n__environment: "{{ app_n8n__environment_default | combine(n8n_environment | default({})) }}"
 
 # Secrets with name, data and target, e.g. DB_POSTGRESDB_PASSWORD or N8N_ENCRYPTION_KEY
@@ -39,8 +39,8 @@ app_n8n__gid: 1000
 
 app_n8n__port: "{{ app_n8n__container.environment.N8N_PORT | default(5678) }}"
 
+# GENERIC_TIMEZONE is the time zone of the workflows, n8n uses America/New_York without it
 app_n8n__environment_default:
-  TZ: "{{ app_n8n__timezone }}"
   GENERIC_TIMEZONE: "{{ app_n8n__timezone }}"
   N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true
 
@@ -68,7 +68,7 @@ app_n8n__environment_owner: >-
 # The podman secret of the bcrypt hash of the password of the owner, created by the module app_n8n_owner_secret
 app_n8n__owner_secret: "{{ (n8n_container | default({})).name | default(app_n8n__podman_name) }}_owner_password_hash"
 
-# Password rules of n8n 2.47.5 (passwordSchema of @n8n/api-types)
+# Password rules of n8n 2.48.8 (passwordSchema of @n8n/api-types)
 app_n8n__owner_password_pattern: '^(?=.*[0-9])(?=.*[A-Z]).{8,64}$'
 app_n8n__owner_email_pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
 
@@ -122,11 +122,15 @@ app_n8n__packages: [ 'python3-bcrypt' ]
 
 app_n8n__podman_name: 'n8n'
 app_n8n__podman_image: 'docker.io/n8nio/n8n'
+app_n8n__podman_tag: "{{ app_n8n__version }}"
+
+app_n8n__podman_home: "{{ app_n8n__home }}"
+app_n8n__podman_data_dir: "{{ app_n8n__podman_home }}/data"
 
 app_n8n__podman_container_default:
   name: "{{ app_n8n__podman_name }}"
   hostname: "{{ app_n8n__hostname }}"
-  image: "{{ app_n8n__podman_image }}:{{ app_n8n__version }}"
+  image: "{{ app_n8n__podman_image }}:{{ app_n8n__podman_tag }}"
   ip: "{{ app_n8n__ip }}"
   ipv6: "{{ app_n8n__ipv6 | default(omit) }}"
   network: "{{ app_n8n__network }}"
@@ -135,10 +139,10 @@ app_n8n__podman_container_default:
   # Set with n8n_environment, n8n_secrets and n8n_owner, merged over the default
   environment: "{{ app_n8n__environment_container }}"
   volumes:
-    - "{{ app_n8n__home }}/data:/home/node/.n8n"
+    - "{{ app_n8n__podman_data_dir }}:/home/node/.n8n"
   secrets: "{{ app_n8n__podman_secrets if app_n8n__podman_secrets | length > 0 else omit }}"
 
-# n8n reads every variable of @Env from the file NAME_FILE as well (readEnv of @n8n/config 2.47.5), the secrets are mounted as files
+# n8n reads every variable of @Env from the file NAME_FILE as well (readEnv of @n8n/config 2.48.8), the secrets are mounted as files
 app_n8n__secret_files:
   DB_POSTGRESDB_PASSWORD: 'DB_POSTGRESDB_PASSWORD_FILE'
   DB_POSTGRESDB_SSL_KEY: 'DB_POSTGRESDB_SSL_KEY_FILE'
@@ -168,7 +172,7 @@ app_n8n__secret_files:
   N8N_DYNAMIC_CREDENTIALS_ENDPOINT_AUTH_TOKEN: 'N8N_DYNAMIC_CREDENTIALS_ENDPOINT_AUTH_TOKEN_FILE'
   N8N_INSTANCE_REPORTING_AUTH_TOKEN: 'N8N_INSTANCE_REPORTING_AUTH_TOKEN_FILE'
 
-# The variables n8n reads as booleans (fields of the type boolean with @Env in n8n 2.47.5)
+# The variables n8n reads as booleans (fields of the type boolean with @Env in n8n 2.48.8)
 app_n8n__environment_booleans:
   - 'CREDENTIALS_OVERWRITE_PERSISTENCE'
   - 'DB_LOGGING_ENABLED'
@@ -356,13 +360,16 @@ app_n8n__environment_booleans:
   - 'QUEUE_BULL_REDIS_TLS_VALIDATE_CERTIFICATE'
   - 'QUEUE_HEALTH_CHECK_ACTIVE'
 
-# The variables of n8n, generated from all @Env of the packages of n8n 2.47.5 without the variables carrying secrets,
+# The variables of n8n, generated from all @Env of the packages of n8n 2.48.8 without the variables carrying secrets,
 # TZ of the image and the file variables of the secrets
 app_n8n__environment_allowed:
   - 'TZ'
   - 'CREDENTIALS_DEFAULT_NAME'
+  - 'CREDENTIALS_OVERWRITE_DATA_FILE'
   - 'CREDENTIALS_OVERWRITE_ENDPOINT'
+  - 'CREDENTIALS_OVERWRITE_ENDPOINT_AUTH_TOKEN_FILE'
   - 'CREDENTIALS_OVERWRITE_PERSISTENCE'
+  - 'DAYTONA_API_KEY_FILE'
   - 'DAYTONA_API_URL'
   - 'DB_CONNECTION_ACQUISITION_TIMEOUT_MS'
   - 'DB_LOGGING_ENABLED'
@@ -379,12 +386,14 @@ app_n8n__environment_allowed:
   - 'DB_POSTGRESDB_KEEP_ALIVE'
   - 'DB_POSTGRESDB_KEEP_ALIVE_INITIAL_DELAY_MS'
   - 'DB_POSTGRESDB_MAX_CONNECTION_LIFETIME_MS'
+  - 'DB_POSTGRESDB_PASSWORD_FILE'
   - 'DB_POSTGRESDB_POOL_SIZE'
   - 'DB_POSTGRESDB_PORT'
   - 'DB_POSTGRESDB_SCHEMA'
   - 'DB_POSTGRESDB_SSL_CA'
   - 'DB_POSTGRESDB_SSL_CERT'
   - 'DB_POSTGRESDB_SSL_ENABLED'
+  - 'DB_POSTGRESDB_SSL_KEY_FILE'
   - 'DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED'
   - 'DB_POSTGRESDB_STATEMENT_TIMEOUT'
   - 'DB_POSTGRESDB_USER'
@@ -418,6 +427,7 @@ app_n8n__environment_allowed:
   - 'EXTERNAL_HOOK_FILES'
   - 'EXTERNAL_HOOK_FILES_SEPARATOR'
   - 'GENERIC_TIMEZONE'
+  - 'INSTANCE_AI_BRAVE_SEARCH_API_KEY_FILE'
   - 'N8N_ACTIVITY_LOG_MAX_ENTRIES'
   - 'N8N_ACTIVITY_LOG_RETENTION_DAYS'
   - 'N8N_ADDITIONAL_NON_UI_ROUTES'
@@ -429,6 +439,11 @@ app_n8n__environment_allowed:
   - 'N8N_AGENTS_BACKGROUND_TASKS_ENABLED'
   - 'N8N_AGENTS_CHANNEL_RECONCILE_INTERVAL'
   - 'N8N_AGENTS_CHECKPOINT_TTL'
+  - 'N8N_AGENTS_FILES_MAX_GENERATED_COUNT'
+  - 'N8N_AGENTS_FILES_MAX_GENERATED_FILE_SIZE_MB'
+  - 'N8N_AGENTS_FILES_MAX_GENERATED_TOTAL_MB'
+  - 'N8N_AGENTS_FILES_MAX_IMPORT_MB'
+  - 'N8N_AGENTS_FILES_MAX_TOTAL_MB'
   - 'N8N_AGENTS_MODULES'
   - 'N8N_AGENTS_PLAN_TOOLS_ENABLED'
   - 'N8N_AGENTS_TRACING_ENABLED'
@@ -439,6 +454,7 @@ app_n8n__environment_allowed:
   - 'N8N_AGENT_EVALS_RUN_TIMEOUT_MINUTES'
   - 'N8N_AI_AGENT_MAX_PASSTHROUGH_BINARY_SIZE_BYTES'
   - 'N8N_AI_ALLOW_SENDING_PARAMETER_VALUES'
+  - 'N8N_AI_ANTHROPIC_KEY_FILE'
   - 'N8N_AI_ASSISTANT_BASE_URL'
   - 'N8N_AI_ENABLED'
   - 'N8N_AI_GATEWAY_ENABLED'
@@ -465,6 +481,7 @@ app_n8n__environment_allowed:
   - 'N8N_AWS_SYSTEM_CREDENTIALS_SDK_SOURCES'
   - 'N8N_AZURE_STORAGE_CUSTOM_ENDPOINTS_ENABLED'
   - 'N8N_BINARY_DATA_DATABASE_MAX_FILE_SIZE'
+  - 'N8N_BINARY_DATA_SIGNING_SECRET_FILE'
   - 'N8N_BINARY_DATA_STORAGE_PATH'
   - 'N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES'
   - 'N8N_BLOCK_FILE_PATTERNS'
@@ -480,6 +497,7 @@ app_n8n__environment_allowed:
   - 'N8N_CHAT_HUB_STREAM_STATE_TTL'
   - 'N8N_COLLABORATION_CRDT'
   - 'N8N_COMMUNITY_PACKAGES'
+  - 'N8N_COMMUNITY_PACKAGES_AUTH_TOKEN_FILE'
   - 'N8N_COMMUNITY_PACKAGES_ENABLED'
   - 'N8N_COMMUNITY_PACKAGES_MANAGED_BY_ENV'
   - 'N8N_COMMUNITY_PACKAGES_PREVENT_LOADING'
@@ -518,11 +536,13 @@ app_n8n__environment_allowed:
   - 'N8N_DYNAMIC_CREDENTIALS_AUTHORIZE_RATE_LIMIT_PER_MINUTE'
   - 'N8N_DYNAMIC_CREDENTIALS_CORS_ALLOW_CREDENTIALS'
   - 'N8N_DYNAMIC_CREDENTIALS_CORS_ORIGIN'
+  - 'N8N_DYNAMIC_CREDENTIALS_ENDPOINT_AUTH_TOKEN_FILE'
   - 'N8N_DYNAMIC_CREDENTIALS_RATE_LIMIT_PER_MINUTE'
   - 'N8N_EDITOR_BASE_URL'
   - 'N8N_EMAIL_MODE'
   - 'N8N_EMBED_LOGIN_ENABLED'
   - 'N8N_ENABLED_MODULES'
+  - 'N8N_ENCRYPTION_KEY_FILE'
   - 'N8N_ENDPOINT_FORM'
   - 'N8N_ENDPOINT_FORM_TEST'
   - 'N8N_ENDPOINT_FORM_WAIT'
@@ -535,6 +555,7 @@ app_n8n__environment_allowed:
   - 'N8N_ENDPOINT_WEBHOOK_WAIT'
   - 'N8N_ENFORCE_GLOBAL_USER_AGENT'
   - 'N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS'
+  - 'N8N_ENGINE_AUTH_SECRET_FILE'
   - 'N8N_ENGINE_BASE_URL'
   - 'N8N_ENGINE_CONTROL_PLANE_BASE_URL'
   - 'N8N_ENGINE_CONTROL_PLANE_HOST'
@@ -544,6 +565,7 @@ app_n8n__environment_allowed:
   - 'N8N_ENGINE_HOST'
   - 'N8N_ENGINE_MODE'
   - 'N8N_ENGINE_PORT'
+  - 'N8N_ENGINE_RESUME_SECRET_FILE'
   - 'N8N_ENGINE_WEBHOOK_RESPONSE_TIMEOUT'
   - 'N8N_ENV_FEAT_EXTERNAL_SECRETS_FOR_PROJECTS'
   - 'N8N_ENV_FEAT_EXTERNAL_SECRETS_MULTIPLE_CONNECTIONS'
@@ -583,12 +605,14 @@ app_n8n__environment_allowed:
   - 'N8N_EXTERNAL_SECRETS_PREFER_GET'
   - 'N8N_EXTERNAL_SECRETS_REFRESH_TIMEOUT'
   - 'N8N_EXTERNAL_SECRETS_UPDATE_INTERVAL'
+  - 'N8N_EXTERNAL_STORAGE_AZURE_ACCOUNT_KEY_FILE'
   - 'N8N_EXTERNAL_STORAGE_AZURE_ACCOUNT_NAME'
   - 'N8N_EXTERNAL_STORAGE_AZURE_AUTH_AUTO_DETECT'
   - 'N8N_EXTERNAL_STORAGE_AZURE_CONNECTION_STRING'
   - 'N8N_EXTERNAL_STORAGE_AZURE_CONTAINER_NAME'
   - 'N8N_EXTERNAL_STORAGE_AZURE_ENDPOINT'
   - 'N8N_EXTERNAL_STORAGE_S3_ACCESS_KEY'
+  - 'N8N_EXTERNAL_STORAGE_S3_ACCESS_SECRET_FILE'
   - 'N8N_EXTERNAL_STORAGE_S3_AUTH_AUTO_DETECT'
   - 'N8N_EXTERNAL_STORAGE_S3_BUCKET_NAME'
   - 'N8N_EXTERNAL_STORAGE_S3_BUCKET_REGION'
@@ -644,6 +668,7 @@ app_n8n__environment_allowed:
   - 'N8N_INSTANCE_AI_MEMORY_MODEL'
   - 'N8N_INSTANCE_AI_MID_RUN_OBSERVATION'
   - 'N8N_INSTANCE_AI_MODEL'
+  - 'N8N_INSTANCE_AI_MODEL_API_KEY_FILE'
   - 'N8N_INSTANCE_AI_MODEL_REQUEST_LABELS'
   - 'N8N_INSTANCE_AI_MODEL_URL'
   - 'N8N_INSTANCE_AI_NODE_CONTEXT_ENABLED'
@@ -675,10 +700,14 @@ app_n8n__environment_allowed:
   - 'N8N_INSTANCE_OWNER_FIRST_NAME'
   - 'N8N_INSTANCE_OWNER_LAST_NAME'
   - 'N8N_INSTANCE_OWNER_MANAGED_BY_ENV'
+  - 'N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE'
+  - 'N8N_INSTANCE_REPORTING_AUTH_TOKEN_FILE'
   - 'N8N_INSTANCE_REPORTING_BASE_URL'
   - 'N8N_INSTANCE_REPORTING_LABEL'
   - 'N8N_INVITE_LINKS_EMAIL_ONLY'
+  - 'N8N_LICENSE_ACTIVATION_KEY_FILE'
   - 'N8N_LICENSE_AUTO_RENEW_ENABLED'
+  - 'N8N_LICENSE_CERT_FILE'
   - 'N8N_LICENSE_DETACH_FLOATING_ON_SHUTDOWN'
   - 'N8N_LICENSE_SERVER_URL'
   - 'N8N_LICENSE_TENANT_ID'
@@ -808,10 +837,12 @@ app_n8n__environment_allowed:
   - 'N8N_REINSTALL_MISSING_PACKAGES'
   - 'N8N_RELEASE_TYPE'
   - 'N8N_RESTRICT_FILE_ACCESS_TO'
+  - 'N8N_RUNNERS_AUTH_TOKEN_FILE'
   - 'N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT'
   - 'N8N_RUNNERS_BROKER_LISTEN_ADDRESS'
   - 'N8N_RUNNERS_BROKER_PORT'
   - 'N8N_RUNNERS_GRACEFUL_SHUTDOWN_TIMEOUT'
+  - 'N8N_RUNNERS_GRANT_TOKEN_FILE'
   - 'N8N_RUNNERS_GRANT_TOKEN_TTL'
   - 'N8N_RUNNERS_HEALTH_CHECK_SERVER_ENABLED'
   - 'N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST'
@@ -830,6 +861,7 @@ app_n8n__environment_allowed:
   - 'N8N_RUNNERS_TASK_REQUEST_TIMEOUT'
   - 'N8N_RUNNERS_TASK_TIMEOUT'
   - 'N8N_SAMESITE_COOKIE'
+  - 'N8N_SANDBOX_SERVICE_API_KEY_FILE'
   - 'N8N_SANDBOX_SERVICE_URL'
   - 'N8N_SCHEDULER_AGENT_TASKS_ENABLED'
   - 'N8N_SCHEDULER_CLAIM_BATCH_SIZE'
@@ -878,13 +910,16 @@ app_n8n__environment_allowed:
   - 'N8N_SKILL_SYNC_CHECK_INTERVAL_SECONDS'
   - 'N8N_SKIP_CREDENTIAL_OVERWRITE'
   - 'N8N_SMTP_HOST'
+  - 'N8N_SMTP_OAUTH_PRIVATE_KEY_FILE'
   - 'N8N_SMTP_OAUTH_SERVICE_CLIENT'
+  - 'N8N_SMTP_PASS_FILE'
   - 'N8N_SMTP_PORT'
   - 'N8N_SMTP_SENDER'
   - 'N8N_SMTP_SSL'
   - 'N8N_SMTP_STARTTLS'
   - 'N8N_SMTP_USER'
   - 'N8N_SOURCECONTROL_DEFAULT_SSH_KEY_TYPE'
+  - 'N8N_SSH_TUNNEL_IDLE_TIMEOUT'
   - 'N8N_SSL_CERT'
   - 'N8N_SSL_KEY'
   - 'N8N_SSO_JUST_IN_TIME_PROVISIONING'
@@ -894,6 +929,7 @@ app_n8n__environment_allowed:
   - 'N8N_SSO_OIDC_ACR_VALUES'
   - 'N8N_SSO_OIDC_ADDITIONAL_SCOPES'
   - 'N8N_SSO_OIDC_CLIENT_ID'
+  - 'N8N_SSO_OIDC_CLIENT_SECRET_FILE'
   - 'N8N_SSO_OIDC_DISCOVERY_ENDPOINT'
   - 'N8N_SSO_OIDC_LOGIN_ENABLED'
   - 'N8N_SSO_OIDC_PROMPT'
@@ -944,6 +980,7 @@ app_n8n__environment_allowed:
   - 'N8N_UNVERIFIED_PACKAGES_ENABLED'
   - 'N8N_USER_MANAGEMENT_JWT_DURATION_HOURS'
   - 'N8N_USER_MANAGEMENT_JWT_REFRESH_TIMEOUT_HOURS'
+  - 'N8N_USER_MANAGEMENT_JWT_SECRET_FILE'
   - 'N8N_USE_WORKFLOW_PUBLICATION_SERVICE'
   - 'N8N_VERIFIED_PACKAGES_ENABLED'
   - 'N8N_VERSION'
@@ -998,6 +1035,7 @@ app_n8n__environment_allowed:
   - 'QUEUE_BULL_REDIS_KEEP_ALIVE'
   - 'QUEUE_BULL_REDIS_KEEP_ALIVE_DELAY'
   - 'QUEUE_BULL_REDIS_KEEP_ALIVE_INTERVAL'
+  - 'QUEUE_BULL_REDIS_PASSWORD_FILE'
   - 'QUEUE_BULL_REDIS_PORT'
   - 'QUEUE_BULL_REDIS_RECONNECT_ON_FAILOVER'
   - 'QUEUE_BULL_REDIS_SLOT_REFRESH_INTERVAL'
@@ -1014,31 +1052,3 @@ app_n8n__environment_allowed:
   - 'QUEUE_WORKER_STALLED_INTERVAL'
   - 'QUEUE_WORKER_TIMEOUT'
   - 'WORKFLOWS_DEFAULT_NAME'
-  - 'DB_POSTGRESDB_PASSWORD_FILE'
-  - 'DB_POSTGRESDB_SSL_KEY_FILE'
-  - 'N8N_ENCRYPTION_KEY_FILE'
-  - 'N8N_USER_MANAGEMENT_JWT_SECRET_FILE'
-  - 'N8N_SMTP_PASS_FILE'
-  - 'N8N_SMTP_OAUTH_PRIVATE_KEY_FILE'
-  - 'QUEUE_BULL_REDIS_PASSWORD_FILE'
-  - 'CREDENTIALS_OVERWRITE_DATA_FILE'
-  - 'CREDENTIALS_OVERWRITE_ENDPOINT_AUTH_TOKEN_FILE'
-  - 'N8N_RUNNERS_AUTH_TOKEN_FILE'
-  - 'N8N_RUNNERS_GRANT_TOKEN_FILE'
-  - 'N8N_LICENSE_ACTIVATION_KEY_FILE'
-  - 'N8N_LICENSE_CERT_FILE'
-  - 'N8N_SSO_OIDC_CLIENT_SECRET_FILE'
-  - 'N8N_EXTERNAL_STORAGE_S3_ACCESS_SECRET_FILE'
-  - 'N8N_EXTERNAL_STORAGE_AZURE_ACCOUNT_KEY_FILE'
-  - 'N8N_BINARY_DATA_SIGNING_SECRET_FILE'
-  - 'N8N_ENGINE_AUTH_SECRET_FILE'
-  - 'N8N_ENGINE_RESUME_SECRET_FILE'
-  - 'N8N_AI_ANTHROPIC_KEY_FILE'
-  - 'N8N_INSTANCE_AI_MODEL_API_KEY_FILE'
-  - 'INSTANCE_AI_BRAVE_SEARCH_API_KEY_FILE'
-  - 'DAYTONA_API_KEY_FILE'
-  - 'N8N_SANDBOX_SERVICE_API_KEY_FILE'
-  - 'N8N_COMMUNITY_PACKAGES_AUTH_TOKEN_FILE'
-  - 'N8N_DYNAMIC_CREDENTIALS_ENDPOINT_AUTH_TOKEN_FILE'
-  - 'N8N_INSTANCE_REPORTING_AUTH_TOKEN_FILE'
-  - 'N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE'

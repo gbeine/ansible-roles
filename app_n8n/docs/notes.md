@@ -6,7 +6,10 @@ n8n runs as the user `node` (uid 1000) of the image and listens on port 5678 (`N
 ### Configuration
 
 All variables are set with `n8n_environment`, which is merged over the defaults of the role
-(`TZ`, `GENERIC_TIMEZONE` and `N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true`).
+(`GENERIC_TIMEZONE` and `N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true`).
+`GENERIC_TIMEZONE` is the time zone of the workflows, n8n uses America/New_York without it.
+The time zone of the container is `n8n_timezone`, n8n does not read `TZ` and the role sets no default for it.
+n8n has no configuration file anymore, `N8N_CONFIG_FILES` is deprecated and ignored.
 Booleans may be written as YAML booleans, the role passes them as `true` and `false`.
 
 ```yaml
@@ -73,16 +76,24 @@ setting it as secret keeps it outside the data. The allowed targets are listed i
 The role only allows the environment variables in `app_n8n__environment_allowed` and the secrets in `app_n8n__secret_files`,
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo, a deprecated variable or a variable that has to be passed as secret.
-The variables are generated from all `@Env` of the packages of n8n 2.47.5 without the secrets, plus `TZ` of the image and the file variables of the secrets.
+The variables are generated from all `@Env` of the packages of n8n 2.48.8 without the secrets, plus `TZ` and the file variables of the secrets.
 The booleans (`app_n8n__environment_booleans`) are the fields of the type boolean. New versions of n8n may add variables, the lists are generated again.
 The check uses the environment and the secrets of the container after merging `n8n_container`,
 so variables set with `n8n_container.environment` are checked as well.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `n8n_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `n8n_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `n8n_container.volumes` replaces `/home/node/.n8n`, `n8n_container.environment` replaces the environment including `n8n_environment`.
 The role waits until `/healthz` of n8n answers, n8n migrates the database and applies the owner on every start, it shows the log of the service otherwise.
+
+```yaml
+n8n_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+```
 
 ### Validation
 
@@ -93,13 +104,19 @@ The role checks before any change:
 - neither a secret nor its file variable nor a variable of the owner is set in `n8n_environment`
 - the booleans of n8n are `true` or `false`, values have no line breaks
 - `n8n_owner` has only known keys, a valid email and a password following the rules of n8n
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
 If `n8n_container` is no dictionary, merging it with the default fails before anything changes.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start and the wait for n8n do not run in check mode.
 
 ### Restart and updates
 
 n8n is restarted if it was running and a secret, the hash of the password of the owner or the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role shows the error and the journal of the service.
 Updates of the image are done by `container_update` with `n8n_autoupdate_enabled: true` and `n8n_autoupdate_schedule`,
 without `n8n_autoupdate_schedule` the schedule of `container_update` is used.
 
@@ -123,7 +140,8 @@ The single variables are replaced by `n8n_environment` and `n8n_secrets`:
 - The former default of `n8n_autoupdate_schedule` (`*-*-* 04:00:00`) is removed, the schedule of `container_update` is used.
 - `n8n_container` was not merged, it is merged over the default now. `n8n_labels` is new.
 - If `N8N_ENCRYPTION_KEY` is set for an existing installation, it has to be the key of `<n8n_home>/data/config`, otherwise the credentials cannot be read.
-- The volumes `/etc/localtime` and `/etc/timezone` are removed, the timezone is set by podman and `TZ`.
+- The volumes `/etc/localtime` and `/etc/timezone` are removed, the timezone is set by podman.
+- The role sets no default for `TZ` anymore, the time zone of the container is `n8n_timezone`, if needed `TZ` is set in `n8n_environment`.
 - The service is not stopped on every run anymore, `podman___update_mode` is removed.
 - The tag `app_n8n` stays, the tag `app` is added.
 
@@ -138,12 +156,15 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-n8n` | IPv6, labels, PostgreSQL with the secret `DB_POSTGRESDB_PASSWORD`, the secret `N8N_ENCRYPTION_KEY` and the owner |
 
 `prepare` creates the podman network, pulls the image and starts PostgreSQL on `molecule-n8n`.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `n8n_container` not a dictionary, a secret without `target`, the database password in the environment,
 PostgreSQL without the database password, an invalid `DB_TYPE`, a variable of the owner in the environment, an invalid boolean, a line break in a value,
 an owner without email, a weak password of the owner, an unknown environment variable and an unknown secret
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes the password of the owner on `molecule-n8n`, the secret of the hash changes and n8n has to restart.
-`verify` checks the quadlet unit with the secrets as files and without passwords, the service, the addresses and the environment of the container,
+then it changes the password of the owner on `molecule-n8n`, the secret of the hash changes and n8n has to restart,
+`molecule-n8n-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets as files and without passwords, the service without automatic restarts,
+the addresses, the time zone and the environment of the container,
 `/healthz`, the setup of the owner in `/rest/settings`, the login of the owner with the changed password and the refused former password
 and the tables of n8n in PostgreSQL.
 
