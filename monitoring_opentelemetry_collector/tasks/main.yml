@@ -6,8 +6,11 @@
     monitoring_opentelemetry_collector__other_distributions: >-
       {{ monitoring_opentelemetry_collector__distributions | reject('eq', monitoring_opentelemetry_collector__distribution) | list }}
     monitoring_opentelemetry_collector__config_file: "/etc/{{ monitoring_opentelemetry_collector__distribution }}/config.yaml"
-    # The package restarts the collector on its installation, the configuration is written afterwards
-    monitoring_opentelemetry_collector__restart_needed: "{{ monitoring_opentelemetry_collector__config_result is changed }}"
+    # The package restarts the collector on its installation, the configuration and the secrets are written afterwards
+    monitoring_opentelemetry_collector__restart_needed: >-
+      {{ monitoring_opentelemetry_collector__config_result is changed
+         or monitoring_opentelemetry_collector__secrets_result is changed
+         or monitoring_opentelemetry_collector__secrets_removed is changed }}
     monitoring_opentelemetry_collector__installed_version: >-
       {{ (ansible_facts['packages'][monitoring_opentelemetry_collector__distribution] | default([{}]) | first).version | default('') }}
     monitoring_opentelemetry_collector__package: >-
@@ -18,7 +21,36 @@
          ~ '/' ~ monitoring_opentelemetry_collector__package }}
   block:
 
+    # A failing template in the variables (e.g. an unknown filter or otelcol_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__config_rendered | to_json | length > 0
+        quiet: true
+
     - name: 'Validate the variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_opentelemetry_collector__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_opentelemetry_collector__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_opentelemetry_collector__distribution is not string
+                 or monitoring_opentelemetry_collector__distribution not in monitoring_opentelemetry_collector__distributions -%}
+          {%-   set _ = errors.append('`otelcol_distribution` has to be one of ' ~ (monitoring_opentelemetry_collector__distributions | join(', '))
+                                    ~ ': ' ~ monitoring_opentelemetry_collector__distribution ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_opentelemetry_collector__version is not string
+                 or monitoring_opentelemetry_collector__version is not match('^(latest|v?[0-9]+[.][0-9]+[.][0-9]+)$') -%}
+          {%-   set _ = errors.append("`otelcol_version` has to be 'latest' or a release like 0.165.0: " ~ monitoring_opentelemetry_collector__version ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the secrets'
       ansible.builtin.assert:
         that:
           - monitoring_opentelemetry_collector__invalid | length == 0
@@ -27,16 +59,109 @@
         quiet: true
       vars:
         monitoring_opentelemetry_collector__invalid: >-
-          {{ [ ('otelcol_distribution has to be one of ' ~ monitoring_opentelemetry_collector__distributions | join(', ')
-                ~ ': ' ~ monitoring_opentelemetry_collector__distribution)
-                 if monitoring_opentelemetry_collector__distribution is not string
-                    or monitoring_opentelemetry_collector__distribution not in monitoring_opentelemetry_collector__distributions else '',
-               ("otelcol_version has to be 'latest' or a release like 0.164.0: " ~ monitoring_opentelemetry_collector__version)
-                 if monitoring_opentelemetry_collector__version is not string
-                    or monitoring_opentelemetry_collector__version is not match('^(latest|v?[0-9]+[.][0-9]+[.][0-9]+)$') else '',
-               'otelcol_config has to be a mapping that is not empty'
-                 if monitoring_opentelemetry_collector__config is not mapping or monitoring_opentelemetry_collector__config | length == 0 else '' ]
-             | select | list }}
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_opentelemetry_collector__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`otelcol_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`otelcol_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `otelcol_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The collector checks the configuration with validate before config.yaml is replaced
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_opentelemetry_collector__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_opentelemetry_collector__unknown: >-
+          {{ monitoring_opentelemetry_collector__config.keys() | map('string') | reject('in', monitoring_opentelemetry_collector__config_allowed) | list }}
+        # Fields carrying secrets with a value that is no reference of the environment, null and an empty string are allowed
+        monitoring_opentelemetry_collector__plain_secrets: >-
+          {{ monitoring_opentelemetry_collector__config | to_json
+             | regex_findall('"(' ~ (monitoring_opentelemetry_collector__config_secret_keys | join('|')) ~ ')"\s*:\s*(?!null)(?!"")(?!"\$\{env:)', ignorecase=true)
+             | unique | list }}
+        monitoring_opentelemetry_collector__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_opentelemetry_collector__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown keys in `otelcol_config`: ' ~ (monitoring_opentelemetry_collector__unknown | join(', '))
+                                    ~ ', allowed are ' ~ (monitoring_opentelemetry_collector__config_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_opentelemetry_collector__plain_secrets | length > 0 -%}
+          {%-   set _ = errors.append('These fields carry secrets, they are set with `otelcol_secrets`, not in `otelcol_config`: '
+                                    ~ (monitoring_opentelemetry_collector__plain_secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The role writes the references of the secrets into the dictionaries of the paths,
+    # a list or a value on the path would be replaced by the references
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_opentelemetry_collector__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_opentelemetry_collector__targets: "{{ monitoring_opentelemetry_collector__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_opentelemetry_collector__names: >-
+          {{ monitoring_opentelemetry_collector__secrets | map(attribute='name') | map('string')
+             | reject('match', monitoring_opentelemetry_collector__secret_name_pattern) | list }}
+        monitoring_opentelemetry_collector__unknown: >-
+          {{ monitoring_opentelemetry_collector__targets
+             | reject('in', monitoring_opentelemetry_collector__secrets_valid | map(attribute='path') | map('join', '.') | list) | list }}
+        monitoring_opentelemetry_collector__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(set=[], paths=[]) -%}
+          {%- for secret in monitoring_opentelemetry_collector__secrets_valid -%}
+          {%-   set node = namespace(value=monitoring_opentelemetry_collector__config, broken=false) -%}
+          {%-   for key in secret.path -%}
+          {%-     if not node.broken and node.value is not none -%}
+          {%-       if node.value is not mapping -%}
+          {%-         set node.broken = true -%}
+          {%-       else -%}
+          {%-         set node.value = node.value[key] | default(none) -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if node.broken -%}
+          {%-     set ns.paths = ns.paths + [ secret.path | join('.') ] -%}
+          {%-   elif node.value is not none -%}
+          {%-     set ns.set = ns.set + [ secret.path | join('.') ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set duplicates = monitoring_opentelemetry_collector__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%- set data = monitoring_opentelemetry_collector__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+                         + monitoring_opentelemetry_collector__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list -%}
+          {%- if monitoring_opentelemetry_collector__names | length > 0 -%}
+          {%-   set _ = errors.append('The names of `otelcol_secrets` are the names of their files and match '
+                                    ~ monitoring_opentelemetry_collector__secret_name_pattern ~ ': ' ~ (monitoring_opentelemetry_collector__names | join(', ')) ~ '.') -%}
+          {%- elif monitoring_opentelemetry_collector__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (monitoring_opentelemetry_collector__unknown | join(', '))
+                                    ~ ', the targets are paths of options of `otelcol_config` below '
+                                    ~ (monitoring_opentelemetry_collector__config_allowed | join(', ')) ~ ', e.g. exporters.otlphttp/backend.headers.authorization.') -%}
+          {%- endif -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('Every target of `otelcol_secrets` is set once: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.set | length > 0 -%}
+          {%-   set _ = errors.append('The targets of `otelcol_secrets` must not be set in `otelcol_config`: ' ~ (ns.set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.paths | length > 0 -%}
+          {%-   set _ = errors.append('The paths of these secrets lead through values of `otelcol_config` that are no dictionaries: ' ~ (ns.paths | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Read the architecture of dpkg'
       ansible.builtin.command: 'dpkg --print-architecture'
@@ -144,7 +269,45 @@
           check_mode: false
           when: monitoring_opentelemetry_collector__tempdir.path is defined
 
-    # In check mode the package of a first installation is missing, there is no directory and no binary to validate
+    # The group is created by the package, in check mode of a first installation it is missing
+    - name: 'Create the directory of the secrets'
+      ansible.builtin.file:
+        path: "{{ monitoring_opentelemetry_collector__secrets_dir }}"
+        owner: 'root'
+        group: "{{ monitoring_opentelemetry_collector__groups[monitoring_opentelemetry_collector__distribution] }}"
+        mode: '0750'
+        state: 'directory'
+
+    # The file provider of the collector reads the files as YAML, the secret is written as JSON string, so it stays a string
+    - name: 'Write the secrets'
+      no_log: true
+      ansible.builtin.copy:
+        content: "{{ item.data | to_json }}"
+        dest: "{{ monitoring_opentelemetry_collector__secrets_dir }}/{{ item.name }}"
+        owner: 'root'
+        group: "{{ monitoring_opentelemetry_collector__groups[monitoring_opentelemetry_collector__distribution] }}"
+        mode: '0640'
+      loop: "{{ monitoring_opentelemetry_collector__secrets }}"
+      register: 'monitoring_opentelemetry_collector__secrets_result'
+
+    - name: 'Find the files of the secrets'
+      ansible.builtin.find:
+        paths: "{{ monitoring_opentelemetry_collector__secrets_dir }}"
+        file_type: 'file'
+      register: 'monitoring_opentelemetry_collector__secret_files'
+      check_mode: false
+
+    - name: 'Remove the files of removed secrets'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ monitoring_opentelemetry_collector__secret_files.files | map(attribute='path')
+           | reject('in', monitoring_opentelemetry_collector__secrets | map(attribute='name')
+                          | map('regex_replace', '^', monitoring_opentelemetry_collector__secrets_dir ~ '/') | list) | list }}
+      register: 'monitoring_opentelemetry_collector__secrets_removed'
+
+    # validate resolves the references of the secrets, copy does not run it in check mode
     - name: 'Write the configuration'
       ansible.builtin.copy:
         content: |
@@ -152,15 +315,15 @@
           # To limit exposure to denial of service attacks, change the host in endpoints below from 0.0.0.0 to a specific network interface.
           # See https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/security-best-practices.md#safeguards-against-denial-of-service-attacks
 
-          {{ monitoring_opentelemetry_collector__config | to_nice_yaml(indent=2, sort_keys=false) }}
+          {{ monitoring_opentelemetry_collector__config_rendered | to_nice_yaml(indent=2, sort_keys=false) }}
         dest: "{{ monitoring_opentelemetry_collector__config_file }}"
         owner: 'root'
         group: "{{ monitoring_opentelemetry_collector__groups[monitoring_opentelemetry_collector__distribution] }}"
         mode: '0640'
         validate: "/usr/bin/{{ monitoring_opentelemetry_collector__distribution }} validate --config=%s"
       register: 'monitoring_opentelemetry_collector__config_result'
-      when: not ansible_check_mode or monitoring_opentelemetry_collector__installed_version | length > 0
 
+    # In check mode of a first installation the unit of the package is missing
     - name: 'Enable and start the collector'
       ansible.builtin.systemd_service:
         name: "{{ monitoring_opentelemetry_collector__distribution }}.service"
@@ -172,4 +335,6 @@
       ansible.builtin.systemd_service:
         name: "{{ monitoring_opentelemetry_collector__distribution }}.service"
         state: 'restarted'
-      when: monitoring_opentelemetry_collector__restart_needed | bool
+      when:
+        - monitoring_opentelemetry_collector__restart_needed | bool
+        - not ansible_check_mode or monitoring_opentelemetry_collector__installed_version | length > 0

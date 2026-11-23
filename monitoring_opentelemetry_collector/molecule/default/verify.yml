@@ -11,9 +11,10 @@
   vars:
     monitoring_opentelemetry_collector__test_case: "{{ monitoring_opentelemetry_collector__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     monitoring_opentelemetry_collector__test_expect: "{{ monitoring_opentelemetry_collector__test_case.expect }}"
+    # The configuration is merged over the default, the role adds the references of the secrets
     monitoring_opentelemetry_collector__test_config: >-
-      {{ monitoring_opentelemetry_collector__config_default if monitoring_opentelemetry_collector__test_expect.config == 'default'
-         else monitoring_opentelemetry_collector__test_expect.config }}
+      {{ monitoring_opentelemetry_collector__config_default | combine(monitoring_opentelemetry_collector__test_expect.config)
+         | combine(monitoring_opentelemetry_collector__test_expect.references, recursive=true) }}
 
   tasks:
 
@@ -102,6 +103,65 @@
           - monitoring_opentelemetry_collector__test_config_stat.stat.gr_name == monitoring_opentelemetry_collector__test_expect.group
           - monitoring_opentelemetry_collector__test_config_stat.stat.mode == '0640'
         fail_msg: "{{ monitoring_opentelemetry_collector__test_config_file.content | b64decode }}"
+
+    - name: 'Read the files of the secrets'
+      ansible.builtin.slurp:
+        src: "/etc/{{ monitoring_opentelemetry_collector__test_expect.package }}/secrets/{{ item.key }}"
+      loop: "{{ monitoring_opentelemetry_collector__test_expect.secrets | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'monitoring_opentelemetry_collector__test_secret_files'
+
+    - name: 'Read the attributes of the files of the secrets'
+      ansible.builtin.stat:
+        path: "/etc/{{ monitoring_opentelemetry_collector__test_expect.package }}/secrets/{{ item.key }}"
+      loop: "{{ monitoring_opentelemetry_collector__test_expect.secrets | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'monitoring_opentelemetry_collector__test_secret_stat'
+
+    # The secrets are JSON strings, the file provider of the collector reads them as YAML
+    - name: 'Assert the files of the secrets and that config.yaml does not contain them'
+      ansible.builtin.assert:
+        that:
+          - >-
+            monitoring_opentelemetry_collector__test_secret_files.results | map(attribute='content') | map('b64decode') | list
+            == monitoring_opentelemetry_collector__test_expect.secrets.values() | list
+          - monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.pw_name') | reject('eq', 'root') | list | length == 0
+          - >-
+            monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.gr_name')
+            | reject('eq', monitoring_opentelemetry_collector__test_expect.group) | list | length == 0
+          - monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.mode') | reject('eq', '0640') | list | length == 0
+          - >-
+            monitoring_opentelemetry_collector__test_expect.secrets.values() | map('from_json')
+            | select('in', monitoring_opentelemetry_collector__test_config_file.content | b64decode) | list | length == 0
+        fail_msg: >-
+          content {{ monitoring_opentelemetry_collector__test_secret_files.results | map(attribute='content') | map('b64decode') | list | to_json }},
+          owner {{ monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.pw_name') | list | to_json }},
+          group {{ monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.gr_name') | list | to_json }},
+          mode {{ monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.mode') | list | to_json }}
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the collector'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', "{{ monitoring_opentelemetry_collector__test_expect.package }}" ]
+      register: 'monitoring_opentelemetry_collector__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the collector'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_opentelemetry_collector__test_expect.package }}", '-n', '80', '--no-pager' ]
+      register: 'monitoring_opentelemetry_collector__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert that the collector did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_restarts.stdout | int == 0
+        fail_msg: >-
+          {{ [ 'automatic restarts: ' ~ monitoring_opentelemetry_collector__test_restarts.stdout ]
+             + monitoring_opentelemetry_collector__test_journal.stdout_lines | default([]) }}
 
     - name: 'Wait for the OTLP port'
       ansible.builtin.wait_for:

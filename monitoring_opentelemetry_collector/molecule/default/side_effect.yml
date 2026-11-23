@@ -1,6 +1,6 @@
 ---
 - name: 'Side effect'
-  hosts: 'molecule-otelcol-contrib'
+  hosts: 'all'
   become: true
 
   vars_files:
@@ -8,57 +8,132 @@
 
   vars:
     monitoring_opentelemetry_collector__test_case: "{{ monitoring_opentelemetry_collector__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_opentelemetry_collector__test_package: "{{ monitoring_opentelemetry_collector__test_case.expect.package }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
-    - name: 'Read the configuration before the update'
-      ansible.builtin.stat:
-        path: '/etc/otelcol-contrib/config.yaml'
-        get_checksum: true
-      register: 'monitoring_opentelemetry_collector__test_config_before'
-
-    - name: 'Set the role variables with the newer release'
+    - name: 'Set the role variables of the test case'
       ansible.builtin.set_fact:
-        otelcol_distribution: "{{ monitoring_opentelemetry_collector__test_case.role_vars.otelcol_distribution }}"
-        otelcol_version: "{{ monitoring_opentelemetry_collector__test_case.side_effect.otelcol_version }}"
-        otelcol_config: "{{ monitoring_opentelemetry_collector__test_case.role_vars.otelcol_config }}"
-
-    - name: 'Run monitoring_opentelemetry_collector with the newer release'
-      ansible.builtin.include_role:
-        name: 'monitoring_opentelemetry_collector'
-
-    - name: 'Read the configuration after the update'
-      ansible.builtin.stat:
-        path: '/etc/otelcol-contrib/config.yaml'
-        get_checksum: true
-      register: 'monitoring_opentelemetry_collector__test_config_updated'
-
-    - name: 'Assert the update kept the configuration'
-      ansible.builtin.assert:
-        that:
-          - monitoring_opentelemetry_collector__test_config_updated.stat.checksum == monitoring_opentelemetry_collector__test_config_before.stat.checksum
-        fail_msg: 'The update of the package changed the configuration'
-
-    - name: 'Run monitoring_opentelemetry_collector with invalid variables (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      loop:
-        - message: 'an unknown distribution'
-          search: '^otelcol_distribution has to be one of otelcol, otelcol-contrib: otelcol-otlp$'
-          role_vars:
-            otelcol_distribution: 'otelcol-otlp'
-        - message: 'a version without patch level'
-          search: "^otelcol_version has to be 'latest' or a release like 0[.]164[.]0: 0[.]164$"
-          role_vars:
-            otelcol_version: '0.164'
-        - message: 'a configuration that is no mapping'
-          search: '^otelcol_config has to be a mapping that is not empty$'
-          role_vars:
-            otelcol_config: [ 'receivers' ]
-        - message: 'a configuration with an unknown receiver'
-          search: 'failed to validate'
-          role_vars:
-            otelcol_config: >-
-              {{ monitoring_opentelemetry_collector__test_contrib_config | combine({'receivers': {'molecule_unknown': {}}}, recursive=true) }}
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_opentelemetry_collector__test_case.role_vars | dict2items }}"
       loop_control:
-        loop_var: 'monitoring_opentelemetry_collector__test_invalid'
-        label: "{{ monitoring_opentelemetry_collector__test_invalid.message }}"
+        label: "{{ item.key }}"
+
+    - name: 'Update otelcol-contrib and run the role with invalid variables'
+      when: monitoring_opentelemetry_collector__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the configuration before the update'
+          ansible.builtin.stat:
+            path: '/etc/otelcol-contrib/config.yaml'
+            get_checksum: true
+          register: 'monitoring_opentelemetry_collector__test_config_before'
+
+        - name: 'Set the newer release'
+          ansible.builtin.set_fact:
+            otelcol_version: "{{ monitoring_opentelemetry_collector__test_case.side_effect.otelcol_version }}"
+
+        - name: 'Run monitoring_opentelemetry_collector with the newer release'
+          ansible.builtin.include_role:
+            name: 'monitoring_opentelemetry_collector'
+
+        - name: 'Read the configuration after the update'
+          ansible.builtin.stat:
+            path: '/etc/otelcol-contrib/config.yaml'
+            get_checksum: true
+          register: 'monitoring_opentelemetry_collector__test_config_updated'
+
+        - name: 'Assert the update kept the configuration'
+          ansible.builtin.assert:
+            that:
+              - monitoring_opentelemetry_collector__test_config_updated.stat.checksum == monitoring_opentelemetry_collector__test_config_before.stat.checksum
+            fail_msg: 'The update of the package changed the configuration'
+
+        - name: 'Run monitoring_opentelemetry_collector with invalid variables (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          loop:
+            - message: 'an unknown distribution'
+              search: '^`otelcol_distribution` has to be one of otelcol, otelcol-contrib: otelcol-otlp\.$'
+              role_vars:
+                otelcol_distribution: 'otelcol-otlp'
+            - message: 'a version without patch level'
+              search: "^`otelcol_version` has to be 'latest' or a release like 0[.]165[.]0: 0[.]165[.]$"
+              role_vars:
+                otelcol_version: '0.165'
+            - message: 'a configuration that is no dictionary'
+              search: 'failed to combine variables, expected dicts'
+              role_vars:
+                otelcol_config: [ 'receivers' ]
+            - message: 'an unknown key of the configuration'
+              search: '^Unknown keys in `otelcol_config`: pipelines, allowed are '
+              role_vars:
+                otelcol_config: "{{ monitoring_opentelemetry_collector__test_contrib_config | combine({ 'pipelines': {} }) }}"
+            - message: 'a secret in the configuration'
+              search: '^These fields carry secrets, they are set with `otelcol_secrets`, not in `otelcol_config`: Authorization\.$'
+              role_vars:
+                otelcol_config: >-
+                  {{ monitoring_opentelemetry_collector__test_contrib_config
+                     | combine({ 'exporters': { 'otlphttp/plain': { 'endpoint': 'http://127.0.0.1:4320', 'headers': { 'Authorization': 'Bearer plain' } } } }, recursive=true) }}
+            - message: 'a secret without target'
+              search: '^`otelcol_secrets` entries need name, data and target$'
+              role_vars:
+                otelcol_secrets: [ { 'name': 'otelcol_other', 'data': 'x' } ]
+            - message: 'an unknown secret'
+              search: '^Unknown secrets: pipelines\.token, the targets are paths of options of `otelcol_config` below '
+              role_vars:
+                otelcol_secrets: [ { 'name': 'otelcol_other', 'data': 'x', 'target': 'pipelines.token' } ]
+            - message: 'a target set in the configuration'
+              search: '^The targets of `otelcol_secrets` must not be set in `otelcol_config`: exporters\.otlphttp/molecule\.headers\.X-Molecule\.$'
+              role_vars:
+                otelcol_secrets: [ { 'name': 'otelcol_other', 'data': 'x', 'target': 'exporters.otlphttp/molecule.headers.X-Molecule' } ]
+            - message: 'a secret in a list'
+              search: '^The paths of these secrets lead through values of `otelcol_config` that are no dictionaries: service\.pipelines\.traces\.receivers\.token\.$'
+              role_vars:
+                otelcol_secrets: [ { 'name': 'otelcol_other', 'data': 'x', 'target': 'service.pipelines.traces.receivers.token' } ]
+            - message: 'a configuration with an unknown receiver'
+              search: 'failed to validate'
+              role_vars:
+                otelcol_config: >-
+                  {{ monitoring_opentelemetry_collector__test_contrib_config | combine({ 'receivers': { 'molecule_unknown': {} } }, recursive=true) }}
+          loop_control:
+            loop_var: 'monitoring_opentelemetry_collector__test_invalid'
+            label: "{{ monitoring_opentelemetry_collector__test_invalid.message }}"
+
+    - name: 'Run the role again without a change'
+      when: monitoring_opentelemetry_collector__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', "{{ monitoring_opentelemetry_collector__test_package }}" ]
+          register: 'monitoring_opentelemetry_collector__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_opentelemetry_collector without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_opentelemetry_collector'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', "{{ monitoring_opentelemetry_collector__test_package }}" ]
+          register: 'monitoring_opentelemetry_collector__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_opentelemetry_collector__config_result is not changed
+              - monitoring_opentelemetry_collector__secrets_result is not changed
+              - monitoring_opentelemetry_collector__secrets_removed is not changed
+              - monitoring_opentelemetry_collector__test_unchanged_after.stdout == monitoring_opentelemetry_collector__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ monitoring_opentelemetry_collector__config_result is changed }},
+              secrets changed: {{ monitoring_opentelemetry_collector__secrets_result is changed }},
+              secrets removed: {{ monitoring_opentelemetry_collector__secrets_removed is changed }},
+              start before {{ monitoring_opentelemetry_collector__test_unchanged_before.stdout }},
+              after {{ monitoring_opentelemetry_collector__test_unchanged_after.stdout }}

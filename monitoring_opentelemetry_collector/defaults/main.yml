@@ -5,12 +5,16 @@
 # https://ansible-roles.org/roles/monitoring-opentelemetry-collector
 #
 
-# 'latest' or a release like '0.164.0' or 'v0.164.0'
+# 'latest' or a release like '0.165.0' or 'v0.165.0'
 monitoring_opentelemetry_collector__version: "{{ otelcol_version | default('latest') }}"
 # 'otelcol' or 'otelcol-contrib'
 monitoring_opentelemetry_collector__distribution: "{{ otelcol_distribution | default('otelcol') }}"
-# Replaces the configuration completely
-monitoring_opentelemetry_collector__config: "{{ otelcol_config | default(monitoring_opentelemetry_collector__config_default) }}"
+# The configuration of the collector, every key replaces the key of the default, null removes a key
+monitoring_opentelemetry_collector__config: "{{ monitoring_opentelemetry_collector__config_default | combine(otelcol_config | default({})) }}"
+
+# Secrets with name, data and target, the target is the path of the option in otelcol_config,
+# e.g. exporters.otlphttp/backend.headers.authorization, the configuration reads the file of the secret
+monitoring_opentelemetry_collector__secrets: "{{ otelcol_secrets | default([]) }}"
 
 #
 # Defaults - do not change
@@ -37,7 +41,7 @@ monitoring_opentelemetry_collector__architectures:
   ppc64el: 'ppc64le'
   s390x: 's390x'
 
-# /etc/otelcol/config.yaml of the package otelcol 0.164.0, the same in otelcol-contrib
+# /etc/otelcol/config.yaml of the package otelcol 0.165.0, the same in otelcol-contrib
 monitoring_opentelemetry_collector__config_default:
   extensions:
     health_check:
@@ -105,3 +109,48 @@ monitoring_opentelemetry_collector__config_default:
         processors: [ 'batch' ]
         exporters: [ 'debug' ]
     extensions: [ 'health_check', 'pprof', 'zpages' ]
+
+# Generated from Config in otelcol/config.go of the OpenTelemetry Collector v0.165.0, the collector checks the keys below
+monitoring_opentelemetry_collector__config_allowed: [ 'receivers', 'exporters', 'processors', 'connectors', 'extensions', 'service' ]
+
+# Fields carrying secrets, they are set with otelcol_secrets, a reference of the environment (${env:NAME}) is allowed
+monitoring_opentelemetry_collector__config_secret_keys: [ 'password', 'client_secret', 'bearer_token', 'api_key', 'token', 'authorization' ]
+
+# The names of the secrets are the names of their files
+monitoring_opentelemetry_collector__secret_name_pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+
+# The keys of the paths of the targets, component IDs contain / (e.g. otlphttp/backend)
+monitoring_opentelemetry_collector__secret_target_pattern: '^[A-Za-z0-9_/-]+([.][A-Za-z0-9_/-]+)+$'
+
+monitoring_opentelemetry_collector__secrets_dir: "/etc/{{ monitoring_opentelemetry_collector__distribution }}/secrets"
+
+# The valid secrets with their path, broken entries are left out, the validation reports them
+monitoring_opentelemetry_collector__secrets_valid: >-
+  {%- set result = [] -%}
+  {%- set secrets = monitoring_opentelemetry_collector__secrets -%}
+  {%- if secrets is sequence and secrets is not string and secrets is not mapping -%}
+  {%-   for secret in secrets if secret is mapping and secret.name is defined and secret.target is defined and secret.target is string
+                                and secret.name | string is match(monitoring_opentelemetry_collector__secret_name_pattern)
+                                and secret.target is match(monitoring_opentelemetry_collector__secret_target_pattern)
+                                and (secret.target | split('.') | first) in monitoring_opentelemetry_collector__config_allowed -%}
+  {%-     set _ = result.append({ 'name': secret.name | string, 'path': secret.target | split('.') }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ result }}
+
+# The references of the secrets as nested dictionaries, e.g. { 'exporters': { 'otlphttp': { 'headers': { 'authorization': '${file:…}' } } } }
+monitoring_opentelemetry_collector__config_secrets: >-
+  {%- set ns = namespace(result={}) -%}
+  {%- for secret in monitoring_opentelemetry_collector__secrets_valid -%}
+  {%-   set node = namespace(value='${file:' ~ monitoring_opentelemetry_collector__secrets_dir ~ '/' ~ secret.name ~ '}') -%}
+  {%-   for key in secret.path | reverse -%}
+  {%-     set node.value = { key: node.value } -%}
+  {%-   endfor -%}
+  {%-   set ns.result = ns.result | combine(node.value, recursive=true) -%}
+  {%- endfor -%}
+  {{ ns.result }}
+
+# The content of config.yaml: the configuration without the removed keys and with the references of the secrets
+monitoring_opentelemetry_collector__config_rendered: >-
+  {{ monitoring_opentelemetry_collector__config | dict2items | rejectattr('value', 'none') | items2dict
+     | combine(monitoring_opentelemetry_collector__config_secrets, recursive=true) }}

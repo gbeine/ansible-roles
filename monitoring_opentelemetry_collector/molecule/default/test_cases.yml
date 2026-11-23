@@ -1,8 +1,9 @@
 ---
 # Release of the collector installed by prepare and the releases of the test case of otelcol-contrib
-monitoring_opentelemetry_collector__test_prepare_release: '0.164.0'
+monitoring_opentelemetry_collector__test_prepare_release: '0.165.0'
 
-# Own configuration of otelcol-contrib, OTLP on localhost only
+# Own configuration of otelcol-contrib, OTLP on localhost only, merged over the default of the role,
+# the exporter otlphttp/molecule is not used, it carries the secret
 monitoring_opentelemetry_collector__test_contrib_config:
   receivers:
     otlp:
@@ -14,6 +15,10 @@ monitoring_opentelemetry_collector__test_contrib_config:
   exporters:
     debug:
       verbosity: 'basic'
+    otlphttp/molecule:
+      endpoint: 'http://127.0.0.1:4319'
+      headers:
+        X-Molecule: 'molecule'
   service:
     pipelines:
       metrics:
@@ -36,7 +41,9 @@ monitoring_opentelemetry_collector__test_cases:
       # latest is determined like by the role
       version: 'latest'
       absent: [ 'otelcol-contrib' ]
-      config: 'default'
+      config: {}
+      secrets: {}
+      references: {}
       group: 'otel'
       address: '0.0.0.0'
 
@@ -45,15 +52,27 @@ monitoring_opentelemetry_collector__test_cases:
     prepare: true
     role_vars:
       otelcol_distribution: 'otelcol-contrib'
-      otelcol_version: 'v0.163.2'
+      otelcol_version: 'v0.164.0'
       otelcol_config: "{{ monitoring_opentelemetry_collector__test_contrib_config }}"
+      otelcol_secrets:
+        - name: 'otelcol_molecule_authorization'
+          data: 'Bearer molecule-token'
+          target: 'exporters.otlphttp/molecule.headers.authorization'
     side_effect:
-      otelcol_version: '0.164.0'
+      otelcol_version: '0.165.0'
     expect:
       package: 'otelcol-contrib'
       # After the update in side_effect
-      version: '0.164.0'
+      version: '0.165.0'
       absent: [ 'otelcol' ]
       config: "{{ monitoring_opentelemetry_collector__test_contrib_config }}"
+      # The files of the secrets with their content and the references the role writes into config.yaml
+      secrets:
+        otelcol_molecule_authorization: '"Bearer molecule-token"'
+      references:
+        exporters:
+          otlphttp/molecule:
+            headers:
+              authorization: '${file:/etc/otelcol-contrib/secrets/otelcol_molecule_authorization}'
       group: 'otelcol-contrib'
       address: '127.0.0.1'
