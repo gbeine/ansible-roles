@@ -44,10 +44,11 @@ karakeep_admin:
 Karakeep reads its settings only from the environment with the schema of `packages/shared/config.ts` and has no file variables,
 so the secrets are passed in the environment of the container with `type=env,target=<target>`, they are not part of the quadlet unit.
 
-`NEXTAUTH_SECRET` is mandatory, it signs the sessions. `MEILI_MASTER_KEY` is needed together with `MEILI_ADDR`.
+`NEXTAUTH_SECRET` is mandatory, it signs the sessions. `MEILI_MASTER_KEY` is needed together with `MEILI_ADDR`,
+`SANDBOX_REMOTE_TOKEN` with the remote sandbox (`SANDBOX_REMOTE_SERVER_ENABLED: true` or `SANDBOX_REMOTE_URL`).
 The allowed targets are `NEXTAUTH_SECRET`, `MEILI_MASTER_KEY`, `MEILI_VECTOR_MASTER_KEY`, `OPENAI_API_KEY`, `EMBEDDING_OPENAI_API_KEY`,
 `SMTP_PASSWORD`, `OAUTH_CLIENT_SECRET`, `ASSET_STORE_S3_SECRET_ACCESS_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-`TURNSTILE_SECRET_KEY` and `PROMETHEUS_AUTH_TOKEN`, none of them may be set in `karakeep_environment`.
+`TURNSTILE_SECRET_KEY`, `PROMETHEUS_AUTH_TOKEN` and `SANDBOX_REMOTE_TOKEN`, none of them may be set in `karakeep_environment`.
 
 ```yaml
 karakeep_secrets:
@@ -65,10 +66,12 @@ The role only allows the environment variables in `app_karakeep__environment_all
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
 The check uses the environment and the secrets of the container after merging `karakeep_container`.
-The list is generated from the schema of `packages/shared/config.ts` and the variables of `packages/plugins` of Karakeep v0.34.1 without the secrets,
+The list is generated from the schema of `packages/shared/config.ts`, the variables of `packages/plugins` and `KARAKEEP_DISABLE_PRIVILEGE_DROP`
+of the s6 scripts of Karakeep v0.35.0 without the secrets,
 new versions of the image may add variables.
 Not allowed are `DATA_DIR`, set by the role, `SERVER_VERSION` and `CHANGELOG_VERSION`, set by the image,
 and `DEMO_MODE`, `DEMO_MODE_EMAIL` and `DEMO_MODE_PASSWORD`, the demo mode makes the instance read only and publishes the credentials of a user.
+`REVENUECAT_*` are not allowed either, they are the in-app purchases of the hosted service of Karakeep.
 
 ### Container
 
@@ -86,6 +89,8 @@ karakeep_container:
 
 For a reverse proxy, e.g. Traefik, the labels are set with `karakeep_labels`.
 The image runs Karakeep as root, the directories belong to root with the mode `0750`.
+Since v0.35.0 the image drops all Linux capabilities of the processes except `CHOWN`, `DAC_OVERRIDE` and `FOWNER`
+and sets `no_new_privs`, `KARAKEEP_DISABLE_PRIVILEGE_DROP: true` disables it.
 
 ### Validation
 
@@ -95,7 +100,8 @@ The role checks before any change:
 - `karakeep_secrets` is a list of entries with `name`, `data` and `target` and unique names
 - `NEXTAUTH_URL` and the secret `NEXTAUTH_SECRET` are set, `MEILI_ADDR` and the secret `MEILI_MASTER_KEY` are only set together
 - no secret and not `DATA_DIR` is set in `karakeep_environment`, secrets and values contain no line breaks, booleans are `true` or `false`
-- `karakeep_admin` has a name of up to 128 characters, a valid email and a password of 8 to 128 characters, the limits of Karakeep
+- `karakeep_admin` has a name that is not empty without `<`, `>` and line breaks, a valid email and a password of 8 to 100 characters, the limits of Karakeep
+- the remote sandbox has the secret `SANDBOX_REMOTE_TOKEN`
 - only allowed environment variables without line breaks and allowed secrets are set in the container
 
 If `karakeep_container` or `karakeep_environment` is no dictionary, merging it fails before anything changes,
@@ -120,6 +126,10 @@ without `karakeep_autoupdate_schedule` the schedule of `container_update` is use
 The role sets no default for `TZ` anymore, the time zone of the container is `karakeep_timezone`.
 If needed, `TZ` is set in `karakeep_environment`.
 
+The allowed variables follow Karakeep v0.35.0. The password of `karakeep_admin` has up to 100 characters,
+the limit of the sign-up and of the change of the password of Karakeep, formerly the role accepted up to 128 characters.
+The name of `karakeep_admin` has no limit of 128 characters anymore, but must not contain `<` or `>`, like in Karakeep.
+
 ### Tests
 
 The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs on a macOS controller, the base VM has to be Debian 13.
@@ -128,13 +138,14 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-karakeep-default` | Only the mandatory variables, without Meilisearch and Chrome |
-| `molecule-karakeep` | IPv6, labels, Meilisearch, Chrome, `DISABLE_SIGNUPS` and `CRAWLER_STORE_SCREENSHOT` |
+| `molecule-karakeep` | IPv6, labels, Meilisearch, Chrome, `DISABLE_SIGNUPS`, `CRAWLER_STORE_SCREENSHOT` and `TRUSTED_PROXIES` |
 
 `prepare` creates the podman network and pulls the image, on `molecule-karakeep` it deploys Meilisearch and Chrome with `app_meilisearch` and `app_karakeep_chrome`.
 `check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `karakeep_container` and `karakeep_environment` not a dictionary, a secret without `target`, without `NEXTAUTH_SECRET`, without `NEXTAUTH_URL`,
 `MEILI_ADDR` without the master key, a secret and `DATA_DIR` in the environment, the demo mode, an unknown secret, an invalid boolean, a line break in a value,
-an administrator without password and a password of 7 characters
+an administrator without password, a password of 7 and of 101 characters, markup in the name of the administrator,
+the remote sandbox without the token and a variable of RevenueCat
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `CRAWLER_STORE_SCREENSHOT`, the name and the password of the administrator on `molecule-karakeep`,
 the quadlet unit changes, Karakeep has to restart and the administrator is updated, not created,

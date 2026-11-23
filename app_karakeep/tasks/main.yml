@@ -36,7 +36,8 @@
           {%- endif -%}
           {{ errors }}
 
-    # NEXTAUTH_URL and NEXTAUTH_SECRET are mandatory, Meilisearch needs its address and its master key
+    # NEXTAUTH_URL and NEXTAUTH_SECRET are mandatory, Meilisearch needs its address and its master key,
+    # the remote sandbox needs its token
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
@@ -50,6 +51,9 @@
         app_karakeep__environment_missing: "{{ app_karakeep__environment_required | reject('in', app_karakeep__set) | list }}"
         app_karakeep__secrets_missing: "{{ app_karakeep__secrets_required | reject('in', app_karakeep__targets) | list }}"
         app_karakeep__meilisearch_set: "{{ app_karakeep__meilisearch_pair | select('in', app_karakeep__set + app_karakeep__targets) | list }}"
+        app_karakeep__sandbox_enabled: >-
+          {{ (app_karakeep__environment.SANDBOX_REMOTE_SERVER_ENABLED | default('false') | string | lower) == 'true'
+             or 'SANDBOX_REMOTE_URL' in app_karakeep__set }}
         app_karakeep__secrets_in_environment: >-
           {{ (app_karakeep__targets + app_karakeep__secret_variables) | select('in', app_karakeep__environment.keys() | list) | unique | list }}
         app_karakeep__role_in_environment: >-
@@ -66,6 +70,9 @@
           {%- endif -%}
           {%- if app_karakeep__meilisearch_set | length == 1 -%}
           {%-   set _ = errors.append('Meilisearch needs MEILI_ADDR in karakeep_environment and the secret MEILI_MASTER_KEY, only ' ~ (app_karakeep__meilisearch_set | join(', ')) ~ ' is set.') -%}
+          {%- endif -%}
+          {%- if app_karakeep__sandbox_enabled | bool and app_karakeep__sandbox_token not in app_karakeep__targets -%}
+          {%-   set _ = errors.append('The remote sandbox (SANDBOX_REMOTE_SERVER_ENABLED or SANDBOX_REMOTE_URL) needs the secret SANDBOX_REMOTE_TOKEN.') -%}
           {%- endif -%}
           {%- if app_karakeep__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets must not be set in karakeep_environment: ' ~ (app_karakeep__secrets_in_environment | join(', ')) ~ '.') -%}
@@ -124,8 +131,8 @@
           {%-     set _ = errors.append('Unknown keys in karakeep_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_karakeep__admin_keys | join(', ')) ~ '.') -%}
           {%-   endif -%}
           {%-   set name = admin.name | default('') | string -%}
-          {%-   if name | length == 0 or name | length > app_karakeep__admin_name_length or (name ~ '.').splitlines() | length > 1 -%}
-          {%-     set _ = errors.append('karakeep_admin needs a name of up to ' ~ app_karakeep__admin_name_length ~ ' characters without line breaks.') -%}
+          {%-   if name is not match(app_karakeep__admin_name_pattern) -%}
+          {%-     set _ = errors.append('karakeep_admin needs a name that is not empty, without <, > and line breaks.') -%}
           {%-   endif -%}
           {%-   if (admin.email | default('') | string) is not match(app_karakeep__admin_email_pattern) -%}
           {%-     set _ = errors.append('karakeep_admin needs a valid email.') -%}
