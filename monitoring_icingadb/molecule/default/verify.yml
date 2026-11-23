@@ -1,0 +1,133 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icingadb__test_case: "{{ monitoring_icingadb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icingadb__test_expect: "{{ monitoring_icingadb__test_case.expect }}"
+    monitoring_icingadb__test_secrets: "{{ monitoring_icingadb__test_expect.secrets | join('|') }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_icingadb__test_quadlet_path }}"
+      register: 'monitoring_icingadb__test_quadlet'
+
+    # The secrets are mounted as files, the passwords are not part of the quadlet unit
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + monitoring_icingadb__test_expect.ip) in monitoring_icingadb__test_lines
+          - monitoring_icingadb__test_expect.quadlet | reject('in', monitoring_icingadb__test_lines) | list | length == 0
+          - >-
+            monitoring_icingadb__test_lines
+            | select('search', monitoring_icingadb__test_expect.quadlet_absent | map('regex_escape') | join('|')) | list | length == 0
+          - monitoring_icingadb__test_lines | select('search', monitoring_icingadb__test_secrets) | list | length == 0
+        fail_msg: "Quadlet: {{ monitoring_icingadb__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_icingadb__test_lines: "{{ (monitoring_icingadb__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the Icinga DB service'
+      ansible.builtin.command: 'systemctl is-active icingadb'
+      register: 'monitoring_icingadb__test_service'
+      changed_when: false
+      failed_when: false
+      until: monitoring_icingadb__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the Icinga DB service is active'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingadb__test_service.stdout == 'active'
+        fail_msg: "Service: {{ monitoring_icingadb__test_service.stdout }}"
+
+    - name: 'Read the time zone of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }}', 'icingadb' ]
+      register: 'monitoring_icingadb__test_timezone'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'icingadb' ]
+      register: 'monitoring_icingadb__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'icingadb', '-n', '80', '--no-pager' ]
+      register: 'monitoring_icingadb__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the time zone and that the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingadb__test_restarts.stdout | int == 0
+          - monitoring_icingadb__test_timezone.stdout == monitoring_icingadb__test_case.role_vars.icingadb_timezone
+        fail_msg: >-
+          {{ [ 'time zone ' ~ monitoring_icingadb__test_timezone.stdout, 'automatic restarts: ' ~ monitoring_icingadb__test_restarts.stdout ]
+             + monitoring_icingadb__test_journal.stdout_lines | default([]) }}
+
+    - name: 'Read the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'icingadb' ]
+      register: 'monitoring_icingadb__test_env'
+      changed_when: false
+
+    # The passwords are files, the environment contains their file variables
+    - name: 'Assert the environment of the container'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingadb__test_missing | length == 0
+          - monitoring_icingadb__test_icingadb == (monitoring_icingadb__test_expect.environment.keys() | sort)
+          - monitoring_icingadb__test_env.stdout is not search(monitoring_icingadb__test_secrets)
+          - monitoring_icingadb__test_lines | select('match', 'TZ=') | list | length == 0
+        fail_msg: >-
+          missing {{ monitoring_icingadb__test_missing }}, variables {{ monitoring_icingadb__test_icingadb }},
+          expected {{ monitoring_icingadb__test_expect.environment.keys() | sort }}
+      vars:
+        monitoring_icingadb__test_lines: "{{ monitoring_icingadb__test_env.stdout | from_json }}"
+        monitoring_icingadb__test_missing: >-
+          {{ monitoring_icingadb__test_expect.environment | dict2items | map(attribute='key')
+             | zip(monitoring_icingadb__test_expect.environment.values()) | map('join', '=') | reject('in', monitoring_icingadb__test_lines) | list }}
+        monitoring_icingadb__test_icingadb: >-
+          {{ monitoring_icingadb__test_lines | select('match', 'ICINGADB_') | map('regex_replace', '=.*$', '') | sort }}
+
+    # Icinga DB imports the schema at the first start with the password of the file of the secret
+    - name: 'Read the schema in the database'
+      ansible.builtin.command:
+        argv: "{{ monitoring_icingadb__test_case.database.query }}"
+      register: 'monitoring_icingadb__test_schema'
+      changed_when: false
+      until: monitoring_icingadb__test_schema.rc == 0 and monitoring_icingadb__test_schema.stdout | trim | int > 0
+      retries: 20
+      delay: 3
+      failed_when: false
+
+    - name: 'Assert the schema is imported'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingadb__test_schema.rc == 0
+          - monitoring_icingadb__test_schema.stdout | trim | int > 0
+        fail_msg: "Schema: {{ monitoring_icingadb__test_schema.stdout }} {{ monitoring_icingadb__test_schema.stderr }}"
+
+    # Without Icinga 2 Icinga DB waits after the login to Redis
+    - name: 'Read the log of Icinga DB'
+      ansible.builtin.command:
+        argv: [ 'podman', 'logs', 'icingadb' ]
+      register: 'monitoring_icingadb__test_log'
+      changed_when: false
+
+    - name: 'Assert Icinga DB is connected to Redis'
+      ansible.builtin.assert:
+        that:
+          - (monitoring_icingadb__test_log.stdout ~ monitoring_icingadb__test_log.stderr) is search('Waiting for Icinga 2 to write into Redis')
+        fail_msg: "Log: {{ (monitoring_icingadb__test_log.stdout ~ monitoring_icingadb__test_log.stderr)[-2000:] }}"

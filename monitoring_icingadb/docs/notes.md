@@ -57,7 +57,7 @@ Icinga DB stops if a password and its file are set, neither a target nor its fil
 
 ### Allowed variables
 
-The role only allows the variables of `monitoring_icinga_icingadb__environment_allowed` and the secrets of `monitoring_icinga_icingadb__secret_variables`,
+The role only allows the variables of `monitoring_icingadb__environment_allowed` and the secrets of `monitoring_icingadb__secret_variables`,
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a password that has to be passed as secret.
 The list is generated from the `env` tags of `internal/config/config.go` of Icinga DB v1.6.0 and the configuration of icinga-go-library v0.10.0,
@@ -69,8 +69,8 @@ The image has no variables of its own. The check uses the environment of the con
 Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `icingadb_container`, it is merged over the default of the container.
 The merge is not recursive, `icingadb_container.environment` replaces the environment including `icingadb_environment` and the file variables of the secrets.
 Volumes are only needed for files of the TLS options (`*_CERT`, `*_KEY`, `*_CA`).
-The dependencies of the quadlet unit are lists of units in `icingadb_container`: `requires`, `wants`, `after`, `part_of` and `binds_to`
-are written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 
 ```yaml
 icingadb_container:
@@ -83,19 +83,23 @@ icingadb_container:
 The role checks before any change:
 
 - `icingadb_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a known secret and set once,
-  `ICINGADB_DATABASE_PASSWORD` is set, the names start with a letter or digit, the data are strings without line breaks
+  `ICINGADB_DATABASE_PASSWORD` is set, the data are strings without line breaks, podman checks the names of the secrets
 - `icingadb_environment` contains `ICINGADB_DATABASE_HOST` and `ICINGADB_REDIS_HOST`, no secret and no file variable of a secret,
   booleans (`*_TLS`, `*_INSECURE`, `ICINGADB_NOTIFICATIONS_SYNCHRONIZE_WITH_DATABASE`) are `true` or `false`, no value contains a line break
-- the former single variables of the role are not set, the message names their replacement
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
-If `icingadb_container` or `icingadb_environment` is no dictionary, merging it with the default fails before anything changes.
-Icinga DB checks the values at the start.
+If `icingadb_container` or `icingadb_environment` is no dictionary, merging it with the default fails before anything changes,
+the same applies to a failing template in the variables, e.g. an unknown filter. Icinga DB checks the values at the start.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the secrets and the quadlet unit.
+The start and the wait for Icinga DB do not run in check mode.
 
 ### Restart and updates
 
 Icinga DB is restarted if it was running and a secret or the quadlet unit changed, otherwise it is started and enabled.
-If the start fails, the role shows the journal of the service.
+If the start fails, the role shows the error and the journal of the service.
 Icinga DB exits if the configuration, the database or Redis fail, the role waits until Icinga DB logged in to the database and to Redis
 (it waits for Icinga 2 or syncs) and shows the journal otherwise.
 Updates of the image are done by `container_update` with `icingadb_autoupdate_enabled: true` and `icingadb_autoupdate_schedule`,
@@ -103,8 +107,11 @@ without `icingadb_autoupdate_schedule` the schedule of `container_update` is use
 
 ### Migration
 
+The role was called `monitoring_icinga_icingadb`, it is called `monitoring_icingadb` now: the playbooks include `monitoring_icingadb`,
+the tag is `monitoring_icingadb`, the inventory variables `icingadb_*` stay the same.
+
 The former version of the role configured Icinga DB with single variables, they are variables of `icingadb_environment` now.
-The role rejects the former variables and names their replacement.
+The role ignores the former variables.
 
 | Former variable | Replacement |
 |---|---|
@@ -122,23 +129,27 @@ Changed behavior:
 - all options of Icinga DB can be set with `icingadb_environment`
 - `/etc/localtime` and `/etc/timezone` are not mounted anymore, the time zone is set with `icingadb_timezone`
 - Icinga DB is restarted if the environment or a secret changed, the role waits until Icinga DB is connected and shows the journal if it fails
-- the tags are `monitoring` and `monitoring_icinga_icingadb`
+- the tags are `monitoring` and `monitoring_icingadb`
+- the names of the secrets are not checked by the role anymore, podman checks them
+- `requires_mounts_for` of `icingadb_container` is new
 
 ### Tests
 
 The molecule scenario `default` uses tart with the VMs `molecule-icingadb-default` with the mandatory variables and MariaDB
 and `molecule-icingadb` with the options, PostgreSQL and Redis with a password.
 `prepare` starts the database and Redis as containers.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `icingadb_container` and `icingadb_environment` not a dictionary, an unknown variable, a boolean that is no boolean,
 the password of Redis and the file variable of the password of the database in `icingadb_environment`, without `ICINGADB_REDIS_HOST`,
-a secret without target, an unknown secret, without the password of the database, a former variable
+a secret without target, an unknown secret, without the password of the database
 and an unknown variable in `icingadb_container.environment`
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it changes `ICINGADB_RETENTION_HISTORY_DAYS` on `molecule-icingadb`, the quadlet unit changes and Icinga DB has to restart.
+then it changes `ICINGADB_RETENTION_HISTORY_DAYS` on `molecule-icingadb`, the quadlet unit changes and Icinga DB has to restart,
+`molecule-icingadb-default` runs again without a change and Icinga DB must not restart.
 `verify` checks the quadlet unit with the mounted secrets and without volume and passwords, the environment of the container with the file variables
-and without passwords, the service, the schema imported into the database and that Icinga DB is connected to Redis and waits for Icinga 2.
+and without passwords and `TZ`, the time zone, the service without automatic restarts, the schema imported into the database and that Icinga DB is connected to Redis and waits for Icinga 2.
 
 ```shell
-cd monitoring_icinga_icingadb
+cd monitoring_icingadb
 MOLECULE_TART_IMAGE='debian' molecule test
 ```
