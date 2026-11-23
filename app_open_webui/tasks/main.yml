@@ -1,18 +1,184 @@
 ---
 
-- name: 'Deploy Open WebUI container'
-  tags: [ 'app_open_webui' ]
+- name: 'Deploy Open WebUI'
+  tags: [ 'app', 'app_open_webui' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter or open_webui_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_open_webui__container | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_open_webui__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_open_webui__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_open_webui__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`open_webui_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`open_webui_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `open_webui_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # WEBUI_SECRET_KEY is mandatory, the administrator is set with open_webui_admin
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_open_webui__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_open_webui__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_open_webui__environment is not mapping -%}
+          {%-   set _ = errors.append('`open_webui_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set targets = app_open_webui__secrets | map(attribute='target') | list -%}
+          {%-   set keys = app_open_webui__environment.keys() | map('string') | list -%}
+          {%-   set missing = app_open_webui__secrets_required | reject('in', targets) | list -%}
+          {%-   set secrets_in_environment = (targets + app_open_webui__secret_variables) | select('in', keys) | unique | list -%}
+          {%-   set init_in_environment = app_open_webui__environment_init | select('in', keys + targets) | list -%}
+          {%-   set lines = app_open_webui__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('Open WebUI needs the secrets ' ~ (app_open_webui__secrets_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if init_in_environment | length > 0 -%}
+          {%-     set _ = errors.append('The administrator is set with open_webui_admin, not with ' ~ (init_in_environment | join(', ')) ~ '.') -%}
+          {%-   elif secrets_in_environment | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not be set in open_webui_environment: ' ~ (secrets_in_environment | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Secrets must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_open_webui__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_open_webui__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[]) -%}
+          {%- for key, value in app_open_webui__environment.items() if value is not none -%}
+          {%-   if key in app_open_webui__environment_booleans and value not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be the strings true or false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_open_webui__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_open_webui__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_open_webui__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('`open_webui_admin` has to be a dictionary with name, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | map('string') | reject('in', app_open_webui__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in open_webui_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_open_webui__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.name | default('') | string | length) == 0 or ((admin.name | string) ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('open_webui_admin needs a name without line breaks.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_open_webui__admin_email_pattern) -%}
+          {%-     set _ = errors.append('open_webui_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none -%}
+          {%-     set _ = errors.append('open_webui_admin needs a password.') -%}
+          {%-   elif (admin.password | string | length) < app_open_webui__password_length -%}
+          {%-     set _ = errors.append('The password of open_webui_admin needs at least ' ~ app_open_webui__password_length ~ ' characters.') -%}
+          {%-   elif ((admin.password | string) ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('The password of open_webui_admin must not contain line breaks.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging open_webui_container,
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_open_webui__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_open_webui__container_environment: >-
+          {{ app_open_webui__container.environment if app_open_webui__container.environment | default(none) is mapping else {} }}
+        # The file variable of WEBUI_SECRET_KEY is set by the role, it is part of the environment of the container
+        app_open_webui__environment_unknown: >-
+          {{ app_open_webui__container_environment.keys() | map('string')
+             | reject('in', app_open_webui__environment_allowed + (app_open_webui__secret_files.values() | list)) | list }}
+        app_open_webui__environment_line_breaks: >-
+          {{ app_open_webui__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_open_webui__secrets_unknown: >-
+          {{ app_open_webui__secrets | map(attribute='target') | reject('in', app_open_webui__secrets_allowed) | list }}
+        app_open_webui__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_open_webui__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_open_webui__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_open_webui__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_open_webui__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Open WebUI (app_open_webui__environment_allowed) and the secrets of app_open_webui__secrets_allowed.') -%}
+          {%- endif -%}
+          {%- if app_open_webui__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_open_webui__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs Open WebUI as root
+    - name: 'Create the directories of Open WebUI'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ item }}"
         owner: 'root'
         group: 'root'
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_open_webui__podman_home }}"
+      loop:
+        - "{{ app_open_webui__podman_home }}"
+        - "{{ app_open_webui__podman_data_dir }}"
 
     - name: 'Create secrets'
       no_log: true
@@ -20,24 +186,105 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items: "{{ app_open_webui__secrets }}"
+      loop: "{{ app_open_webui__secrets }}"
+      register: 'app_open_webui__secrets_result'
+
+    # Only the initialization reads the password, a changed password does not change the administrator
+    - name: 'Create the secret of the password of the administrator'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ app_open_webui__admin_secret }}"
+        data: "{{ app_open_webui__admin.password | string }}"
+
+    - name: 'Find the database of an initialized Open WebUI'
+      ansible.builtin.stat:
+        path: "{{ app_open_webui__initialized_file }}"
+      register: 'app_open_webui__initialized'
+      check_mode: false
+
+    - name: 'Find the quadlet unit of an installed Open WebUI'
+      ansible.builtin.stat:
+        path: "/etc/containers/systemd/{{ app_open_webui__container.name }}.container"
+      register: 'app_open_webui__installed'
+      check_mode: false
+
+    # Open WebUI creates the administrator from WEBUI_ADMIN_* on the start if there is no user yet.
+    # The container of the initialization starts Open WebUI once with them and is removed afterwards,
+    # the quadlet unit never contains them. An external database has no webui.db, the quadlet unit shows the first deployment then.
+    - name: 'Initialize Open WebUI'
+      when:
+        - not ansible_check_mode
+        - not app_open_webui__initialized.stat.exists
+        - not app_open_webui__installed.stat.exists
+      block:
+
+        - name: 'Run the initialization'
+          containers.podman.podman_container:
+            name: "{{ app_open_webui__podman_init_name }}"
+            image: "{{ app_open_webui__container.image }}"
+            hostname: "{{ app_open_webui__container.hostname }}"
+            ip: "{{ app_open_webui__container.ip }}"
+            ip6: "{{ app_open_webui__container.ipv6 | default(omit) }}"
+            network: "{{ app_open_webui__container.network }}"
+            timezone: "{{ app_open_webui__container.timezone }}"
+            env: "{{ app_open_webui__container.environment | combine(app_open_webui__init_environment) }}"
+            secrets: "{{ (app_open_webui__container.secrets | default([])) + [ app_open_webui__admin_secret ~ ',type=env,target=WEBUI_ADMIN_PASSWORD' ] }}"
+            volume: "{{ app_open_webui__container.volumes | default(omit) }}"
+            etc_hosts: "{{ app_open_webui__container.etc_hosts | default(omit) }}"
+            state: 'started'
+          vars:
+            app_open_webui__init_environment:
+              WEBUI_ADMIN_EMAIL: "{{ app_open_webui__admin.email | string }}"
+              WEBUI_ADMIN_NAME: "{{ app_open_webui__admin.name | string }}"
+
+        # /ready answers 200 after the startup of Open WebUI, the administrator is created before
+        - name: 'Wait for the end of the initialization'
+          ansible.builtin.uri:
+            url: "http://{{ app_open_webui__container.ip }}:{{ app_open_webui__port }}/ready"
+            # Without the container the address does not answer, a short timeout ends the wait in time
+            timeout: 5
+          register: 'app_open_webui__init_ready'
+          until: app_open_webui__init_ready.status | default(-1) == 200
+          retries: 120
+          delay: 5
+          failed_when: false
+
+        - name: 'Read the log of the initialization'
+          when: app_open_webui__init_ready.status | default(-1) != 200
+          ansible.builtin.command:
+            argv:
+              - 'sh'
+              - '-c'
+              - >-
+                podman logs "$1" 2>&1; podman container inspect --format "STATE={% raw %}{{.State.Status}}{% endraw %}" "$1"
+              - 'sh'
+              - "{{ app_open_webui__podman_init_name }}"
+          register: 'app_open_webui__init_log'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the initialization'
+          ansible.builtin.assert:
+            that:
+              - app_open_webui__init_ready.status | default(-1) == 200
+            fail_msg: >-
+              The initialization of Open WebUI failed, remove {{ app_open_webui__initialized_file }} or the database before the next run,
+              the initialization only runs without a database and without the quadlet unit.
+              {{ ((app_open_webui__init_log.stdout | default('') ~ app_open_webui__init_log.stderr | default('')) | split('\n'))[-30:] }}
+            quiet: true
+
+      always:
+
+        - name: 'Remove the container of the initialization'
+          containers.podman.podman_container:
+            name: "{{ app_open_webui__podman_init_name }}"
+            state: 'absent'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_open_webui__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_open_webui__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_open_webui__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name:  'Install container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_open_webui__container.name }}"
         hostname: "{{ app_open_webui__container.hostname }}"
@@ -46,6 +293,7 @@
         ip6: "{{ app_open_webui__container.ipv6 | default(omit) }}"
         network: "{{ app_open_webui__container.network }}"
         timezone: "{{ app_open_webui__container.timezone }}"
+        command: "{{ app_open_webui__container.command | default(omit) }}"
         env: "{{ app_open_webui__container.environment | default(omit) }}"
         etc_hosts: "{{ app_open_webui__container.etc_hosts | default(omit) }}"
         expose: "{{ app_open_webui__container.expose | default(omit) }}"
@@ -65,22 +313,92 @@
           {% if app_open_webui__container.requires is defined %}
           Requires={{ app_open_webui__container.requires | join(' ') }}
           {% endif %}
+          {% if app_open_webui__container.wants is defined %}
+          Wants={{ app_open_webui__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_open_webui__container.after is defined %}
+          After={{ app_open_webui__container.after | join(' ') }}
+          {% endif %}
+          {% if app_open_webui__container.part_of is defined %}
+          PartOf={{ app_open_webui__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_open_webui__container.binds_to is defined %}
+          BindsTo={{ app_open_webui__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_open_webui__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_open_webui__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_open_webui__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ app_open_webui__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Open WebUI'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_open_webui__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_open_webui__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_open_webui__running: >-
+              {{ (ansible_facts.services[app_open_webui__container.name + '.service'].state | default('')) == 'running' }}
+            app_open_webui__restart: >-
+              {{ app_open_webui__running | bool
+                 and (app_open_webui__secrets_result is changed or app_open_webui__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_open_webui__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_open_webui__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_open_webui__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_open_webui__start_journal.stdout_lines }}
+
+    # /ready answers 200 after the startup, Open WebUI may load the embedding models on the start
+    - name: 'Wait for Open WebUI'
+      ansible.builtin.uri:
+        url: "http://{{ app_open_webui__ip }}:{{ app_open_webui__port }}/ready"
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'app_open_webui__ready'
+      until: app_open_webui__ready.status | default(-1) == 200
+      retries: 120
+      delay: 3
+      failed_when: false
       when: 'not ansible_check_mode'
 
+    - name: 'Read the log of Open WebUI'
+      when:
+        - not ansible_check_mode
+        - app_open_webui__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_open_webui__container.name }}", '-n', '150', '--no-pager' ]
+      register: 'app_open_webui__journal'
+      changed_when: false
+
+    - name: 'Assert that Open WebUI answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__journal is skipped
+        fail_msg: "{{ app_open_webui__journal.stdout_lines | default([]) }}"
+        quiet: true
+
     - name: 'Enable autoupdate on container'
-      when: 'app_open_webui__autoupdate_enabled'
-      include_role:
+      when: 'app_open_webui__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_open_webui__container.name }}"
         container_image: "{{ app_open_webui__container.image }}"
+        container_schedule: "{{ app_open_webui__autoupdate_schedule }}"

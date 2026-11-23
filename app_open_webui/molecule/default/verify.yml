@@ -1,0 +1,151 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_open_webui__test_case: "{{ app_open_webui__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_open_webui__expect: "{{ app_open_webui__test_case.expect }}"
+    app_open_webui__test_url: "http://{{ app_open_webui__expect.ip }}:8080"
+    # The secrets and the password of the administrator, they must not be part of the unit
+    app_open_webui__test_plain: >-
+      {{ app_open_webui__test_case.role_vars.open_webui_secrets | map(attribute='data') | list + [ app_open_webui__test_admin.password ] }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_open_webui__test_quadlet_path }}"
+      register: 'app_open_webui__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_open_webui__test_image) in app_open_webui__test_quadlet_lines
+          - ('IP=' + app_open_webui__expect.ip) in app_open_webui__test_quadlet_lines
+          - app_open_webui__expect.ip6 is none or ('IP6=' + app_open_webui__expect.ip6) in app_open_webui__test_quadlet_lines
+          - app_open_webui__expect.ip6 is not none or app_open_webui__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_open_webui__expect.quadlet | reject('in', app_open_webui__test_quadlet_lines) | list | length == 0
+          - app_open_webui__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_open_webui__test_quadlet_lines | select('search', 'WEBUI_ADMIN') | list | length == 0
+          - app_open_webui__test_plain | select('in', app_open_webui__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_open_webui__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        app_open_webui__test_quadlet_lines: "{{ (app_open_webui__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the open-webui service'
+      ansible.builtin.command: 'systemctl is-active open-webui'
+      register: 'app_open_webui__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the open-webui container'
+      ansible.builtin.command: 'podman inspect open-webui'
+      register: 'app_open_webui__test_inspect'
+      changed_when: false
+
+    - name: 'Read the containers'
+      ansible.builtin.command:
+        argv: [ 'podman', 'ps', '--all', '--format', '{{ "{{" }}.Names{{ "}}" }}' ]
+      register: 'app_open_webui__test_containers'
+      changed_when: false
+
+    - name: 'Read the database of Open WebUI'
+      ansible.builtin.stat:
+        path: "{{ app_open_webui__test_home }}/data/webui.db"
+      register: 'app_open_webui__test_database'
+
+    # The secrets of type=env are part of the environment of the process, they are left out of the message
+    - name: 'Assert the service, the container addresses, the environment and the initialization'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__test_service.stdout == 'active'
+          - app_open_webui__test_net.IPAddress == app_open_webui__expect.ip
+          - app_open_webui__expect.ip6 is none or app_open_webui__test_net.GlobalIPv6Address == app_open_webui__expect.ip6
+          - app_open_webui__expect.env | reject('in', app_open_webui__test_env) | list | length == 0
+          - app_open_webui__test_env | select('match', '(TZ|WEBUI_ADMIN_[A-Z]+)=') | list | length == 0
+          - app_open_webui__test_container.Config.Timezone == app_open_webui__test_case.role_vars.open_webui_timezone
+          - "'open-webui-init' not in app_open_webui__test_containers.stdout_lines"
+          - app_open_webui__test_database.stat.exists
+        fail_msg: >-
+          service {{ app_open_webui__test_service.stdout }}, time zone {{ app_open_webui__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_open_webui__test_net.IPAddress }}, IPv6 {{ app_open_webui__test_net.GlobalIPv6Address }},
+          containers {{ app_open_webui__test_containers.stdout_lines }}, database {{ app_open_webui__test_database.stat.exists }},
+          environment {{ app_open_webui__test_env | reject('search', '(KEY|PASSWORD|SECRET)=') | join(', ') }}
+      vars:
+        app_open_webui__test_container: "{{ (app_open_webui__test_inspect.stdout | from_json)[0] }}"
+        app_open_webui__test_net: "{{ app_open_webui__test_container.NetworkSettings.Networks[app_open_webui__test_case.role_vars.open_webui_network] }}"
+        app_open_webui__test_env: "{{ app_open_webui__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'open-webui' ]
+      register: 'app_open_webui__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'open-webui', '-n', '80', '--no-pager' ]
+      register: 'app_open_webui__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_open_webui__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_open_webui__test_restarts.stdout ] + app_open_webui__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the health check'
+      ansible.builtin.uri:
+        url: "{{ app_open_webui__test_url }}/health"
+        return_content: true
+      register: 'app_open_webui__test_health'
+
+    # The initialization created the administrator, a wrong password is answered with 400
+    - name: 'Sign in with the password and a wrong password'
+      ansible.builtin.uri:
+        url: "{{ app_open_webui__test_url }}/api/v1/auths/signin"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          email: "{{ app_open_webui__test_admin.email }}"
+          password: "{{ item }}"
+        status_code: [ 200, 400, 401, 403 ]
+        return_content: true
+      loop: [ "{{ app_open_webui__test_admin.password }}", 'molecule-wrong-password' ]
+      register: 'app_open_webui__test_signin'
+      no_log: true
+
+    # With an administrator the signup is disabled
+    - name: 'Sign up another user'
+      ansible.builtin.uri:
+        url: "{{ app_open_webui__test_url }}/api/v1/auths/signup"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          name: 'Molecule Intruder'
+          email: 'intruder@molecule.test'
+          password: 'molecule-intruder-password'
+        status_code: [ 200, 400, 403 ]
+        return_content: true
+      register: 'app_open_webui__test_signup'
+
+    - name: 'Assert the health check, the administrator and the refused signup'
+      ansible.builtin.assert:
+        that:
+          - (app_open_webui__test_health.json | default({})).status | default(false) is true
+          - app_open_webui__test_signin.results | map(attribute='status') | list == [ 200, 400 ]
+          - (app_open_webui__test_signin.results[0].json | default({})).role | default('') == 'admin'
+          - (app_open_webui__test_signin.results[0].json | default({})).email | default('') == app_open_webui__test_admin.email
+          - app_open_webui__test_signup.status == 403
+        fail_msg: >-
+          health {{ app_open_webui__test_health.json | default({}) | to_json }},
+          sign-ins {{ app_open_webui__test_signin.results | map(attribute='status') | list }},
+          role {{ (app_open_webui__test_signin.results[0].json | default({})).role | default('') }},
+          signup {{ app_open_webui__test_signup.status }}

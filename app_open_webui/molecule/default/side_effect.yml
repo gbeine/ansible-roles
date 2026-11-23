@@ -1,0 +1,199 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_open_webui__test_case: "{{ app_open_webui__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_open_webui__test_vars: "{{ app_open_webui__test_case.role_vars }}"
+    app_open_webui__test_environment: "{{ app_open_webui__test_vars.open_webui_environment | default({}) }}"
+    app_open_webui__test_secrets: "{{ app_open_webui__test_vars.open_webui_secrets }}"
+    app_open_webui__test_checked_files:
+      - "{{ app_open_webui__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_open_webui__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_open_webui__test_checked_files }}"
+      register: 'app_open_webui__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_open_webui with open_webui_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_container: [ 'environment' ]
+        app_open_webui__test_invalid:
+          message: 'open_webui_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_open_webui with open_webui_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: [ 'WEBUI_NAME' ]
+        app_open_webui__test_invalid:
+          message: 'open_webui_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts|`open_webui_environment` has to be a dictionary\.'
+
+    - name: 'Run app_open_webui with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_secrets: "{{ app_open_webui__test_secrets + [ { 'name': 'open_webui_other', 'data': 'x' } ] }}"
+        app_open_webui__test_invalid:
+          message: 'a secret without target'
+          search: '^`open_webui_secrets` entries need name, data and target$'
+
+    - name: 'Run app_open_webui without WEBUI_SECRET_KEY (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_secrets: "{{ app_open_webui__test_secrets | rejectattr('target', 'eq', 'WEBUI_SECRET_KEY') | list }}"
+        app_open_webui__test_invalid:
+          message: 'no WEBUI_SECRET_KEY'
+          search: '^Open WebUI needs the secrets WEBUI_SECRET_KEY, missing: WEBUI_SECRET_KEY\.$'
+
+    - name: 'Run app_open_webui with OPENAI_API_KEY in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: "{{ app_open_webui__test_environment | combine({ 'OPENAI_API_KEY': 'molecule-plain-key' }) }}"
+        app_open_webui__test_invalid:
+          message: 'OPENAI_API_KEY in the environment'
+          search: '^Secrets must not be set in open_webui_environment: OPENAI_API_KEY\.$'
+
+    - name: 'Run app_open_webui with the password of the administrator in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: "{{ app_open_webui__test_environment | combine({ 'WEBUI_ADMIN_PASSWORD': 'molecule-plain-password' }) }}"
+        app_open_webui__test_invalid:
+          message: 'the password of the administrator in the environment'
+          search: '^The administrator is set with open_webui_admin, not with WEBUI_ADMIN_PASSWORD\.$'
+
+    - name: 'Run app_open_webui with an invalid boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: "{{ app_open_webui__test_environment | combine({ 'ENABLE_SIGNUP': 'yes' }) }}"
+        app_open_webui__test_invalid:
+          message: 'an invalid boolean'
+          search: '^These variables have to be the strings true or false: ENABLE_SIGNUP\.$'
+
+    - name: 'Run app_open_webui with a YAML boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: "{{ app_open_webui__test_environment | combine({ 'ENABLE_SIGNUP': false }) }}"
+        app_open_webui__test_invalid:
+          message: 'a YAML boolean'
+          search: '^These variables have to be the strings true or false: ENABLE_SIGNUP\.$'
+
+    - name: 'Run app_open_webui with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: "{{ app_open_webui__test_environment | combine({ 'WEBUI_NAME': 'Molecule\nWebUI' }) }}"
+        app_open_webui__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: WEBUI_NAME\.$'
+
+    - name: 'Run app_open_webui with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_environment: "{{ app_open_webui__test_environment | combine({ 'USE_OLLAMA_DOCKER': 'true' }) }}"
+        app_open_webui__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: USE_OLLAMA_DOCKER\.'
+
+    - name: 'Run app_open_webui with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_secrets: "{{ app_open_webui__test_secrets + [ { 'name': 'open_webui_unknown', 'data': 'x', 'target': 'MOLECULE_TOKEN' } ] }}"
+        app_open_webui__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: MOLECULE_TOKEN\.'
+
+    - name: 'Run app_open_webui with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        open_webui_admin: "{{ app_open_webui__test_admin | dict2items | rejectattr('key', 'eq', 'password') | items2dict }}"
+        app_open_webui__test_invalid:
+          message: 'an administrator without password'
+          search: '^open_webui_admin needs a password\.$'
+
+    - name: 'Change the environment'
+      when: app_open_webui__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'open-webui' ]
+          register: 'app_open_webui__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            open_webui_environment: "{{ app_open_webui__test_case.side_effect.environment }}"
+
+        - name: 'Run app_open_webui with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_open_webui'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'open-webui' ]
+          register: 'app_open_webui__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart'
+          ansible.builtin.assert:
+            that:
+              - app_open_webui__quadlet_result is changed
+              - app_open_webui__test_started_after.stdout | int > app_open_webui__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_open_webui__quadlet_result is changed }},
+              start before {{ app_open_webui__test_started_before.stdout }}, after {{ app_open_webui__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_open_webui__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'open-webui' ]
+          register: 'app_open_webui__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_open_webui without a change'
+          ansible.builtin.include_role:
+            name: 'app_open_webui'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'open-webui' ]
+          register: 'app_open_webui__test_unchanged_after'
+          changed_when: false
+
+        # The database exists, the initialization does not run again
+        - name: 'Assert no restart, no change and no initialization'
+          ansible.builtin.assert:
+            that:
+              - app_open_webui__quadlet_result is not changed
+              - app_open_webui__secrets_result is not changed
+              - app_open_webui__init_ready is skipped
+              - app_open_webui__test_unchanged_after.stdout == app_open_webui__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_open_webui__quadlet_result is changed }}, secrets changed: {{ app_open_webui__secrets_result is changed }},
+              start before {{ app_open_webui__test_unchanged_before.stdout }}, after {{ app_open_webui__test_unchanged_after.stdout }}

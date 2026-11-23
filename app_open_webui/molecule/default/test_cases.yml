@@ -1,0 +1,86 @@
+---
+# Network created by container_podman in prepare.yml
+app_open_webui__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_open_webui__test_image: 'ghcr.io/open-webui/open-webui:0.13'
+app_open_webui__test_quadlet_path: '/etc/containers/systemd/open-webui.container'
+app_open_webui__test_home: '/opt/open-webui'
+
+app_open_webui__test_admin:
+  name: 'Molecule Admin'
+  email: 'admin@molecule.test'
+  password: 'molecule-admin-password'
+
+app_open_webui__test_cases:
+
+  # Only the mandatory variables, SQLite in the data directory
+  - name: 'molecule-open-webui-default'
+    role_vars:
+      open_webui_home: '/opt/open-webui'
+      open_webui_ip: '10.89.0.100'
+      open_webui_network: 'podman-molecule'
+      open_webui_hostname: 'open-webui-default'
+      open_webui_timezone: 'Europe/Berlin'
+      open_webui_secrets:
+        - name: 'open_webui_secret_key'
+          data: 'molecule-webui-secret-key-default'
+          target: 'WEBUI_SECRET_KEY'
+      open_webui_admin: "{{ app_open_webui__test_admin }}"
+    expect:
+      ip: '10.89.0.100'
+      ip6: ~
+      quadlet:
+        - 'Secret=open_webui_secret_key,type=mount,target=/run/secrets/open_webui_secret_key'
+        - 'Volume=/opt/open-webui/data:/app/backend/data'
+      env:
+        - 'WEBUI_SECRET_KEY_FILE=/run/secrets/open_webui_secret_key'
+
+  # IPv6, labels, offline without Ollama and a secret in the environment
+  - name: 'molecule-open-webui'
+    role_vars:
+      open_webui_home: '/opt/open-webui'
+      open_webui_ip: '10.89.0.101'
+      open_webui_ipv6: 'fd00:89::101'
+      open_webui_network: 'podman-molecule'
+      open_webui_hostname: 'open-webui-molecule'
+      open_webui_timezone: 'Europe/Berlin'
+      open_webui_labels:
+        traefik.enable: 'true'
+      open_webui_environment:
+        OFFLINE_MODE: 'true'
+        ENABLE_OLLAMA_API: 'false'
+        WEBUI_NAME: 'Molecule'
+      open_webui_secrets:
+        - name: 'open_webui_secret_key'
+          data: 'molecule-webui-secret-key'
+          target: 'WEBUI_SECRET_KEY'
+        - name: 'open_webui_openai_api_key'
+          data: 'molecule-openai-api-key'
+          target: 'OPENAI_API_KEY'
+      open_webui_admin: "{{ app_open_webui__test_admin }}"
+    # A valid change, the quadlet unit changes and Open WebUI has to restart
+    side_effect:
+      environment:
+        OFFLINE_MODE: 'true'
+        ENABLE_OLLAMA_API: 'false'
+        WEBUI_NAME: 'Molecule Changed'
+    expect:
+      ip: '10.89.0.101'
+      ip6: 'fd00:89::101'
+      quadlet:
+        - 'Secret=open_webui_secret_key,type=mount,target=/run/secrets/open_webui_secret_key'
+        - 'Secret=open_webui_openai_api_key,type=env,target=OPENAI_API_KEY'
+        - 'Volume=/opt/open-webui/data:/app/backend/data'
+        - 'Label=traefik.enable=true'
+      env:
+        - 'WEBUI_SECRET_KEY_FILE=/run/secrets/open_webui_secret_key'
+        - 'OFFLINE_MODE=true'
+        - 'ENABLE_OLLAMA_API=false'
+        - 'WEBUI_NAME=Molecule Changed'
