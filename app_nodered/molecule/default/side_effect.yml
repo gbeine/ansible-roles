@@ -17,6 +17,11 @@
       - "{{ app_nodered__test_quadlet_path }}"
       - "{{ app_nodered__test_settings_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -50,7 +55,7 @@
         nodered_secrets: [ { name: 'nodered_credential_secret', data: 'x' } ]
         app_nodered__test_invalid:
           message: 'a secret without target'
-          search: '^nodered_secrets entries need name, data and target$'
+          search: '^`nodered_secrets` entries need name, data and target$'
 
     - name: 'Run app_nodered with an unknown secret (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -127,6 +132,22 @@
           message: 'an unknown environment variable'
           search: '^Unknown environment variables: PORT\.'
 
+    - name: 'Run app_nodered with nodered_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_environment: [ 'NODE_RED_ENABLE_TOURS' ]
+        app_nodered__test_invalid:
+          message: 'nodered_environment not a dictionary'
+          search: '^`nodered_environment` has to be a dictionary\.$'
+
+    - name: 'Run app_nodered with a YAML boolean in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        nodered_environment: "{{ app_nodered__test_environment | combine({ 'NODE_RED_ENABLE_PROJECTS': true }) }}"
+        app_nodered__test_invalid:
+          message: 'a YAML boolean in the environment'
+          search: '^These variables have to be the strings true or false: NODE_RED_ENABLE_PROJECTS\.$'
+
     - name: 'Run app_nodered with the changed password of the administrator'
       when: app_nodered__test_case.side_effect is defined
       block:
@@ -160,3 +181,35 @@
             fail_msg: >-
               settings.js changed: {{ app_nodered__settings_result is changed }}, quadlet changed: {{ app_nodered__quadlet_result is changed }},
               start before {{ app_nodered__test_started_before.stdout }}, after {{ app_nodered__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_nodered__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nodered' ]
+          register: 'app_nodered__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_nodered without a change'
+          ansible.builtin.include_role:
+            name: 'app_nodered'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'nodered' ]
+          register: 'app_nodered__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_nodered__quadlet_result is not changed
+              - app_nodered__settings_result is not changed
+              - app_nodered__secrets_result is not changed
+              - app_nodered__test_unchanged_after.stdout == app_nodered__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_nodered__quadlet_result is changed }}, settings.js changed: {{ app_nodered__settings_result is changed }},
+              secrets changed: {{ app_nodered__secrets_result is changed }},
+              start before {{ app_nodered__test_unchanged_before.stdout }}, after {{ app_nodered__test_unchanged_after.stdout }}

@@ -35,6 +35,8 @@
           - app_nodered__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
           - app_nodered__test_quadlet_lines | select('match', 'ExecStartPre=') | list | length == 0
           - app_nodered__test_quadlet_lines | select('search', 'type=env') | list | length == 0
+          # Without nodered_environment the quadlet unit has no environment
+          - app_nodered__expect.env | length > 0 or app_nodered__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
           - app_nodered__test_plain | select('in', app_nodered__test_quadlet.content | b64decode) | list | length == 0
         fail_msg: "{{ app_nodered__test_quadlet.content | b64decode }}"
       vars:
@@ -81,8 +83,10 @@
           - app_nodered__expect.ip6 is none or app_nodered__test_net.GlobalIPv6Address == app_nodered__expect.ip6
           - app_nodered__expect.env | reject('in', app_nodered__test_env) | list | length == 0
           - app_nodered__test_plain | select('in', app_nodered__test_env | join(' ')) | list | length == 0
+          - app_nodered__test_env | select('match', 'TZ=') | list | length == 0
+          - app_nodered__test_container.Config.Timezone == app_nodered__test_case.role_vars.nodered_timezone
         fail_msg: >-
-          service {{ app_nodered__test_service.stdout }},
+          service {{ app_nodered__test_service.stdout }}, time zone {{ app_nodered__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_nodered__test_net.IPAddress }}, IPv6 {{ app_nodered__test_net.GlobalIPv6Address }},
           environment {{ app_nodered__test_env | join(', ') }}
       vars:
@@ -90,6 +94,25 @@
         app_nodered__test_net: "{{ app_nodered__test_container.NetworkSettings.Networks[app_nodered__test_case.role_vars.nodered_network] }}"
         app_nodered__test_env: "{{ app_nodered__test_container.Config.Env }}"
 
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'nodered' ]
+      register: 'app_nodered__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'nodered', '-n', '80', '--no-pager' ]
+      register: 'app_nodered__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_nodered__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_nodered__test_restarts.stdout ] + app_nodered__test_journal.stdout_lines | default([]) }}"
     - name: 'Read the flows without login'
       ansible.builtin.uri:
         url: "{{ app_nodered__test_url }}/flows"
