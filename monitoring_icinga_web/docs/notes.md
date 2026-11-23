@@ -1,11 +1,16 @@
 Icinga Web 2 runs in the official container image [icinga/icingaweb2](https://hub.docker.com/r/icinga/icingaweb2) as podman quadlet,
-it listens on port 8080. The data are in `<icingaweb_home>/data`, mounted to `/data`, the configuration is in `/data/etc/icingaweb2`.
+it listens on port 8080. The role mounts only the configuration and the state of Icinga Web, everything else of `/data` comes from the image:
+
+| Host | Container |
+|---|---|
+| `<icingaweb_home>/etc` | `/data/etc/icingaweb2` (configuration) |
+| `<icingaweb_home>/lib` | `/data/var/lib/icingaweb2` (state) |
 
 ### Configuration
 
 `icingaweb_config` contains the INI files of Icinga Web: the file without `.ini` (e.g. `resources` or `modules/icingadb/redis`),
 the section and the option. It is merged recursively over the default of the role, `null` removes a file, a section or an option.
-The role writes the files to `<icingaweb_home>/data/etc/icingaweb2` like Icinga Web writes them: values are quoted and escaped,
+The role writes the files to `<icingaweb_home>/etc` like Icinga Web writes them: values are quoted and escaped,
 booleans are `1` and `0`, lists are joined by commas.
 
 ```yaml
@@ -185,6 +190,9 @@ Changed behavior:
 - `/etc/localtime` and `/etc/timezone` are not mounted anymore, the time zone is set with `icingaweb_timezone`
 - Icinga Web is restarted if the configuration or a secret changed, the role waits until the login page answers
 - the tags are `monitoring` and `monitoring_icinga_web`
+- `<icingaweb_home>/data` is not mounted to `/data` anymore, the directories on the host are `etc` and `lib`, the role does not move the files of former versions.
+  Move them before the first run and remove `<icingaweb_home>/data` afterwards:
+  `mv <icingaweb_home>/data/etc/icingaweb2 <icingaweb_home>/etc`, `mv <icingaweb_home>/data/var/lib/icingaweb2 <icingaweb_home>/lib`
 
 ### Tests
 
