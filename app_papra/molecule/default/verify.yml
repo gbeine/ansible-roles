@@ -1,0 +1,152 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_papra__test_case: "{{ app_papra__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_papra__expect: "{{ app_papra__test_case.expect }}"
+    app_papra__test_url: "http://{{ app_papra__expect.ip }}:1221"
+    # The secrets and the password of the administrator, they must not be part of the unit or the configuration
+    app_papra__test_plain: "{{ app_papra__test_case.role_vars.papra_secrets | map(attribute='data') | list + [ app_papra__test_admin.password ] }}"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_papra__test_quadlet_path }}"
+      register: 'app_papra__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_papra__test_image) in app_papra__test_quadlet_lines
+          - ('IP=' + app_papra__expect.ip) in app_papra__test_quadlet_lines
+          - app_papra__expect.ip6 is none or ('IP6=' + app_papra__expect.ip6) in app_papra__test_quadlet_lines
+          - app_papra__expect.ip6 is not none or app_papra__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_papra__expect.quadlet | reject('in', app_papra__test_quadlet_lines) | list | length == 0
+          - app_papra__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - app_papra__test_plain | select('in', app_papra__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_papra__test_quadlet_lines | to_json }}"
+      vars:
+        app_papra__test_quadlet_lines: "{{ (app_papra__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the configuration file'
+      ansible.builtin.stat:
+        path: "{{ app_papra__test_config_path }}"
+      register: 'app_papra__test_config_stat'
+
+    - name: 'Read the configuration file'
+      ansible.builtin.slurp:
+        src: "{{ app_papra__test_config_path }}"
+      register: 'app_papra__test_config'
+
+    # The configuration reads the secrets from their files, it contains no secret
+    - name: 'Assert the configuration file'
+      ansible.builtin.assert:
+        that:
+          - app_papra__test_config_stat.stat.uid == 999
+          - app_papra__test_config_stat.stat.mode == '0400'
+          - app_papra__expect.config | reject('in', app_papra__test_config_content) | list | length == 0
+          - app_papra__test_plain | select('in', app_papra__test_config_content) | list | length == 0
+        fail_msg: "{{ app_papra__test_config_content }}"
+      vars:
+        app_papra__test_config_content: "{{ app_papra__test_config.content | b64decode }}"
+
+    - name: 'Read the state of the papra service'
+      ansible.builtin.command: 'systemctl is-active papra'
+      register: 'app_papra__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the papra container'
+      ansible.builtin.command: 'podman inspect papra'
+      register: 'app_papra__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_papra__test_service.stdout == 'active'
+          - app_papra__test_net.IPAddress == app_papra__expect.ip
+          - app_papra__expect.ip6 is none or app_papra__test_net.GlobalIPv6Address == app_papra__expect.ip6
+          - app_papra__test_env | select('match', 'TZ=') | list | length == 0
+          - app_papra__test_plain | select('in', app_papra__test_env | join(' ')) | list | length == 0
+          - app_papra__test_container.Config.Timezone == app_papra__test_case.role_vars.papra_timezone
+        fail_msg: >-
+          service {{ app_papra__test_service.stdout }}, time zone {{ app_papra__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_papra__test_net.IPAddress }}, IPv6 {{ app_papra__test_net.GlobalIPv6Address }},
+          environment {{ app_papra__test_env | join(', ') }}
+      vars:
+        app_papra__test_container: "{{ (app_papra__test_inspect.stdout | from_json)[0] }}"
+        app_papra__test_net: "{{ app_papra__test_container.NetworkSettings.Networks[app_papra__test_case.role_vars.papra_network] }}"
+        app_papra__test_env: "{{ app_papra__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'papra' ]
+      register: 'app_papra__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'papra', '-n', '80', '--no-pager' ]
+      register: 'app_papra__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_papra__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_papra__test_restarts.stdout ] + app_papra__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the health check'
+      ansible.builtin.uri:
+        url: "{{ app_papra__test_url }}/api/health"
+        return_content: true
+      register: 'app_papra__test_health'
+
+    # better-auth only accepts requests from the origin of appBaseUrl
+    - name: 'Sign in with the password and a wrong password'
+      ansible.builtin.uri:
+        url: "{{ app_papra__test_url }}/api/auth/sign-in/email"
+        method: 'POST'
+        body_format: 'json'
+        body:
+          email: "{{ app_papra__test_admin.email }}"
+          password: "{{ item }}"
+        headers:
+          Origin: "{{ app_papra__expect.url }}"
+        status_code: [ 200, 401, 403 ]
+        return_content: true
+      loop: [ "{{ app_papra__test_admin.password }}", 'molecule-wrong-password' ]
+      register: 'app_papra__test_signin'
+      no_log: true
+
+    # The first user is the administrator, it has the permissions of the role admin
+    - name: 'Read the signed in user'
+      ansible.builtin.uri:
+        url: "{{ app_papra__test_url }}/api/users/me"
+        headers:
+          Cookie: "{{ app_papra__test_signin.results[0].cookies_string | default('') }}"
+          Origin: "{{ app_papra__expect.url }}"
+        return_content: true
+      register: 'app_papra__test_me'
+
+    - name: 'Assert the health check, the sign-ins and the administrator'
+      ansible.builtin.assert:
+        that:
+          - (app_papra__test_health.json | default({})).isEverythingOk | default(false) is true
+          - app_papra__test_signin.results | map(attribute='status') | list == [ 200, 401 ]
+          - (app_papra__test_me.json | default({})).user.email | default('') == app_papra__test_admin.email
+          - (app_papra__test_me.json | default({})).user.permissions | default([]) | length > 0
+        fail_msg: >-
+          health {{ app_papra__test_health.json | default({}) | to_json }},
+          sign-ins {{ app_papra__test_signin.results | map(attribute='status') | list }},
+          user {{ (app_papra__test_me.json | default({})).user | default({}) | to_json }}

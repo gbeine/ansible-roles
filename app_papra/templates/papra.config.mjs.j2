@@ -1,0 +1,29 @@
+// {{ ansible_managed }}
+// Read by Papra from PAPRA_CONFIG_DIR, the options take precedence over the environment
+import { readFileSync } from 'node:fs';
+
+// null removes an option, Papra uses its default then
+const prune = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null).map(([key, item]) => [key, prune(item)]));
+};
+
+// Sets the value of a dotted path, e.g. auth.secret
+const set = (object, path, value) => {
+  const keys = path.split('.');
+  const last = keys.pop();
+  const parent = keys.reduce((current, key) => (current[key] ??= {}), object);
+  parent[last] = value;
+};
+
+const secret = (name) => readFileSync('{{ app_papra__secrets_dir }}/' + name, 'utf8').trim();
+
+const config = prune({{ app_papra__config | to_nice_json(indent=2) | indent(0) }});
+
+{% for item in app_papra__secrets %}
+set(config, {{ item.target | to_json }}, secret({{ item.name | to_json }}));
+{% endfor %}
+
+export default config;

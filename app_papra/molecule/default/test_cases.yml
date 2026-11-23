@@ -1,0 +1,97 @@
+---
+# Network created by container_podman in prepare.yml
+app_papra__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_papra__test_image: 'ghcr.io/papra-hq/papra:latest'
+app_papra__test_quadlet_path: '/etc/containers/systemd/papra.container'
+app_papra__test_config_path: '/opt/papra/papra.config.mjs'
+
+app_papra__test_admin:
+  name: 'Molecule Admin'
+  email: 'admin@molecule.test'
+  password: 'molecule-admin-password'
+
+app_papra__test_cases:
+
+  # Only the mandatory variables, SQLite in the data directory
+  - name: 'molecule-papra-default'
+    role_vars:
+      papra_home: '/opt/papra'
+      papra_ip: '10.89.0.100'
+      papra_network: 'podman-molecule'
+      papra_hostname: 'papra-default'
+      papra_timezone: 'Europe/Berlin'
+      papra_config:
+        appBaseUrl: 'http://10.89.0.100:1221'
+      papra_secrets:
+        - name: 'papra_auth_secret'
+          data: 'molecule-papra-auth-secret-default-0123456789'
+          target: 'auth.secret'
+      papra_admin: "{{ app_papra__test_admin }}"
+    expect:
+      ip: '10.89.0.100'
+      ip6: ~
+      url: 'http://10.89.0.100:1221'
+      quadlet:
+        - 'Secret=papra_auth_secret,type=mount,target=/run/secrets/papra_auth_secret,uid=999,gid=999,mode=0400'
+        - 'Volume=/opt/papra:/app/app-data:Z'
+      config:
+        - '"appBaseUrl": "http://10.89.0.100:1221"'
+        - 'set(config, "auth.secret", secret("papra_auth_secret"));'
+
+  # IPv6, labels, options, a boolean, NODE_OPTIONS and a second secret
+  - name: 'molecule-papra'
+    role_vars:
+      papra_home: '/opt/papra'
+      papra_ip: '10.89.0.101'
+      papra_ipv6: 'fd00:89::101'
+      papra_network: 'podman-molecule'
+      papra_hostname: 'papra-molecule'
+      papra_timezone: 'Europe/Berlin'
+      papra_labels:
+        traefik.enable: 'true'
+      papra_environment:
+        NODE_OPTIONS: '--max-old-space-size=512'
+      papra_config:
+        appBaseUrl: 'http://10.89.0.101:1221'
+        auth:
+          showLegalLinksOnAuthPage: false
+        documents:
+          ocrLanguages: 'deu,eng'
+      papra_secrets:
+        - name: 'papra_auth_secret'
+          data: 'molecule-papra-auth-secret-options-0123456789'
+          target: 'auth.secret'
+        - name: 'papra_intake_webhook_secret'
+          data: 'molecule-intake-webhook-secret'
+          target: 'intakeEmails.webhookSecret'
+      papra_admin: "{{ app_papra__test_admin }}"
+    # A valid change, the configuration file changes and Papra has to restart
+    side_effect:
+      config:
+        appBaseUrl: 'http://10.89.0.101:1221'
+        auth:
+          showLegalLinksOnAuthPage: false
+        documents:
+          ocrLanguages: 'deu,eng,fra'
+    expect:
+      ip: '10.89.0.101'
+      ip6: 'fd00:89::101'
+      url: 'http://10.89.0.101:1221'
+      quadlet:
+        - 'Secret=papra_auth_secret,type=mount,target=/run/secrets/papra_auth_secret,uid=999,gid=999,mode=0400'
+        - 'Secret=papra_intake_webhook_secret,type=mount,target=/run/secrets/papra_intake_webhook_secret,uid=999,gid=999,mode=0400'
+        - 'Volume=/opt/papra:/app/app-data:Z'
+        - 'Label=traefik.enable=true'
+        - 'Environment=NODE_OPTIONS=--max-old-space-size=512'
+      config:
+        - '"ocrLanguages": "deu,eng,fra"'
+        - '"showLegalLinksOnAuthPage": false'
+        - 'set(config, "intakeEmails.webhookSecret", secret("papra_intake_webhook_secret"));'

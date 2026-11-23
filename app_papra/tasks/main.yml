@@ -1,19 +1,221 @@
 ---
 
-- name: 'Deploy papra container'
-  tags: [ 'app_papra' ]
+- name: 'Deploy Papra'
+  tags: [ 'app', 'app_papra' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. an unknown filter, papra_container or papra_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_papra__container | length > 0
+          - app_papra__config | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_papra__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_papra__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_papra__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_papra__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`papra_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`papra_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `papra_secrets` have to be unique') -%}
+          {%- elif secrets | map(attribute='target') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the targets of `papra_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The options are nested dictionaries, they are checked as dotted paths, e.g. auth.isRegistrationEnabled
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_papra__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_papra__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_papra__config_paths: >-
+          {%- macro paths(value, prefix) -%}
+          {%-   set result = [] -%}
+          {%-   for key, item in value.items() if item is not none -%}
+          {%-     if item is mapping and item | length > 0 -%}
+          {%-       set _ = result.extend(paths(item, prefix ~ key ~ '.') | from_json) -%}
+          {%-     else -%}
+          {%-       set _ = result.append({ 'path': prefix ~ key, 'value': item }) -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {{ result | to_json }}
+          {%- endmacro -%}
+          {{ (paths(app_papra__config, '') | from_json) if app_papra__config is mapping else [] }}
+        app_papra__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_papra__config is not mapping -%}
+          {%-   set _ = errors.append('`papra_config` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set keys = app_papra__config_paths | map(attribute='path') | list -%}
+          {%-   set secrets = keys | select('in', app_papra__secrets_allowed) | list -%}
+          {%-   set unknown = keys | reject('in', app_papra__config_allowed) | reject('in', secrets) | list -%}
+          {%-   set booleans = app_papra__config_paths | selectattr('path', 'in', app_papra__config_booleans)
+                               | rejectattr('value', 'boolean') | map(attribute='path') | list -%}
+          {%-   set lines = app_papra__config_paths | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='path') | list -%}
+          {%-   set missing = app_papra__config_required | reject('in', keys) | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('Papra needs the options ' ~ (app_papra__config_required | join(', ')) ~ ' in papra_config, missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-   elif (app_papra__config.appBaseUrl | string) is not match(app_papra__url_pattern) -%}
+          {%-     set _ = errors.append('appBaseUrl has to be an http or https URL.') -%}
+          {%-   endif -%}
+          {%-   if secrets | length > 0 -%}
+          {%-     set _ = errors.append('These options are passed as secrets with papra_secrets, not in papra_config: ' ~ (secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in papra_config: ' ~ (unknown | join(', ')) ~ '. Allowed are the options of Papra (app_papra__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   if booleans | length > 0 -%}
+          {%-     set _ = errors.append('These options are booleans, use true or false without quotes: ' ~ (booleans | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Options must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # auth.secret is mandatory, Papra refuses shorter secrets
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_papra__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_papra__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_papra__errors: >-
+          {%- set errors = [] -%}
+          {%- set targets = app_papra__secrets | map(attribute='target') | map('string') | list -%}
+          {%- set unknown = targets | reject('in', app_papra__secrets_allowed) | list -%}
+          {%- set missing = app_papra__secrets_required | reject('in', targets) | list -%}
+          {%- set secret = app_papra__secrets | selectattr('target', 'eq', 'auth.secret') | map(attribute='data') | map('string') | first | default('') -%}
+          {%- set lines = app_papra__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (unknown | join(', ')) ~ '. Allowed are the options of app_papra__secrets_allowed.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Papra needs the secrets ' ~ (app_papra__secrets_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- elif secret | length < app_papra__secret_length -%}
+          {%-   set _ = errors.append('The secret auth.secret needs at least ' ~ app_papra__secret_length ~ ' characters.') -%}
+          {%- endif -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Without papra_environment there is nothing to check
+    - name: 'Validate the environment'
+      when: app_papra__environment is defined
+      ansible.builtin.assert:
+        that:
+          - app_papra__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_papra__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_papra__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_papra__environment is not mapping -%}
+          {%-   set _ = errors.append('`papra_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = app_papra__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_papra__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_papra__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_papra__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_papra__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('`papra_admin` has to be a dictionary with name, email and password.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | map('string') | reject('in', app_papra__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in papra_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_papra__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.name | default('') | string | length) == 0 or ((admin.name | string) ~ '.').splitlines() | length > 1 -%}
+          {%-     set _ = errors.append('papra_admin needs a name without line breaks.') -%}
+          {%-   endif -%}
+          {%-   if (admin.email | default('') | string) is not match(app_papra__admin_email_pattern) -%}
+          {%-     set _ = errors.append('papra_admin needs a valid email.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none -%}
+          {%-     set _ = errors.append('papra_admin needs a password.') -%}
+          {%-   elif (admin.password | string | length) < app_papra__password_length -%}
+          {%-     set _ = errors.append('The password of papra_admin needs at least ' ~ app_papra__password_length ~ ' characters.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging papra_container,
+    # unknown variables would change the behavior unexpectedly, without an environment of the container there is nothing to check
+    - name: 'Validate the allowed environment variables'
+      when: app_papra__container.environment | default(none) is mapping
+      ansible.builtin.assert:
+        that:
+          - app_papra__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_papra__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_papra__environment_unknown: >-
+          {{ app_papra__container.environment.keys() | map('string') | reject('in', app_papra__environment_allowed) | list }}
+        app_papra__environment_line_breaks: >-
+          {{ app_papra__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_papra__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_papra__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_papra__environment_unknown | join(', '))
+                                    ~ '. Allowed are ' ~ (app_papra__environment_allowed | join(', ')) ~ ', the options of Papra are set with papra_config.') -%}
+          {%- endif -%}
+          {%- if app_papra__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_papra__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The rootless image runs Papra as the user nonroot (999)
+    - name: 'Create the directories of Papra'
       ansible.builtin.file:
-        dest: "{{ item.dest }}"
+        path: "{{ item }}"
         owner: "{{ app_papra__uid }}"
         group: "{{ app_papra__gid }}"
-        mode: "{{ item.mode | default('0700') }}"
+        mode: '0700'
         state: 'directory'
-      with_items:
-        - dest: "{{ app_papra__podman_home }}/db"
-        - dest: "{{ app_papra__podman_home }}/documents"
+      loop:
+        - "{{ app_papra__podman_home }}"
+        - "{{ app_papra__podman_home }}/db"
+        - "{{ app_papra__podman_home }}/documents"
 
     - name: 'Create secrets'
       no_log: true
@@ -21,24 +223,23 @@
         state: 'present'
         name: "{{ item.name }}"
         data: "{{ item.data }}"
-      with_items: "{{ app_papra__secrets }}"
+      loop: "{{ app_papra__secrets }}"
+      register: 'app_papra__secrets_result'
+
+    # The configuration reads the secrets from their files, it contains no secret
+    - name: 'Write the configuration file'
+      ansible.builtin.template:
+        src: 'papra.config.mjs.j2'
+        dest: "{{ app_papra__config_file }}"
+        owner: "{{ app_papra__uid }}"
+        group: "{{ app_papra__gid }}"
+        mode: '0400'
+      register: 'app_papra__config_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
 
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ app_papra__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[app_papra__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ app_papra__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
-
-    - name:  'Install container'
+    - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ app_papra__container.name }}"
         hostname: "{{ app_papra__container.hostname }}"
@@ -47,6 +248,7 @@
         ip6: "{{ app_papra__container.ipv6 | default(omit) }}"
         network: "{{ app_papra__container.network }}"
         timezone: "{{ app_papra__container.timezone }}"
+        command: "{{ app_papra__container.command | default(omit) }}"
         env: "{{ app_papra__container.environment | default(omit) }}"
         etc_hosts: "{{ app_papra__container.etc_hosts | default(omit) }}"
         expose: "{{ app_papra__container.expose | default(omit) }}"
@@ -66,22 +268,142 @@
           {% if app_papra__container.requires is defined %}
           Requires={{ app_papra__container.requires | join(' ') }}
           {% endif %}
+          {% if app_papra__container.wants is defined %}
+          Wants={{ app_papra__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_papra__container.after is defined %}
+          After={{ app_papra__container.after | join(' ') }}
+          {% endif %}
+          {% if app_papra__container.part_of is defined %}
+          PartOf={{ app_papra__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_papra__container.binds_to is defined %}
+          BindsTo={{ app_papra__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_papra__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_papra__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'app_papra__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ app_papra__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
+    # Papra reads the configuration and the secrets only on start,
+    # a failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Papra'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_papra__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_papra__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_papra__running: >-
+              {{ (ansible_facts.services[app_papra__container.name + '.service'].state | default('')) == 'running' }}
+            app_papra__restart: >-
+              {{ app_papra__running | bool
+                 and (app_papra__config_result is changed or app_papra__secrets_result is changed or app_papra__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_papra__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_papra__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_papra__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_papra__start_journal.stdout_lines }}
+
+    # Papra migrates the database on every start before it listens
+    - name: 'Wait for Papra'
+      ansible.builtin.uri:
+        url: "http://{{ app_papra__ip }}:{{ app_papra__port }}/api/health"
+        return_content: true
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'app_papra__ready'
+      until: (app_papra__ready.json | default({})).isEverythingOk | default(false) is true
+      retries: 60
+      delay: 3
+      failed_when: false
       when: 'not ansible_check_mode'
 
+    - name: 'Read the log of Papra'
+      when:
+        - not ansible_check_mode
+        - (app_papra__ready.json | default({})).isEverythingOk | default(false) is not true
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_papra__container.name }}", '-n', '100', '--no-pager' ]
+      register: 'app_papra__journal'
+      changed_when: false
+
+    - name: 'Assert that Papra answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_papra__journal is skipped
+        fail_msg: "{{ app_papra__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # The first user who signs up becomes the administrator, the role signs it up if the sign-in is refused.
+    # better-auth only accepts requests from the origin of appBaseUrl
+    - name: 'Create the administrator'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Sign in as the administrator'
+          ansible.builtin.uri:
+            url: "http://{{ app_papra__ip }}:{{ app_papra__port }}/api/auth/sign-in/email"
+            method: 'POST'
+            body_format: 'json'
+            body:
+              email: "{{ app_papra__admin.email | string }}"
+              password: "{{ app_papra__admin.password | string }}"
+            headers:
+              Origin: "{{ app_papra__config.appBaseUrl | regex_replace('^(https?://[^/]+).*$', '\\1') }}"
+            status_code: [ 200, 401, 403 ]
+          register: 'app_papra__admin_signin'
+          no_log: true
+
+        - name: 'Sign up the administrator'
+          when: app_papra__admin_signin.status != 200
+          ansible.builtin.uri:
+            url: "http://{{ app_papra__ip }}:{{ app_papra__port }}/api/auth/sign-up/email"
+            method: 'POST'
+            body_format: 'json'
+            body:
+              name: "{{ app_papra__admin.name | string }}"
+              email: "{{ app_papra__admin.email | string }}"
+              password: "{{ app_papra__admin.password | string }}"
+            headers:
+              Origin: "{{ app_papra__config.appBaseUrl | regex_replace('^(https?://[^/]+).*$', '\\1') }}"
+            status_code: [ 200, 400, 403, 422 ]
+            return_content: true
+          register: 'app_papra__admin_result'
+          changed_when: app_papra__admin_result.status == 200
+          no_log: true
+
+        - name: 'Assert the administrator'
+          ansible.builtin.assert:
+            that:
+              - app_papra__admin_signin.status == 200 or app_papra__admin_result.status == 200
+            fail_msg: >-
+              The administrator {{ app_papra__admin.email }} can neither sign in nor sign up
+              ({{ (app_papra__admin_result.json | default({})).message | default(app_papra__admin_result.status | default('')) }}),
+              the registration may be disabled (auth.isRegistrationEnabled) or the user exists with another password.
+            quiet: true
+
     - name: 'Enable autoupdate on container'
-      when: 'app_papra__autoupdate_enabled'
-      include_role:
+      when: 'app_papra__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ app_papra__container.name }}"
         container_image: "{{ app_papra__container.image }}"
+        container_schedule: "{{ app_papra__autoupdate_schedule }}"

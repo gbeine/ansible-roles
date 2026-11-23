@@ -11,29 +11,61 @@ app_papra__ipv6: "{{ papra_ipv6 }}"
 app_papra__network: "{{ papra_network | mandatory }}"
 app_papra__hostname: "{{ papra_hostname | mandatory }}"
 app_papra__timezone: "{{ papra_timezone | mandatory }}"
-app_papra__labels: "{{ papra_labels | default({}) }}"
-app_papra__secrets: "{{ papra_secrets | default([]) }}"
+app_papra__labels: "{{ papra_labels }}"
 
 app_papra__version: "{{ papra_version | default('latest') }}"
 
-app_papra__container: "{{ app_papra__container_default | combine(papra_container | default({})) }}"
+app_papra__container: "{{ app_papra__podman_container_default | combine(papra_container | default({})) }}"
+
+# The options of papra.config.mjs, merged recursively over the default, appBaseUrl is mandatory
+app_papra__config: "{{ app_papra__config_default | combine(papra_config | default({}), recursive=true) }}"
+
+# The variables of the image that are no options of Papra, e.g. NODE_OPTIONS
+app_papra__environment: "{{ papra_environment }}"
+
+# Secrets with name, data and target, the target is the path of the option, auth.secret is mandatory
+app_papra__secrets: "{{ papra_secrets | default([]) }}"
+
+# The administrator of Papra with name, email and password, the role signs it up as first user
+app_papra__admin: "{{ papra_admin | mandatory }}"
 
 app_papra__autoupdate_enabled: "{{ papra_autoupdate_enabled | default(false) }}"
+app_papra__autoupdate_schedule: "{{ papra_autoupdate_schedule }}"
 
 #
 # Defaults - do not change
 #
 
-app_papra__uid: '999'
-app_papra__gid: "{{ app_papra__uid }}"
+# The user nonroot of the rootless image
+app_papra__uid: 999
+app_papra__gid: 999
 
 app_papra__podman_name: 'papra'
 app_papra__podman_image: 'ghcr.io/papra-hq/papra'
 app_papra__podman_tag: "{{ app_papra__version }}"
 
 app_papra__podman_home: "{{ app_papra__home }}"
+# Papra reads papra.config.mjs from PAPRA_CONFIG_DIR, /app/app-data in the image
+app_papra__config_file: "{{ app_papra__podman_home }}/papra.config.mjs"
 
-app_papra__container_default:
+app_papra__port: 1221
+
+app_papra__config_default: {}
+
+# appBaseUrl is the public URL of Papra, better-auth only accepts requests from its origin
+app_papra__config_required: [ 'appBaseUrl' ]
+app_papra__url_pattern: '^https?://[^\s/]+(/\S*)?$'
+
+# auth.secret signs the sessions, Papra requires at least 32 characters
+app_papra__secrets_required: [ 'auth.secret' ]
+app_papra__secret_length: 32
+app_papra__secrets_dir: '/run/secrets'
+
+app_papra__admin_keys: [ 'name', 'email', 'password' ]
+app_papra__admin_email_pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+app_papra__password_length: 8
+
+app_papra__podman_container_default:
   name: "{{ app_papra__podman_name }}"
   hostname: "{{ app_papra__hostname }}"
   image: "{{ app_papra__podman_image }}:{{ app_papra__podman_tag }}"
@@ -41,12 +73,244 @@ app_papra__container_default:
   ipv6: "{{ app_papra__ipv6 | default(omit) }}"
   network: "{{ app_papra__network }}"
   timezone: "{{ app_papra__timezone }}"
-  labels: "{{ app_papra__labels }}"
-  secrets: >-
-    {{ (app_papra__secrets | map(attribute='name') | zip(app_papra__secrets | map(attribute='target')) | map('join', ',type=env,target=') | list)
-      if (app_papra__secrets | length > 0)
-      else omit }}
+  labels: "{{ app_papra__labels | default(omit) }}"
+  # Set with papra_environment
+  environment: "{{ app_papra__environment | default(omit) }}"
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
     - "{{ app_papra__podman_home }}:/app/app-data:Z"
+  # The secrets are files, papra.config.mjs reads them, entries without name are left out, the validation reports them
+  secrets: >-
+    {{ (app_papra__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ app_papra__secrets_dir ~ '/\1,uid=' ~ app_papra__uid ~ ',gid=' ~ app_papra__gid ~ ',mode=0400') | list)
+      if (app_papra__secrets is sequence and app_papra__secrets is not string and app_papra__secrets | length > 0)
+      else omit }}
+
+# The variables of the image that are no options of Papra
+app_papra__environment_allowed: [ 'NODE_OPTIONS', 'TZ' ]
+
+# The options of papra-config-schema.json of Papra 26.7.1 carrying keys, passwords, tokens or credentials,
+# they are passed with papra_secrets
+app_papra__secrets_allowed:
+  - 'ai.adapters.anthropic.apiKey'
+  - 'ai.adapters.cocore.apiKey'
+  - 'ai.adapters.deepseek.apiKey'
+  - 'ai.adapters.lmstudio.apiKey'
+  - 'ai.adapters.mistral.apiKey'
+  - 'ai.adapters.ollama.apiKey'
+  - 'ai.adapters.openai.apiKey'
+  - 'ai.adapters.openrouter.apiKey'
+  - 'ai.adapters.vllm.apiKey'
+  - 'auth.providers.github.clientSecret'
+  - 'auth.providers.google.clientSecret'
+  - 'auth.secret'
+  - 'database.authToken'
+  - 'database.encryptionKey'
+  - 'documentContentExtraction.strategy.azureDi.apiKey'
+  - 'documentContentExtraction.strategy.docling.apiKey'
+  - 'documentsStorage.drivers.azureBlob.accountKey'
+  - 'documentsStorage.drivers.azureBlob.connectionString'
+  - 'documentsStorage.drivers.s3.secretAccessKey'
+  - 'documentsStorage.encryption.documentKeyEncryptionKeys'
+  - 'emails.drivers.resend.resendApiKey'
+  - 'emails.drivers.smtp.password'
+  - 'intakeEmails.drivers.owlrelay.owlrelayApiKey'
+  - 'intakeEmails.webhookSecret'
+  - 'planEntitlements.selfhst.entitlementVerification.token'
+  - 'subscriptions.stripeApiSecretKey'
+  - 'subscriptions.stripeWebhookSecret'
+  - 'tasks.persistence.drivers.libSql.authToken'
+  - 'tracking.posthog.apiKey'
+
+# The booleanish options of papra-config-schema.json of Papra 26.7.1, the values are YAML booleans
+app_papra__config_booleans:
+  - 'ai.credits.isEnabled'
+  - 'ai.isEnabled'
+  - 'auth.firstUserAsAdmin'
+  - 'auth.isEmailVerificationRequired'
+  - 'auth.isPasswordResetEnabled'
+  - 'auth.isRegistrationEnabled'
+  - 'auth.providers.email.isEnabled'
+  - 'auth.providers.github.isEnabled'
+  - 'auth.providers.google.isEnabled'
+  - 'auth.showLegalLinksOnAuthPage'
+  - 'autoTagging.isEnabled'
+  - 'documents.isContentExtractionEnabled'
+  - 'documents.isReprocessingEnabled'
+  - 'documentsStorage.drivers.s3.forcePathStyle'
+  - 'documentsStorage.encryption.isEncryptionEnabled'
+  - 'documentsStorage.pattern.enableRandomSuffixFallback'
+  - 'documentsStorage.pattern.isStorageKeySyncEnabled'
+  - 'documentsStorage.pattern.useLegacyStorageKeyDefinitionSystem'
+  - 'emails.drivers.smtp.secure'
+  - 'ingestionFolder.isEnabled'
+  - 'ingestionFolder.watcher.usePolling'
+  - 'intakeEmails.isEnabled'
+  - 'intakeEmails.username.canCustomize'
+  - 'organizationPlans.isFreePlanUnlimited'
+  - 'planEntitlements.selfhst.isEnabledForNewClaims'
+  - 'server.servePublicDir'
+  - 'tasks.expireInvitations.runOnStartup'
+  - 'tasks.hardDeleteExpiredDocuments.runOnStartup'
+  - 'tasks.persistence.drivers.libSql.migrateWithPragma'
+  - 'tasks.purgeExpiredKvEntries.runOnStartup'
+  - 'tasks.purgeExpiredOrganizations.runOnStartup'
+  - 'tasks.reverifyPlanEntitlements.runOnStartup'
+  - 'tracking.posthog.isEnabled'
+  - 'webhooks.isSsrfProtectionEnabled'
+
+# Generated from the paths of papra-config-schema.json of Papra 26.7.1 without the secrets,
+# env, version, gitCommitSha and gitCommitDate set by the image and auth.providers.customs, it contains the client secrets in JSON,
+# update with new versions of the image
+app_papra__config_allowed:
+  - 'ai.adapters.anthropic.baseUrl'
+  - 'ai.adapters.cocore.baseUrl'
+  - 'ai.adapters.deepseek.baseUrl'
+  - 'ai.adapters.lmstudio.baseUrl'
+  - 'ai.adapters.mistral.baseUrl'
+  - 'ai.adapters.ollama.baseUrl'
+  - 'ai.adapters.openai.baseUrl'
+  - 'ai.adapters.openrouter.baseUrl'
+  - 'ai.adapters.vllm.baseUrl'
+  - 'ai.credits.isEnabled'
+  - 'ai.defaultModelId'
+  - 'ai.isEnabled'
+  - 'appBaseUrl'
+  - 'auth.allowedEmailDomains'
+  - 'auth.firstUserAsAdmin'
+  - 'auth.forbiddenEmailDomains'
+  - 'auth.ipAddressHeaders'
+  - 'auth.isEmailVerificationRequired'
+  - 'auth.isPasswordResetEnabled'
+  - 'auth.isRegistrationEnabled'
+  - 'auth.providers.email.isEnabled'
+  - 'auth.providers.github.clientId'
+  - 'auth.providers.github.isEnabled'
+  - 'auth.providers.google.clientId'
+  - 'auth.providers.google.isEnabled'
+  - 'auth.showLegalLinksOnAuthPage'
+  - 'autoTagging.defaultMaxTags'
+  - 'autoTagging.isEnabled'
+  - 'autoTagging.modelId'
+  - 'client.baseUrl'
+  - 'customProperties.maxCustomPropertiesPerOrganization'
+  - 'database.url'
+  - 'documentContentExtraction.extractionStrategies'
+  - 'documentContentExtraction.strategy.azureDi.endpoint'
+  - 'documentContentExtraction.strategy.azureDi.mimeTypesAllowList'
+  - 'documentContentExtraction.strategy.azureDi.pollingAttempts'
+  - 'documentContentExtraction.strategy.azureDi.pollingDelayMs'
+  - 'documentContentExtraction.strategy.azureDi.timeoutMs'
+  - 'documentContentExtraction.strategy.customHttp.headers'
+  - 'documentContentExtraction.strategy.customHttp.jsonResponseTextPath'
+  - 'documentContentExtraction.strategy.customHttp.mimeTypesAllowList'
+  - 'documentContentExtraction.strategy.customHttp.requestTimeout'
+  - 'documentContentExtraction.strategy.customHttp.responseFormat'
+  - 'documentContentExtraction.strategy.customHttp.uploadFormat'
+  - 'documentContentExtraction.strategy.customHttp.url'
+  - 'documentContentExtraction.strategy.docling.baseUrl'
+  - 'documentContentExtraction.strategy.docling.mimeTypesAllowList'
+  - 'documentContentExtraction.strategy.docling.options'
+  - 'documentContentExtraction.strategy.docling.timeoutMs'
+  - 'documentContentExtraction.strategy.mistralOcr.mimeTypesAllowList'
+  - 'documentContentExtraction.strategy.mistralOcr.modelName'
+  - 'documentContentExtraction.strategy.mistralOcr.timeoutMs'
+  - 'documentSearch.providerName'
+  - 'documentShareLinks.accessTokenTtlMinutes'
+  - 'documentShareLinks.documentAccessRateLimit'
+  - 'documentShareLinks.fileAccessRateLimit'
+  - 'documentShareLinks.maxLinksPerDocument'
+  - 'documentShareLinks.passwordVerificationRateLimit'
+  - 'documentShareLinks.shareLinkBaseUrl'
+  - 'documents.deletedDocumentsRetentionDays'
+  - 'documents.isContentExtractionEnabled'
+  - 'documents.isReprocessingEnabled'
+  - 'documents.ocrLanguages'
+  - 'documents.reprocessingRateLimit'
+  - 'documentsStorage.driver'
+  - 'documentsStorage.drivers.azureBlob.accountName'
+  - 'documentsStorage.drivers.azureBlob.containerName'
+  - 'documentsStorage.drivers.filesystem.root'
+  - 'documentsStorage.drivers.s3.accessKeyId'
+  - 'documentsStorage.drivers.s3.bucketName'
+  - 'documentsStorage.drivers.s3.endpoint'
+  - 'documentsStorage.drivers.s3.forcePathStyle'
+  - 'documentsStorage.drivers.s3.region'
+  - 'documentsStorage.encryption.isEncryptionEnabled'
+  - 'documentsStorage.maxUploadSize'
+  - 'documentsStorage.pattern.enableRandomSuffixFallback'
+  - 'documentsStorage.pattern.isStorageKeySyncEnabled'
+  - 'documentsStorage.pattern.maxIncrementalSuffixAttempts'
+  - 'documentsStorage.pattern.storageKeyPattern'
+  - 'documentsStorage.pattern.useLegacyStorageKeyDefinitionSystem'
+  - 'emails.driverName'
+  - 'emails.drivers.logger.level'
+  - 'emails.drivers.smtp.host'
+  - 'emails.drivers.smtp.port'
+  - 'emails.drivers.smtp.rawConfig'
+  - 'emails.drivers.smtp.secure'
+  - 'emails.drivers.smtp.user'
+  - 'emails.fromEmail'
+  - 'ingestionFolder.errorFolder'
+  - 'ingestionFolder.folderRootPath'
+  - 'ingestionFolder.ignoredPatterns'
+  - 'ingestionFolder.isEnabled'
+  - 'ingestionFolder.postProcessing.moveToFolderPath'
+  - 'ingestionFolder.postProcessing.strategy'
+  - 'ingestionFolder.processingConcurrency'
+  - 'ingestionFolder.watcher.awaitWriteFinish.pollInterval'
+  - 'ingestionFolder.watcher.awaitWriteFinish.stabilityThreshold'
+  - 'ingestionFolder.watcher.pollingInterval'
+  - 'ingestionFolder.watcher.usePolling'
+  - 'intakeEmails.driver'
+  - 'intakeEmails.drivers.catchAll.domain'
+  - 'intakeEmails.drivers.owlrelay.domain'
+  - 'intakeEmails.drivers.owlrelay.webhookUrl'
+  - 'intakeEmails.isEnabled'
+  - 'intakeEmails.username.canCustomize'
+  - 'intakeEmails.username.driver'
+  - 'intakeEmails.username.drivers.pattern.pattern'
+  - 'kvStore.driverName'
+  - 'organizationPlans.isFreePlanUnlimited'
+  - 'organizationPlans.plusPlanAnnualPriceId'
+  - 'organizationPlans.plusPlanMonthlyPriceId'
+  - 'organizationPlans.proPlanAnnualPriceId'
+  - 'organizationPlans.proPlanMonthlyPriceId'
+  - 'organizations.deletedOrganizationsPurgeDaysDelay'
+  - 'organizations.invitationExpirationDelayDays'
+  - 'organizations.maxOrganizationCount'
+  - 'organizations.maxUserInvitationsPerDay'
+  - 'planEntitlements.claimRateLimit'
+  - 'planEntitlements.selfhst.entitlementVerification.endpoint'
+  - 'planEntitlements.selfhst.isEnabledForNewClaims'
+  - 'planEntitlements.selfhst.subscriptionDiscountCouponId'
+  - 'processMode'
+  - 'server.baseUrl'
+  - 'server.corsOrigins'
+  - 'server.defaultRouteTimeoutMs'
+  - 'server.hostname'
+  - 'server.port'
+  - 'server.routeTimeouts'
+  - 'server.servePublicDir'
+  - 'server.trustedAppSchemes'
+  - 'server.trustedOrigins'
+  - 'subscriptions.globalCouponId'
+  - 'tags.maxTagsPerOrganization'
+  - 'tasks.expireInvitations.cron'
+  - 'tasks.expireInvitations.runOnStartup'
+  - 'tasks.hardDeleteExpiredDocuments.cron'
+  - 'tasks.hardDeleteExpiredDocuments.runOnStartup'
+  - 'tasks.persistence.driverName'
+  - 'tasks.persistence.drivers.libSql.migrateWithPragma'
+  - 'tasks.persistence.drivers.libSql.pollIntervalMs'
+  - 'tasks.persistence.drivers.libSql.url'
+  - 'tasks.purgeExpiredKvEntries.cron'
+  - 'tasks.purgeExpiredKvEntries.runOnStartup'
+  - 'tasks.purgeExpiredOrganizations.cron'
+  - 'tasks.purgeExpiredOrganizations.runOnStartup'
+  - 'tasks.reverifyPlanEntitlements.cron'
+  - 'tasks.reverifyPlanEntitlements.runOnStartup'
+  - 'tasks.worker.id'
+  - 'tracking.posthog.host'
+  - 'tracking.posthog.isEnabled'
+  - 'webhooks.isSsrfProtectionEnabled'
+  - 'webhooks.webhookUrlAllowedHostnames'

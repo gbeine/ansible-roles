@@ -1,0 +1,216 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_papra__test_case: "{{ app_papra__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_papra__test_vars: "{{ app_papra__test_case.role_vars }}"
+    app_papra__test_config: "{{ app_papra__test_vars.papra_config }}"
+    app_papra__test_secrets: "{{ app_papra__test_vars.papra_secrets }}"
+    app_papra__test_checked_files:
+      - "{{ app_papra__test_quadlet_path }}"
+      - "{{ app_papra__test_config_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_papra__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_papra__test_checked_files }}"
+      register: 'app_papra__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_papra with papra_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_container: [ 'environment' ]
+        app_papra__test_invalid:
+          message: 'papra_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_papra with papra_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_config: [ 'appBaseUrl' ]
+        app_papra__test_invalid:
+          message: 'papra_config not a dictionary'
+          search: 'failed to combine variables, expected dicts|`papra_config` has to be a dictionary\.'
+
+    - name: 'Run app_papra with papra_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_environment: [ 'NODE_OPTIONS' ]
+        app_papra__test_invalid:
+          message: 'papra_environment not a dictionary'
+          search: '^`papra_environment` has to be a dictionary\.$'
+
+    - name: 'Run app_papra with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_config: "{{ app_papra__test_config | combine({ 'auth': { 'isRegistrationEnabeld': true } }, recursive=true) }}"
+        app_papra__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in papra_config: auth\.isRegistrationEnabeld\.'
+
+    - name: 'Run app_papra with a secret in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_config: "{{ app_papra__test_config | combine({ 'auth': { 'secret': 'molecule-plain-secret-0123456789012345' } }, recursive=true) }}"
+        app_papra__test_invalid:
+          message: 'a secret in the configuration'
+          search: '^These options are passed as secrets with papra_secrets, not in papra_config: auth\.secret\.$'
+
+    - name: 'Run app_papra without appBaseUrl (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_config: "{{ app_papra__test_config | combine({ 'appBaseUrl': none }) }}"
+        app_papra__test_invalid:
+          message: 'no appBaseUrl'
+          search: '^Papra needs the options appBaseUrl in papra_config, missing: appBaseUrl\.$'
+
+    - name: 'Run app_papra with a string as boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_config: "{{ app_papra__test_config | combine({ 'auth': { 'isRegistrationEnabled': 'yes' } }, recursive=true) }}"
+        app_papra__test_invalid:
+          message: 'a string as boolean'
+          search: '^These options are booleans, use true or false without quotes: auth\.isRegistrationEnabled\.$'
+
+    - name: 'Run app_papra with a line break in an option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_config: "{{ app_papra__test_config | combine({ 'documents': { 'ocrLanguages': 'deu\neng' } }, recursive=true) }}"
+        app_papra__test_invalid:
+          message: 'a line break in an option'
+          search: '^Options must not contain line breaks: documents\.ocrLanguages\.$'
+
+    - name: 'Run app_papra with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_secrets: "{{ app_papra__test_secrets + [ { 'name': 'papra_other', 'data': 'x' } ] }}"
+        app_papra__test_invalid:
+          message: 'a secret without target'
+          search: '^`papra_secrets` entries need name, data and target$'
+
+    - name: 'Run app_papra with a short auth.secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_secrets:
+          - name: 'papra_auth_secret'
+            data: 'molecule-short-secret'
+            target: 'auth.secret'
+        app_papra__test_invalid:
+          message: 'a short auth.secret'
+          search: '^The secret auth\.secret needs at least 32 characters\.$'
+
+    - name: 'Run app_papra with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_secrets: "{{ app_papra__test_secrets + [ { 'name': 'papra_unknown', 'data': 'x', 'target': 'auth.providers.customs' } ] }}"
+        app_papra__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: auth\.providers\.customs\.'
+
+    - name: 'Run app_papra with an option in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_environment:
+          AUTH_SECRET: 'molecule-plain-secret-0123456789012345'
+        app_papra__test_invalid:
+          message: 'an option in the environment'
+          search: '^Unknown environment variables: AUTH_SECRET\.'
+
+    - name: 'Run app_papra with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        papra_admin: "{{ app_papra__test_admin | dict2items | rejectattr('key', 'eq', 'password') | items2dict }}"
+        app_papra__test_invalid:
+          message: 'an administrator without password'
+          search: '^papra_admin needs a password\.$'
+
+    - name: 'Change the configuration'
+      when: app_papra__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'papra' ]
+          register: 'app_papra__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            papra_config: "{{ app_papra__test_case.side_effect.config }}"
+
+        - name: 'Run app_papra with the changed values'
+          ansible.builtin.include_role:
+            name: 'app_papra'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'papra' ]
+          register: 'app_papra__test_started_after'
+          changed_when: false
+
+        # Only the configuration file changes, the quadlet unit is unchanged
+        - name: 'Assert the changed configuration file and the restart'
+          ansible.builtin.assert:
+            that:
+              - app_papra__config_result is changed
+              - app_papra__quadlet_result is not changed
+              - app_papra__test_started_after.stdout | int > app_papra__test_started_before.stdout | int
+            fail_msg: >-
+              configuration changed: {{ app_papra__config_result is changed }}, quadlet changed: {{ app_papra__quadlet_result is changed }},
+              start before {{ app_papra__test_started_before.stdout }}, after {{ app_papra__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_papra__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'papra' ]
+          register: 'app_papra__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_papra without a change'
+          ansible.builtin.include_role:
+            name: 'app_papra'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'papra' ]
+          register: 'app_papra__test_unchanged_after'
+          changed_when: false
+
+        # The administrator exists, the role only signs in
+        - name: 'Assert no restart, no change and no new administrator'
+          ansible.builtin.assert:
+            that:
+              - app_papra__config_result is not changed
+              - app_papra__quadlet_result is not changed
+              - app_papra__secrets_result is not changed
+              - app_papra__admin_result is skipped
+              - app_papra__test_unchanged_after.stdout == app_papra__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ app_papra__config_result is changed }}, quadlet changed: {{ app_papra__quadlet_result is changed }},
+              secrets changed: {{ app_papra__secrets_result is changed }}, signed up: {{ app_papra__admin_result is not skipped }},
+              start before {{ app_papra__test_unchanged_before.stdout }}, after {{ app_papra__test_unchanged_after.stdout }}
