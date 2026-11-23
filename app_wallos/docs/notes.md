@@ -37,9 +37,15 @@ The image creates the database as root at every start and hands it to `www-data`
 - with users the user with the id 1 is the administrator, the module checks the password with `password_verify`
   and only changes the username, the email or the password if they differ
 
-The environment is set with `wallos_environment`, it is merged over the default of the role (`TZ`).
-Wallos reads `TZ` for its cron jobs, `SSRF_ALLOWLIST` (hosts allowed for webhooks, it overrides the setting of the administration page)
-and the `OIDC_*` variables for the login with OpenID Connect, variables set in the environment cannot be changed on the administration page.
+Wallos has no configuration file, its settings are stored in the database, so it is configured with the environment.
+The environment is set with `wallos_environment`, it is merged over the default of the role (`TZ` from `wallos_timezone`).
+Wallos reads `TZ` itself for its cron jobs (`endpoints/cronjobs/settimezone.php`), without it PHP uses UTC, not `/etc/localtime`
+of podman, so the role keeps `TZ` in its default.
+Wallos reads `SSRF_ALLOWLIST` (hosts allowed for webhooks, it overrides the setting of the administration page),
+the `OIDC_*` variables for the login with OpenID Connect, the settings of the instance `WALLOS_SMTP_HOST`, `WALLOS_SMTP_PORT`,
+`WALLOS_SMTP_ENCRYPTION` (`none`, `tls` or `ssl`), `WALLOS_SMTP_USERNAME`, `WALLOS_SMTP_FROM`, `WALLOS_SERVER_URL`, `WALLOS_NTFY_SERVER`
+and `WALLOS_GOTIFY_SERVER`, and `https_proxy`, `http_proxy` and `all_proxy` for the search of logos and payment methods.
+Variables set in the environment cannot be changed on the administration page.
 `startup.sh` of the image sets the user `www-data` to `PUID` and `PGID` (82 by default) and owns the database and the logos by it,
 the role creates `<home>/db` and `<home>/logos` with the same IDs.
 
@@ -54,10 +60,18 @@ wallos_environment:
   OIDC_REDIRECT_URL: 'https://wallos.example.org/'
   OIDC_USER_IDENTIFIER: 'preferred_username'
   OIDC_SCOPES: 'openid email profile'
+  WALLOS_SMTP_HOST: 'mail.example.org'
+  WALLOS_SMTP_PORT: 587
+  WALLOS_SMTP_ENCRYPTION: 'tls'
+  WALLOS_SMTP_USERNAME: 'wallos'
+  WALLOS_SMTP_FROM: 'wallos@example.org'
 wallos_secrets:
   - name: 'wallos_oidc_client_secret'
     data: "{{ vault_wallos_oidc_client_secret }}"
     target: 'OIDC_CLIENT_SECRET'
+  - name: 'wallos_smtp_password'
+    data: "{{ vault_wallos_smtp_password }}"
+    target: 'WALLOS_SMTP_PASSWORD'
 ```
 
 With `OIDC_ISSUER` Wallos reads the URLs of the provider from its discovery document,
@@ -65,9 +79,10 @@ otherwise `OIDC_AUTH_URL`, `OIDC_TOKEN_URL` and `OIDC_USERINFO_URL` are needed.
 
 ### Secrets
 
-The secrets are set with `wallos_secrets`, every entry needs `name`, `data` and `target`, the only allowed target is `OIDC_CLIENT_SECRET`.
+The secrets are set with `wallos_secrets`, every entry needs `name`, `data` and `target`, the allowed targets are
+`OIDC_CLIENT_SECRET`, `WALLOS_SMTP_PASSWORD`, `WALLOS_TELEGRAM_BOT_TOKEN`, `WALLOS_NTFY_HEADERS` and `WALLOS_PUSHOVER_TOKEN`.
 The role creates every entry with `podman secret` and mounts it to `/run/secrets/<name>`,
-the file variable `OIDC_CLIENT_SECRET_FILE` points to it, Wallos reads the client secret from the file.
+the file variable `<target>_FILE` (e.g. `OIDC_CLIENT_SECRET_FILE`) points to it, Wallos reads the secret from the file.
 Neither the target nor the file variable may be set in `wallos_environment`.
 The administrator of Wallos sees the client secret on the administration page.
 
@@ -76,13 +91,16 @@ The administrator of Wallos sees the client secret on the administration page.
 The role only allows the environment variables in `app_wallos__environment_allowed` and the secrets in `app_wallos__secret_files`,
 it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret.
-The lists are generated from `startup.sh`, `endpoints/cronjobs/settimezone.php`, `includes/oidc_settings.php` and `includes/ssrf_helper.php` of Wallos v5.11.1.
+The lists are generated from `startup.sh`, `endpoints/cronjobs/settimezone.php`, `endpoints/logos/search.php`, `endpoints/payments/search.php`,
+`includes/instance_config.php`, `includes/oidc_settings.php` and `includes/ssrf_helper.php` of Wallos v5.11.3, new versions of the image may add variables.
 `DEMO_MODE` is not allowed, it turns the instance into a demo.
 The check uses the environment of the container after merging `wallos_container`, so variables set with `wallos_container.environment` are checked as well.
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `wallos_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `wallos_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `publish` and `volumes` replace the values of the default completely,
 `wallos_container.environment` replaces the environment including `wallos_environment` and the file variables of the secrets, use `wallos_environment` instead.
 
@@ -90,21 +108,27 @@ The merge is not recursive, `publish` and `volumes` replace the values of the de
 
 The role checks before any change:
 
-- `wallos_secrets` is a list of entries with `name`, `data` and `target` and unique names, only `OIDC_CLIENT_SECRET` is a target
+- `wallos_secrets` is a list of entries with `name`, `data` and `target` and unique names with known targets
 - no secret, file variable of a secret or secret with line breaks is set in `wallos_environment`
 - `PUID` and `PGID` are numbers
 - the `OIDC_*` booleans are `true` or `false` and no value contains a line break
+- `WALLOS_SMTP_ENCRYPTION` is `none`, `tls` or `ssl` and `WALLOS_SMTP_PORT` a port number, Wallos would only ignore them with a note on the administration page
 - `wallos_admin` is a dictionary with `username` (letters, digits, `.`, `_`, `@` and `-`), a valid `email`, a `password` without line breaks
   and a `language` and `currency` known by Wallos
-- only allowed environment variables are set in the container
+- only allowed environment variables without line breaks are set in the container
 
 If `wallos_container` or `wallos_environment` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start, the wait for Wallos and the administrator do not run in check mode.
+
 ### Restart and updates
 
 Wallos is restarted if it was running and a secret or the quadlet unit changed, otherwise it is started and enabled.
-If the start fails, the role shows the journal of the service.
+If the start fails, the role shows the error and the journal of the service.
 Afterwards the role waits up to 120 seconds until `/health.php` answers and shows the journal if Wallos does not answer.
 Updates of the image are done by `container_update` with `wallos_autoupdate_enabled: true` and `wallos_autoupdate_schedule`,
 without `wallos_autoupdate_schedule` the schedule of `container_update` is used.
@@ -119,6 +143,8 @@ without `wallos_autoupdate_schedule` the schedule of `container_update` is used.
 | `podman___update_mode` | Removed, updates are done by `container_update` |
 | none | `wallos_admin`, mandatory |
 | none | `wallos_environment`, `wallos_autoupdate_schedule` |
+| none | The settings of the instance `WALLOS_*` and the proxy variables in `wallos_environment`, the secrets `WALLOS_SMTP_PASSWORD`, `WALLOS_TELEGRAM_BOT_TOKEN`, `WALLOS_NTFY_HEADERS` and `WALLOS_PUSHOVER_TOKEN` (Wallos v5.11.3) |
+| none | The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `wallos_container` |
 
 Changed behavior:
 
@@ -141,17 +167,20 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-wallos-default` | Only the mandatory variables, the administrator with the default language and currency |
-| `molecule-wallos` | IPv6, labels, `PUID` and `PGID` 1000, the login with OIDC and the client secret as file, an administrator with language and currency |
+| `molecule-wallos` | IPv6, labels, `PUID` and `PGID` 1000, the login with OIDC and the client secret as file, the SMTP settings with the password as file, an administrator with language and currency |
 
 `prepare` creates the podman network, installs curl and pulls the image.
-`side_effect` runs the role with `wallos_container` not a dictionary, `wallos_secrets` not a list, a secret without target, duplicate names of secrets,
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `wallos_container` and `wallos_environment` not a dictionary, the SMTP password in the environment,
+an invalid SMTP encryption and port, `wallos_secrets` not a list, a secret without target, duplicate names of secrets,
 an unknown secret, a secret and its file variable in the environment, a secret with a line break, `PUID` not a number,
 an unknown variable in `wallos_environment` and in `wallos_container.environment`, a boolean that is no boolean, a line break in a value,
 `wallos_admin` not a dictionary, without password, with an invalid username and email and with an unknown key, language and currency
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes the client secret and the password of the administrator on `molecule-wallos`, the secret changes, Wallos has to restart
-and the module has to set the password.
-`verify` checks the quadlet unit without the mounts of the time zone and without secrets in the environment, the service, the environment,
+and the module has to set the password, `molecule-wallos-default` runs again without a change and Wallos must not restart.
+`verify` checks the quadlet unit without the mounts of the time zone and without secrets in the environment, the service without automatic restarts,
+the time zone, the environment,
 the owners of the directories and of the database, that `/health.php` answers, that the registration is closed,
 logs in as the administrator with the current password and opens the administration page.
 On `molecule-wallos` it checks that the login page offers the login with OIDC, so the variables reach PHP-FPM,

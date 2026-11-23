@@ -52,6 +52,32 @@
       register: 'app_wallos__test_env'
       changed_when: false
 
+    - name: 'Read the time zone of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }}', 'wallos' ]
+      register: 'app_wallos__test_timezone'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'wallos' ]
+      register: 'app_wallos__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'wallos', '-n', '80', '--no-pager' ]
+      register: 'app_wallos__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_wallos__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_wallos__test_restarts.stdout ] + app_wallos__test_journal.stdout_lines | default([]) }}"
+
     - name: 'Read the directories of Wallos'
       ansible.builtin.stat:
         path: "{{ item }}"
@@ -72,12 +98,13 @@
         that:
           - app_wallos__test_service.stdout == 'active'
           - ('TZ=' + app_wallos__test_case.role_vars.wallos_timezone) in (app_wallos__test_env.stdout | from_json)
-          - (app_wallos__test_env.stdout | from_json) | select('match', 'OIDC_CLIENT_SECRET=') | list | length == 0
+          - (app_wallos__test_env.stdout | from_json) | select('match', '(OIDC_CLIENT_SECRET|WALLOS_SMTP_PASSWORD)=') | list | length == 0
+          - app_wallos__test_timezone.stdout == app_wallos__test_case.role_vars.wallos_timezone
           - app_wallos__test_dirs.results | map(attribute='stat.uid') | unique | list == [ app_wallos__expect.uid ]
           - app_wallos__test_dirs.results | map(attribute='stat.gid') | unique | list == [ app_wallos__expect.uid ]
           - app_wallos__test_db_owner.stdout == (app_wallos__expect.uid | string) ~ ':' ~ (app_wallos__expect.uid | string)
         fail_msg: >-
-          service {{ app_wallos__test_service.stdout }}, environment {{ app_wallos__test_env.stdout }},
+          service {{ app_wallos__test_service.stdout }}, time zone {{ app_wallos__test_timezone.stdout }}, environment {{ app_wallos__test_env.stdout }},
           directories {{ app_wallos__test_dirs.results | map(attribute='stat.uid') | list }}, database {{ app_wallos__test_db_owner.stdout }}
 
     - name: 'Wait until Wallos answers'

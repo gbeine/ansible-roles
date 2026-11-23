@@ -15,6 +15,11 @@
     app_wallos__test_checked_files:
       - "{{ app_wallos__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -41,13 +46,37 @@
           message: 'wallos_container not a dictionary'
           search: 'failed to combine variables, expected dicts'
 
+    - name: 'Run app_wallos with wallos_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: [ 'PUID' ]
+        app_wallos__test_invalid:
+          message: 'wallos_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_wallos with the SMTP password in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'WALLOS_SMTP_PASSWORD': 'molecule-plain-password' }) }}"
+        app_wallos__test_invalid:
+          message: 'the SMTP password in the environment'
+          search: '^Secrets and their file variables must not be set in wallos_environment: WALLOS_SMTP_PASSWORD\.$'
+
+    - name: 'Run app_wallos with an invalid SMTP encryption and port (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        wallos_environment: "{{ app_wallos__test_environment | combine({ 'WALLOS_SMTP_ENCRYPTION': 'starttls', 'WALLOS_SMTP_PORT': 70000 }) }}"
+        app_wallos__test_invalid:
+          message: 'an invalid SMTP encryption and port'
+          search: '^WALLOS_SMTP_ENCRYPTION has to be one of none, tls, ssl\. WALLOS_SMTP_PORT has to be a port number from 1 to 65535\.$'
+
     - name: 'Run app_wallos with wallos_secrets not a list (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         wallos_secrets: { 'name': 'wallos_other', 'data': 'x', 'target': 'OIDC_CLIENT_SECRET' }
         app_wallos__test_invalid:
           message: 'wallos_secrets not a list'
-          search: '^wallos_secrets has to be a list$'
+          search: '^`wallos_secrets` has to be a list$'
 
     - name: 'Run app_wallos with a secret without target (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -55,7 +84,7 @@
         wallos_secrets: "{{ app_wallos__test_secrets + [ { 'name': 'wallos_other', 'data': 'x' } ] }}"
         app_wallos__test_invalid:
           message: 'a secret without target'
-          search: '^wallos_secrets entries need name, data and target$'
+          search: '^`wallos_secrets` entries need name, data and target$'
 
     - name: 'Run app_wallos with duplicate names of secrets (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -65,7 +94,7 @@
           - { 'name': 'wallos_twice', 'data': 'y', 'target': 'OIDC_CLIENT_SECRET' }
         app_wallos__test_invalid:
           message: 'duplicate names of secrets'
-          search: '^the names of wallos_secrets have to be unique$'
+          search: '^the names of `wallos_secrets` have to be unique$'
 
     - name: 'Run app_wallos with an unknown secret (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -211,3 +240,35 @@
               secret changed: {{ app_wallos__secrets_result is changed }}, quadlet changed: {{ app_wallos__quadlet_result is changed }},
               administrator: {{ app_wallos__admin_result.updated | default([]) }},
               start before {{ app_wallos__test_started_before.stdout }}, after {{ app_wallos__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_wallos__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'wallos' ]
+          register: 'app_wallos__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_wallos without a change'
+          ansible.builtin.include_role:
+            name: 'app_wallos'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'wallos' ]
+          register: 'app_wallos__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_wallos__quadlet_result is not changed
+              - app_wallos__secrets_result is not changed
+              - app_wallos__admin_result is not changed
+              - app_wallos__test_unchanged_after.stdout == app_wallos__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_wallos__quadlet_result is changed }}, secrets changed: {{ app_wallos__secrets_result is changed }},
+              administrator changed: {{ app_wallos__admin_result is changed }},
+              start before {{ app_wallos__test_unchanged_before.stdout }}, after {{ app_wallos__test_unchanged_after.stdout }}

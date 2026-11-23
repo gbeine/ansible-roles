@@ -4,13 +4,15 @@
   tags: [ 'app', 'app_wallos' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or wallos_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, wallos_container or wallos_environment not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - app_wallos__container | length > 0
+          # combine fails here if wallos_environment is no dictionary
+          - app_wallos__environment | length >= 0
         quiet: true
 
     - name: 'Validate the secrets'
@@ -25,14 +27,14 @@
           {%- set errors = [] -%}
           {%- set secrets = app_wallos__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('wallos_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`wallos_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('wallos_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`wallos_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of wallos_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `wallos_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -96,6 +98,14 @@
           {%- if ns.lines | length > 0 -%}
           {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
           {%- endif -%}
+          {%- set encryption = app_wallos__environment.WALLOS_SMTP_ENCRYPTION | default(none) -%}
+          {%- if encryption is not none and (encryption | string | lower) not in app_wallos__smtp_encryptions -%}
+          {%-   set _ = errors.append('WALLOS_SMTP_ENCRYPTION has to be one of ' ~ (app_wallos__smtp_encryptions | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set port = app_wallos__environment.WALLOS_SMTP_PORT | default(none) -%}
+          {%- if port is not none and (port is boolean or (port | string) is not match('^[0-9]+$') or (port | int) < 1 or (port | int) > 65535) -%}
+          {%-   set _ = errors.append('WALLOS_SMTP_PORT has to be a port number from 1 to 65535.') -%}
+          {%- endif -%}
           {{ errors }}
 
     - name: 'Validate the administrator'
@@ -137,7 +147,7 @@
           {{ errors }}
 
     # Checks the environment and the secrets of the container after merging wallos_container,
-    # unknown variables would change the behavior unexpectedly
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
     - name: 'Validate the allowed environment variables and secrets'
       ansible.builtin.assert:
         that:
@@ -146,8 +156,13 @@
         fail_msg: "{{ app_wallos__errors | join(' ') }}"
         quiet: true
       vars:
+        app_wallos__container_environment: >-
+          {{ app_wallos__container.environment if app_wallos__container.environment | default(none) is mapping else {} }}
         app_wallos__environment_unknown: >-
-          {{ (app_wallos__container.environment | default({})).keys() | reject('in', app_wallos__environment_allowed) | list }}
+          {{ app_wallos__container_environment.keys() | map('string') | reject('in', app_wallos__environment_allowed) | list }}
+        app_wallos__environment_line_breaks: >-
+          {{ app_wallos__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         app_wallos__secrets_unknown: >-
           {{ app_wallos__secrets | select('mapping') | selectattr('target', 'defined') | map(attribute='target')
              | reject('in', app_wallos__secret_files.keys() | list) | list }}
@@ -162,6 +177,10 @@
           {%- if errors | length > 0 -%}
           {%-   set _ = errors.append('Allowed are the variables of Wallos (app_wallos__environment_allowed) and the secrets '
                                     ~ (app_wallos__secret_files.keys() | join(', ')) ~ ', the administrator is set with wallos_admin.') -%}
+          {%- endif -%}
+          {%- if app_wallos__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_wallos__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -219,6 +238,21 @@
           {% if app_wallos__container.requires is defined %}
           Requires={{ app_wallos__container.requires | join(' ') }}
           {% endif %}
+          {% if app_wallos__container.wants is defined %}
+          Wants={{ app_wallos__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_wallos__container.after is defined %}
+          After={{ app_wallos__container.after | join(' ') }}
+          {% endif %}
+          {% if app_wallos__container.part_of is defined %}
+          PartOf={{ app_wallos__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_wallos__container.binds_to is defined %}
+          BindsTo={{ app_wallos__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_wallos__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_wallos__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_wallos__quadlet_result'
@@ -251,13 +285,17 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ app_wallos__container.name ~ ' did not start' ] + app_wallos__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ app_wallos__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_wallos__start_journal.stdout_lines }}
 
     # startup.sh starts nginx after php-fpm, the health check answers then
     - name: 'Wait for Wallos'
       ansible.builtin.uri:
         url: "http://{{ app_wallos__container.ip }}:{{ app_wallos__port }}/health.php"
         return_content: true
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
       register: 'app_wallos__ready'
       until: (app_wallos__ready.content | default('') | trim) == 'OK'
       retries: 60
