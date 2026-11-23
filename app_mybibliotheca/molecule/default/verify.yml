@@ -65,15 +65,36 @@
           - app_mybibliotheca__expect.ip6 is none or app_mybibliotheca__test_net.GlobalIPv6Address == app_mybibliotheca__expect.ip6
           - app_mybibliotheca__expect.env | reject('in', app_mybibliotheca__test_env) | list | length == 0
           - app_mybibliotheca__test_plain | select('in', app_mybibliotheca__test_env | join(' ')) | list | length == 0
-          - app_mybibliotheca__test_env | select('match', '(KUZU_FORCE_RESET|DEV_ADMIN_[A-Z]+|API_TEST_TOKEN)=') | list | length == 0
+          - app_mybibliotheca__test_env | select('match', '(KUZU_FORCE_RESET|DEV_ADMIN_[A-Z]+|API_TEST_TOKEN|TZ)=') | list | length == 0
+          - app_mybibliotheca__test_container.Config.Timezone == app_mybibliotheca__test_case.role_vars.mybibliotheca_timezone
         fail_msg: >-
-          service {{ app_mybibliotheca__test_service.stdout }},
+          service {{ app_mybibliotheca__test_service.stdout }}, time zone {{ app_mybibliotheca__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_mybibliotheca__test_net.IPAddress }}, IPv6 {{ app_mybibliotheca__test_net.GlobalIPv6Address }},
           environment {{ app_mybibliotheca__test_env | reject('search', '(SECRET_KEY|PASSWORD|DSN)=') | join(', ') }}
       vars:
         app_mybibliotheca__test_container: "{{ (app_mybibliotheca__test_inspect.stdout | from_json)[0] }}"
         app_mybibliotheca__test_net: "{{ app_mybibliotheca__test_container.NetworkSettings.Networks[app_mybibliotheca__test_case.role_vars.mybibliotheca_network] }}"
         app_mybibliotheca__test_env: "{{ app_mybibliotheca__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'mybibliotheca' ]
+      register: 'app_mybibliotheca__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'mybibliotheca', '-n', '80', '--no-pager' ]
+      register: 'app_mybibliotheca__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_mybibliotheca__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_mybibliotheca__test_restarts.stdout ] + app_mybibliotheca__test_journal.stdout_lines | default([]) }}"
 
     # With an administrator the setup is completed, the health check and the status are not redirected to the onboarding
     - name: 'Read the health check and the state of the setup'

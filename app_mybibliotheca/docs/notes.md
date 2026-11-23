@@ -6,7 +6,11 @@ The database is PostgreSQL, it is not part of the role.
 ### Configuration
 
 MyBibliotheca is configured with environment variables in `mybibliotheca_environment`, merged over the default of the role.
-The default sets `TZ` and `TIMEZONE` to `mybibliotheca_timezone`, `POSTGRES_PORT` to `5432` and `KUZU_DB_PATH` to `/app/data/kuzu`.
+The default sets `TIMEZONE` to `mybibliotheca_timezone`, `POSTGRES_PORT` to `5432` and `KUZU_DB_PATH` to `/app/data/kuzu`.
+`TIMEZONE` is only the default of the time zone of the server until the onboarding stores it in `/app/data/system_config.json`.
+The time zone of the container is `mybibliotheca_timezone`, MyBibliotheca does not read `TZ` and the role sets no default for it.
+MyBibliotheca keeps its own settings in `/app/data`, e.g. `system_config.json` and the debug settings in `.env`,
+which override the environment, the role does not generate them.
 Booleans may be given as YAML booleans, the role passes them as `true` or `false`.
 
 A new installation uses PostgreSQL if `POSTGRES_HOST`, `POSTGRES_DB` and `POSTGRES_USER` or the secret `POSTGRES_DSN` are set,
@@ -77,7 +81,7 @@ The check uses the environment and the secrets of the container after merging `m
 so variables set with `mybibliotheca_container.environment` are checked as well.
 
 The list is generated from the `os.getenv` and `os.environ` calls of `app/`, `config.py` and `run.py`, `docker-entrypoint.sh`
-and the `Dockerfile` of MyBibliotheca v3.0.3, new versions of the image may add variables. It leaves out:
+and the `Dockerfile` of MyBibliotheca v3.0.4, new versions of the image may add variables. It leaves out:
 
 - `KUZU_FORCE_RESET`, it deletes the database at the start
 - the variables for development `DEV_ADMIN_USERNAME`, `DEV_ADMIN_PASSWORD`, `API_TEST_TOKEN` and `FLASK_ENV`,
@@ -88,10 +92,18 @@ and the `Dockerfile` of MyBibliotheca v3.0.3, new versions of the image may add 
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `mybibliotheca_container`, it is merged over the default of the container.
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `mybibliotheca_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `mybibliotheca_container.environment` replaces the environment including `mybibliotheca_environment`, use `mybibliotheca_environment` instead.
 For a reverse proxy, e.g. Traefik, the labels are set with `mybibliotheca_labels`.
 The data directory belongs to the user 1000 with the mode `0755`, like the entrypoint sets it.
+
+```yaml
+mybibliotheca_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+```
 
 ### Validation
 
@@ -102,21 +114,28 @@ The role checks before any change:
 - no secret is set in `mybibliotheca_environment`, secrets and values contain no line breaks
 - booleans are `true` or `false`, `WORKERS` is a number from 1 to 32
 - `mybibliotheca_admin` is a dictionary with a valid name, email and password
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
 If `mybibliotheca_container` is no dictionary, merging it with the default fails before anything changes,
 the same applies to a failing template in the variables, e.g. an unknown filter.
 
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start, the wait for MyBibliotheca and the administrator do not run in check mode.
+
 ### Restart and updates
 
 MyBibliotheca is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `mybibliotheca_environment`,
-otherwise it is started and enabled. Afterwards the role waits up to 300 seconds for the login page (`/auth/login`) and shows the journal if MyBibliotheca does not answer.
+otherwise it is started and enabled. If the start fails, the role shows the error and the journal of the service.
+Afterwards the role waits up to 300 seconds for the login page (`/auth/login`) and shows the journal if MyBibliotheca does not answer.
 Updates of the image are done by `container_update` with `mybibliotheca_autoupdate_enabled: true` and `mybibliotheca_autoupdate_schedule`,
 without `mybibliotheca_autoupdate_schedule` the schedule of `container_update` is used.
 
 ### Migration
 
-The role is new, there are no former variables.
+The role sets no default for `TZ` anymore, the time zone of the container is `mybibliotheca_timezone`.
+If needed, `TZ` is set in `mybibliotheca_environment`. The allowed variables follow MyBibliotheca v3.0.4.
 An existing installation on KuzuDB stays on KuzuDB until an administrator completes the database migration of MyBibliotheca
 (Admin, Database Migration), the role fails at the administrator until then. Do not remove `data/kuzu` before the migration is verified.
 
@@ -131,13 +150,16 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-mybibliotheca` | IPv6, labels, PostgreSQL with the secret `POSTGRES_DSN`, `SITE_NAME`, `WORKERS` and a boolean |
 
 `prepare` installs curl, creates the podman network, pulls the images and starts PostgreSQL with the database and its user on both VMs.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `mybibliotheca_container` not a dictionary, a secret without `target`, without `SECRET_KEY`, without PostgreSQL,
 the password of PostgreSQL in the environment, `KUZU_FORCE_RESET` and `SECURITY_PASSWORD_SALT`, `DEV_ADMIN_PASSWORD` as secret,
 an invalid boolean, a line break in a value, too many workers, an administrator without password and a weak password
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes `SITE_NAME`, the email and the password of the administrator on `molecule-mybibliotheca`,
-MyBibliotheca has to restart and the administrator changes without a new user.
-`verify` checks the quadlet unit with the secrets in the environment without their values, the service, the addresses and the environment of the container,
+MyBibliotheca has to restart and the administrator changes without a new user,
+`molecule-mybibliotheca-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets in the environment without their values, the service without automatic restarts,
+the addresses, the time zone and the environment of the container,
 the health check and the state of the setup on PostgreSQL, logs in with curl and a cookie file with the password of the administrator,
 a wrong password and the former password, opens the dashboard of the administration and checks the users in PostgreSQL.
 
