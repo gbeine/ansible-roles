@@ -153,6 +153,8 @@ icinga_master_container:
 ```
 
 The plugins of `<icinga_master_home>/plugins` are mounted read-only to `/usr/local/lib/nagios/plugins` (`PluginLocalDir`), the role copies `pushover.sh` there.
+The CheckCommands of the plugins of the agents are written to `conf.d/commands`, among them `commands-dsa.conf` (`dsa-*`) and `commands-madrisan.conf` (`madrisan-*`)
+of the plugins `dsa` and `madrisan` of `monitoring_plugins`, so the master can schedule these checks on the agents.
 
 ### Certificates
 
