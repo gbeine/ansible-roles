@@ -1,51 +1,307 @@
 ---
 
-- name: 'Install and configure mqttwarn container'
-  tags: [ 'monitoring_mqttwarn' ]
+- name: 'Install mqttwarn'
+  tags: [ 'monitoring', 'monitoring_mqttwarn' ]
   block:
 
-    - name: 'Create directories for mqttwarn'
+    # A failing template in the variables (e.g. an unknown filter, mqttwarn_config or mqttwarn_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_mqttwarn__container | length > 0
+          - monitoring_mqttwarn__config | length > 0
+          # mqttwarn_environment has no default, a failing template stops the role here as well
+          - monitoring_mqttwarn__environment | default({}) | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_mqttwarn__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_mqttwarn__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_mqttwarn__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`mqttwarn_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`mqttwarn_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `mqttwarn_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # mqttwarn checks the values of the options when it uses them
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_mqttwarn__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_mqttwarn__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(sections=[], unknown=[], services=[], targets=[], secrets=[], booleans=[], values=[], lines=[], cron=[], present=[]) -%}
+          {%- for section, options in monitoring_mqttwarn__config.items() if options is not none -%}
+          {%-   set section = section | string -%}
+          {%-   if options is not mapping -%}
+          {%-     set ns.sections = ns.sections + [ section ] -%}
+          {%-   else -%}
+          {%-     set service = section is match('config:') -%}
+          {%-     set topic = section not in [ 'defaults', 'failover', 'cron' ] and not service -%}
+          {%-     if service and section[7:] not in monitoring_mqttwarn__config_services and options.module | default(none) is none -%}
+          {%-       set ns.services = ns.services + [ section ] -%}
+          {%-     endif -%}
+          {%-     if topic and options.targets | default(none) is none -%}
+          {%-       set ns.targets = ns.targets + [ section ] -%}
+          {%-     endif -%}
+          {%-     for key, value in options.items() if value is not none -%}
+          {%-       set key = key | string -%}
+          {%-       set path = section ~ '.' ~ key -%}
+          {%-       set _ = ns.present.append(path) -%}
+          {%-       set booleans = monitoring_mqttwarn__config_booleans[section] | default(monitoring_mqttwarn__config_booleans.topic if topic else []) -%}
+          {%-       set nested = (value.values() | list) if value is mapping else (value if (value is sequence and value is not string) else []) -%}
+          {%-       set inner = namespace(bad=false) -%}
+          {%-       for item in nested -%}
+          {%-         set items = item if (item is sequence and item is not string and item is not mapping) else [ item ] -%}
+          {%-         if item is mapping or items | select('boolean') | list | length > 0 or items | reject('string') | reject('number') | list | length > 0 -%}
+          {%-           set inner.bad = true -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-       if (section == 'defaults' and key == 'password') or (service and key in monitoring_mqttwarn__config_secret_options) -%}
+          {%-         set ns.secrets = ns.secrets + [ path ] -%}
+          {%-       elif (section == 'defaults' and key not in monitoring_mqttwarn__config_defaults_allowed)
+                         or (section == 'failover' and key != 'targets')
+                         or (section == 'cron' and key is not match(monitoring_mqttwarn__config_function_pattern))
+                         or (service and key is not match(monitoring_mqttwarn__config_option_pattern))
+                         or (topic and key not in monitoring_mqttwarn__config_topic_allowed) -%}
+          {%-         set ns.unknown = ns.unknown + [ path ] -%}
+          {%-       elif key in booleans and value is not boolean -%}
+          {%-         set ns.booleans = ns.booleans + [ path ] -%}
+          {%-       elif section == 'cron' and value is not number -%}
+          {%-         set ns.cron = ns.cron + [ path ] -%}
+          {%-       elif (service and key == 'targets' and value is not mapping) or inner.bad -%}
+          {%-         set ns.values = ns.values + [ path ] -%}
+          {%-       elif value | to_json is search('\\\\[nr]') -%}
+          {%-         set ns.lines = ns.lines + [ path ] -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set missing = monitoring_mqttwarn__config_required | reject('in', ns.present) | list -%}
+          {%- if ns.sections | length > 0 -%}
+          {%-   set _ = errors.append('The sections of `mqttwarn_config` are dictionaries of options: ' ~ (ns.sections | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.services | length > 0 -%}
+          {%-   set _ = errors.append('Unknown services in `mqttwarn_config`: ' ~ (ns.services | join(', '))
+                                    ~ ', allowed are the services of `monitoring_mqttwarn__config_services` or a section with the option module.') -%}
+          {%- endif -%}
+          {%- if ns.targets | length > 0 -%}
+          {%-   set _ = errors.append('The sections of topics in `mqttwarn_config` need targets: ' ~ (ns.targets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options in `mqttwarn_config`: ' ~ (ns.unknown | join(', '))
+                                    ~ ', allowed are the options of `monitoring_mqttwarn__config_defaults_allowed` in defaults, targets in failover,'
+                                    ~ ' the options of `monitoring_mqttwarn__config_topic_allowed` in topics, functions in cron'
+                                    ~ ' and options matching ' ~ monitoring_mqttwarn__config_option_pattern ~ ' in config:<service>.') -%}
+          {%- endif -%}
+          {%- if ns.secrets | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are set with `mqttwarn_secrets`, not in `mqttwarn_config`: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.cron | length > 0 -%}
+          {%-   set _ = errors.append('The functions of cron need the period in seconds: ' ~ (ns.cron | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('Lists and dictionaries of `mqttwarn_config` contain strings, numbers and lists of them,'
+                                    ~ ' targets of config:<service> is a dictionary: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of `mqttwarn_config` must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('mqttwarn needs the options ' ~ (monitoring_mqttwarn__config_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # mqttwarn.ini reads the secrets as "${FILE:/run/secrets/<name>}" and evaluates the quoted value as Python string
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_mqttwarn__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_mqttwarn__targets: "{{ monitoring_mqttwarn__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_mqttwarn__valid: "{{ monitoring_mqttwarn__secrets_valid | map(attribute='section') | zip(monitoring_mqttwarn__secrets_valid | map(attribute='option')) | map('join', '.') | list }}"
+        monitoring_mqttwarn__errors: >-
+          {%- set errors = [] -%}
+          {%- set unknown = monitoring_mqttwarn__targets | reject('in', monitoring_mqttwarn__valid) | list -%}
+          {%- set sections = monitoring_mqttwarn__secrets_valid | rejectattr('section', 'eq', 'defaults')
+                             | rejectattr('section', 'in', monitoring_mqttwarn__config | dict2items | selectattr('value', 'mapping') | map(attribute='key') | list)
+                             | map(attribute='section') | list -%}
+          {%- set duplicates = monitoring_mqttwarn__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%- set data = monitoring_mqttwarn__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+                         + monitoring_mqttwarn__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\\r\\n"\\\\]') | map(attribute='name') | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (unknown | join(', ')) ~ ', allowed are defaults.password and config:<service>.<option>'
+                                    ~ ' with the options of `monitoring_mqttwarn__config_secret_options`.') -%}
+          {%- endif -%}
+          {%- if sections | length > 0 -%}
+          {%-   set _ = errors.append('The sections of these secrets are not part of `mqttwarn_config`: ' ~ (sections | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('Every target of `mqttwarn_secrets` is set once: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks, double quotes and backslashes: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the files'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_mqttwarn__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_mqttwarn__errors: >-
+          {%- set errors = [] -%}
+          {%- set files = monitoring_mqttwarn__files -%}
+          {%- if files is not sequence or files is string or files is mapping or files | reject('string') | list | length > 0 -%}
+          {%-   set _ = errors.append('`mqttwarn_files` has to be a list of paths of files.') -%}
+          {%- else -%}
+          {%-   set names = files | map('basename') | list -%}
+          {%-   set invalid = names | reject('match', monitoring_mqttwarn__file_pattern) | list + names | select('eq', 'mqttwarn.ini') | list -%}
+          {%-   set duplicates = names | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The names of the files of `mqttwarn_files` match ' ~ monitoring_mqttwarn__file_pattern
+                                      ~ ' and are not mqttwarn.ini: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if duplicates | length > 0 -%}
+          {%-     set _ = errors.append('The names of the files of `mqttwarn_files` have to be unique: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_mqttwarn__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_mqttwarn__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_mqttwarn__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_mqttwarn__environment is not mapping -%}
+          {%-   set _ = errors.append('`mqttwarn_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = monitoring_mqttwarn__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\\r\\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of `mqttwarn_environment` must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging mqttwarn_container,
+    # unknown variables would change the behavior unexpectedly, e.g. MQTTWARNINI
+    # An environment that is no mapping is not checked here, the validation of mqttwarn_environment reports it
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_mqttwarn__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_mqttwarn__container_environment: >-
+          {{ monitoring_mqttwarn__container.environment if monitoring_mqttwarn__container.environment | default(none) is mapping else {} }}
+        monitoring_mqttwarn__unknown: >-
+          {{ monitoring_mqttwarn__container_environment.keys() | map('string') | reject('in', monitoring_mqttwarn__environment_allowed) | list }}
+        monitoring_mqttwarn__line_breaks: >-
+          {{ monitoring_mqttwarn__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_mqttwarn__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_mqttwarn__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_mqttwarn__unknown | join(', ')) ~ ', mqttwarn only reads '
+                                    ~ (monitoring_mqttwarn__environment_allowed | join(', ')) ~ ', the options are set with `mqttwarn_config`.') -%}
+          {%- endif -%}
+          {%- if monitoring_mqttwarn__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_mqttwarn__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The image runs mqttwarn as mqttwarn (999)
+    - name: 'Create the directories of mqttwarn'
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "{{ item.mode }}"
+        state: 'directory'
+      loop:
+        - { path: "{{ monitoring_mqttwarn__podman_home }}", owner: 0, mode: '0755' }
+        - { path: "{{ monitoring_mqttwarn__podman_etc_dir }}", owner: "{{ monitoring_mqttwarn__uid }}", mode: '0750' }
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: 'Copy the files'
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ monitoring_mqttwarn__podman_etc_dir }}/{{ item | basename }}"
         owner: "{{ monitoring_mqttwarn__uid }}"
         group: "{{ monitoring_mqttwarn__gid }}"
-        state: 'directory'
-        mode: '750'
-      with_items:
-        - "{{ monitoring_mqttwarn__podman_etc_dir }}"
+        mode: '0640'
+      loop: "{{ monitoring_mqttwarn__files }}"
+      register: 'monitoring_mqttwarn__files_result'
 
-    - name: 'Generate mqttwarn configuration'
-      ansible.builtin.template:
-        src: 'mqttwarn.ini.j2'
+    # The secrets are references to their files, mqttwarn.ini contains no secret
+    - name: 'Generate the configuration'
+      ansible.builtin.copy:
+        content: |
+          #
+          # Ansible managed
+          #
+          {% for section, options in monitoring_mqttwarn__config_ini.items() %}
+
+          [{{ section }}]
+          {% for key, value in options.items() %}
+          {{ key }} = {{ value }}
+          {% endfor %}
+          {% endfor %}
         dest: "{{ monitoring_mqttwarn__podman_etc_dir }}/mqttwarn.ini"
         owner: "{{ monitoring_mqttwarn__uid }}"
         group: "{{ monitoring_mqttwarn__gid }}"
-        mode: '640'
-      notify:
-        - 'Restart mqttwarn'
-      when: 'not podman___update_mode | bool'
+        mode: '0640'
+      register: 'monitoring_mqttwarn__config_result'
 
-    - name: 'Copy files to mqttwarn host'
-      ansible.builtin.copy:
-        src: "{{ item }}"
-        dest: "{{ monitoring_mqttwarn__podman_etc_dir }}"
-      with_items: "{{ monitoring_mqttwarn__files }}"
-      when: 'monitoring_mqttwarn__files | length > 0 and not podman___update_mode | bool'
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_mqttwarn__secrets }}"
+      register: 'monitoring_mqttwarn__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ monitoring_mqttwarn__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[monitoring_mqttwarn__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ monitoring_mqttwarn__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
@@ -56,6 +312,7 @@
         ip6: "{{ monitoring_mqttwarn__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_mqttwarn__container.network }}"
         timezone: "{{ monitoring_mqttwarn__container.timezone }}"
+        command: "{{ monitoring_mqttwarn__container.command | default(omit) }}"
         env: "{{ monitoring_mqttwarn__container.environment | default(omit) }}"
         etc_hosts: "{{ monitoring_mqttwarn__container.etc_hosts | default(omit) }}"
         expose: "{{ monitoring_mqttwarn__container.expose | default(omit) }}"
@@ -70,14 +327,120 @@
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if monitoring_mqttwarn__container.requires is defined %}
+          Requires={{ monitoring_mqttwarn__container.requires | join(' ') }}
+          {% endif %}
+          {% if monitoring_mqttwarn__container.wants is defined %}
+          Wants={{ monitoring_mqttwarn__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_mqttwarn__container.after is defined %}
+          After={{ monitoring_mqttwarn__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_mqttwarn__container.part_of is defined %}
+          PartOf={{ monitoring_mqttwarn__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_mqttwarn__container.binds_to is defined %}
+          BindsTo={{ monitoring_mqttwarn__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if monitoring_mqttwarn__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_mqttwarn__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
+      register: 'monitoring_mqttwarn__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ monitoring_mqttwarn__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if podman___update_mode | bool else 'started' }}"
-        enabled: true
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start mqttwarn'
       when: 'not ansible_check_mode'
+      block:
+
+        # systemd counts the automatic restarts, mqttwarn exits if it cannot connect to the broker
+        - name: 'Read the automatic restarts before the start'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', "{{ monitoring_mqttwarn__container.name }}" ]
+          register: 'monitoring_mqttwarn__restarts_before'
+          changed_when: false
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_mqttwarn__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_mqttwarn__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_mqttwarn__running: >-
+              {{ (ansible_facts.services[monitoring_mqttwarn__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_mqttwarn__restart: >-
+              {{ monitoring_mqttwarn__running | bool
+                 and (monitoring_mqttwarn__config_result is changed
+                      or monitoring_mqttwarn__files_result is changed
+                      or monitoring_mqttwarn__secrets_result is changed
+                      or monitoring_mqttwarn__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_mqttwarn__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_mqttwarn__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ monitoring_mqttwarn__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_mqttwarn__start_journal.stdout_lines }}
+
+    # mqttwarn has no API and logs the connection to the broker only with DEBUG,
+    # it exits if the broker does not answer and logs a refused login, so the role waits until it runs for 10 seconds
+    - name: 'Wait for mqttwarn'
+      when: 'not ansible_check_mode'
+      ansible.builtin.command:
+        argv: [ 'sh', '-c', "systemctl show --property=ActiveState --property=ActiveEnterTimestampMonotonic --property=NRestarts {{ monitoring_mqttwarn__container.name }}; cut -d ' ' -f 1 /proc/uptime" ]
+      register: 'monitoring_mqttwarn__state'
+      changed_when: false
+      until: >-
+        (monitoring_mqttwarn__state_values.NRestarts | default(0) | int) > (monitoring_mqttwarn__restarts_before.stdout | int)
+        or (monitoring_mqttwarn__state_values.ActiveState | default('') == 'active'
+            and (monitoring_mqttwarn__state.stdout_lines | last | float) * 1000000
+                - (monitoring_mqttwarn__state_values.ActiveEnterTimestampMonotonic | default(0) | int) >= 10000000)
+      retries: 30
+      delay: 2
+      vars:
+        monitoring_mqttwarn__state_values: >-
+          {{ dict(monitoring_mqttwarn__state.stdout_lines | default([]) | select('search', '=') | map('split', '=', 1)) }}
+
+    # The log of the running container, mqttwarn logs to stderr
+    - name: 'Read the log of mqttwarn'
+      when: 'not ansible_check_mode'
+      ansible.builtin.command:
+        argv: [ 'podman', 'logs', '--tail', '60', "{{ monitoring_mqttwarn__container.name }}" ]
+      register: 'monitoring_mqttwarn__log'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert that mqttwarn runs and is connected'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__state_values.ActiveState | default('') == 'active'
+          - (monitoring_mqttwarn__state_values.NRestarts | default(0) | int) == (monitoring_mqttwarn__restarts_before.stdout | int)
+          - (monitoring_mqttwarn__log.stdout ~ monitoring_mqttwarn__log.stderr) is not search('Connection refused|Cannot connect to MQTT broker')
+        fail_msg: >-
+          {{ [ 'state ' ~ (monitoring_mqttwarn__state.stdout_lines | join(' ')), 'automatic restarts before ' ~ monitoring_mqttwarn__restarts_before.stdout ]
+             + (monitoring_mqttwarn__log.stdout ~ '\n' ~ monitoring_mqttwarn__log.stderr).splitlines() }}
+        quiet: true
+      vars:
+        monitoring_mqttwarn__state_values: >-
+          {{ dict(monitoring_mqttwarn__state.stdout_lines | select('search', '=') | map('split', '=', 1)) }}
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_mqttwarn__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_mqttwarn__container.name }}"
+        container_image: "{{ monitoring_mqttwarn__container.image }}"
+        container_schedule: "{{ monitoring_mqttwarn__autoupdate_schedule }}"

@@ -1,0 +1,128 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_mqttwarn__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_mqttwarn__test_image: 'c0d3.sh/container/mqttwarn-docker:latest'
+monitoring_mqttwarn__test_quadlet_path: '/etc/containers/systemd/mqttwarn.container'
+
+# The broker of the tests, started in prepare.yml, with a password on molecule-mqttwarn
+monitoring_mqttwarn__test_broker:
+  name: 'mosquitto-molecule'
+  image: 'docker.io/library/eclipse-mosquitto:2'
+  home: '/opt/mosquitto'
+  username: 'mqttwarn'
+  password: 'molecule-mqtt-password'
+
+monitoring_mqttwarn__test_cases:
+
+  # Only the mandatory variables, the broker without password
+  - name: 'molecule-mqttwarn-default'
+    broker:
+      ip: '10.89.0.151'
+      password: false
+    role_vars:
+      mqttwarn_home: '/opt/mqttwarn'
+      mqttwarn_ip: '10.89.0.150'
+      mqttwarn_network: 'podman-molecule'
+      mqttwarn_hostname: 'mqttwarn-default'
+      mqttwarn_timezone: 'Europe/Berlin'
+      mqttwarn_config:
+        defaults:
+          hostname: '10.89.0.151'
+    expect:
+      ip: '10.89.0.150'
+      home: '/opt/mqttwarn'
+      quadlet:
+        - 'Volume=/opt/mqttwarn/etc:/etc/mqttwarn'
+      quadlet_absent: [ 'Secret=', 'IP6=', 'Label=', '/etc/timezone', '/etc/localtime', 'Environment=' ]
+      ini:
+        - '[defaults]'
+        - 'hostname = "10.89.0.151"'
+        - 'skipretained = True'
+        - 'protocol = 3'
+        - 'launch = log'
+        - 'status_topic = "mqttwarn/$SYS"'
+        - '[config:log]'
+        - 'targets = {"debug": ["debug"], "info": ["info"], "warn": ["warn"], "crit": ["crit"], "error": ["error"]}'
+        - '[failover]'
+        - 'targets = log:error'
+      ini_absent: [ 'password' ]
+      secrets: []
+
+  # IPv6, labels, the password of the broker as secret, a file with functions, the file service and a topic
+  - name: 'molecule-mqttwarn'
+    broker:
+      ip: '10.89.0.161'
+      password: true
+    role_vars:
+      mqttwarn_home: '/srv/mqttwarn'
+      mqttwarn_ip: '10.89.0.160'
+      mqttwarn_ipv6: 'fd00:89::160'
+      mqttwarn_network: 'podman-molecule'
+      mqttwarn_hostname: 'mqttwarn'
+      mqttwarn_timezone: 'Europe/Berlin'
+      mqttwarn_labels:
+        traefik.enable: 'false'
+      mqttwarn_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+      mqttwarn_config:
+        defaults:
+          hostname: '10.89.0.161'
+          username: 'mqttwarn'
+          functions: 'molecule_funcs.py'
+          launch: [ 'log', 'file' ]
+          loglevel: 'DEBUG'
+        'config:file':
+          append_newline: true
+          targets:
+            molecule: [ '/etc/mqttwarn/molecule.log' ]
+        'molecule/#':
+          targets: [ 'file:molecule' ]
+          format: 'molecule_format()'
+      mqttwarn_secrets:
+        - name: 'mqttwarn_mqtt_password'
+          data: 'molecule-mqtt-password'
+          target: 'defaults.password'
+      mqttwarn_files: [ "{{ playbook_dir }}/files/molecule_funcs.py" ]
+    # side_effect changes the level of the log, mqttwarn.ini changes and mqttwarn has to restart
+    side_effect:
+      config:
+        defaults:
+          loglevel: 'INFO'
+    expect:
+      ip: '10.89.0.160'
+      home: '/srv/mqttwarn'
+      quadlet:
+        - 'IP6=fd00:89::160'
+        - 'Label=traefik.enable=false'
+        - 'Volume=/srv/mqttwarn/etc:/etc/mqttwarn'
+        - 'Secret=mqttwarn_mqtt_password,type=mount,target=/run/secrets/mqttwarn_mqtt_password,uid=999,gid=999,mode=0400'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      quadlet_absent: [ '/etc/timezone', '/etc/localtime', 'Environment=' ]
+      ini:
+        - 'hostname = "10.89.0.161"'
+        - 'username = "mqttwarn"'
+        - 'password = "${FILE:/run/secrets/mqttwarn_mqtt_password}"'
+        - 'functions = "molecule_funcs.py"'
+        - 'launch = log, file'
+        - 'loglevel = "INFO"'
+        - '[config:file]'
+        - 'append_newline = True'
+        - 'targets = {"molecule": ["/etc/mqttwarn/molecule.log"]}'
+        - '[molecule/#]'
+        - 'targets = file:molecule'
+        - 'format = molecule_format()'
+      ini_absent: []
+      secrets: [ 'molecule-mqtt-password' ]
+      # The message published by verify and the line the function writes to the file
+      message: 'molecule message'
+      line: 'molecule-formatted molecule message'

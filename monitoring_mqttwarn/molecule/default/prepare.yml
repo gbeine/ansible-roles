@@ -1,0 +1,84 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_mqttwarn__test_case: "{{ monitoring_mqttwarn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_mqttwarn__test_home: "{{ monitoring_mqttwarn__test_broker.home }}"
+    podman_networks:
+      - "{{ monitoring_mqttwarn__test_network }}"
+    podman_default_network: "{{ monitoring_mqttwarn__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_mqttwarn__test_image }}"
+        - "{{ monitoring_mqttwarn__test_broker.image }}"
+      register: 'monitoring_mqttwarn__test_pull'
+      until: monitoring_mqttwarn__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Create the directory of the broker'
+      ansible.builtin.file:
+        path: "{{ monitoring_mqttwarn__test_home }}"
+        mode: '0755'
+        state: 'directory'
+
+    # Mosquitto 2 only listens on localhost without a listener
+    - name: 'Write the configuration of the broker'
+      ansible.builtin.copy:
+        content: |
+          listener 1883
+          {% if monitoring_mqttwarn__test_case.broker.password %}
+          allow_anonymous false
+          password_file /mosquitto/config/passwd
+          {% else %}
+          allow_anonymous true
+          {% endif %}
+        dest: "{{ monitoring_mqttwarn__test_home }}/mosquitto.conf"
+        mode: '0644'
+
+    - name: 'Create the password file of the broker'
+      when: monitoring_mqttwarn__test_case.broker.password
+      ansible.builtin.command:
+        argv: [ 'podman', 'run', '--rm', '--network', 'none', '--volume', "{{ monitoring_mqttwarn__test_home }}:/mosquitto/config",
+                "{{ monitoring_mqttwarn__test_broker.image }}", 'mosquitto_passwd', '-b', '-c', '/mosquitto/config/passwd',
+                "{{ monitoring_mqttwarn__test_broker.username }}", "{{ monitoring_mqttwarn__test_broker.password }}" ]
+        creates: "{{ monitoring_mqttwarn__test_home }}/passwd"
+
+    # The broker runs as mosquitto, mosquitto_passwd creates the file for root only
+    - name: 'Allow the broker to read the password file'
+      when: monitoring_mqttwarn__test_case.broker.password
+      ansible.builtin.file:
+        path: "{{ monitoring_mqttwarn__test_home }}/passwd"
+        mode: '0644'
+
+    - name: 'Start the broker'
+      containers.podman.podman_container:
+        name: "{{ monitoring_mqttwarn__test_broker.name }}"
+        image: "{{ monitoring_mqttwarn__test_broker.image }}"
+        network: "{{ monitoring_mqttwarn__test_network.name }}"
+        ip: "{{ monitoring_mqttwarn__test_case.broker.ip }}"
+        volume:
+          - "{{ monitoring_mqttwarn__test_home }}:/mosquitto/config:ro"
+        state: 'started'
+
+    - name: 'Wait for the broker'
+      ansible.builtin.wait_for:
+        host: "{{ monitoring_mqttwarn__test_case.broker.ip }}"
+        port: 1883
+        timeout: 60

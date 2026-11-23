@@ -1,0 +1,171 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_mqttwarn__test_case: "{{ monitoring_mqttwarn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_mqttwarn__test_vars: "{{ monitoring_mqttwarn__test_case.role_vars }}"
+    monitoring_mqttwarn__test_expect: "{{ monitoring_mqttwarn__test_case.expect }}"
+    monitoring_mqttwarn__test_etc: "{{ monitoring_mqttwarn__test_expect.home }}/etc"
+    # The options of mosquitto_pub and mosquitto_sub, with the login on molecule-mqttwarn
+    monitoring_mqttwarn__test_login: >-
+      {{ [ '-h', 'localhost' ]
+         + ([ '-u', monitoring_mqttwarn__test_broker.username, '-P', monitoring_mqttwarn__test_broker.password ]
+            if monitoring_mqttwarn__test_case.broker.password else []) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_mqttwarn__test_quadlet_path }}"
+      register: 'monitoring_mqttwarn__test_quadlet'
+
+    # The secret is a mounted file, the password is not part of the quadlet unit
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + monitoring_mqttwarn__test_expect.ip) in monitoring_mqttwarn__test_lines
+          - monitoring_mqttwarn__test_expect.quadlet | reject('in', monitoring_mqttwarn__test_lines) | list | length == 0
+          - >-
+            monitoring_mqttwarn__test_lines
+            | select('search', monitoring_mqttwarn__test_expect.quadlet_absent | map('regex_escape') | join('|')) | list | length == 0
+          - >-
+            monitoring_mqttwarn__test_expect.secrets | length == 0
+            or monitoring_mqttwarn__test_lines | select('search', monitoring_mqttwarn__test_expect.secrets | join('|')) | list | length == 0
+        fail_msg: "Quadlet: {{ monitoring_mqttwarn__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_mqttwarn__test_lines: "{{ (monitoring_mqttwarn__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read mqttwarn.ini'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_mqttwarn__test_etc }}/mqttwarn.ini"
+      register: 'monitoring_mqttwarn__test_ini'
+
+    - name: 'Read the files of mqttwarn'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ monitoring_mqttwarn__test_etc }}"
+        - "{{ monitoring_mqttwarn__test_etc }}/mqttwarn.ini"
+      register: 'monitoring_mqttwarn__test_files'
+
+    # mqttwarn.ini references the secret, it does not contain it
+    - name: 'Assert mqttwarn.ini'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__test_expect.ini | reject('in', monitoring_mqttwarn__test_lines) | list | length == 0
+          - >-
+            monitoring_mqttwarn__test_expect.ini_absent | length == 0
+            or monitoring_mqttwarn__test_lines | select('search', monitoring_mqttwarn__test_expect.ini_absent | join('|')) | list | length == 0
+          - >-
+            monitoring_mqttwarn__test_expect.secrets | length == 0
+            or monitoring_mqttwarn__test_lines | select('search', monitoring_mqttwarn__test_expect.secrets | join('|')) | list | length == 0
+          - monitoring_mqttwarn__test_files.results | map(attribute='stat.uid') | list == [ 999, 999 ]
+          - monitoring_mqttwarn__test_files.results | map(attribute='stat.mode') | list == [ '0750', '0640' ]
+        fail_msg: >-
+          missing {{ monitoring_mqttwarn__test_expect.ini | reject('in', monitoring_mqttwarn__test_lines) | list }},
+          files {{ monitoring_mqttwarn__test_files.results | map(attribute='stat.uid') | list }}
+          {{ monitoring_mqttwarn__test_files.results | map(attribute='stat.mode') | list }},
+          mqttwarn.ini {{ monitoring_mqttwarn__test_lines }}
+      vars:
+        monitoring_mqttwarn__test_lines: "{{ (monitoring_mqttwarn__test_ini.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the mqttwarn service'
+      ansible.builtin.command: 'systemctl is-active mqttwarn'
+      register: 'monitoring_mqttwarn__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Read the time zone and the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'mqttwarn' ]
+      register: 'monitoring_mqttwarn__test_inspect'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'mqttwarn' ]
+      register: 'monitoring_mqttwarn__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'mqttwarn', '-n', '80', '--no-pager' ]
+      register: 'monitoring_mqttwarn__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service, the time zone, no TZ and that the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__test_service.stdout == 'active'
+          - monitoring_mqttwarn__test_restarts.stdout | int == 0
+          - (monitoring_mqttwarn__test_inspect.stdout.split(' ', 1) | first) == monitoring_mqttwarn__test_vars.mqttwarn_timezone
+          - (monitoring_mqttwarn__test_inspect.stdout.split(' ', 1) | last | from_json) | select('match', 'TZ=') | list | length == 0
+          - >-
+            monitoring_mqttwarn__test_expect.secrets | length == 0
+            or monitoring_mqttwarn__test_inspect.stdout is not search(monitoring_mqttwarn__test_expect.secrets | join('|'))
+        fail_msg: >-
+          {{ [ 'service ' ~ monitoring_mqttwarn__test_service.stdout, 'automatic restarts: ' ~ monitoring_mqttwarn__test_restarts.stdout,
+               'time zone ' ~ (monitoring_mqttwarn__test_inspect.stdout.split(' ', 1) | first) ]
+             + monitoring_mqttwarn__test_journal.stdout_lines | default([]) }}
+
+    # mqttwarn publishes its version retained after the login to the broker
+    - name: 'Read the status of mqttwarn from the broker'
+      ansible.builtin.command:
+        argv: >-
+          {{ [ 'podman', 'exec', monitoring_mqttwarn__test_broker.name, 'mosquitto_sub' ] + monitoring_mqttwarn__test_login
+             + [ '-t', 'mqttwarn/$SYS/version', '-C', '1', '-W', '10' ] }}
+      register: 'monitoring_mqttwarn__test_status'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the status of mqttwarn'
+      ansible.builtin.assert:
+        that:
+          - monitoring_mqttwarn__test_status.rc == 0
+          - monitoring_mqttwarn__test_status.stdout | trim | length > 0
+        fail_msg: "Status: rc {{ monitoring_mqttwarn__test_status.rc }}, {{ monitoring_mqttwarn__test_status.stdout }} {{ monitoring_mqttwarn__test_status.stderr }}"
+
+    - name: 'Deliver a message with the function to the file'
+      when: monitoring_mqttwarn__test_expect.message is defined
+      block:
+
+        - name: 'Publish a message'
+          ansible.builtin.command:
+            argv: >-
+              {{ [ 'podman', 'exec', monitoring_mqttwarn__test_broker.name, 'mosquitto_pub' ] + monitoring_mqttwarn__test_login
+                 + [ '-t', 'molecule/test', '-m', monitoring_mqttwarn__test_expect.message ] }}
+          changed_when: false
+
+        # The file service of mqttwarn writes the message formatted by the function of molecule_funcs.py
+        - name: 'Read the file of the file service'
+          ansible.builtin.slurp:
+            src: "{{ monitoring_mqttwarn__test_etc }}/molecule.log"
+          register: 'monitoring_mqttwarn__test_file'
+          until: >-
+            monitoring_mqttwarn__test_file is succeeded
+            and monitoring_mqttwarn__test_expect.line in (monitoring_mqttwarn__test_file.content | b64decode).splitlines()
+          retries: 15
+          delay: 2
+          failed_when: false
+
+        - name: 'Read the log of mqttwarn'
+          ansible.builtin.command:
+            argv: [ 'podman', 'logs', '--tail', '40', 'mqttwarn' ]
+          register: 'monitoring_mqttwarn__test_log'
+          changed_when: false
+
+        - name: 'Assert the formatted message in the file'
+          ansible.builtin.assert:
+            that:
+              - monitoring_mqttwarn__test_file is succeeded
+              - monitoring_mqttwarn__test_expect.line in (monitoring_mqttwarn__test_file.content | default('') | b64decode).splitlines()
+            fail_msg: >-
+              {{ [ 'file: ' ~ (monitoring_mqttwarn__test_file.content | default('') | b64decode) ]
+                 + (monitoring_mqttwarn__test_log.stdout ~ '\n' ~ monitoring_mqttwarn__test_log.stderr).splitlines() }}

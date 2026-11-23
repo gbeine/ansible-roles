@@ -11,53 +11,205 @@ monitoring_mqttwarn__ipv6: "{{ mqttwarn_ipv6 }}"
 monitoring_mqttwarn__network: "{{ mqttwarn_network | mandatory }}"
 monitoring_mqttwarn__hostname: "{{ mqttwarn_hostname | mandatory }}"
 monitoring_mqttwarn__timezone: "{{ mqttwarn_timezone | mandatory }}"
+monitoring_mqttwarn__labels: "{{ mqttwarn_labels }}"
 
 monitoring_mqttwarn__version: "{{ mqttwarn_version | default('latest') }}"
 
-monitoring_mqttwarn__container: "{{ monitoring_mqttwarn__container_default | combine(mqttwarn_container | default({})) }}"
+monitoring_mqttwarn__container: "{{ monitoring_mqttwarn__podman_container_default | combine(mqttwarn_container | default({})) }}"
 
-monitoring_mqttwarn__mqtt_hostname: "{{ mqttwarn_mqtt_hostname | mandatory }}"
-monitoring_mqttwarn__mqtt_realm: "{{ mqttwarn_mqtt_realm | default(monitoring_mqttwarn__mqtt_hostname) }}"
-monitoring_mqttwarn__mqtt_port: "{{ mqttwarn_mqtt_port | default(1883) }}"
-monitoring_mqttwarn__mqtt_username: "{{ mqttwarn_mqtt_username }}"
-monitoring_mqttwarn__mqtt_password: "{{ mqttwarn_mqtt_password }}"
-monitoring_mqttwarn__mqtt_clientid: "{{ mqttwarn_mqtt_clientid | default('mqttwarn') }}"
-monitoring_mqttwarn__mqtt_lwt: "{{ mqttwarn_mqtt_lwt | default('clients/mqttwarn') }}"
-monitoring_mqttwarn__mqtt_lwt_alive: "{{ mqttwarn_mqtt_lwt_alive | default('1') }}"
-monitoring_mqttwarn__mqtt_lwt_dead: "{{ mqttwarn_mqtt_lwt_dead | default('0') }}"
-monitoring_mqttwarn__mqtt_skipretained: "{{ mqttwarn_mqtt_skipretained | default(true) }}"
-monitoring_mqttwarn__mqtt_cleansession: "{{ mqttwarn_mqtt_cleansession | default(false) }}"
+# The sections of mqttwarn.ini with their options, merged recursively over the default, null removes a section or an option
+monitoring_mqttwarn__config: "{{ monitoring_mqttwarn__config_default | combine(mqttwarn_config | default({}), recursive=true) }}"
 
-monitoring_mqttwarn__mqtt_protocol: "{{ mqttwarn_mqtt_protocol | default(3) }}"
-monitoring_mqttwarn__mqtt_tls: "{{ mqttwarn_mqtt_tls | default(false) }}"
-monitoring_mqttwarn__mqtt_tls_version: "{{ mqttwarn_mqtt_tls_version | default('tlsv1_2') }}"
-monitoring_mqttwarn__mqtt_tls_insecure: "{{ mqttwarn_mqtt_tls_insecure | default(false) }}"
-monitoring_mqttwarn__mqtt_tls_ca_certs: "{{ mqttwarn_ca_certs | default('') }}"
-monitoring_mqttwarn__mqtt_tls_certfile: "{{ mqttwarn_certfile | default('') }}"
-monitoring_mqttwarn__mqtt_tls_keyfile: "{{ mqttwarn_keyfile | default('') }}"
+# Secrets with name, data and target, the target is <section>.<option> of a secret,
+# e.g. defaults.password or config:pushover.token, mqttwarn.ini reads the file of the secret
+monitoring_mqttwarn__secrets: "{{ mqttwarn_secrets | default([]) }}"
 
-monitoring_mqttwarn__logfile: "{{ mqttwarn_logfile | default('stream://sys.stderr') }}"
-# CRITICAL, DEBUG, ERROR, INFO, WARN
-monitoring_mqttwarn__loglevel: "{{ mqttwarn_loglevel | default('INFO') }}"
-# CRITICAL, DEBUG, ERROR, INFO, WARN
-monitoring_mqttwarn__filteredmessagesloglevel: "{{ mqttwarn_filteredmessagesloglevel | default('INFO') }}"
-monitoring_mqttwarn__logformat: "{{ mqttwarn_logformat | default('%(asctime)-15s %(levelname)-8s [%(name)-25s] %(message)s') }}"
-
-monitoring_mqttwarn__functions: "{{ mqttwarn_functions | default([]) }}"
-monitoring_mqttwarn__launch: "{{ mqttwarn_launch | default(monitoring_mqttwarn__launch_default) }}"
-monitoring_mqttwarn__status_publish: "{{ mqttwarn_status_publish | default(true) }}"
-monitoring_mqttwarn__status_topic: "{{ mqttwarn_status_topic | default('mqttwarn/$SYS') }}"
-
-monitoring_mqttwarn__config: "{{ mqttwarn_config | default(monitoring_mqttwarn__config_default) }}"
-monitoring_mqttwarn__failover: "{{ mqttwarn_failover | default(monitoring_mqttwarn__failover_default) }}"
-
-monitoring_mqttwarn__topics: "{{ mqttwarn_topics | default([]) }}"
-
+# Files of the controller copied to the directory of mqttwarn.ini, e.g. the functions of defaults.functions
 monitoring_mqttwarn__files: "{{ mqttwarn_files | default([]) }}"
+
+# mqttwarn reads no variables besides TZ, without mqttwarn_environment the container has no environment
+monitoring_mqttwarn__environment: "{{ mqttwarn_environment }}"
+
+monitoring_mqttwarn__autoupdate_enabled: "{{ mqttwarn_autoupdate_enabled | default(false) }}"
+monitoring_mqttwarn__autoupdate_schedule: "{{ mqttwarn_autoupdate_schedule }}"
+
 #
 # Defaults - do not change
 #
 
+# The values of the former versions of the role
+monitoring_mqttwarn__config_default:
+  defaults:
+    clientid: 'mqttwarn'
+    lwt: 'clients/mqttwarn'
+    lwt_alive: '1'
+    lwt_dead: '0'
+    skipretained: true
+    cleansession: false
+    protocol: 3
+    logfile: 'stream://sys.stderr'
+    loglevel: 'INFO'
+    filteredmessagesloglevel: 'INFO'
+    logformat: '%(asctime)-15s %(levelname)-8s [%(name)-25s] %(message)s'
+    launch: [ 'log' ]
+    status_publish: true
+    status_topic: 'mqttwarn/$SYS'
+  'config:log':
+    targets:
+      debug: [ 'debug' ]
+      info: [ 'info' ]
+      warn: [ 'warn' ]
+      crit: [ 'crit' ]
+      error: [ 'error' ]
+  failover:
+    targets: [ 'log:error' ]
+
+monitoring_mqttwarn__config_required: [ 'defaults.hostname' ]
+
+# Generated from Config in mqttwarn/configuration.py and the options of defaults read by mqttwarn/core.py of mqttwarn 0.36.1,
+# update with new versions of the image, password is a secret
+monitoring_mqttwarn__config_defaults_allowed:
+  - 'hostname'
+  - 'port'
+  - 'username'
+  - 'clientid'
+  - 'lwt'
+  - 'lwt_alive'
+  - 'lwt_dead'
+  - 'skipretained'
+  - 'cleansession'
+  - 'protocol'
+  - 'logformat'
+  - 'logfile'
+  - 'loglevel'
+  - 'filteredmessagesloglevel'
+  - 'functions'
+  - 'num_workers'
+  - 'ca_certs'
+  - 'tls_version'
+  - 'certfile'
+  - 'keyfile'
+  - 'tls_insecure'
+  - 'tls'
+  - 'launch'
+  - 'status_publish'
+  - 'status_topic'
+
+# Generated from the options of the sections of topics read by mqttwarn/context.py and mqttwarn/core.py of mqttwarn 0.36.1
+monitoring_mqttwarn__config_topic_allowed:
+  - 'targets'
+  - 'topic'
+  - 'qos'
+  - 'timeout'
+  - 'notify_only_on_timeout'
+  - 'filter'
+  - 'datamap'
+  - 'alldata'
+  - 'format'
+  - 'title'
+  - 'image'
+  - 'priority'
+  - 'template'
+
+# Generated from the modules in mqttwarn/services of mqttwarn 0.36.1, the sections config:<service>,
+# a section with the option module loads another module
+monitoring_mqttwarn__config_services:
+  - 'alexa-notify-me'
+  - 'amqp'
+  - 'apns'
+  - 'apprise'
+  - 'apprise_multi'
+  - 'apprise_single'
+  - 'apprise_util'
+  - 'asterisk'
+  - 'autoremote'
+  - 'azure_iot'
+  - 'carbon'
+  - 'celery'
+  - 'chromecast'
+  - 'dbus'
+  - 'desktopnotify'
+  - 'dnsupdate'
+  - 'emoncms'
+  - 'execute'
+  - 'fbchat'
+  - 'file'
+  - 'freeswitch'
+  - 'gss2'
+  - 'hangbot'
+  - 'http_urllib'
+  - 'icinga2'
+  - 'ifttt'
+  - 'influxdb'
+  - 'ionic'
+  - 'irccat'
+  - 'linuxnotify'
+  - 'log'
+  - 'mattermost'
+  - 'mqtt'
+  - 'mqtt_filter'
+  - 'mqttpub'
+  - 'mysql'
+  - 'mysql_dynamic'
+  - 'mysql_remap'
+  - 'mythtv'
+  - 'nntp'
+  - 'noop'
+  - 'nsca'
+  - 'ntfy'
+  - 'osxsay'
+  - 'pastebinpub'
+  - 'pipe'
+  - 'postgres'
+  - 'prowl'
+  - 'pushbullet'
+  - 'pushover'
+  - 'pushsafer'
+  - 'redispub'
+  - 'rrdtool'
+  - 'serial'
+  - 'slack'
+  - 'slixmpp'
+  - 'smtp'
+  - 'sqlite'
+  - 'sqlite_json2cols'
+  - 'sqlite_timestamp'
+  - 'ssh'
+  - 'syslog'
+  - 'telegram'
+  - 'thingspeak'
+  - 'tootpaste'
+  - 'twilio'
+  - 'twitter'
+  - 'websocket'
+  - 'xbmc'
+  - 'xmpp'
+  - 'zabbix'
+
+# The options of the services of config:<service> are checked with a pattern, the services read different options
+monitoring_mqttwarn__config_option_pattern: '^[a-z0-9_]+$'
+
+# The functions of the section cron
+monitoring_mqttwarn__config_function_pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+
+# Generated from the options of the services in mqttwarn/services of mqttwarn 0.36.1 carrying secrets,
+# they are set with mqttwarn_secrets, defaults.password is the password of MQTT
+monitoring_mqttwarn__config_secret_options: [ 'apikey', 'dns_keyblob', 'pass', 'password', 'token' ]
+
+monitoring_mqttwarn__config_booleans:
+  defaults: [ 'skipretained', 'cleansession', 'tls', 'tls_insecure', 'status_publish' ]
+  topic: [ 'notify_only_on_timeout' ]
+
+# Options mqttwarn reads as lists separated by commas, except targets of config:<service>, a dictionary
+monitoring_mqttwarn__config_list_options: [ 'launch', 'targets' ]
+
+# The names of the files of mqttwarn_files
+monitoring_mqttwarn__file_pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
+
+# The variables of the image, mqttwarn reads no other variables
+monitoring_mqttwarn__environment_allowed: [ 'TZ' ]
+
+# The user mqttwarn of the image
 monitoring_mqttwarn__uid: 999
 monitoring_mqttwarn__gid: 999
 
@@ -68,7 +220,58 @@ monitoring_mqttwarn__podman_tag: "{{ monitoring_mqttwarn__version }}"
 monitoring_mqttwarn__podman_home: "{{ monitoring_mqttwarn__home }}"
 monitoring_mqttwarn__podman_etc_dir: "{{ monitoring_mqttwarn__podman_home }}/etc"
 
-monitoring_mqttwarn__container_default:
+# The valid secrets with their section and option, broken entries are left out, the validation reports them
+monitoring_mqttwarn__secrets_valid: >-
+  {%- set result = [] -%}
+  {%- if monitoring_mqttwarn__secrets is sequence and monitoring_mqttwarn__secrets is not string and monitoring_mqttwarn__secrets is not mapping -%}
+  {%-   for secret in monitoring_mqttwarn__secrets if secret is mapping and secret.name is defined and secret.target is defined and secret.target is string -%}
+  {%-     set parts = secret.target | regex_search('^(defaults|config:[^.]+)\.([a-z0-9_]+)$', '\\1', '\\2') -%}
+  {%-     if parts and ((parts[0] == 'defaults' and parts[1] == 'password')
+                        or (parts[0] is match('config:') and parts[1] in monitoring_mqttwarn__config_secret_options)) -%}
+  {%-       set _ = result.append({ 'name': secret.name, 'section': parts[0], 'option': parts[1] }) -%}
+  {%-     endif -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ result }}
+
+# The references of the secrets by section, mqttwarn reads the files when it reads the options
+monitoring_mqttwarn__config_secrets: >-
+  {%- set ns = namespace(result={}) -%}
+  {%- for secret in monitoring_mqttwarn__secrets_valid -%}
+  {%-   set ns.result = ns.result | combine({ secret.section: { secret.option: '${FILE:/run/secrets/' ~ secret.name ~ '}' } }, recursive=true) -%}
+  {%- endfor -%}
+  {{ ns.result }}
+
+# The sections of mqttwarn.ini with the options as text: mqttwarn evaluates the values of defaults and config:<service>
+# as Python literals, strings are quoted, booleans are True and False, lists and dictionaries are written as JSON,
+# which is a Python literal for strings and numbers. The other sections are read as text, strings are not quoted
+# and false removes the option, mqttwarn reads every text as true. Lists of launch and targets are joined by commas,
+# null removes the option.
+monitoring_mqttwarn__config_ini: >-
+  {%- set result = {} -%}
+  {%- for section, options in (monitoring_mqttwarn__config | combine(monitoring_mqttwarn__config_secrets, recursive=true)).items() if options is mapping -%}
+  {%-   set literal = section == 'defaults' or section is match('config:') -%}
+  {%-   set lines = {} -%}
+  {%-   for key, value in options.items() if value is not none and (literal or value is not false) -%}
+  {%-     set listed = key in monitoring_mqttwarn__config_list_options and not (section is match('config:')) -%}
+  {%-     if value is boolean -%}
+  {%-       set text = value | ternary('True', 'False') -%}
+  {%-     elif value is number -%}
+  {%-       set text = value | string -%}
+  {%-     elif (listed or not literal) and value is string -%}
+  {%-       set text = value -%}
+  {%-     elif (listed or not literal) and value is sequence and value is not mapping -%}
+  {%-       set text = value | map('string') | join(', ') -%}
+  {%-     else -%}
+  {%-       set text = value | to_json -%}
+  {%-     endif -%}
+  {%-     set _ = lines.update({ key: text }) -%}
+  {%-   endfor -%}
+  {%-   set _ = result.update({ section: lines }) -%}
+  {%- endfor -%}
+  {{ result }}
+
+monitoring_mqttwarn__podman_container_default:
   name: "{{ monitoring_mqttwarn__podman_name }}"
   hostname: "{{ monitoring_mqttwarn__hostname }}"
   image: "{{ monitoring_mqttwarn__podman_image }}:{{ monitoring_mqttwarn__podman_tag }}"
@@ -76,33 +279,16 @@ monitoring_mqttwarn__container_default:
   ipv6: "{{ monitoring_mqttwarn__ipv6 | default(omit) }}"
   network: "{{ monitoring_mqttwarn__network }}"
   timezone: "{{ monitoring_mqttwarn__timezone }}"
+  environment: "{{ monitoring_mqttwarn__environment | default(omit) }}"
+  labels: "{{ monitoring_mqttwarn__labels | default(omit) }}"
+  # The secrets are files, mqttwarn.ini references them with ${FILE:/run/secrets/<name>}
+  secrets: >-
+    {%- set result = [] -%}
+    {%- for secret in monitoring_mqttwarn__secrets_valid -%}
+    {%-   set _ = result.append(secret.name ~ ',type=mount,target=/run/secrets/' ~ secret.name
+                              ~ ',uid=' ~ monitoring_mqttwarn__uid ~ ',gid=' ~ monitoring_mqttwarn__gid ~ ',mode=0400') -%}
+    {%- endfor -%}
+    {{ result }}
+  # mqttwarn_container.volumes replaces the configuration
   volumes:
-    - '/etc/timezone:/etc/timezone:ro'
-    - '/etc/localtime:/etc/localtime:ro'
     - "{{ monitoring_mqttwarn__podman_etc_dir }}:/etc/mqttwarn"
-
-monitoring_mqttwarn__launch_default:
-  - 'log'
-
-monitoring_mqttwarn__config_default:
-  - name: 'log'
-    targets:
-      - name: 'debug'
-        options:
-          - 'debug'
-      - name: 'info'
-        options:
-          - 'info'
-      - name: 'warn'
-        options:
-          - 'warn'
-      - name: 'crit'
-        options:
-          - 'crit'
-      - name: 'error'
-        options:
-          - 'error'
-
-monitoring_mqttwarn__failover_default:
-  - 'log:error'
-  - 'file:mqttwarn'

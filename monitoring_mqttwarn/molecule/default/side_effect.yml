@@ -1,0 +1,254 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_mqttwarn__test_case: "{{ monitoring_mqttwarn__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_mqttwarn__test_vars: "{{ monitoring_mqttwarn__test_case.role_vars }}"
+    monitoring_mqttwarn__test_config: "{{ monitoring_mqttwarn__test_vars.mqttwarn_config }}"
+    monitoring_mqttwarn__test_secrets: "{{ monitoring_mqttwarn__test_vars.mqttwarn_secrets | default([]) }}"
+    monitoring_mqttwarn__test_checked_files:
+      - "{{ monitoring_mqttwarn__test_quadlet_path }}"
+      - "{{ monitoring_mqttwarn__test_vars.mqttwarn_home }}/etc/mqttwarn.ini"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_mqttwarn__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_mqttwarn__test_checked_files }}"
+      register: 'monitoring_mqttwarn__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run monitoring_mqttwarn with mqttwarn_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_container: [ 'environment' ]
+        monitoring_mqttwarn__test_invalid:
+          message: 'mqttwarn_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_mqttwarn with mqttwarn_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: [ 'defaults' ]
+        monitoring_mqttwarn__test_invalid:
+          message: 'mqttwarn_config not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run monitoring_mqttwarn with an unknown option of defaults (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'defaults': { 'host': 'localhost' } }, recursive=true) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'an unknown option of defaults'
+          search: '^Unknown options in `mqttwarn_config`: defaults\.host, allowed are '
+
+    - name: 'Run monitoring_mqttwarn with a boolean that is no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'defaults': { 'skipretained': 'yes' } }, recursive=true) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a boolean that is no boolean'
+          search: '^These options are booleans, allowed are true and false: defaults\.skipretained\.$'
+
+    - name: 'Run monitoring_mqttwarn with an unknown service (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'config:molecule': { 'targets': { 'a': [ 'b' ] } } }) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'an unknown service'
+          search: '^Unknown services in `mqttwarn_config`: config:molecule, allowed are '
+
+    - name: 'Run monitoring_mqttwarn with a topic without targets (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'molecule/none': { 'format': '{payload}' } }) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a topic without targets'
+          search: '^The sections of topics in `mqttwarn_config` need targets: molecule/none\.$'
+
+    - name: 'Run monitoring_mqttwarn with an unknown option of a topic (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'molecule/other': { 'targets': [ 'log:info' ], 'fromat': '{payload}' } }) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'an unknown option of a topic'
+          search: '^Unknown options in `mqttwarn_config`: molecule/other\.fromat, allowed are '
+
+    - name: 'Run monitoring_mqttwarn with a password in mqttwarn_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'defaults': { 'password': 'molecule-plain-password' } }, recursive=true) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a password in mqttwarn_config'
+          search: '^Secrets are set with `mqttwarn_secrets`, not in `mqttwarn_config`: defaults\.password\.$'
+
+    - name: 'Run monitoring_mqttwarn with a dictionary in a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'config:log': { 'targets': { 'info': [ { 'level': 'info' } ] } } }, recursive=true) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a dictionary in a list'
+          search: '^Lists and dictionaries of `mqttwarn_config` contain strings, numbers and lists of them, .*: config:log\.targets\.$'
+
+    - name: 'Run monitoring_mqttwarn with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine({ 'defaults': { 'clientid': \"mqttwarn\nother\" } }, recursive=true) }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a line break in a value'
+          search: '^The values of `mqttwarn_config` must not contain line breaks: defaults\.clientid\.$'
+
+    - name: 'Run monitoring_mqttwarn with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_secrets: "{{ monitoring_mqttwarn__test_secrets + [ { 'name': 'mqttwarn_other', 'data': 'x' } ] }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a secret without target'
+          search: '^`mqttwarn_secrets` entries need name, data and target$'
+
+    - name: 'Run monitoring_mqttwarn with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_secrets: "{{ monitoring_mqttwarn__test_secrets + [ { 'name': 'mqttwarn_clientid', 'data': 'x', 'target': 'defaults.clientid' } ] }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: defaults\.clientid, allowed are '
+
+    - name: 'Run monitoring_mqttwarn with the secret of a missing section (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_secrets: "{{ monitoring_mqttwarn__test_secrets + [ { 'name': 'mqttwarn_pushover', 'data': 'x', 'target': 'config:pushover.token' } ] }}"
+        monitoring_mqttwarn__test_invalid:
+          message: 'the secret of a missing section'
+          search: '^The sections of these secrets are not part of `mqttwarn_config`: config:pushover\.$'
+
+    - name: 'Run monitoring_mqttwarn with a double quote in a secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_secrets: [ { 'name': 'mqttwarn_mqtt_password', 'data': 'molecule"password', 'target': 'defaults.password' } ]
+        monitoring_mqttwarn__test_invalid:
+          message: 'a double quote in a secret'
+          search: '^Secrets are strings that are not empty and without line breaks, double quotes and backslashes: mqttwarn_mqtt_password\.$'
+
+    - name: 'Run monitoring_mqttwarn with an invalid name of a file (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_files: [ '/tmp/mqttwarn.ini' ]
+        monitoring_mqttwarn__test_invalid:
+          message: 'an invalid name of a file'
+          search: '^The names of the files of `mqttwarn_files` match .* and are not mqttwarn\.ini: mqttwarn\.ini\.$'
+
+    - name: 'Run monitoring_mqttwarn with mqttwarn_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_environment: [ 'TZ' ]
+        monitoring_mqttwarn__test_invalid:
+          message: 'mqttwarn_environment not a dictionary'
+          search: '^`mqttwarn_environment` has to be a dictionary\.$'
+
+    - name: 'Run monitoring_mqttwarn with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_environment: { 'MQTTWARNINI': '/tmp/mqttwarn.ini' }
+        monitoring_mqttwarn__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: MQTTWARNINI, mqttwarn only reads TZ'
+
+    - name: 'Run monitoring_mqttwarn with a line break in the environment of the container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mqttwarn_container:
+          environment:
+            TZ: "Europe/Berlin\nUTC"
+        monitoring_mqttwarn__test_invalid:
+          message: 'a line break in the environment of the container'
+          search: '^The environment variables must not contain line breaks: TZ\.$'
+
+    - name: 'Change the configuration'
+      when: monitoring_mqttwarn__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mqttwarn' ]
+          register: 'monitoring_mqttwarn__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed values'
+          ansible.builtin.set_fact:
+            mqttwarn_config: "{{ monitoring_mqttwarn__test_config | combine(monitoring_mqttwarn__test_case.side_effect.config, recursive=true) }}"
+
+        - name: 'Run monitoring_mqttwarn with the changed values'
+          ansible.builtin.include_role:
+            name: 'monitoring_mqttwarn'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mqttwarn' ]
+          register: 'monitoring_mqttwarn__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart'
+          ansible.builtin.assert:
+            that:
+              - monitoring_mqttwarn__config_result is changed
+              - monitoring_mqttwarn__quadlet_result is not changed
+              - monitoring_mqttwarn__test_started_after.stdout | int > monitoring_mqttwarn__test_started_before.stdout | int
+            fail_msg: >-
+              configuration changed: {{ monitoring_mqttwarn__config_result is changed }}, quadlet changed: {{ monitoring_mqttwarn__quadlet_result is changed }},
+              start before {{ monitoring_mqttwarn__test_started_before.stdout }}, after {{ monitoring_mqttwarn__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_mqttwarn__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mqttwarn' ]
+          register: 'monitoring_mqttwarn__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_mqttwarn without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_mqttwarn'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mqttwarn' ]
+          register: 'monitoring_mqttwarn__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_mqttwarn__config_result is not changed
+              - monitoring_mqttwarn__files_result is not changed
+              - monitoring_mqttwarn__secrets_result is not changed
+              - monitoring_mqttwarn__quadlet_result is not changed
+              - monitoring_mqttwarn__test_unchanged_after.stdout == monitoring_mqttwarn__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ monitoring_mqttwarn__config_result is changed }},
+              files changed: {{ monitoring_mqttwarn__files_result is changed }},
+              secrets changed: {{ monitoring_mqttwarn__secrets_result is changed }},
+              quadlet changed: {{ monitoring_mqttwarn__quadlet_result is changed }},
+              start before {{ monitoring_mqttwarn__test_unchanged_before.stdout }}, after {{ monitoring_mqttwarn__test_unchanged_after.stdout }}
