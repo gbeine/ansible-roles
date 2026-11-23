@@ -84,7 +84,7 @@ The entrypoint of the image would write the passwords of `icingaweb.*` variables
 So the files with passwords are podman secrets:
 
 - the `target` of an entry of `icingaweb_secrets` is `<file>.<section>.<option>` of a password, the passwords of
-  `monitoring_icinga_web__config_secret_options` are `password` and `bind_pw` of `resources`, `password` of `modules/icingadb/redis`
+  `monitoring_icingaweb__config_secret_options` are `password` and `bind_pw` of `resources`, `password` of `modules/icingadb/redis`
   and `password` of `modules/icingadb/commandtransports`, the section has to be part of `icingaweb_config`
 - the role merges the passwords into the file, renders the whole file as podman secret `<container name>-<file>`
   (e.g. `icingaweb-resources`, `icingaweb-modules-icingadb-redis`) and mounts it to `/data/etc/icingaweb2/<file>.ini`
@@ -113,8 +113,8 @@ icingaweb_secrets:
 
 ### Allowed variables
 
-The role only allows the files, sections and options of `monitoring_icinga_web__config_allowed`, the passwords of `monitoring_icinga_web__config_secret_options`
-and the environment variables in `monitoring_icinga_web__environment_allowed`, it stops before any change if unknown files, options, secrets or variables are set.
+The role only allows the files, sections and options of `monitoring_icingaweb__config_allowed`, the passwords of `monitoring_icingaweb__config_secret_options`
+and the environment variables in `monitoring_icingaweb__environment_allowed`, it stops before any change if unknown files, options, secrets or variables are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a password that has to be passed as secret.
 The lists are generated from the forms of Icinga Web v2.14.1 and Icinga DB Web v1.5.0, the sections of most files are names (`*`),
 `roles` also takes the restrictions of the modules, e.g. `icingadb/filter/objects`.
@@ -129,8 +129,8 @@ The check of the environment uses the environment of the container after merging
 Ports, volumes, labels, additional hosts (`etc_hosts`) and dependencies are changed with `icingaweb_container`, it is merged over the default of the container.
 The merge is not recursive, `publish` and `volumes` replace the values of the default completely,
 `icingaweb_container.environment` replaces the environment including `icingaweb_environment` and the modules.
-The dependencies of the quadlet unit are lists of units in `icingaweb_container`: `requires`, `wants`, `after`, `part_of` and `binds_to`
-are written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 
 ```yaml
 icingaweb_container:
@@ -143,20 +143,26 @@ icingaweb_container:
 The role checks before any change:
 
 - `icingaweb_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a known password of an existing section
-  or `passwords.<backend>.<user>` and set once, the passwords of both resources are set, the names start with a letter or digit,
-  the data are strings without line breaks
+  or `passwords.<backend>.<user>` and set once, the passwords of both resources are set, the data are strings without line breaks,
+  podman checks the names of the secrets
 - `icingaweb_config` contains known files and options, the files and sections are dictionaries, no passwords,
   the mandatory options and values without line breaks
 - `icingaweb_modules` is a list of names of modules
-- the former single variables of the role are not set, the message names their replacement
-- `icingaweb_environment`, if set, is a dictionary without options of Icinga Web and line breaks, only allowed environment variables are set in the container
+- `icingaweb_environment`, if set, is a dictionary without options of Icinga Web and line breaks
+- only allowed environment variables without line breaks are set in the container
 
-If `icingaweb_container` or `icingaweb_config` is no dictionary, merging it with the default fails before anything changes.
+If `icingaweb_container` or `icingaweb_config` is no dictionary, merging it with the default fails before anything changes,
+the same applies to a failing template in the variables, e.g. an unknown filter.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the files of the configuration,
+the secrets and the quadlet unit. The start and the wait for Icinga Web do not run in check mode.
 
 ### Restart and updates
 
 Icinga Web is restarted if it was running and a file of the configuration, a secret or the quadlet unit changed, otherwise it is started and enabled.
-If the start fails, the role shows the journal of the service.
+If the start fails, the role shows the error and the journal of the service.
 The entrypoint imports the schema into the empty database of the authentication backend and creates the users before Apache starts,
 the role waits until the login page answers and shows the journal otherwise.
 Updates of the image are done by `container_update` with `icingaweb_autoupdate_enabled: true` and `icingaweb_autoupdate_schedule`,
@@ -164,8 +170,11 @@ without `icingaweb_autoupdate_schedule` the schedule of `container_update` is us
 
 ### Migration
 
+The role was called `monitoring_icinga_web`, it is called `monitoring_icingaweb` now: the playbooks include `monitoring_icingaweb`,
+the tag is `monitoring_icingaweb`, the inventory variables `icingaweb_*` stay the same.
+
 The former version of the role configured Icinga Web with single variables in `icingaweb.*` variables of the environment,
-they are options of `icingaweb_config` and secrets now. The role rejects the former variables and names their replacement.
+they are options of `icingaweb_config` and secrets now. The role ignores the former variables.
 
 | Former variable | Replacement |
 |---|---|
@@ -184,32 +193,37 @@ Changed behavior:
 - the fixed secrets `icingaweb_admin_password`, `icingaweb_icinga_password`, `icingaweb_db_password` and `icingaweb_icingadb_password` are replaced by `icingaweb_secrets`,
   the names are chosen freely, the old secrets are not removed
 - the passwords are no longer written to `/data/etc/icingaweb2/resources.ini` and `modules/icingadb/commandtransports.ini` on the host,
-  the role removes these files of the former versions before it mounts the secrets
+  the role does not remove these files of the former versions, they contain the passwords in plain text, remove them before the first run (see below)
 - `config_backend` of `config.global` is not set anymore, Icinga Web v2.14 stores the preferences in `config_resource`
 - the modules are set with `icingaweb_modules`, all options of the files of Icinga Web can be set with `icingaweb_config`
 - `/etc/localtime` and `/etc/timezone` are not mounted anymore, the time zone is set with `icingaweb_timezone`
 - Icinga Web is restarted if the configuration or a secret changed, the role waits until the login page answers
-- the tags are `monitoring` and `monitoring_icinga_web`
+- the tags are `monitoring` and `monitoring_icingaweb`
+- the names of the secrets are not checked by the role anymore, podman checks them
+- `requires_mounts_for` of `icingaweb_container` is new
 - `<icingaweb_home>/data` is not mounted to `/data` anymore, the directories on the host are `etc` and `lib`, the role does not move the files of former versions.
   Move them before the first run and remove `<icingaweb_home>/data` afterwards:
-  `mv <icingaweb_home>/data/etc/icingaweb2 <icingaweb_home>/etc`, `mv <icingaweb_home>/data/var/lib/icingaweb2 <icingaweb_home>/lib`
+  `mv <icingaweb_home>/data/etc/icingaweb2 <icingaweb_home>/etc`, `mv <icingaweb_home>/data/var/lib/icingaweb2 <icingaweb_home>/lib`,
+  then remove the files with the passwords: `rm <icingaweb_home>/etc/resources.ini <icingaweb_home>/etc/modules/icingadb/commandtransports.ini`
 
 ### Tests
 
 The molecule scenario `default` uses tart with the VMs `molecule-icingaweb-default` with the mandatory variables
 and `molecule-icingaweb` with the options and Redis with a password.
 `prepare` starts MariaDB with the databases `icingaweb` and `icinga` and Redis as containers, Icinga 2 is not needed.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `icingaweb_container` and `icingaweb_config` not a dictionary, an unknown file, an unknown option, an unknown section of `config`,
 a password in `icingaweb_config`, without the host of Redis, a secret without target, an unknown secret, the secret of a missing section,
-without the password of the database of Icinga Web, a former variable, an option in `icingaweb_environment`
-and an unknown variable in `icingaweb_container.environment` and checks that it fails with the expected message
+without the password of the database of Icinga Web, an option in `icingaweb_environment`,
+an unknown variable and a line break in `icingaweb_container.environment` and checks that it fails with the expected message
 and the quadlet unit and `config.ini` are unchanged (tasks marked `expect ERROR`),
-then it changes `config.logging.level` on `molecule-icingaweb`, `config.ini` changes and Icinga Web has to restart.
+then it changes `config.logging.level` on `molecule-icingaweb`, `config.ini` changes and Icinga Web has to restart,
+`molecule-icingaweb-default` runs again without a change and Icinga Web must not restart.
 `verify` checks the quadlet unit with the mounted files and the secrets of the users and without passwords, the lines of the files on the host,
 that the files with passwords are not on the host and no file on the host contains a password, the files with passwords in the container,
-the service and logs in as `icingaadmin` with the login form.
+the service, the time zone, no `TZ` in the environment, no automatic restarts of the service and logs in as `icingaadmin` with the login form.
 
 ```shell
-cd monitoring_icinga_web
+cd monitoring_icingaweb
 MOLECULE_TART_IMAGE='debian' molecule test
 ```

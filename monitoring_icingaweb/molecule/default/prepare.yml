@@ -1,0 +1,68 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icingaweb__test_case: "{{ monitoring_icingaweb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    podman_networks:
+      - "{{ monitoring_icingaweb__test_network }}"
+    podman_default_network: "{{ monitoring_icingaweb__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_icingaweb__test_image }}"
+        - "{{ monitoring_icingaweb__test_database.image }}"
+        - "{{ monitoring_icingaweb__test_redis.image }}"
+      register: 'monitoring_icingaweb__test_pull'
+      until: monitoring_icingaweb__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Start MariaDB'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icingaweb__test_database.name }}"
+        image: "{{ monitoring_icingaweb__test_database.image }}"
+        network: "{{ monitoring_icingaweb__test_network.name }}"
+        ip: "{{ monitoring_icingaweb__test_case.database_ip }}"
+        env:
+          MARIADB_ROOT_PASSWORD: "{{ monitoring_icingaweb__test_database.root_password }}"
+          MARIADB_DATABASE: 'icingaweb'
+          MARIADB_USER: 'icingaweb'
+          MARIADB_PASSWORD: "{{ monitoring_icingaweb__test_database.password }}"
+        state: 'started'
+
+    - name: 'Start Redis'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icingaweb__test_redis.name }}"
+        image: "{{ monitoring_icingaweb__test_redis.image }}"
+        network: "{{ monitoring_icingaweb__test_network.name }}"
+        ip: "{{ monitoring_icingaweb__test_case.redis.ip }}"
+        command: "{{ monitoring_icingaweb__test_case.redis.command }}"
+        state: 'started'
+
+    - name: 'Wait for MariaDB'
+      ansible.builtin.wait_for:
+        host: "{{ monitoring_icingaweb__test_case.database_ip }}"
+        port: 3306
+        timeout: 120
+
+    # The user icingaweb reads the database of Icinga DB as well
+    - name: 'Create the database of Icinga DB'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '-e', "MYSQL_PWD={{ monitoring_icingaweb__test_database.root_password }}", "{{ monitoring_icingaweb__test_database.name }}",
+                'mariadb', '-u', 'root', '-e', "CREATE DATABASE IF NOT EXISTS icinga; GRANT ALL ON icinga.* TO 'icingaweb'@'%';" ]
+      changed_when: true

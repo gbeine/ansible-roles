@@ -1,0 +1,386 @@
+---
+
+- name: 'Install Icinga Web'
+  tags: [ 'monitoring', 'monitoring_icingaweb' ]
+  block:
+
+    # A failing template in the variables (e.g. icingaweb_container or icingaweb_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_icingaweb__container | length > 0
+          - monitoring_icingaweb__config | length > 0
+          # icingaweb_environment has no default, a failing template stops the role here as well
+          - monitoring_icingaweb__environment | default({}) | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icingaweb__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        monitoring_icingaweb__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_icingaweb__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`icingaweb_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`icingaweb_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `icingaweb_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Icinga Web checks the values of the options when it uses them
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icingaweb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icingaweb__errors: >-
+          {%- set errors = [] -%}
+          {%- set allowed = monitoring_icingaweb__config_allowed -%}
+          {%- set ns = namespace(files=[], values=[], unknown=[], secrets=[], lines=[], present=[]) -%}
+          {%- for file, sections in monitoring_icingaweb__config.items() if sections is not none -%}
+          {%-   if file not in allowed -%}
+          {%-     set ns.files = ns.files + [ file | string ] -%}
+          {%-   elif sections is not mapping -%}
+          {%-     set ns.values = ns.values + [ file ] -%}
+          {%-   else -%}
+          {%-     for section, options in sections.items() if options is not none -%}
+          {%-       set keys = allowed[file][section] | default(allowed[file]['*'] | default(none)) -%}
+          {%-       if keys is none -%}
+          {%-         set ns.unknown = ns.unknown + [ file ~ '.' ~ section ] -%}
+          {%-       elif options is not mapping -%}
+          {%-         set ns.values = ns.values + [ file ~ '.' ~ section ] -%}
+          {%-       else -%}
+          {%-         for key, value in options.items() if value is not none -%}
+          {%-           set path = file ~ '.' ~ section ~ '.' ~ key -%}
+          {%-           set _ = ns.present.append(path) -%}
+          {%-           if key in monitoring_icingaweb__config_secret_options[file] | default([]) -%}
+          {%-             set ns.secrets = ns.secrets + [ path ] -%}
+          {%-           elif key not in keys and not (file == 'roles' and key is match(monitoring_icingaweb__config_roles_pattern)) -%}
+          {%-             set ns.unknown = ns.unknown + [ path ] -%}
+          {%-           elif value is mapping or (value | string ~ '.').splitlines() | length > 1 -%}
+          {%-             set ns.lines = ns.lines + [ path ] -%}
+          {%-           endif -%}
+          {%-         endfor -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set missing = monitoring_icingaweb__config_required | reject('in', ns.present) | list -%}
+          {%- if ns.files | length > 0 -%}
+          {%-   set _ = errors.append('Unknown files in `icingaweb_config`: ' ~ (ns.files | join(', ')) ~ ', allowed are ' ~ (allowed.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('The files and sections of `icingaweb_config` are dictionaries: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown sections or options in `icingaweb_config`: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of `monitoring_icingaweb__config_allowed`.') -%}
+          {%- endif -%}
+          {%- if ns.secrets | length > 0 -%}
+          {%-   set _ = errors.append('Passwords are set with `icingaweb_secrets`, not in `icingaweb_config`: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of `icingaweb_config` are strings, numbers, booleans or lists without line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Icinga Web needs the options ' ~ (monitoring_icingaweb__config_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_icingaweb__modules is string or monitoring_icingaweb__modules is not sequence
+                 or monitoring_icingaweb__modules | reject('string') | list | length > 0
+                 or monitoring_icingaweb__modules | reject('match', '^[a-z0-9-]+$') | list | length > 0 -%}
+          {%-   set _ = errors.append('`icingaweb_modules` has to be a list of names of modules.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icingaweb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icingaweb__targets: "{{ monitoring_icingaweb__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_icingaweb__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(unknown=[], sections=[]) -%}
+          {%- for target in monitoring_icingaweb__targets if target is not match(monitoring_icingaweb__secrets_users_pattern) -%}
+          {%-   set parts = target | regex_search('^(.+)\.([^.]+)\.([^.]+)$', '\\1', '\\2', '\\3') -%}
+          {%-   if not parts or parts[0] not in monitoring_icingaweb__config_secret_options or parts[2] not in monitoring_icingaweb__config_secret_options[parts[0]] -%}
+          {%-     set ns.unknown = ns.unknown + [ target ] -%}
+          {%-   elif (monitoring_icingaweb__config[parts[0]] | default({}))[parts[1]] | default(none) is not mapping -%}
+          {%-     set ns.sections = ns.sections + [ target ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set missing = monitoring_icingaweb__secrets_required | reject('in', monitoring_icingaweb__targets) | list -%}
+          {%- set duplicates = monitoring_icingaweb__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%- set data = monitoring_icingaweb__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+                         + monitoring_icingaweb__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the passwords of `monitoring_icingaweb__config_secret_options`'
+                                    ~ ' (<file>.<section>.<option>, e.g. resources.icingaweb_db.password) and passwords.<backend>.<user>.') -%}
+          {%- endif -%}
+          {%- if ns.sections | length > 0 -%}
+          {%-   set _ = errors.append('The sections of these secrets are not part of `icingaweb_config`: ' ~ (ns.sections | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if missing | length > 0 -%}
+          {%-   set _ = errors.append('Icinga Web needs the secrets ' ~ (monitoring_icingaweb__secrets_required | join(', ')) ~ ', missing: ' ~ (missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('Every target of `icingaweb_secrets` is set once: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_icingaweb__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icingaweb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icingaweb__errors: >-
+          {%- set errors = [] -%}
+          {%- set environment = monitoring_icingaweb__environment -%}
+          {%- if environment is not mapping -%}
+          {%-   set _ = errors.append('`icingaweb_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set options = environment.keys() | select('match', '^icingaweb') | list -%}
+          {%-   set lines = environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if options | length > 0 -%}
+          {%-     set _ = errors.append('The options of Icinga Web are set with `icingaweb_config`, `icingaweb_modules` and `icingaweb_secrets`,'
+                                      ~ ' the entrypoint would overwrite the files of the role: ' ~ (options | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging icingaweb_container,
+    # icingaweb.* would make the entrypoint overwrite the files of the role
+    # An environment that is no mapping is not checked here, the validation of icingaweb_environment reports it
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_icingaweb__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_icingaweb__container_environment: >-
+          {{ monitoring_icingaweb__container.environment if monitoring_icingaweb__container.environment | default(none) is mapping else {} }}
+        monitoring_icingaweb__unknown: >-
+          {{ monitoring_icingaweb__container_environment.keys() | map('string')
+             | reject('in', monitoring_icingaweb__environment_allowed + [ 'icingaweb.enabledModules' ]) | list }}
+        monitoring_icingaweb__line_breaks: >-
+          {{ monitoring_icingaweb__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_icingaweb__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_icingaweb__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_icingaweb__unknown | join(', ')) ~ '. Allowed are the variables '
+                                    ~ (monitoring_icingaweb__environment_allowed | join(', '))
+                                    ~ ' and icingaweb.enabledModules, the options of Icinga Web are set with `icingaweb_config` and `icingaweb_secrets`.') -%}
+          {%- endif -%}
+          {%- if monitoring_icingaweb__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_icingaweb__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create directories'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ monitoring_icingaweb__uid }}"
+        group: "{{ monitoring_icingaweb__gid }}"
+        mode: '0750'
+        state: 'directory'
+      loop: >-
+        {{ [ monitoring_icingaweb__etc_dir, monitoring_icingaweb__lib_dir ]
+           + ((monitoring_icingaweb__config_files.keys() | select('search', '/') | map('dirname') | list)
+              + (monitoring_icingaweb__config_files.keys() | select('search', '/.*/') | map('dirname') | map('dirname') | list))
+             | unique | sort | map('regex_replace', '^', monitoring_icingaweb__etc_dir ~ '/') | list }}
+
+    # The files without passwords, the files with passwords are podman secrets
+    - name: 'Generate the configuration'
+      ansible.builtin.copy:
+        content: "{{ monitoring_icingaweb__config_files[item] | community.general.to_ini }}"
+        dest: "{{ monitoring_icingaweb__etc_dir }}/{{ item }}.ini"
+        owner: "{{ monitoring_icingaweb__uid }}"
+        group: "{{ monitoring_icingaweb__gid }}"
+        mode: '0640'
+      loop: "{{ monitoring_icingaweb__config_files.keys() | reject('in', monitoring_icingaweb__config_secret_files) | list }}"
+      register: 'monitoring_icingaweb__config_result'
+
+    # Files of icingaweb_config set to null
+    - name: 'Remove files of the configuration'
+      ansible.builtin.file:
+        path: "{{ monitoring_icingaweb__etc_dir }}/{{ item.key }}.ini"
+        state: 'absent'
+      loop: "{{ monitoring_icingaweb__config | dict2items | selectattr('value', 'none') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'monitoring_icingaweb__config_removed'
+
+    # The files with passwords are complete INI files, they never exist on the host
+    - name: 'Create the secrets of the files with passwords'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ monitoring_icingaweb__container.name }}-{{ item | replace('/', '-') }}"
+        data: "{{ monitoring_icingaweb__config_files[item] | community.general.to_ini }}"
+      loop: "{{ monitoring_icingaweb__config_secret_files }}"
+      register: 'monitoring_icingaweb__config_secrets_result'
+
+    - name: 'Create the secrets of the users'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_icingaweb__secrets_env }}"
+      register: 'monitoring_icingaweb__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ monitoring_icingaweb__container.name }}"
+        hostname: "{{ monitoring_icingaweb__container.hostname }}"
+        image: "{{ monitoring_icingaweb__container.image }}"
+        ip: "{{ monitoring_icingaweb__container.ip }}"
+        ip6: "{{ monitoring_icingaweb__container.ipv6 | default(omit) }}"
+        network: "{{ monitoring_icingaweb__container.network }}"
+        timezone: "{{ monitoring_icingaweb__container.timezone }}"
+        command: "{{ monitoring_icingaweb__container.command | default(omit) }}"
+        env: "{{ monitoring_icingaweb__container.environment | default(omit) }}"
+        etc_hosts: "{{ monitoring_icingaweb__container.etc_hosts | default(omit) }}"
+        expose: "{{ monitoring_icingaweb__container.expose | default(omit) }}"
+        label: "{{ monitoring_icingaweb__container.labels | default(omit) }}"
+        publish: "{{ monitoring_icingaweb__container.publish | default(omit) }}"
+        secrets: "{{ monitoring_icingaweb__container_secrets }}"
+        volume: "{{ monitoring_icingaweb__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if monitoring_icingaweb__container.requires is defined %}
+          Requires={{ monitoring_icingaweb__container.requires | join(' ') }}
+          {% endif %}
+          {% if monitoring_icingaweb__container.wants is defined %}
+          Wants={{ monitoring_icingaweb__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_icingaweb__container.after is defined %}
+          After={{ monitoring_icingaweb__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_icingaweb__container.part_of is defined %}
+          PartOf={{ monitoring_icingaweb__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_icingaweb__container.binds_to is defined %}
+          BindsTo={{ monitoring_icingaweb__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if monitoring_icingaweb__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_icingaweb__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'monitoring_icingaweb__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Icinga Web'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_icingaweb__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_icingaweb__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_icingaweb__running: >-
+              {{ (ansible_facts.services[monitoring_icingaweb__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_icingaweb__restart: >-
+              {{ monitoring_icingaweb__running | bool
+                 and (monitoring_icingaweb__config_result is changed
+                      or monitoring_icingaweb__config_removed is changed
+                      or monitoring_icingaweb__config_secrets_result is changed
+                      or monitoring_icingaweb__secrets_result is changed
+                      or monitoring_icingaweb__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_icingaweb__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_icingaweb__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ monitoring_icingaweb__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_icingaweb__start_journal.stdout_lines }}
+
+    # The entrypoint imports the schema and creates the users before Apache starts, it exits if that fails
+    - name: 'Wait for Icinga Web'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_icingaweb__container.ip }}:8080/authentication/login"
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'monitoring_icingaweb__ready'
+      until: monitoring_icingaweb__ready.status | default(-1) == 200
+      retries: 40
+      delay: 3
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Icinga Web'
+      when:
+        - not ansible_check_mode
+        - monitoring_icingaweb__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_icingaweb__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'monitoring_icingaweb__journal'
+      changed_when: false
+
+    - name: 'Assert that Icinga Web answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__journal is skipped
+        fail_msg: "{{ monitoring_icingaweb__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'monitoring_icingaweb__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ monitoring_icingaweb__container.name }}"
+        container_image: "{{ monitoring_icingaweb__container.image }}"
+        container_schedule: "{{ monitoring_icingaweb__autoupdate_schedule }}"

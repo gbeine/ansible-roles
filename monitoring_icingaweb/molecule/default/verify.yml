@@ -1,0 +1,190 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_icingaweb__test_case: "{{ monitoring_icingaweb__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_icingaweb__test_expect: "{{ monitoring_icingaweb__test_case.expect }}"
+    monitoring_icingaweb__test_secrets: "{{ monitoring_icingaweb__test_expect.secrets | join('|') }}"
+    monitoring_icingaweb__test_etc: "{{ monitoring_icingaweb__test_expect.home }}/etc"
+    monitoring_icingaweb__test_url: "http://{{ monitoring_icingaweb__test_expect.ip }}:8080"
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_icingaweb__test_quadlet_path }}"
+      register: 'monitoring_icingaweb__test_quadlet'
+
+    # The passwords are mounted files or secrets in the environment, they are not part of the quadlet unit
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('IP=' + monitoring_icingaweb__test_expect.ip) in monitoring_icingaweb__test_lines
+          - monitoring_icingaweb__test_expect.quadlet | reject('in', monitoring_icingaweb__test_lines) | list | length == 0
+          - >-
+            monitoring_icingaweb__test_lines
+            | select('search', monitoring_icingaweb__test_expect.quadlet_absent | map('regex_escape') | join('|')) | list | length == 0
+          - monitoring_icingaweb__test_lines | select('search', monitoring_icingaweb__test_secrets) | list | length == 0
+        fail_msg: "Quadlet: {{ monitoring_icingaweb__test_quadlet.content | b64decode }}"
+      vars:
+        monitoring_icingaweb__test_lines: "{{ (monitoring_icingaweb__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the files of the configuration'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_icingaweb__test_etc }}/{{ item }}.ini"
+      loop: "{{ monitoring_icingaweb__test_expect.files.keys() | list }}"
+      register: 'monitoring_icingaweb__test_files'
+
+    - name: 'Assert the lines of the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_missing | length == 0
+        fail_msg: "{{ item.item }}: missing {{ monitoring_icingaweb__test_missing }} in {{ item.content | b64decode }}"
+      loop: "{{ monitoring_icingaweb__test_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      vars:
+        monitoring_icingaweb__test_missing: >-
+          {{ monitoring_icingaweb__test_expect.files[item.item] | reject('in', (item.content | b64decode).splitlines()) | list }}
+
+    # The files with passwords are podman secrets, podman leaves an empty mount point on the host
+    - name: 'Read the files with passwords on the host'
+      ansible.builtin.stat:
+        path: "{{ monitoring_icingaweb__test_etc }}/{{ item }}.ini"
+      loop: "{{ monitoring_icingaweb__test_expect.secret_files }}"
+      register: 'monitoring_icingaweb__test_secret_files'
+
+    - name: 'Search the passwords in the files on the host'
+      ansible.builtin.command:
+        argv: [ 'grep', '-rlE', "{{ monitoring_icingaweb__test_secrets }}",
+                "{{ monitoring_icingaweb__test_expect.home }}/etc", "{{ monitoring_icingaweb__test_expect.home }}/lib" ]
+      register: 'monitoring_icingaweb__test_grep'
+      changed_when: false
+      failed_when: monitoring_icingaweb__test_grep.rc != 1
+
+    - name: 'Assert the files with passwords are not on the host'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_secret_files.results | selectattr('stat.exists') | selectattr('stat.size', 'gt', 0) | list | length == 0
+        fail_msg: "Files with content: {{ monitoring_icingaweb__test_secret_files.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+
+    - name: 'Read the state of the Icinga Web service'
+      ansible.builtin.command: 'systemctl is-active icingaweb'
+      register: 'monitoring_icingaweb__test_service'
+      changed_when: false
+      failed_when: false
+      until: monitoring_icingaweb__test_service.stdout == 'active'
+      retries: 10
+      delay: 3
+
+    - name: 'Assert the Icinga Web service is active'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_service.stdout == 'active'
+        fail_msg: "Service: {{ monitoring_icingaweb__test_service.stdout }}"
+
+    - name: 'Read the time zone and the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'icingaweb' ]
+      register: 'monitoring_icingaweb__test_inspect'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'icingaweb' ]
+      register: 'monitoring_icingaweb__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'icingaweb', '-n', '80', '--no-pager' ]
+      register: 'monitoring_icingaweb__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the time zone, no TZ and that the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_restarts.stdout | int == 0
+          - (monitoring_icingaweb__test_inspect.stdout.split(' ', 1) | first) == monitoring_icingaweb__test_case.role_vars.icingaweb_timezone
+          - (monitoring_icingaweb__test_inspect.stdout.split(' ', 1) | last | from_json) | select('match', 'TZ=') | list | length == 0
+        fail_msg: >-
+          {{ [ 'inspect ' ~ monitoring_icingaweb__test_inspect.stdout, 'automatic restarts: ' ~ monitoring_icingaweb__test_restarts.stdout ]
+             + monitoring_icingaweb__test_journal.stdout_lines | default([]) }}
+
+    - name: 'Read the files with passwords in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'icingaweb', 'stat', '-c', '%a %u', "/data/etc/icingaweb2/{{ item }}.ini" ]
+      loop: "{{ monitoring_icingaweb__test_expect.secret_files }}"
+      register: 'monitoring_icingaweb__test_secret_stat'
+      changed_when: false
+
+    - name: 'Assert the files with passwords are readable by Icinga Web only'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_secret_stat.results | map(attribute='stdout') | reject('eq', '400 33') | list | length == 0
+        fail_msg: "{{ monitoring_icingaweb__test_secret_stat.results | map(attribute='stdout') | list }}"
+
+    # Any cookie passes the check of Icinga Web for cookies
+    - name: 'Read the login form'
+      ansible.builtin.uri:
+        url: "{{ monitoring_icingaweb__test_url }}/authentication/login"
+        headers:
+          Cookie: '_chc=1'
+        return_content: true
+      register: 'monitoring_icingaweb__test_form'
+
+    # The login form protects the login with a token bound to the session
+    - name: 'Assert the login form contains the token'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_status == 200
+          - monitoring_icingaweb__test_inputs | select('search', 'CSRFToken') | list | length > 0
+        fail_msg: >-
+          Login form: HTTP {{ monitoring_icingaweb__test_status }}, cookies {{ monitoring_icingaweb__test_form.cookies_string | default('') }},
+          inputs {{ monitoring_icingaweb__test_inputs }}
+      vars:
+        monitoring_icingaweb__test_status: "{{ monitoring_icingaweb__test_form.status }}"
+        monitoring_icingaweb__test_inputs: "{{ monitoring_icingaweb__test_form.content | default('') | regex_findall('<input[^>]*>') }}"
+
+    # The hidden fields of the form (formUID, CSRFToken, redirect) are sent as the browser sends them
+    - name: 'Log in as icingaadmin'
+      ansible.builtin.uri:
+        url: "{{ monitoring_icingaweb__test_url }}/authentication/login"
+        method: 'POST'
+        body_format: 'form-urlencoded'
+        body: >-
+          {{ monitoring_icingaweb__test_hidden
+             | combine({ 'username': 'icingaadmin', 'password': monitoring_icingaweb__test_admin_password, 'submit_login': 'Login' }) }}
+        headers:
+          Cookie: "_chc=1; {{ monitoring_icingaweb__test_form.cookies_string }}"
+        follow_redirects: 'none'
+        status_code: [ 200, 302, 303 ]
+        return_content: true
+      register: 'monitoring_icingaweb__test_login'
+      vars:
+        monitoring_icingaweb__test_hidden: >-
+          {%- set fields = {} -%}
+          {%- for input in monitoring_icingaweb__test_form.content | regex_findall('<input[^>]*type="hidden"[^>]*>') -%}
+          {%-   set name = (input | regex_findall('name="([^"]*)"') + [ '' ]) | first -%}
+          {%-   if name -%}
+          {%-     set _ = fields.update({ name: (input | regex_findall('value="([^"]*)"') + [ '' ]) | first | replace('&amp;', '&') }) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ fields }}
+
+    - name: 'Assert the login of icingaadmin'
+      ansible.builtin.assert:
+        that:
+          - monitoring_icingaweb__test_login.status in [ 302, 303 ]
+          - monitoring_icingaweb__test_login.location | default('') is search('dashboard')
+        fail_msg: >-
+          Login: {{ monitoring_icingaweb__test_login.status }} {{ monitoring_icingaweb__test_login.location | default('') }},
+          cookies {{ monitoring_icingaweb__test_form.cookies_string | default('') }},
+          form {{ (monitoring_icingaweb__test_login.content | default('') | regex_findall('(?s)<form.*?</form>') + [ '' ]) | first | truncate(3000) }}
