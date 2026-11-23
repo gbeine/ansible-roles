@@ -88,10 +88,17 @@ so variables set with `joplin_container.environment` or `joplin_container.secret
 
 ### Container
 
-Ports, volumes, additional hosts (`etc_hosts`) and dependencies (`requires`) are changed with `joplin_container`, it is merged over the default of the container.
-The merge is not recursive, `joplin_container.volumes` replaces the data directory,
+Ports, volumes, additional hosts (`etc_hosts`) and the dependencies are changed with `joplin_container`, it is merged over the default of the container.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
+The merge is not recursive, `joplin_container.volumes` replaces the data directory (`<joplin_home>/data`),
 `joplin_container.environment` replaces the environment including `joplin_environment`.
-The role waits until `/api/ping` of Joplin Server answers, Joplin Server migrates the database before it listens, it shows the log of the service otherwise.
+
+```yaml
+joplin_container:
+  wants: [ 'network-online.target' ]
+  after: [ 'network-online.target' ]
+```
 
 ### Validation
 
@@ -101,13 +108,20 @@ The role checks before any change:
 - `APP_BASE_URL` is set, `DB_CLIENT` is `sqlite3` or `pg`, `pg` has `POSTGRES_HOST` and `POSTGRES_PASSWORD` or `POSTGRES_CONNECTION_STRING`
 - no secret is set in `joplin_environment`, the booleans are `true` or `false`, values have no line breaks
 - `joplin_admin` has a valid email other than `admin@localhost`, a password with at least 8 characters and a `full_name` without line breaks
-- only allowed environment variables and secrets are set in the container
+- only allowed environment variables without line breaks and allowed secrets are set in the container
 
 If `joplin_container` is no dictionary, merging it with the default fails before anything changes.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, the secrets and the quadlet unit.
+The start, the wait for Joplin Server and the administrator do not run in check mode.
 
 ### Restart and updates
 
 Joplin Server is restarted if it was running and a secret or the quadlet unit changed, otherwise it is started and enabled.
+If the start fails, the role shows the journal of the service. Afterwards it waits until `/api/ping` answers,
+Joplin Server migrates the database before it listens, it shows the journal otherwise.
 A changed password of the administrator needs no restart.
 Updates of the image are done by `container_update` with `joplin_autoupdate_enabled: true` and `joplin_autoupdate_schedule`,
 without `joplin_autoupdate_schedule` the schedule of `container_update` is used.
@@ -140,13 +154,16 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-joplin` | IPv6, labels, PostgreSQL with the secret `POSTGRES_PASSWORD`, the name of the application, a boolean and the administrator with a name |
 
 `prepare` creates the podman network, pulls the images and starts PostgreSQL on `molecule-joplin`.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `joplin_container` not a dictionary, a secret without `target`, an unknown secret,
 the database password in the environment, no `APP_BASE_URL`, an invalid database client, `pg` without the host, an invalid boolean,
 a line break in a value, `DEFAULT_ADMIN_PASSWORD` in the environment, an administrator without password and a short password
 and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
 then it changes the name of the application and the password of the administrator on `molecule-joplin`,
-Joplin Server has to restart and the password changes without a new user.
-`verify` checks the quadlet unit with the secrets and without their values, the service, the addresses and the environment of the container,
+Joplin Server has to restart and the password changes without a new user,
+`molecule-joplin-default` runs again without a change and must not restart.
+`verify` checks the quadlet unit with the secrets and without their values, the service without automatic restarts, the addresses,
+the time zone and the environment of the container,
 the login to the API with the password, the refused former password and the refused `admin@localhost`,
 the administrator, the name of the application and the database.
 

@@ -63,14 +63,35 @@
           - app_joplin__expect.env | reject('in', app_joplin__test_env) | list | length == 0
           - app_joplin__test_env | select('match', 'DEFAULT_ADMIN_PASSWORD=') | list | length == 0
           - app_joplin__test_passwords | select('in', app_joplin__test_env | join(' ')) | list | length == 0
+          - app_joplin__test_container.Config.Timezone == app_joplin__test_case.role_vars.joplin_timezone
         fail_msg: >-
-          service {{ app_joplin__test_service.stdout }},
+          service {{ app_joplin__test_service.stdout }}, time zone {{ app_joplin__test_container.Config.Timezone | default('') }},
           IPv4 {{ app_joplin__test_net.IPAddress }}, IPv6 {{ app_joplin__test_net.GlobalIPv6Address }},
           environment {{ app_joplin__test_env | reject('match', '(POSTGRES_PASSWORD|MAILER_AUTH_PASSWORD)=') | join(', ') }}
       vars:
         app_joplin__test_container: "{{ (app_joplin__test_inspect.stdout | from_json)[0] }}"
         app_joplin__test_net: "{{ app_joplin__test_container.NetworkSettings.Networks[app_joplin__test_case.role_vars.joplin_network] }}"
         app_joplin__test_env: "{{ app_joplin__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'joplin' ]
+      register: 'app_joplin__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'joplin', '-n', '80', '--no-pager' ]
+      register: 'app_joplin__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_joplin__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_joplin__test_restarts.stdout ] + app_joplin__test_journal.stdout_lines | default([]) }}"
 
     - name: 'Log in to the API'
       ansible.builtin.uri:
@@ -92,12 +113,13 @@
       register: 'app_joplin__test_login'
       no_log: true
 
-    # Only administrators may list the users, the list contains is_admin
+    # Only administrators may list the users, others get 403, the API does not return is_admin
     - name: 'Read the users as the administrator'
       ansible.builtin.uri:
         url: "{{ app_joplin__test_url }}/api/users"
         headers:
           X-API-AUTH: "{{ (app_joplin__test_login.results[0].content | from_json).id }}"
+        status_code: [ 200, 403 ]
         return_content: true
       register: 'app_joplin__test_users_api'
       no_log: true
@@ -112,19 +134,19 @@
       ansible.builtin.assert:
         that:
           - app_joplin__test_logins == app_joplin__test_login.results | map(attribute='item.allowed') | map('ternary', 200, 403) | list
-          - app_joplin__test_admin_user.is_admin | default(0) | int == 1
+          - app_joplin__test_users_api.status == 200
           - app_joplin__test_admin_user.full_name | default('') == app_joplin__expect.admin.full_name
           - app_joplin__test_user_list | selectattr('email', 'eq', 'admin@localhost') | list | length == 0
           - (app_joplin__test_ping.content | from_json).message == app_joplin__test_app_name ~ ' is running'
         fail_msg: >-
-          logins {{ app_joplin__test_logins }},
+          logins {{ app_joplin__test_logins }}, listing of the users {{ app_joplin__test_users_api.status }},
           users {{ app_joplin__test_user_list | map(attribute='email') | list | to_json }},
-          administrator {{ app_joplin__test_admin_user | dict2items | selectattr('key', 'in', [ 'email', 'full_name', 'is_admin', 'enabled' ]) | items2dict | to_json }},
+          administrator {{ app_joplin__test_admin_user | dict2items | selectattr('key', 'in', [ 'email', 'full_name' ]) | items2dict | to_json }},
           ping {{ app_joplin__test_ping.content }}
       vars:
         # A wrong password is answered with 403, the test maps 401 to it
         app_joplin__test_logins: "{{ app_joplin__test_login.results | map(attribute='status') | map('regex_replace', '^401$', '403') | map('int') | list }}"
-        app_joplin__test_user_list: "{{ (app_joplin__test_users_api.content | from_json)['items'] }}"
+        app_joplin__test_user_list: "{{ (app_joplin__test_users_api.content | from_json)['items'] | default([]) }}"
         app_joplin__test_admin_user: "{{ app_joplin__test_user_list | selectattr('email', 'eq', app_joplin__expect.admin.email) | first | default({}) }}"
 
     - name: 'Read the administrators in PostgreSQL'

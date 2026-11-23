@@ -14,6 +14,11 @@
     app_joplin__test_checked_files:
       - "{{ app_joplin__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -47,7 +52,7 @@
         joplin_secrets: [ { name: 'joplin_database_password', data: 'x' } ]
         app_joplin__test_invalid:
           message: 'a secret without target'
-          search: '^joplin_secrets entries need name, data and target$'
+          search: '^`joplin_secrets` entries need name, data and target$'
 
     - name: 'Run app_joplin with an unknown secret (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -166,3 +171,35 @@
               quadlet changed: {{ app_joplin__quadlet_result is changed }}, administrator changed: {{ app_joplin__admin_result is changed }},
               created: {{ app_joplin__admin_result.created | default('') }}, taken over: {{ app_joplin__admin_result.taken_over | default('') }},
               start before {{ app_joplin__test_started_before.stdout }}, after {{ app_joplin__test_started_after.stdout }}
+
+    # molecule-joplin-default runs again without a change, Joplin Server must not restart and the administrator stays unchanged
+    - name: 'Run app_joplin without a change'
+      when: app_joplin__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'joplin' ]
+          register: 'app_joplin__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_joplin without a change'
+          ansible.builtin.include_role:
+            name: 'app_joplin'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'joplin' ]
+          register: 'app_joplin__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_joplin__quadlet_result is not changed
+              - app_joplin__secrets_result is not changed
+              - app_joplin__admin_result is not changed
+              - app_joplin__test_unchanged_after.stdout == app_joplin__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_joplin__quadlet_result is changed }}, administrator changed: {{ app_joplin__admin_result is changed }},
+              start before {{ app_joplin__test_unchanged_before.stdout }}, after {{ app_joplin__test_unchanged_after.stdout }}
