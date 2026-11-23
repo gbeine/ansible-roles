@@ -39,13 +39,17 @@ watch:
   runOnStartup: true
   compareDigest: false
 defaults:
-  watchRepo: false
+  watchMode: 'tag'
   notifyOn: [ 'new', 'update' ]
   maxTags: 10
   sortTags: 'reverse'
 ```
 
 The image sets the path of the database with `DIUN_DB_PATH=/data/diun.db`.
+`watchMode: 'tag'` watches the tag of the image, it replaces `watchRepo: false`, which Diun deprecated with v4.34.0.
+`defaults.watchMode` is `tag`, `all`, `semver` or `semver+prereleases`, the labels of `metrics.metadataLabels`
+only contain letters, digits and underscores, Diun refuses to start otherwise, so the role checks both.
+The time zone of the container is `diun_timezone`, the image sets no `TZ` and the role sets no default for it.
 
 ### Secrets
 
@@ -54,8 +58,8 @@ e.g. `notif.mail.password`. The role creates the secret, mounts it to `/run/secr
 (e.g. `passwordFile: /run/secrets/<name>`) to `diun.yml`, Diun reads the file at the start.
 Passwords are neither part of `diun.yml`, nor of the quadlet unit or the environment of the container.
 
-The targets are the keys of `monitoring_diun__secrets_allowed`, every option with a file option in diun v4.33.1, e.g. `notif.mail.username`,
-`notif.mail.password`, `notif.telegram.token`, `notif.telegram.chatIDs`, `metrics.token`, `watch.healthchecks.uuid` and `providers.kubernetes.token`.
+The targets are the keys of `monitoring_diun__secrets_allowed`, every option with a file option in diun v4.34.0, e.g. `notif.mail.username`,
+`notif.mail.password`, `notif.matrix.token`, `notif.telegram.token`, `notif.telegram.chatIDs`, `metrics.token`, `watch.healthchecks.uuid` and `providers.kubernetes.token`.
 The credentials of a registry are `regopts.<name>.username` and `regopts.<name>.password`, the entry with this name has to be part of `diun_config.regopts`.
 Neither a target nor its file option may be set in `diun_config`, every target is set once.
 
@@ -86,13 +90,13 @@ With `diun_provider_podman: false` the role sets no provider, configure e.g. the
 The role only allows the options of `monitoring_diun__config_schema`, the secrets with a target in `monitoring_diun__secrets_allowed`
 and the environment variables in `monitoring_diun__environment_allowed`, it stops before any change if unknown options, secrets or variables are set.
 This prevents unexpected behavior by accident, e.g. by a typo or an option that has to be passed as secret.
-The schema is generated from `internal/config/config.go` and `internal/model` of diun v4.33.1 with the types of the options:
-booleans, numbers, strings (also durations), lists, maps with free keys (`defaults.metadata`, `notif.webhook.headers`, `notif.signalrest.headers`)
+The schema is generated from `internal/config/config.go` and `internal/model` of diun v4.34.0 with the types of the options:
+booleans, numbers, strings (also durations), lists, maps with free keys (`defaults.metadata`, `notif.webhook.headers`, `notif.signalrest.headers`, `notif.ntfy.headers`)
 and the entries of `regopts`.
 
 `diun_environment` has no default and only takes the variables of the command line and the image (`TZ`, `LOG_LEVEL`, `LOG_JSON`, `LOG_CALLER`,
-`LOG_NOCOLOR`, `PROFILER`, `PROFILER_PATH`, `GRPC_AUTHORITY`), without it the quadlet unit has no environment and nothing is checked.
-The options of Diun are not set with `DIUN_*`, the role reports such variables with their option.
+`LOG_NOCOLOR`, `LOG_TIMESTAMP`, `PROFILER`, `PROFILER_PATH`, `GRPC_AUTHORITY`), without it the quadlet unit has no environment and nothing is checked.
+The options of Diun are set with `diun_config`, `DIUN_*` are unknown variables.
 The check of the environment uses the environment of the container after merging `diun_container`.
 
 ### Container
@@ -100,8 +104,8 @@ The check of the environment uses the environment of the container after merging
 Ports, volumes, additional hosts (`etc_hosts`) and dependencies are changed with `diun_container`, it is merged over the default of the container.
 The merge is not recursive, `publish` and `volumes` replace the values of the default completely,
 `diun_container.environment` replaces the environment including `diun_environment`.
-The dependencies of the quadlet unit are lists of units in `diun_container`: `requires`, `wants`, `after`, `part_of` and `binds_to`
-are written as `Requires=`, `Wants=`, `After=`, `PartOf=` and `BindsTo=` to `[Unit]`.
+The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
+`requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 
 ```yaml
 diun_container:
@@ -116,16 +120,21 @@ The role checks before any change:
 - `diun_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a known secret and set once,
   the secrets of a registry have their entry in `regopts`, no secret contains a line break
 - `diun_config` contains known options with the types of the schema, the entries of `regopts` have a unique `name`,
-  no secret or file option of a secret, no line breaks
-- `diun_environment`, if set, contains no option of Diun (`DIUN_*`) and no line breaks, only allowed environment variables are set in the container
-- `diun_keys` is not set anymore
+  no secret or file option of a secret, no line breaks, a known `defaults.watchMode` and valid labels in `metrics.metadataLabels`
+- `diun_environment`, if set, is a dictionary without line breaks, only allowed environment variables without line breaks are set in the container
 
-If `diun_container` or `diun_config` is no dictionary, merging it with the default fails before anything changes. Diun checks the values of the options at the start.
+If `diun_container` or `diun_config` is no dictionary, merging it with the default fails before anything changes,
+the same applies to a failing template in the variables, e.g. an unknown filter. Diun checks the other values of the options at the start.
+
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the directories, `diun.yml`, the secrets and the quadlet unit.
+The start and the wait for Diun do not run in check mode.
 
 ### Restart and updates
 
 Diun is restarted if it was running and `diun.yml`, a secret or the quadlet unit changed, otherwise it is started and enabled.
-If the start fails, the role shows the journal of the service.
+If the start fails, the role shows the error and the journal of the service.
 Afterwards the role waits until Diun reports the loaded `diun.yml` and shows the journal otherwise.
 Updates of the image are done by `container_update` with `diun_autoupdate_enabled: true` and `diun_autoupdate_schedule`, without `diun_autoupdate_schedule` the schedule of `container_update` is used.
 
@@ -134,7 +143,7 @@ Updates of the image are done by `container_update` with `diun_autoupdate_enable
 The former version of the role configured Diun with `DIUN_<PATH>` in `diun_environment`, it is `diun_config` now:
 the variable `DIUN_<PATH>` is the option `<path>` in `diun.yml`, e.g. `DIUN_WATCH_SCHEDULE` is `watch.schedule`,
 `DIUN_NOTIF_MAIL_HOST` is `host` in `notif.mail`. Values are no strings anymore, e.g. `ssl: false` and `port: 1025`,
-comma separated lists are lists, e.g. `notifyOn: [ 'new', 'update' ]`. The role rejects `DIUN_*` in `diun_environment` and names the option of every variable.
+comma separated lists are lists, e.g. `notifyOn: [ 'new', 'update' ]`. `DIUN_*` in `diun_environment` are unknown variables.
 
 | Former variable | Replacement |
 |---|---|
@@ -148,7 +157,11 @@ comma separated lists are lists, e.g. `notifyOn: [ 'new', 'update' ]`. The role 
 Changed behavior:
 
 - the role generates `<diun_home>/diun.yml` again and mounts it read-only, it contains the files of the secrets, not the secrets
-- the file of the earliest versions, `<diun_home>/etc/diun.yml`, is still removed
+- the file of the earliest versions, `<diun_home>/etc/diun.yml`, is not removed by the role anymore, remove it by hand
+- `diun_keys` is ignored, the role does not check it anymore
+- the default of the role sets `defaults.watchMode: 'tag'` instead of `defaults.watchRepo: false`, the behavior is the same,
+  set `watchRepo` in `diun_config` to `watchMode` (`true` is `all`, `false` is `tag`), Diun deprecated `watchRepo` with v4.34.0
+- `requires_mounts_for` of `diun_container` is new
 - the quadlet unit has no environment without `diun_environment`, the defaults of the role are part of `diun.yml`
 - Diun is restarted if `diun.yml` changed, the role waits until Diun reports the loaded `diun.yml` and shows the journal if it fails
 
@@ -167,17 +180,33 @@ Earlier versions of the role used single variables:
 
 ### Tests
 
-The molecule scenario `default` uses tart with one VM `molecule-diun`.
-`prepare` enables the podman socket, starts [mailpit](https://mailpit.axllent.org) and a container with the label `diun.enable=true`.
-`side_effect` runs the role with `diun_container` and `diun_config` not a dictionary, a secret without target, unknown options and an option of the wrong type,
-the password and its file option in `diun_config`, options of Diun in `diun_environment`, `diun_keys`, an unknown environment variable in `diun_container.environment`,
-an unknown secret and the secret of a registry without entry in `regopts`
+The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs on a macOS controller, the base VM has to be Debian 13.
+The playbooks creating and destroying the VMs live in `.molecule/tart/` in the repository root.
+
+| Platform | Test case |
+|---|---|
+| `molecule-diun-default` | Only the mandatory variables, the docker provider through the podman socket |
+| `molecule-diun` | IPv6, labels, `LOG_LEVEL` and `LOG_TIMESTAMP`, mail to mailpit, a registry with its credentials as secrets, `watchMode`, `assumeImmutableTags` and the metrics with a token and a label of the metadata |
+
+`prepare` enables the podman socket, creates the podman network, starts [mailpit](https://mailpit.axllent.org) and a container with the label `diun.enable=true`.
+`check` runs `converge` with `--check` on the new VMs.
+`side_effect` runs the role with `diun_container`, `diun_config` and `diun_environment` not a dictionary, a secret without target, unknown options and an option of the wrong type,
+the password and its file option in `diun_config`, an option of Diun in `diun_environment`, an invalid watch mode and an invalid label of the metrics,
+an unknown environment variable in `diun_container.environment`, an unknown secret and the secret of a registry without entry in `regopts`
 and checks that it fails with the expected message and the quadlet unit and `diun.yml` are unchanged (tasks marked `expect ERROR`),
-then it changes `watch.workers`, `diun.yml` changes and Diun has to restart.
-`verify` checks the quadlet unit with the mounted secrets and `diun.yml` without environment and passwords, `diun.yml` with the files of the secrets,
-that the files contain the secrets, Diun loaded `diun.yml` and no option is set in the environment,
-that the docker provider found the labeled container through the podman socket, the database in `data`,
-and sends a test notification with `diun notif test`, which must arrive at mailpit.
+then it changes `watch.workers` on `molecule-diun`, `diun.yml` changes and Diun has to restart,
+`molecule-diun-default` runs again without a change and Diun must not restart.
+`verify` checks the quadlet unit with the mounted secrets and without passwords, `diun.yml` with the files of the secrets and without `watchRepo`,
+the service without automatic restarts, the addresses, the time zone and the environment, that the files contain the secrets,
+that Diun loaded `diun.yml` without warning about `watchRepo`, that the docker provider found the labeled container through the podman socket,
+the database in `data`, on `molecule-diun` a test notification with `diun notif test`, which must arrive at mailpit,
+and the metrics, which answer with the token and refuse the request without it.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `MOLECULE_TART_IMAGE` | `ghcr.io/cirruslabs/debian:latest` | Base VM or image that is cloned |
+| `MOLECULE_TART_USER` | `admin` | SSH user of the base VM |
+| `MOLECULE_TART_PASSWORD` | `admin` | Password of the SSH user, used to install the SSH key and for `sudo` |
 
 ```shell
 cd monitoring_diun

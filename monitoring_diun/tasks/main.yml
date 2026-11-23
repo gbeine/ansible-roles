@@ -27,14 +27,14 @@
           {%- set errors = [] -%}
           {%- set secrets = monitoring_diun__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('diun_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`diun_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
                    or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
-          {%-   set _ = errors.append('diun_secrets entries need name, data and target') -%}
+          {%-   set _ = errors.append('`diun_secrets` entries need name, data and target') -%}
           {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
-          {%-   set _ = errors.append('the names of diun_secrets have to be unique') -%}
+          {%-   set _ = errors.append('the names of `diun_secrets` have to be unique') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -96,9 +96,6 @@
           {%-   endfor -%}
           {%- endmacro -%}
           {%- set errors = [] -%}
-          {%- if diun_keys is defined -%}
-          {%-   set _ = errors.append('diun_keys is not used anymore, options with keys are set in diun_config, e.g. regopts or defaults.metadata.') -%}
-          {%- endif -%}
           {%- if monitoring_diun__config_custom is not mapping -%}
           {%-   set _ = errors.append('diun_config has to be a dictionary of the options of diun.yml.') -%}
           {%- else -%}
@@ -121,10 +118,21 @@
           {%-   if result.lines | length > 0 -%}
           {%-     set _ = errors.append('The values of diun_config must not contain line breaks: ' ~ (result.lines | join(', ')) ~ '.') -%}
           {%-   endif -%}
+          {#- Diun refuses to start with another watch mode or a label of the metrics with other characters -#}
+          {%-   set defaults = monitoring_diun__config.defaults if monitoring_diun__config.defaults | default(none) is mapping else {} -%}
+          {%-   if defaults.watchMode | default(none) is not none and defaults.watchMode not in monitoring_diun__watch_modes -%}
+          {%-     set _ = errors.append('defaults.watchMode has to be one of ' ~ (monitoring_diun__watch_modes | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set metrics = monitoring_diun__config.metrics if monitoring_diun__config.metrics | default(none) is mapping else {} -%}
+          {%-   set labels = metrics.metadataLabels if metrics.metadataLabels | default(none) is sequence and metrics.metadataLabels is not string else [] -%}
+          {%-   set invalid_labels = labels | map('string') | reject('match', monitoring_diun__metadata_label_pattern) | list -%}
+          {%-   if invalid_labels | length > 0 -%}
+          {%-     set _ = errors.append('The labels of metrics.metadataLabels may only contain letters, digits and underscores: ' ~ (invalid_labels | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
-    # The options of diun were set with DIUN_* by former versions of the role, without diun_environment there is nothing to check
+    # Without diun_environment the container has no environment and there is nothing to check
     - name: 'Validate the environment'
       when: monitoring_diun__environment is defined
       ansible.builtin.assert:
@@ -134,39 +142,15 @@
         fail_msg: "{{ monitoring_diun__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_diun__options_in_environment: >-
-          {#- The macro writes <variable>|<option>; per option -#}
-          {%- macro paths(schema, path) -%}
-          {%-   for key, item in schema.items() -%}
-          {%-     if item is mapping -%}
-          {{-       paths(item, path ~ key ~ '.') -}}
-          {%-     elif item is string -%}
-          {{-       ('DIUN_' ~ path ~ key) | upper | replace('.', '_') ~ '|' ~ path ~ key ~ ';' -}}
-          {%-     endif -%}
-          {%-   endfor -%}
-          {%- endmacro -%}
-          {%- set names = [] -%}
-          {%- set variables = monitoring_diun__environment.keys() | select('match', '^DIUN_') | list -%}
-          {%- if variables | length > 0 -%}
-          {%-   set known = {} -%}
-          {%-   for line in (paths(monitoring_diun__config_schema, '') | string).split(';') | select -%}
-          {%-     set _ = known.update({ line.split('|')[0]: line.split('|')[1] }) -%}
-          {%-   endfor -%}
-          {%-   for variable in variables -%}
-          {%-     set _ = names.append(variable ~ ((' (' ~ known[variable] | regex_replace('File$', '') ~ ')') if variable in known
-                                                 else (' (regopts)' if variable is match('^DIUN_REGOPTS_') else ''))) -%}
-          {%-   endfor -%}
-          {%- endif -%}
-          {{ names }}
-        monitoring_diun__environment_lines: >-
-          {{ monitoring_diun__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
         monitoring_diun__errors: >-
           {%- set errors = [] -%}
-          {%- if monitoring_diun__options_in_environment | length > 0 -%}
-          {%-   set _ = errors.append('The options of diun are set with diun_config now: ' ~ (monitoring_diun__options_in_environment | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if monitoring_diun__environment_lines | length > 0 -%}
-          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (monitoring_diun__environment_lines | join(', ')) ~ '.') -%}
+          {%- if monitoring_diun__environment is not mapping -%}
+          {%-   set _ = errors.append('`diun_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = monitoring_diun__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
@@ -181,9 +165,13 @@
         quiet: true
       vars:
         # Without diun_environment and diun_container.environment the environment is omitted, there is nothing to check
+        monitoring_diun__container_environment: >-
+          {{ monitoring_diun__container.environment if monitoring_diun__container.environment | default(none) is mapping else {} }}
         monitoring_diun__environment_unknown: >-
-          {{ (monitoring_diun__container.environment.keys() | reject('in', monitoring_diun__environment_allowed) | list)
-             if monitoring_diun__container.environment is mapping else [] }}
+          {{ monitoring_diun__container_environment.keys() | map('string') | reject('in', monitoring_diun__environment_allowed) | list }}
+        monitoring_diun__environment_line_breaks: >-
+          {{ monitoring_diun__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
         monitoring_diun__targets: "{{ monitoring_diun__secrets | map(attribute='target') | map('string') | list }}"
         monitoring_diun__regopts_names: >-
           {{ monitoring_diun__config.regopts | default([]) | select('mapping') | map(attribute='name', default='') | map('string') | list }}
@@ -218,6 +206,10 @@
           {%- if monitoring_diun__secrets_lines | length > 0 -%}
           {%-   set _ = errors.append('Secrets are strings without line breaks: ' ~ (monitoring_diun__secrets_lines | join(', ')) ~ '.') -%}
           {%- endif -%}
+          {%- if monitoring_diun__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (monitoring_diun__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
           {{ errors }}
 
     - name: 'Create directories'
@@ -235,12 +227,6 @@
         group: 'root'
         mode: '0644'
       register: 'monitoring_diun__config_result'
-
-    # diun.yml of earlier versions of the role was mounted from etc
-    - name: 'Remove the configuration file of earlier versions'
-      ansible.builtin.file:
-        path: "{{ monitoring_diun__podman_etc_dir }}/diun.yml"
-        state: 'absent'
 
     - name: 'Create secrets'
       no_log: true
@@ -295,6 +281,9 @@
           {% if monitoring_diun__container.binds_to is defined %}
           BindsTo={{ monitoring_diun__container.binds_to | join(' ') }}
           {% endif %}
+          {% if monitoring_diun__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_diun__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_diun__quadlet_result'
@@ -329,7 +318,9 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ monitoring_diun__container.name ~ ' did not start' ] + monitoring_diun__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ monitoring_diun__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_diun__start_journal.stdout_lines }}
 
     # diun exits if diun.yml or a file of a secret is invalid, it reports the loaded file at the start,
     # the quadlet unit creates a new container at every start, its log only contains the current start

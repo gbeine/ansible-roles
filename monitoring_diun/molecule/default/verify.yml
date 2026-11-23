@@ -6,54 +6,58 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    monitoring_diun__test_case: "{{ monitoring_diun__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_diun__expect: "{{ monitoring_diun__test_case.expect }}"
+    # The secrets of the test case, they must not be part of the unit or diun.yml
+    monitoring_diun__test_plain: "{{ monitoring_diun__expect.secrets.values() | list }}"
+
   tasks:
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/diun.container'
+        src: "{{ monitoring_diun__test_quadlet_path }}"
       register: 'monitoring_diun__test_quadlet'
 
+    # podman may quote values, the quotes are removed before the lines are compared
     - name: 'Assert the quadlet unit'
       ansible.builtin.assert:
         that:
-          - ('IP=' + monitoring_diun__test_vars.diun_ip) in monitoring_diun__test_lines
-          # The secrets are mounted as files, they are neither part of the quadlet unit nor of the environment
-          - "'Secret=diun_mail_password,type=mount,target=/run/secrets/diun_mail_password' in monitoring_diun__test_lines"
-          - "'Secret=diun_registry_user,type=mount,target=/run/secrets/diun_registry_user' in monitoring_diun__test_lines"
-          - "'Secret=diun_registry_password,type=mount,target=/run/secrets/diun_registry_password' in monitoring_diun__test_lines"
-          # The options are part of diun.yml, without diun_environment the quadlet unit has no environment
-          - monitoring_diun__test_lines | select('search', 'Environment=|DIUN_|type=env') | list | length == 0
-          - monitoring_diun__test_lines | select('search', monitoring_diun__test_secret) | list | length == 0
-          - monitoring_diun__test_lines | select('search', monitoring_diun__test_registry_password) | list | length == 0
-          - ('Volume=' + monitoring_diun__test_vars.diun_home + '/diun.yml:/etc/diun/diun.yml:ro') in monitoring_diun__test_lines
-          - ('Volume=' + monitoring_diun__test_vars.diun_home + '/data:/data') in monitoring_diun__test_lines
-          - "'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro' in monitoring_diun__test_lines"
-          - monitoring_diun__test_lines | select('match', 'Label=') | list | length == 0
-          - monitoring_diun__test_lines | select('match', 'IP6=') | list | length == 0
-        fail_msg: "Quadlet: {{ monitoring_diun__test_quadlet.content | b64decode }}"
+          - ('Image=' + monitoring_diun__test_image) in monitoring_diun__test_lines
+          - ('IP=' + monitoring_diun__expect.ip) in monitoring_diun__test_lines
+          - monitoring_diun__expect.ip6 is none or ('IP6=' + monitoring_diun__expect.ip6) in monitoring_diun__test_lines
+          - monitoring_diun__expect.ip6 is not none or monitoring_diun__test_lines | select('match', 'IP6=') | list | length == 0
+          - monitoring_diun__expect.quadlet | reject('in', monitoring_diun__test_lines) | list | length == 0
+          # The secrets are mounted as files, the options are part of diun.yml
+          - monitoring_diun__test_lines | select('search', 'DIUN_|type=env|Environment=TZ=') | list | length == 0
+          - monitoring_diun__expect.env | length > 0 or monitoring_diun__test_lines | select('match', 'Environment=') | list | length == 0
+          - monitoring_diun__test_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
+          - monitoring_diun__test_plain | select('in', monitoring_diun__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ monitoring_diun__test_lines | to_json }}"
       vars:
         monitoring_diun__test_lines: "{{ (monitoring_diun__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
 
     - name: 'Read diun.yml'
       ansible.builtin.slurp:
-        src: "{{ monitoring_diun__test_vars.diun_home }}/diun.yml"
+        src: "{{ monitoring_diun__test_home }}/diun.yml"
       register: 'monitoring_diun__test_config_file'
 
     - name: 'Read the state of diun.yml'
       ansible.builtin.stat:
-        path: "{{ monitoring_diun__test_vars.diun_home }}/diun.yml"
+        path: "{{ monitoring_diun__test_home }}/diun.yml"
       register: 'monitoring_diun__test_config_stat'
 
-    # diun.yml contains the files of the secrets, not the secrets
+    # diun.yml contains the files of the secrets, not the secrets, watchMode replaces the deprecated watchRepo
     - name: 'Assert diun.yml'
       ansible.builtin.assert:
         that:
-          - monitoring_diun__test_config_lines | reject('in', monitoring_diun__test_lines) | list | length == 0
-          - monitoring_diun__test_lines | select('search', monitoring_diun__test_secret ~ '|' ~ monitoring_diun__test_registry_password) | list | length == 0
+          - monitoring_diun__expect.config_lines | reject('in', monitoring_diun__test_lines) | list | length == 0
+          - monitoring_diun__test_lines | select('search', 'watchRepo') | list | length == 0
+          - monitoring_diun__test_plain | select('in', monitoring_diun__test_config_file.content | b64decode) | list | length == 0
           - monitoring_diun__test_config_stat.stat.uid == 0
           - monitoring_diun__test_config_stat.stat.mode == '0644'
         fail_msg: >-
-          missing {{ monitoring_diun__test_config_lines | reject('in', monitoring_diun__test_lines) | list }},
+          missing {{ monitoring_diun__expect.config_lines | reject('in', monitoring_diun__test_lines) | list }},
           owner {{ monitoring_diun__test_config_stat.stat.uid }}, mode {{ monitoring_diun__test_config_stat.stat.mode }}
       vars:
         monitoring_diun__test_lines: "{{ (monitoring_diun__test_config_file.content | b64decode).splitlines() }}"
@@ -67,19 +71,59 @@
       retries: 10
       delay: 3
 
-    - name: 'Assert the Diun service is active'
+    - name: 'Inspect the Diun container'
+      ansible.builtin.command: 'podman inspect diun'
+      register: 'monitoring_diun__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the addresses, the time zone and the environment'
       ansible.builtin.assert:
         that:
           - monitoring_diun__test_service.stdout == 'active'
-        fail_msg: "Service: {{ monitoring_diun__test_service.stdout }}"
+          - monitoring_diun__test_net.IPAddress == monitoring_diun__expect.ip
+          - monitoring_diun__expect.ip6 is none or monitoring_diun__test_net.GlobalIPv6Address == monitoring_diun__expect.ip6
+          - monitoring_diun__expect.env | reject('in', monitoring_diun__test_env) | list | length == 0
+          - monitoring_diun__test_env | select('match', 'TZ=') | list | length == 0
+          # The image only sets DIUN_DB_PATH
+          - monitoring_diun__test_env | select('match', 'DIUN_') | list == [ 'DIUN_DB_PATH=/data/diun.db' ]
+          - monitoring_diun__test_container.Config.Timezone == monitoring_diun__test_case.role_vars.diun_timezone
+        fail_msg: >-
+          service {{ monitoring_diun__test_service.stdout }}, time zone {{ monitoring_diun__test_container.Config.Timezone | default('') }},
+          IPv4 {{ monitoring_diun__test_net.IPAddress }}, IPv6 {{ monitoring_diun__test_net.GlobalIPv6Address }},
+          environment {{ monitoring_diun__test_env | join(', ') }}
+      vars:
+        monitoring_diun__test_container: "{{ (monitoring_diun__test_inspect.stdout | from_json)[0] }}"
+        monitoring_diun__test_net: "{{ monitoring_diun__test_container.NetworkSettings.Networks[monitoring_diun__test_case.role_vars.diun_network] }}"
+        monitoring_diun__test_env: "{{ monitoring_diun__test_container.Config.Env }}"
 
-    # diun reads the files of diun.yml, it is started with the configuration from the file
-    - name: 'Read the files of the secrets, the environment and the log in the container'
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
       ansible.builtin.command:
-        argv: [ 'podman', 'exec', 'diun', 'sh', '-c',
-                'cat /run/secrets/diun_mail_password; echo; cat /run/secrets/diun_registry_user; echo; cat /run/secrets/diun_registry_password; echo;
-                 env | grep -c "^DIUN_" ; true' ]
-      register: 'monitoring_diun__test_env'
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'diun' ]
+      register: 'monitoring_diun__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'diun', '-n', '80', '--no-pager' ]
+      register: 'monitoring_diun__test_restart_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_diun__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ monitoring_diun__test_restarts.stdout ] + monitoring_diun__test_restart_journal.stdout_lines | default([]) }}"
+
+    # Diun reads the files of the secrets referenced by diun.yml
+    - name: 'Read the files of the secrets in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'diun', 'cat', "/run/secrets/{{ item.key }}" ]
+      loop: "{{ monitoring_diun__expect.secrets | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'monitoring_diun__test_secret_files'
       changed_when: false
       no_log: true
 
@@ -89,18 +133,16 @@
       register: 'monitoring_diun__test_log'
       changed_when: false
 
-    # The image only sets DIUN_DB_PATH
     - name: 'Assert the secrets are passed as files and diun.yml is loaded'
       ansible.builtin.assert:
         that:
-          - monitoring_diun__test_env.stdout_lines[0] == monitoring_diun__test_secret
-          - monitoring_diun__test_env.stdout_lines[1] == monitoring_diun__test_registry_user
-          - monitoring_diun__test_env.stdout_lines[2] == monitoring_diun__test_registry_password
-          - monitoring_diun__test_env.stdout_lines[-1] == '1'
+          - monitoring_diun__test_secret_files.results | map(attribute='stdout') | list == monitoring_diun__expect.secrets.values() | list
           - >-
-            (monitoring_diun__test_log.stdout ~ monitoring_diun__test_log.stderr)
-            is search('Configuration loaded from file: /etc/diun/diun.yml')
-        fail_msg: 'The files of the secrets have not the values of the secrets, DIUN_* are set or diun.yml was not loaded'
+            (monitoring_diun__test_log.stdout ~ monitoring_diun__test_log.stderr) is search('Configuration loaded from file: /etc/diun/diun.yml')
+          # watchRepo of earlier defaults is deprecated since v4.34.0
+          - >-
+            (monitoring_diun__test_log.stdout ~ monitoring_diun__test_log.stderr) is not search('watchRepo .* is deprecated')
+        fail_msg: 'The files of the secrets have not the values of the secrets, diun.yml was not loaded or Diun warns about watchRepo'
 
     - name: 'Read the journal of Diun until the watched container was found'
       ansible.builtin.command: 'journalctl -u diun --no-pager -n 200'
@@ -119,43 +161,69 @@
 
     - name: 'Read the database of Diun in the mounted data directory'
       ansible.builtin.stat:
-        path: "{{ monitoring_diun__test_vars.diun_home }}/data/diun.db"
+        path: "{{ monitoring_diun__test_home }}/data/diun.db"
       register: 'monitoring_diun__test_db'
 
     - name: 'Assert Diun writes its database into the mounted data directory'
       ansible.builtin.assert:
         that:
           - monitoring_diun__test_db.stat.exists
-        fail_msg: "Database: {{ monitoring_diun__test_vars.diun_home }}/data/diun.db does not exist"
+        fail_msg: "Database: {{ monitoring_diun__test_home }}/data/diun.db does not exist"
 
-    - name: 'Send a test notification'
-      ansible.builtin.command:
-        argv: [ 'podman', 'exec', 'diun', 'diun', 'notif', 'test' ]
-      register: 'monitoring_diun__test_notif'
-      changed_when: false
-      until: monitoring_diun__test_notif.rc == 0
-      retries: 10
-      delay: 3
+    - name: 'Check the notification by mail'
+      when: monitoring_diun__expect.mail
+      block:
 
-    - name: 'Read the mails received by mailpit'
-      ansible.builtin.uri:
-        url: "http://{{ monitoring_diun__test_mailpit.ip }}:8025/api/v1/messages"
-        return_content: true
-      register: 'monitoring_diun__test_messages'
-      until: >-
-        monitoring_diun__test_messages.status == 200
-        and monitoring_diun__test_from in (monitoring_diun__test_messages.json.messages | default([])
-                                           | map(attribute='From') | map(attribute='Address') | list)
-      retries: 15
-      delay: 2
-      failed_when: false
+        - name: 'Send a test notification'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'diun', 'diun', 'notif', 'test' ]
+          register: 'monitoring_diun__test_notif'
+          changed_when: false
+          until: monitoring_diun__test_notif.rc == 0
+          retries: 10
+          delay: 3
 
-    - name: 'Assert the notification arrived at mailpit'
-      ansible.builtin.assert:
-        that:
-          - >-
-            monitoring_diun__test_from in (monitoring_diun__test_messages.json.messages | default([])
-                                           | map(attribute='From') | map(attribute='Address') | list)
-        fail_msg: >-
-          Mails: {{ monitoring_diun__test_messages.json.messages | default([]) | map(attribute='Subject') | join(', ') }},
-          notif test: {{ monitoring_diun__test_notif.stdout | default('') }} {{ monitoring_diun__test_notif.stderr | default('') }}
+        - name: 'Read the mails received by mailpit'
+          ansible.builtin.uri:
+            url: "http://{{ monitoring_diun__test_mailpit.ip }}:8025/api/v1/messages"
+            return_content: true
+          register: 'monitoring_diun__test_messages'
+          until: >-
+            monitoring_diun__test_messages.status == 200
+            and monitoring_diun__test_from in (monitoring_diun__test_messages.json.messages | default([])
+                                               | map(attribute='From') | map(attribute='Address') | list)
+          retries: 15
+          delay: 2
+          failed_when: false
+
+        - name: 'Assert the notification arrived at mailpit'
+          ansible.builtin.assert:
+            that:
+              - >-
+                monitoring_diun__test_from in (monitoring_diun__test_messages.json.messages | default([])
+                                               | map(attribute='From') | map(attribute='Address') | list)
+            fail_msg: >-
+              Mails: {{ monitoring_diun__test_messages.json.messages | default([]) | map(attribute='Subject') | join(', ') }},
+              notif test: {{ monitoring_diun__test_notif.stdout | default('') }} {{ monitoring_diun__test_notif.stderr | default('') }}
+
+    # The metrics need the token of the secret metrics.token, they carry the label of the metadata
+    - name: 'Check the metrics'
+      when: monitoring_diun__expect.metrics
+      block:
+
+        - name: 'Read the metrics with and without the token'
+          ansible.builtin.uri:
+            url: "http://{{ monitoring_diun__expect.ip }}:6080/metrics"
+            headers: "{{ { 'Authorization': 'Bearer ' ~ monitoring_diun__test_metrics_token } if item else {} }}"
+            status_code: [ 200, 401 ]
+            return_content: true
+          loop: [ true, false ]
+          register: 'monitoring_diun__test_metrics'
+          no_log: true
+
+        - name: 'Assert the metrics'
+          ansible.builtin.assert:
+            that:
+              - monitoring_diun__test_metrics.results | map(attribute='status') | list == [ 200, 401 ]
+              - monitoring_diun__test_metrics.results[0].content is search('diun_')
+            fail_msg: "status {{ monitoring_diun__test_metrics.results | map(attribute='status') | list }}"

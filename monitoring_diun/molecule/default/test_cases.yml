@@ -5,8 +5,13 @@ monitoring_diun__test_network:
   address: '10.89.0.0'
   gateway: '10.89.0.1'
   netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
 
 monitoring_diun__test_image: 'docker.io/crazymax/diun:latest'
+monitoring_diun__test_quadlet_path: '/etc/containers/systemd/diun.container'
+monitoring_diun__test_home: '/opt/diun-molecule'
 
 # Receives the notifications of Diun, started in prepare.yml
 monitoring_diun__test_mailpit:
@@ -19,55 +24,121 @@ monitoring_diun__test_watched:
   name: 'molecule-watched'
   image: 'docker.io/library/alpine:latest'
 
-monitoring_diun__test_secret: 'molecule-diun-secret'
-monitoring_diun__test_registry_user: 'molecule-registry-user'
-monitoring_diun__test_registry_password: 'molecule-registry-password'
 monitoring_diun__test_from: 'diun@example.test'
-monitoring_diun__test_quadlet_path: '/etc/containers/systemd/diun.container'
+monitoring_diun__test_metrics_token: 'molecule-metrics-token'
 
-monitoring_diun__test_vars:
-  diun_home: '/opt/diun-molecule'
-  diun_ip: '10.89.0.50'
-  diun_network: 'podman-molecule'
-  diun_hostname: 'diun-molecule'
-  diun_timezone: 'Europe/Berlin'
-  diun_config:
-    notif:
-      mail:
-        host: '10.89.0.20'
-        port: 1025
-        ssl: false
-        from: 'diun@example.test'
-        to: [ 'admin@example.test' ]
-    # The registry does not match the watched image
-    regopts:
-      - name: 'molecule'
-        selector: 'name'
-        timeout: '10s'
-    defaults:
-      metadata:
-        team: 'molecule'
-  # Go refuses SMTP authentication without TLS, the password is passed as secret but mailpit does not need it
-  diun_secrets:
-    - name: 'diun_mail_password'
-      data: 'molecule-diun-secret'
-      target: 'notif.mail.password'
-    - name: 'diun_registry_user'
-      data: 'molecule-registry-user'
-      target: 'regopts.molecule.username'
-    - name: 'diun_registry_password'
-      data: 'molecule-registry-password'
-      target: 'regopts.molecule.password'
+monitoring_diun__test_cases:
 
-# The number of workers changed in side_effect.yml, diun.yml changes and the running service must be restarted
-monitoring_diun__test_side_effect_workers: 5
+  # Only the mandatory variables, the docker provider watches the containers of the host through the podman socket
+  - name: 'molecule-diun-default'
+    role_vars:
+      diun_home: '/opt/diun-molecule'
+      diun_ip: '10.89.0.50'
+      diun_network: 'podman-molecule'
+      diun_hostname: 'diun-default'
+      diun_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.50'
+      ip6: ~
+      quadlet:
+        - 'Volume=/opt/diun-molecule/diun.yml:/etc/diun/diun.yml:ro'
+        - 'Volume=/opt/diun-molecule/data:/data'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro'
+      env: []
+      config_lines:
+        - '  watchMode: tag'
+        - '    endpoint: unix:///var/run/docker.sock'
+        - '  workers: 10'
+      secrets: {}
+      mail: false
+      metrics: false
 
-# Lines of diun.yml after side_effect.yml
-monitoring_diun__test_config_lines:
-  - '    passwordFile: /run/secrets/diun_mail_password'
-  - '  passwordFile: /run/secrets/diun_registry_password'
-  - '  usernameFile: /run/secrets/diun_registry_user'
-  - '- name: molecule'
-  - '    team: molecule'
-  - '  workers: 5'
-  - '    endpoint: unix:///var/run/docker.sock'
+  # IPv6, labels, the environment, mail to mailpit, the credentials of a registry, the watch mode of v4.34.0
+  # and the metrics with a token and a label of the metadata
+  - name: 'molecule-diun'
+    role_vars:
+      diun_home: '/opt/diun-molecule'
+      diun_ip: '10.89.0.51'
+      diun_ipv6: 'fd00:89::51'
+      diun_network: 'podman-molecule'
+      diun_hostname: 'diun-molecule'
+      diun_timezone: 'Europe/Berlin'
+      diun_labels:
+        traefik.enable: 'false'
+      diun_environment:
+        LOG_LEVEL: 'debug'
+        LOG_TIMESTAMP: 'true'
+      diun_config:
+        notif:
+          mail:
+            host: '10.89.0.20'
+            port: 1025
+            ssl: false
+            from: 'diun@example.test'
+            to: [ 'admin@example.test' ]
+        # The registry does not match the watched image
+        regopts:
+          - name: 'molecule'
+            selector: 'name'
+            timeout: '10s'
+        defaults:
+          watchMode: 'tag'
+          assumeImmutableTags: true
+          metadata:
+            team: 'molecule'
+        metrics:
+          enabled: true
+          addr: ':6080'
+          path: '/metrics'
+          metadataLabels: [ 'team' ]
+      # Go refuses SMTP authentication without TLS, the password is passed as secret but mailpit does not need it
+      diun_secrets:
+        - name: 'diun_mail_password'
+          data: 'molecule-diun-secret'
+          target: 'notif.mail.password'
+        - name: 'diun_registry_user'
+          data: 'molecule-registry-user'
+          target: 'regopts.molecule.username'
+        - name: 'diun_registry_password'
+          data: 'molecule-registry-password'
+          target: 'regopts.molecule.password'
+        - name: 'diun_metrics_token'
+          data: "{{ monitoring_diun__test_metrics_token }}"
+          target: 'metrics.token'
+    # The number of workers changes, diun.yml changes and the running service must be restarted
+    side_effect:
+      workers: 5
+    expect:
+      ip: '10.89.0.51'
+      ip6: 'fd00:89::51'
+      quadlet:
+        - 'Volume=/opt/diun-molecule/diun.yml:/etc/diun/diun.yml:ro'
+        - 'Volume=/opt/diun-molecule/data:/data'
+        - 'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro'
+        - 'Label=traefik.enable=false'
+        - 'Secret=diun_mail_password,type=mount,target=/run/secrets/diun_mail_password'
+        - 'Secret=diun_registry_user,type=mount,target=/run/secrets/diun_registry_user'
+        - 'Secret=diun_registry_password,type=mount,target=/run/secrets/diun_registry_password'
+        - 'Secret=diun_metrics_token,type=mount,target=/run/secrets/diun_metrics_token'
+        - 'Environment=LOG_LEVEL=debug'
+      env:
+        - 'LOG_LEVEL=debug'
+        - 'LOG_TIMESTAMP=true'
+      config_lines:
+        - '    passwordFile: /run/secrets/diun_mail_password'
+        - '  passwordFile: /run/secrets/diun_registry_password'
+        - '  usernameFile: /run/secrets/diun_registry_user'
+        - '  tokenFile: /run/secrets/diun_metrics_token'
+        - '- name: molecule'
+        - '    team: molecule'
+        - '  watchMode: tag'
+        - '  assumeImmutableTags: true'
+        - '  workers: 5'
+        - '    endpoint: unix:///var/run/docker.sock'
+      secrets:
+        diun_mail_password: 'molecule-diun-secret'
+        diun_registry_user: 'molecule-registry-user'
+        diun_registry_password: 'molecule-registry-password'
+        diun_metrics_token: 'molecule-metrics-token'
+      mail: true
+      metrics: true

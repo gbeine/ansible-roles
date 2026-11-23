@@ -49,7 +49,8 @@ monitoring_diun__config_default:
     runOnStartup: true
     compareDigest: false
   defaults:
-    watchRepo: false
+    # tag watches the tag of the image, Diun deprecated watchRepo: false
+    watchMode: 'tag'
     notifyOn: [ 'new', 'update' ]
     maxTags: 10
     sortTags: 'reverse'
@@ -66,7 +67,12 @@ monitoring_diun__config_custom: "{{ diun_config | default({}) }}"
 
 monitoring_diun__podman_socket: '/run/podman/podman.sock'
 
-# The variables of the command line (cmd/main.go) and of the image (Dockerfile) of diun v4.33.1,
+# The watch modes of defaults.watchMode (internal/model/defaults.go of diun v4.34.0)
+monitoring_diun__watch_modes: [ 'tag', 'all', 'semver', 'semver+prereleases' ]
+# Diun only allows these characters in the labels of metrics.metadataLabels (internal/config/config.go of diun v4.34.0)
+monitoring_diun__metadata_label_pattern: '^[a-zA-Z0-9_]+$'
+
+# The variables of the command line (cmd/main.go, cmd/serve.go) and of the image (Dockerfile) of diun v4.34.0,
 # the options of diun (DIUN_*) are set with diun_config
 monitoring_diun__environment_allowed:
   - 'TZ'
@@ -74,6 +80,7 @@ monitoring_diun__environment_allowed:
   - 'LOG_JSON'
   - 'LOG_CALLER'
   - 'LOG_NOCOLOR'
+  - 'LOG_TIMESTAMP'
   - 'PROFILER'
   - 'PROFILER_PATH'
   - 'GRPC_AUTHORITY'
@@ -123,7 +130,6 @@ monitoring_diun__podman_image: 'docker.io/crazymax/diun'
 monitoring_diun__podman_tag: "{{ monitoring_diun__version }}"
 
 monitoring_diun__podman_home: "{{ monitoring_diun__home }}"
-monitoring_diun__podman_etc_dir: "{{ monitoring_diun__podman_home }}/etc"
 monitoring_diun__podman_data_dir: "{{ monitoring_diun__podman_home }}/data"
 monitoring_diun__config_path: "{{ monitoring_diun__podman_home }}/diun.yml"
 
@@ -147,7 +153,7 @@ monitoring_diun__podman_container_default:
     {{ [ monitoring_diun__config_path + ':/etc/diun/diun.yml:ro', monitoring_diun__podman_data_dir + ':/data' ]
        + ([monitoring_diun__podman_socket + ':/var/run/docker.sock:ro'] if monitoring_diun__provider_podman | bool else []) }}
 
-# Generated from internal/config/config.go and internal/model of diun v4.33.1, update with new versions of diun:
+# Generated from internal/config/config.go and internal/model of diun v4.34.0, update with new versions of diun:
 # the options of diun.yml with their types, bool, int (a number), string (also durations and values of a list of names),
 # list (a list of strings or numbers), map (free keys with strings, numbers or booleans), regopts is a list of entries
 monitoring_diun__config_schema:
@@ -165,12 +171,15 @@ monitoring_diun__config_schema:
       uuid: 'string'
       uuidFile: 'string'
   defaults:
+    watchMode: 'string'
+    # Deprecated by diun, replaced by watchMode
     watchRepo: 'bool'
     notifyOn: 'list'
     maxTags: 'int'
     sortTags: 'string'
     includeTags: 'list'
     excludeTags: 'list'
+    assumeImmutableTags: 'bool'
     metadata: 'map'
   metrics:
     enabled: 'bool'
@@ -178,6 +187,7 @@ monitoring_diun__config_schema:
     path: 'string'
     token: 'string'
     tokenFile: 'string'
+    metadataLabels: 'list'
   notif:
     amqp:
       username: 'string'
@@ -252,6 +262,8 @@ monitoring_diun__config_schema:
       userFile: 'string'
       password: 'string'
       passwordFile: 'string'
+      token: 'string'
+      tokenFile: 'string'
       roomID: 'string'
       msgType: 'string'
       templateBody: 'string'
@@ -268,6 +280,7 @@ monitoring_diun__config_schema:
       qos: 'int'
     ntfy:
       endpoint: 'string'
+      headers: 'map'
       token: 'string'
       tokenFile: 'string'
       topic: 'string'
@@ -411,6 +424,7 @@ monitoring_diun__secrets_allowed:
   'notif.mail.password': 'passwordFile'
   'notif.matrix.user': 'userFile'
   'notif.matrix.password': 'passwordFile'
+  'notif.matrix.token': 'tokenFile'
   'notif.mqtt.username': 'usernameFile'
   'notif.mqtt.password': 'passwordFile'
   'notif.ntfy.token': 'tokenFile'

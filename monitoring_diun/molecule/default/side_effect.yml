@@ -7,14 +7,22 @@
     - 'test_cases.yml'
 
   vars:
-    monitoring_diun__test_config: "{{ monitoring_diun__test_vars.diun_config }}"
+    monitoring_diun__test_case: "{{ monitoring_diun__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_diun__test_vars: "{{ monitoring_diun__test_case.role_vars }}"
+    monitoring_diun__test_config: "{{ monitoring_diun__test_vars.diun_config | default({}) }}"
+    monitoring_diun__test_secrets: "{{ monitoring_diun__test_vars.diun_secrets | default([]) }}"
     monitoring_diun__test_checked_files:
       - "{{ monitoring_diun__test_quadlet_path }}"
-      - "{{ monitoring_diun__test_vars.diun_home }}/diun.yml"
+      - "{{ monitoring_diun__test_home }}/diun.yml"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
-    - name: 'Set the role variables of the test'
+    - name: 'Set the role variables of the test case'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
       loop: "{{ monitoring_diun__test_vars | dict2items }}"
@@ -54,7 +62,7 @@
             data: 'molecule-diun-secret'
         monitoring_diun__test_invalid:
           message: 'a secret without target'
-          search: '^diun_secrets entries need name, data and target$'
+          search: '^`diun_secrets` entries need name, data and target$'
 
     - name: 'Run monitoring_diun with unknown options and an option of the wrong type (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -82,19 +90,30 @@
       vars:
         diun_environment:
           DIUN_WATCH_WORKERS: '5'
-          DIUN_NOTIF_MAIL_PASSWORDFILE: '/run/secrets/diun_mail_password'
         monitoring_diun__test_invalid:
           message: 'an option of diun in the environment'
-          search: '^The options of diun are set with diun_config now: DIUN_WATCH_WORKERS \(watch\.workers\), DIUN_NOTIF_MAIL_PASSWORDFILE \(notif\.mail\.password\)\.$'
+          search: '^Unknown environment variables: DIUN_WATCH_WORKERS\.'
 
-    - name: 'Run monitoring_diun with diun_keys (expect ERROR)'
+    - name: 'Run monitoring_diun with diun_environment not a dictionary (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        diun_keys:
-          regopts: [ 'MOLECULE' ]
+        diun_environment: [ 'LOG_LEVEL' ]
         monitoring_diun__test_invalid:
-          message: 'diun_keys'
-          search: '^diun_keys is not used anymore, options with keys are set in diun_config, e\.g\. regopts or defaults\.metadata\.$'
+          message: 'diun_environment not a dictionary'
+          search: '^`diun_environment` has to be a dictionary\.$'
+
+    - name: 'Run monitoring_diun with an invalid watch mode and an invalid label of the metrics (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        diun_config: >-
+          {{ monitoring_diun__test_config | combine({ 'defaults': { 'watchMode': 'latest' },
+                                                      'metrics': { 'enabled': true, 'addr': ':6080', 'path': '/metrics',
+                                                                   'metadataLabels': [ 'team-name' ] } }, recursive=true) }}
+        monitoring_diun__test_invalid:
+          message: 'an invalid watch mode and an invalid label of the metrics'
+          search: >-
+            ^defaults\.watchMode has to be one of tag, all, semver, semver\+prereleases\.
+            The labels of metrics\.metadataLabels may only contain letters, digits and underscores: team-name\.$
 
     - name: 'Run monitoring_diun with an unknown environment variable in diun_container (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -110,7 +129,7 @@
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         diun_secrets: >-
-          {{ monitoring_diun__test_vars.diun_secrets
+          {{ monitoring_diun__test_secrets
              + [ { 'name': 'diun_molecule_nomad', 'data': 'x', 'target': 'providers.nomad.secretID' },
                  { 'name': 'diun_molecule_other', 'data': 'x', 'target': 'regopts.other.password' } ] }}
         monitoring_diun__test_invalid:
@@ -120,6 +139,7 @@
             The secrets of a registry need its entry in diun_config\.regopts: regopts\.other\.password\.$
 
     - name: 'Change the configuration'
+      when: monitoring_diun__test_case.side_effect is defined
       block:
 
         - name: 'Read the main PID of Diun before the change'
@@ -129,7 +149,7 @@
 
         - name: 'Set the changed configuration'
           ansible.builtin.set_fact:
-            diun_config: "{{ monitoring_diun__test_config | combine({ 'watch': { 'workers': monitoring_diun__test_side_effect_workers } }, recursive=true) }}"
+            diun_config: "{{ monitoring_diun__test_config | combine({ 'watch': { 'workers': monitoring_diun__test_case.side_effect.workers } }, recursive=true) }}"
 
         - name: 'Run monitoring_diun with the changed configuration'
           ansible.builtin.include_role:
@@ -153,3 +173,34 @@
               quadlet changed: {{ monitoring_diun__quadlet_result is changed }},
               secrets changed: {{ monitoring_diun__secrets_result is changed }},
               PID {{ monitoring_diun__test_pid_before.stdout }} -> {{ monitoring_diun__test_pid_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_diun__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the main PID of Diun before the run without a change'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value diun'
+          register: 'monitoring_diun__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_diun without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_diun'
+
+        - name: 'Read the main PID of Diun after the run without a change'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value diun'
+          register: 'monitoring_diun__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_diun__config_result is not changed
+              - monitoring_diun__quadlet_result is not changed
+              - monitoring_diun__secrets_result is not changed
+              - monitoring_diun__test_unchanged_after.stdout == monitoring_diun__test_unchanged_before.stdout
+            fail_msg: >-
+              diun.yml changed: {{ monitoring_diun__config_result is changed }},
+              quadlet changed: {{ monitoring_diun__quadlet_result is changed }},
+              secrets changed: {{ monitoring_diun__secrets_result is changed }},
+              PID {{ monitoring_diun__test_unchanged_before.stdout }} -> {{ monitoring_diun__test_unchanged_after.stdout }}
