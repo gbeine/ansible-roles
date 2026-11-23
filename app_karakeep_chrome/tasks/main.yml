@@ -35,19 +35,66 @@
           {%- endif -%}
           {{ errors }}
 
-    # Checks the environment of the container after merging karakeep_chrome_container,
-    # unknown variables would change the behavior unexpectedly
-    - name: 'Validate the allowed environment variables'
+    # Without karakeep_chrome_environment there is nothing to check
+    - name: 'Validate the environment'
+      when: app_karakeep_chrome__environment is defined
       ansible.builtin.assert:
         that:
-          - app_karakeep_chrome__unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ app_karakeep_chrome__unknown | join(', ') }}.
-          The Chrome of Karakeep reads no environment variables, allowed is {{ app_karakeep_chrome__environment_allowed | join(', ') }}.
+          - app_karakeep_chrome__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep_chrome__errors | join(' ') }}"
         quiet: true
       vars:
-        app_karakeep_chrome__unknown: >-
-          {{ (app_karakeep_chrome__container.environment | default({})).keys() | reject('in', app_karakeep_chrome__environment_allowed) | list }}
+        app_karakeep_chrome__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_karakeep_chrome__environment is not mapping -%}
+          {%-   set _ = errors.append('`karakeep_chrome_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set ns = namespace(booleans=[], lines=[]) -%}
+          {%-   for key, value in app_karakeep_chrome__environment.items() if value is not none -%}
+          {%-     if key in app_karakeep_chrome__environment_booleans and value not in [ 'true', 'false' ] -%}
+          {%-       set ns.booleans = ns.booleans + [ key ] -%}
+          {%-     elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-       set ns.lines = ns.lines + [ key ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.booleans | length > 0 -%}
+          {%-     set _ = errors.append('These variables have to be the strings true or false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging karakeep_chrome_container,
+    # unknown variables would change the behavior unexpectedly, without an environment of the container there is nothing to check
+    - name: 'Validate the allowed environment variables'
+      when: app_karakeep_chrome__container.environment | default(none) is mapping
+      ansible.builtin.assert:
+        that:
+          - app_karakeep_chrome__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_karakeep_chrome__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_karakeep_chrome__environment_unknown: >-
+          {{ app_karakeep_chrome__container.environment.keys() | map('string') | reject('in', app_karakeep_chrome__environment_allowed) | list }}
+        app_karakeep_chrome__environment_line_breaks: >-
+          {{ app_karakeep_chrome__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_karakeep_chrome__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_karakeep_chrome__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_karakeep_chrome__environment_unknown | join(', '))
+                                    ~ '. Allowed are the variables of the image (app_karakeep_chrome__environment_allowed): '
+                                    ~ (app_karakeep_chrome__environment_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_karakeep_chrome__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_karakeep_chrome__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -81,6 +128,21 @@
           {% if app_karakeep_chrome__container.requires is defined %}
           Requires={{ app_karakeep_chrome__container.requires | join(' ') }}
           {% endif %}
+          {% if app_karakeep_chrome__container.wants is defined %}
+          Wants={{ app_karakeep_chrome__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_karakeep_chrome__container.after is defined %}
+          After={{ app_karakeep_chrome__container.after | join(' ') }}
+          {% endif %}
+          {% if app_karakeep_chrome__container.part_of is defined %}
+          PartOf={{ app_karakeep_chrome__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_karakeep_chrome__container.binds_to is defined %}
+          BindsTo={{ app_karakeep_chrome__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_karakeep_chrome__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_karakeep_chrome__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_karakeep_chrome__quadlet_result'
@@ -111,7 +173,9 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ app_karakeep_chrome__container.name ~ ' did not start' ] + app_karakeep_chrome__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ app_karakeep_chrome__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_karakeep_chrome__start_journal.stdout_lines }}
 
     - name: 'Wait for the DevTools of Chrome'
       ansible.builtin.uri:

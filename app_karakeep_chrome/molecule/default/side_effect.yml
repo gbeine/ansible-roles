@@ -12,6 +12,11 @@
     app_karakeep_chrome__test_checked_files:
       - "{{ app_karakeep_chrome__test_quadlet_path }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -76,6 +81,41 @@
           message: 'an unknown environment variable'
           search: '^Unknown environment variables: CHROME_FLAGS\.'
 
+    - name: 'Run app_karakeep_chrome with karakeep_chrome_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_environment: [ 'KARAKEEP_CHROME_SANDBOX' ]
+        app_karakeep_chrome__test_invalid:
+          message: 'karakeep_chrome_environment not a dictionary'
+          search: '^`karakeep_chrome_environment` has to be a dictionary\.$'
+
+    - name: 'Run app_karakeep_chrome with an invalid value of the sandbox (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_environment:
+          KARAKEEP_CHROME_SANDBOX: 'yes'
+        app_karakeep_chrome__test_invalid:
+          message: 'an invalid value of the sandbox'
+          search: '^These variables have to be the strings true or false: KARAKEEP_CHROME_SANDBOX\.$'
+
+    - name: 'Run app_karakeep_chrome with a YAML boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_environment:
+          KARAKEEP_CHROME_SANDBOX: false
+        app_karakeep_chrome__test_invalid:
+          message: 'a YAML boolean'
+          search: '^These variables have to be the strings true or false: KARAKEEP_CHROME_SANDBOX\.$'
+
+    - name: 'Run app_karakeep_chrome with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        karakeep_chrome_environment:
+          TZ: "Europe/Berlin\nEurope/Paris"
+        app_karakeep_chrome__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: TZ\.$'
+
     - name: 'Change the flags of Chrome'
       when: app_karakeep_chrome__test_case.side_effect is defined
       block:
@@ -108,3 +148,32 @@
             fail_msg: >-
               quadlet changed: {{ app_karakeep_chrome__quadlet_result is changed }},
               start before {{ app_karakeep_chrome__test_started_before.stdout }}, after {{ app_karakeep_chrome__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_karakeep_chrome__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'karakeep-chrome' ]
+          register: 'app_karakeep_chrome__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_karakeep_chrome without a change'
+          ansible.builtin.include_role:
+            name: 'app_karakeep_chrome'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'karakeep-chrome' ]
+          register: 'app_karakeep_chrome__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_karakeep_chrome__quadlet_result is not changed
+              - app_karakeep_chrome__test_unchanged_after.stdout == app_karakeep_chrome__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_karakeep_chrome__quadlet_result is changed }},
+              start before {{ app_karakeep_chrome__test_unchanged_before.stdout }}, after {{ app_karakeep_chrome__test_unchanged_after.stdout }}
