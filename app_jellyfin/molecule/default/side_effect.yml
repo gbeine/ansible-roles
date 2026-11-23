@@ -9,6 +9,11 @@
   vars:
     app_jellyfin__test_case: "{{ app_jellyfin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -53,13 +58,41 @@
     - name: 'Run app_jellyfin with a URL without scheme (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        jellyfin_url: 'jellyfin.example.org'
+        jellyfin_environment:
+          JELLYFIN_PublishedServerUrl: 'jellyfin.example.org'
         app_jellyfin__test_invalid:
           message: 'a URL without scheme'
-          search: '^jellyfin_url has to be empty or an http or https URL$'
+          search: 'JELLYFIN_PublishedServerUrl has to be an http or https URL\.$'
 
+    - name: 'Run app_jellyfin with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        jellyfin_environment:
+          JELLYFIN_URL: 'https://jellyfin.example.org'
+        app_jellyfin__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: JELLYFIN_URL\.'
+
+    - name: 'Run app_jellyfin with a line break in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        jellyfin_environment:
+          UMASK: "022\nfoo"
+        app_jellyfin__test_invalid:
+          message: 'a line break in the environment'
+          search: 'The environment variables must not contain line breaks: UMASK\.'
+
+    - name: 'Run app_jellyfin with a YAML boolean in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        jellyfin_environment:
+          UMASK: true
+        app_jellyfin__test_invalid:
+          message: 'a YAML boolean in the environment'
+          search: 'These environment variables are YAML booleans, use strings: UMASK\.'
+
+    # molecule-jellyfin changes the public URL and has to restart, molecule-jellyfin-default runs again without a change
     - name: 'Run app_jellyfin with the changed role variables'
-      when: app_jellyfin__test_case.side_effect is defined
       block:
 
         - name: 'Read the start time of the service before the change'
@@ -88,8 +121,8 @@
         - name: 'Assert the changed quadlet unit and the restart of the service'
           ansible.builtin.assert:
             that:
-              - app_jellyfin__quadlet_result is changed
-              - app_jellyfin__test_started_after.stdout | int > app_jellyfin__test_started_before.stdout | int
+              - (app_jellyfin__quadlet_result is changed) == app_jellyfin__test_case.expect.restart
+              - (app_jellyfin__test_started_after.stdout | int > app_jellyfin__test_started_before.stdout | int) == app_jellyfin__test_case.expect.restart
             fail_msg: >-
               quadlet changed: {{ app_jellyfin__quadlet_result is changed }},
               start before {{ app_jellyfin__test_started_before.stdout }}, after {{ app_jellyfin__test_started_after.stdout }}

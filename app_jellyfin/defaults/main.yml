@@ -5,7 +5,6 @@
 # https://ansible-roles.org/roles/jellyfin
 #
 
-# Configuration directory, contains the configuration, the database and the cache of Jellyfin
 app_jellyfin__home: "{{ jellyfin_home | mandatory }}"
 app_jellyfin__ip: "{{ jellyfin_ip | mandatory }}"
 app_jellyfin__ipv6: "{{ jellyfin_ipv6 }}"
@@ -16,10 +15,11 @@ app_jellyfin__labels: "{{ jellyfin_labels }}"
 
 app_jellyfin__version: "{{ jellyfin_version | default('latest') }}"
 
-# Public URL of Jellyfin, announced to the clients, not set if empty
-app_jellyfin__url: "{{ jellyfin_url | default('') }}"
 # Media library, mounted to /data
 app_jellyfin__library_dir: "{{ jellyfin_library | mandatory }}"
+
+# Variables of the image, e.g. JELLYFIN_PublishedServerUrl or UMASK, the role sets PUID, PGID and TZ
+app_jellyfin__environment: "{{ app_jellyfin__environment_default | combine(jellyfin_environment | default({})) }}"
 
 app_jellyfin__container: "{{ app_jellyfin__podman_container_default | combine(jellyfin_container | default({})) }}"
 
@@ -40,6 +40,25 @@ app_jellyfin__podman_tag: "{{ app_jellyfin__version }}"
 
 app_jellyfin__podman_home: "{{ app_jellyfin__home }}"
 
+# The images of linuxserver.io read the time zone from TZ, podman sets /etc/localtime in addition
+app_jellyfin__environment_default:
+  PUID: "{{ app_jellyfin__uid }}"
+  PGID: "{{ app_jellyfin__gid }}"
+  TZ: "{{ app_jellyfin__timezone }}"
+
+# Generated from readme-vars.yml and root/etc/s6-overlay/s6-rc.d/svc-jellyfin/run of linuxserver/docker-jellyfin (master)
+# and the common variables of the base image, svc-jellyfin sets the JELLYFIN_*_DIR variables itself
+app_jellyfin__environment_allowed:
+  - 'PUID'
+  - 'PGID'
+  - 'TZ'
+  - 'UMASK'
+  - 'JELLYFIN_PublishedServerUrl'
+  - 'FFMPEG_PATH'
+
+# The public URL announced to the clients
+app_jellyfin__url_pattern: '^https?://[^/\s]+'
+
 app_jellyfin__podman_container_default:
   name: "{{ app_jellyfin__podman_name }}"
   hostname: "{{ app_jellyfin__hostname }}"
@@ -48,10 +67,8 @@ app_jellyfin__podman_container_default:
   ipv6: "{{ app_jellyfin__ipv6 | default(omit) }}"
   network: "{{ app_jellyfin__network }}"
   timezone: "{{ app_jellyfin__timezone }}"
-  # jellyfin_container.environment replaces the dictionary completely
-  environment: >-
-    {{ {'PUID': app_jellyfin__uid, 'PGID': app_jellyfin__gid, 'TZ': app_jellyfin__timezone}
-       | combine({'JELLYFIN_PublishedServerUrl': app_jellyfin__url} if app_jellyfin__url | length > 0 else {}) }}
+  # Set with jellyfin_environment, jellyfin_container.environment replaces it completely
+  environment: "{{ app_jellyfin__environment }}"
   labels: "{{ app_jellyfin__labels | default(omit) }}"
   # Client discovery and DLNA, jellyfin_container.publish replaces the list completely
   publish:
@@ -59,7 +76,5 @@ app_jellyfin__podman_container_default:
     - '1900:1900/udp'
   # jellyfin_container.volumes replaces the list completely
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
     - "{{ app_jellyfin__podman_home }}:/config"
     - "{{ app_jellyfin__library_dir }}:/data"

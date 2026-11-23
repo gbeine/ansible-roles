@@ -4,7 +4,7 @@
   tags: [ 'app', 'app_jellyfin' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or jellyfin_container not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, jellyfin_container or jellyfin_environment not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
@@ -29,8 +29,44 @@
           {%- if app_jellyfin__library_dir is not string or app_jellyfin__library_dir is not match('^/') -%}
           {%-   set _ = errors.append('jellyfin_library has to be an absolute path') -%}
           {%- endif -%}
-          {%- if app_jellyfin__url is not string or (app_jellyfin__url | length > 0 and app_jellyfin__url is not match('^https?://[^/]+')) -%}
-          {%-   set _ = errors.append('jellyfin_url has to be empty or an http or https URL') -%}
+          {{ errors }}
+
+    # Checks the environment after merging jellyfin_container, unknown variables would change the behavior unexpectedly,
+    # without an environment of the container there is nothing to check
+    - name: 'Validate the environment'
+      when: app_jellyfin__container.environment is mapping
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_jellyfin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_jellyfin__environment_container: "{{ app_jellyfin__container.environment }}"
+        app_jellyfin__environment_unknown: >-
+          {{ app_jellyfin__environment_container.keys() | map('string') | reject('in', app_jellyfin__environment_allowed) | list }}
+        app_jellyfin__environment_line_breaks: >-
+          {{ app_jellyfin__environment_container | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_jellyfin__environment_booleans: >-
+          {{ app_jellyfin__environment_container | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list }}
+        app_jellyfin__url: "{{ app_jellyfin__environment_container.JELLYFIN_PublishedServerUrl | default(none) }}"
+        app_jellyfin__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_jellyfin__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_jellyfin__environment_unknown | join(', '))
+                                    ~ '. Allowed are the variables of the image (app_jellyfin__environment_allowed).') -%}
+          {%- endif -%}
+          {%- if app_jellyfin__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_jellyfin__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_jellyfin__environment_booleans | length > 0 -%}
+          {%-   set _ = errors.append('These environment variables are YAML booleans, use strings: '
+                                    ~ (app_jellyfin__environment_booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_jellyfin__url is not none and not (app_jellyfin__url is string and app_jellyfin__url is match(app_jellyfin__url_pattern)) -%}
+          {%-   set _ = errors.append('JELLYFIN_PublishedServerUrl has to be an http or https URL.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -75,22 +111,83 @@
           {% if app_jellyfin__container.requires is defined %}
           Requires={{ app_jellyfin__container.requires | join(' ') }}
           {% endif %}
+          {% if app_jellyfin__container.wants is defined %}
+          Wants={{ app_jellyfin__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_jellyfin__container.after is defined %}
+          After={{ app_jellyfin__container.after | join(' ') }}
+          {% endif %}
+          {% if app_jellyfin__container.part_of is defined %}
+          PartOf={{ app_jellyfin__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_jellyfin__container.binds_to is defined %}
+          BindsTo={{ app_jellyfin__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_jellyfin__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_jellyfin__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'app_jellyfin__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ app_jellyfin__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if app_jellyfin__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        app_jellyfin__running: >-
-          {{ (ansible_facts.services[app_jellyfin__container.name + '.service'].state | default('')) == 'running' }}
-        app_jellyfin__restart: >-
-          {{ app_jellyfin__running | bool and app_jellyfin__quadlet_result is changed }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Jellyfin'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_jellyfin__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_jellyfin__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_jellyfin__running: >-
+              {{ (ansible_facts.services[app_jellyfin__container.name + '.service'].state | default('')) == 'running' }}
+            app_jellyfin__restart: "{{ app_jellyfin__running | bool and app_jellyfin__quadlet_result is changed }}"
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_jellyfin__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_jellyfin__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_jellyfin__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_jellyfin__start_journal.stdout_lines }}
+
+    # The first start creates the database of Jellyfin
+    - name: 'Wait for Jellyfin'
+      ansible.builtin.uri:
+        url: "http://{{ app_jellyfin__ip }}:8096/health"
+        return_content: true
+      register: 'app_jellyfin__ready'
+      until: app_jellyfin__ready.content | default('') is search('Healthy')
+      retries: 60
+      delay: 3
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Jellyfin'
+      when:
+        - not ansible_check_mode
+        - app_jellyfin__ready.content | default('') is not search('Healthy')
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_jellyfin__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_jellyfin__journal'
+      changed_when: false
+
+    - name: 'Assert that Jellyfin answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__journal is skipped
+        fail_msg: "{{ app_jellyfin__journal.stdout_lines | default([]) }}"
+        quiet: true
 
     - name: 'Enable autoupdate on container'
       when: 'app_jellyfin__autoupdate_enabled | bool'

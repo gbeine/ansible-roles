@@ -27,6 +27,8 @@
           - app_jellyfin__expect.ip6 is none or ('IP6=' + app_jellyfin__expect.ip6) in app_jellyfin__test_quadlet_lines
           - app_jellyfin__expect.ip6 is not none or app_jellyfin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - app_jellyfin__expect.quadlet | reject('in', app_jellyfin__test_quadlet_lines) | list | length == 0
+          # The time zone is set by podman and TZ, /etc/localtime and /etc/timezone of the host are not mounted
+          - app_jellyfin__test_quadlet_lines | select('match', 'Volume=/etc/(localtime|timezone)') | list | length == 0
         fail_msg: "{{ app_jellyfin__test_quadlet.content | b64decode }}"
       vars:
         app_jellyfin__test_quadlet_lines: "{{ (app_jellyfin__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -62,11 +64,34 @@
           - app_jellyfin__expect.ip6 is none or app_jellyfin__test_net.GlobalIPv6Address == app_jellyfin__expect.ip6
           - app_jellyfin__expect.env | reject('in', app_jellyfin__test_env) | list | length == 0
           - app_jellyfin__test_env | map('regex_replace', '=.*$', '') | select('in', app_jellyfin__expect.absent_env) | list | length == 0
-        fail_msg: "IPv4 {{ app_jellyfin__test_net.IPAddress }}, IPv6 {{ app_jellyfin__test_net.GlobalIPv6Address }}, environment {{ app_jellyfin__test_env | join(', ') }}"
+          - app_jellyfin__test_container.Config.Timezone == app_jellyfin__test_case.role_vars.jellyfin_timezone
+        fail_msg: >-
+          IPv4 {{ app_jellyfin__test_net.IPAddress }}, IPv6 {{ app_jellyfin__test_net.GlobalIPv6Address }},
+          time zone {{ app_jellyfin__test_container.Config.Timezone | default('') }}, environment {{ app_jellyfin__test_env | join(', ') }}
       vars:
         app_jellyfin__test_container: "{{ (app_jellyfin__test_inspect.stdout | from_json)[0] }}"
         app_jellyfin__test_net: "{{ app_jellyfin__test_container.NetworkSettings.Networks[app_jellyfin__test_case.role_vars.jellyfin_network] }}"
         app_jellyfin__test_env: "{{ app_jellyfin__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'jellyfin' ]
+      register: 'app_jellyfin__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'jellyfin', '-n', '80', '--no-pager' ]
+      register: 'app_jellyfin__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_jellyfin__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_jellyfin__test_restarts.stdout ] + app_jellyfin__test_journal.stdout_lines | default([]) }}"
 
     # The first start of Jellyfin creates the database
     - name: 'Wait until Jellyfin is ready'
