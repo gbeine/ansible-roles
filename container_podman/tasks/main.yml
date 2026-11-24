@@ -75,6 +75,35 @@
         - container_podman__socket_group_assign | bool
         - container_podman__socket_gid is defined
 
+    - name: Validate the TCP service
+      ansible.builtin.assert:
+        that:
+          - container_podman__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ container_podman__errors | join(' ') }}"
+        quiet: true
+      vars:
+        container_podman__errors: >-
+          {%- set errors = [] -%}
+          {%- if container_podman__tcp_enable is not boolean -%}
+          {%-   set _ = errors.append('`podman_tcp_enable` has to be true or false.') -%}
+          {%- elif container_podman__tcp_enable -%}
+          {%-   if container_podman__tcp_address is not string or container_podman__tcp_address is not match('^[A-Za-z0-9.:\[\]-]+$') -%}
+          {%-     set _ = errors.append('`podman_tcp_address` is the address of the podman API, a host name or an IP address, IPv6 in brackets.') -%}
+          {%-   endif -%}
+          {%-   if container_podman__tcp_port is not integer or container_podman__tcp_port is boolean
+                   or container_podman__tcp_port < 1 or container_podman__tcp_port > 65535 -%}
+          {%-     set _ = errors.append('`podman_tcp_port` is a port from 1 to 65535.') -%}
+          {%-   endif -%}
+          {%-   set requires = container_podman__tcp_requires -%}
+          {%-   if requires is string or requires is mapping or requires is not iterable
+                   or requires | reject('string') | list | length > 0
+                   or requires | reject('match', '^[^/ ]+[.][a-z]+$') | list | length > 0 -%}
+          {%-     set _ = errors.append('`podman_tcp_requires` is a list of unit names, e.g. wg-quick@wg0.service.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
     - name: Include OS-specific variables
       ansible.builtin.include_vars: "{{ item }}"
       with_first_found:

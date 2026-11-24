@@ -104,10 +104,20 @@ Removing networks can be disabled with `podman_networks_prune: false`.
 
 ### podman API via TCP
 
-Setting `podman_tcp_address` starts `podman-tcp.service`, which serves the podman API on `podman_tcp_address:podman_tcp_port` (default port `2376`).
+`podman_tcp_enable: true` starts `podman-tcp.service`, which serves the podman API on `podman_tcp_address:podman_tcp_port` (default port `2376`),
+`podman_tcp_address` is mandatory then, without `podman_tcp_enable` it is not needed and ignored.
 The API is served **without authentication and with root privileges**, so bind it only to addresses reachable by trusted hosts.
 Additional units required by the service can be set as list in `podman_tcp_requires`.
-Setting `podman_tcp_address` to an empty value removes the service again.
+`podman_tcp_enable: false` (the default) removes the service again.
+
+```yaml
+podman_tcp_enable: true
+podman_tcp_address: '127.0.0.1'
+podman_tcp_port: 2376
+```
+
+The role checks before any change that `podman_tcp_enable` is `true` or `false` and, if it is `true`, that the address is a host name or an IP address
+(IPv6 in brackets), the port is a number from 1 to 65535 and `podman_tcp_requires` is a list of unit names.
 
 ### Group of podman.socket
 
@@ -143,6 +153,8 @@ Setting `podman_cleanup_enabled` to `false` removes the timer.
 - `podman_network` is replaced by `podman_default_network`, the default network is provided as `container_podman__default_network` instead of `bootstrap_podman__default_network`.
 - `podman_environment` and `podman_containers` are no longer used.
 - `podman___update_mode` is no longer evaluated by this role.
+- `podman_tcp_address` alone no longer starts `podman-tcp.service`, it needs `podman_tcp_enable: true`,
+  an empty `podman_tcp_address` no longer removes the service, `podman_tcp_enable: false` (the default) does.
 
 ### Check mode
 
@@ -161,7 +173,7 @@ The scenario runs the role twice:
 |---|---|
 | `prepare` | runs the role in check mode before podman is installed, it has to skip the configuration without errors and changes, installs podman and creates the networks `molstale` (unused) and `molbusy` (used by a container) and the orphaned quadlet `molghost.network` |
 | `converge`, `idempotence` | creates `molnet-a` (IPv4 and IPv6) and `molnet-b` (without DNS), enables socket, TCP service and image cleanup, creates the group `podman` of the socket with the drop-in, prunes `molstale` and `molghost`, keeps `molbusy` |
-| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, runs the role with the undeclared default network `molnet-b` and with an invalid mode and GID of the group of the socket, which have to fail before any change, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled, the drop-in of the socket is removed and the group stays |
+| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, runs the role with the undeclared default network `molnet-b`, with an invalid mode and GID of the group of the socket and with the TCP service without address, which have to fail before any change, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled, the drop-in of the socket is removed and the group stays |
 | `verify` | checks the state after the second run, `molapp` has to run with an address from the new subnet |
 
 After converge the state check reads the drop-in, the group with a GID below 1000 and the group and mode of `/run/podman/podman.sock`, after the second run the drop-in has to be removed.
