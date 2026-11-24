@@ -10,7 +10,16 @@ monitoring_thanos_store__test_network:
   ipv6_prefixlength: 64
 
 monitoring_thanos_store__test_image: 'docker.io/thanosio/thanos:v0.42.5'
+monitoring_thanos_store__test_quadlet_path: '/etc/containers/systemd/thanos-store.container'
+monitoring_thanos_store__test_home: '/opt/thanos-store'
 monitoring_thanos_store__test_bucket_dir: '/opt/thanos-bucket'
+
+# S3 server of prepare.yml, rclone serves the directories of /data as buckets
+monitoring_thanos_store__test_s3_image: 'docker.io/rclone/rclone:1.76.0'
+monitoring_thanos_store__test_s3_ip: '10.89.0.63'
+monitoring_thanos_store__test_s3_dir: '/opt/thanos-s3'
+monitoring_thanos_store__test_s3_access_key: 'molecule'
+monitoring_thanos_store__test_s3_secret_key: 'molecule-s3-secret-key'
 
 monitoring_thanos_store__test_cases:
 
@@ -31,16 +40,18 @@ monitoring_thanos_store__test_cases:
       thanos_store_container:
         volumes:
           - '/opt/thanos-store/data:/var/thanos/store'
+          - '/opt/thanos-store/bucket.yml:/etc/thanos/bucket.yml:ro'
           - '/opt/thanos-bucket:/bucket'
     expect:
       ip: '10.89.0.64'
       ip6: ~
-      objstore: true
+      secrets: []
       quadlet:
         - 'Volume=/opt/thanos-store/data:/var/thanos/store'
+        - 'Volume=/opt/thanos-store/bucket.yml:/etc/thanos/bucket.yml:ro'
         - 'Volume=/opt/thanos-bucket:/bucket'
 
-  # IPv6 and labels
+  # IPv6, labels and S3 with the secret key as secret
   - name: 'molecule-thanos-store'
     role_vars:
       thanos_store_version: 'v0.42.5'
@@ -53,25 +64,40 @@ monitoring_thanos_store__test_cases:
       thanos_store_labels:
         traefik.enable: 'false'
       thanos_store_objstore:
-        type: 'FILESYSTEM'
+        type: 'S3'
         config:
-          directory: '/bucket'
-      thanos_store_container:
-        volumes:
-          - '/opt/thanos-store/data:/var/thanos/store'
-          - '/opt/thanos-bucket:/bucket'
-    # side_effect changes the object storage, the secret changes and store has to restart
+          bucket: 'thanos'
+          endpoint: '10.89.0.63:9000'
+          region: 'us-east-1'
+          insecure: true
+          bucket_lookup_type: 'path'
+          access_key: 'molecule'
+      thanos_store_secrets:
+        - name: 'thanos_store_s3_secret_key'
+          data: 'molecule-s3-secret-key'
+          target: 'config.secret_key'
+    # side_effect changes the prefix of the object storage, bucket.yml changes and store has to restart
     side_effect:
       role_vars:
         thanos_store_objstore:
-          type: 'FILESYSTEM'
+          type: 'S3'
+          prefix: 'molecule'
           config:
-            directory: '/bucket/changed'
+            bucket: 'thanos'
+            endpoint: '10.89.0.63:9000'
+            region: 'us-east-1'
+            insecure: true
+            bucket_lookup_type: 'path'
+            access_key: 'molecule'
     expect:
       ip: '10.89.0.65'
       ip6: 'fd00:89::65'
-      objstore: true
+      secrets:
+        - 'Secret=thanos_store_s3_secret_key,type=env,target=THANOS_SECRET_CONFIG_SECRET_KEY'
+      bucket:
+        - 'prefix: molecule'
+        - '  secret_key: "$(THANOS_SECRET_CONFIG_SECRET_KEY)"'
       quadlet:
         - 'Volume=/opt/thanos-store/data:/var/thanos/store'
-        - 'Volume=/opt/thanos-bucket:/bucket'
+        - 'Volume=/opt/thanos-store/bucket.yml:/etc/thanos/bucket.yml:ro'
         - 'Label=traefik.enable=false'

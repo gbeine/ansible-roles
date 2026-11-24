@@ -4,16 +4,19 @@
   tags: [ 'monitoring', 'monitoring_thanos_store' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or thanos_store_container not a dictionary)
-    # stops the role here before anything changes
+    # A failing template in the variables (e.g. an unknown filter, thanos_store_container not a dictionary
+    # or a missing thanos_store_objstore) stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
-          - (monitoring_thanos_store__container | length) + (monitoring_thanos_store__objstore | to_json | length) > 0
+          - monitoring_thanos_store__container | length > 0
+          - (monitoring_thanos_store__objstore | to_json | length) + (monitoring_thanos_store__secrets | to_json | length) > 0
+          # thanos_store_environment has no default, a failing template stops the role here as well
+          - monitoring_thanos_store__environment | default({}) | length >= 0
         quiet: true
 
-    - name: 'Validate the role variables'
+    - name: 'Validate the secrets'
       ansible.builtin.assert:
         that:
           - monitoring_thanos_store__invalid | length == 0
@@ -23,55 +26,212 @@
       vars:
         monitoring_thanos_store__invalid: >-
           {%- set errors = [] -%}
+          {%- set secrets = monitoring_thanos_store__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`thanos_store_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`thanos_store_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `thanos_store_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the object storage'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_store__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_store__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # Fields carrying secrets with a value, null and an empty string are allowed,
+        # the lookahead also rejects white space, otherwise \s* would backtrack in front of the value
+        monitoring_thanos_store__plain_secrets: >-
+          {{ monitoring_thanos_store__objstore | to_json
+             | regex_findall('"(' ~ (monitoring_thanos_store__objstore_secret_keys | join('|')) ~ ')"\s*:\s*(?![\s]|null|"")')
+             | unique | list }}
+        monitoring_thanos_store__errors: >-
+          {%- set errors = [] -%}
           {%- set objstore = monitoring_thanos_store__objstore -%}
           {%- if objstore is not mapping -%}
-          {%-   set _ = errors.append('thanos_store_objstore has to be a dictionary') -%}
-          {%- elif objstore | length == 0 -%}
-          {%-   set _ = errors.append('thanos_store_objstore is required') -%}
-          {%- elif objstore.type is not defined -%}
-          {%-   set _ = errors.append('thanos_store_objstore needs type') -%}
+          {%-   set _ = errors.append('`thanos_store_objstore` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set unknown = objstore.keys() | map('string') | reject('in', monitoring_thanos_store__objstore_allowed) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in `thanos_store_objstore`: ' ~ (unknown | join(', ')) ~ ', allowed are '
+                                      ~ (monitoring_thanos_store__objstore_allowed | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if objstore.type | default('') not in monitoring_thanos_store__objstore_types -%}
+          {%-     set _ = errors.append('`thanos_store_objstore.type` has to be one of ' ~ (monitoring_thanos_store__objstore_types | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if objstore.config is defined and objstore.config is not mapping -%}
+          {%-     set _ = errors.append('`thanos_store_objstore.config` has to be a dictionary.') -%}
+          {%-   endif -%}
+          {%-   if monitoring_thanos_store__plain_secrets | length > 0 -%}
+          {%-     set _ = errors.append('These fields carry secrets, they are set with `thanos_store_secrets`, not in `thanos_store_objstore`: '
+                                      ~ (monitoring_thanos_store__plain_secrets | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
-          {%- set lines = monitoring_thanos_store__environment | dict2items | selectattr('value', 'string')
-                          | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
-          {%- if lines | length > 0 -%}
-          {%-   set _ = errors.append('Values of thanos_store_environment must not contain line breaks: ' ~ lines | join(', ')) -%}
+          {{ errors }}
+
+    # The role writes the references of the secrets into the dictionaries of the paths,
+    # a list or a value on the path would be replaced by the references,
+    # the references are double-quoted in bucket.yml, " and \ would end the string or start an escape sequence
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_store__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_store__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_thanos_store__targets: "{{ monitoring_thanos_store__secrets | map(attribute='target') | map('string') | list }}"
+        monitoring_thanos_store__unknown: >-
+          {{ monitoring_thanos_store__targets
+             | reject('in', monitoring_thanos_store__secrets_valid | map(attribute='path') | map('join', '.') | list) | list }}
+        monitoring_thanos_store__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(set=[], paths=[]) -%}
+          {%- for secret in monitoring_thanos_store__secrets_valid -%}
+          {%-   set node = namespace(value=monitoring_thanos_store__objstore, broken=false) -%}
+          {%-   for key in secret.path -%}
+          {%-     if not node.broken and node.value is not none -%}
+          {%-       if node.value is not mapping -%}
+          {%-         set node.broken = true -%}
+          {%-       else -%}
+          {%-         set node.value = node.value[key] | default(none) -%}
+          {%-       endif -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if node.broken -%}
+          {%-     set ns.paths = ns.paths + [ secret.path | join('.') ] -%}
+          {%-   elif node.value is not none -%}
+          {%-     set ns.set = ns.set + [ secret.path | join('.') ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set duplicates = monitoring_thanos_store__targets | community.general.counter | dict2items
+                               | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
+          {%- set data = monitoring_thanos_store__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+                         + monitoring_thanos_store__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n"\\\\]')
+                           | map(attribute='name') | list -%}
+          {%- if monitoring_thanos_store__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (monitoring_thanos_store__unknown | join(', '))
+                                    ~ ', the targets are paths of options of `thanos_store_objstore` ending in '
+                                    ~ (monitoring_thanos_store__objstore_secret_keys | join(', ')) ~ ', e.g. config.secret_key.') -%}
+          {%- endif -%}
+          {%- if duplicates | length > 0 -%}
+          {%-   set _ = errors.append('Every target of `thanos_store_secrets` is set once: ' ~ (duplicates | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.set | length > 0 -%}
+          {%-   set _ = errors.append('The targets of `thanos_store_secrets` must not be set in `thanos_store_objstore`: ' ~ (ns.set | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.paths | length > 0 -%}
+          {%-   set _ = errors.append('The paths of these secrets lead through values of `thanos_store_objstore` that are no dictionaries: '
+                                    ~ (ns.paths | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks, " and \\: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_thanos_store__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_store__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_store__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_thanos_store__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_thanos_store__environment is not mapping -%}
+          {%-   set _ = errors.append('`thanos_store_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = monitoring_thanos_store__environment | dict2items | selectattr('value', 'string')
+                            | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of `thanos_store_environment` must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
     # Checks the environment of the container after merging thanos_store_container,
     # unknown variables would change the behavior unexpectedly
+    # An environment that is no mapping is not checked here, the validation of thanos_store_environment reports it
     - name: 'Validate the allowed environment variables'
       ansible.builtin.assert:
         that:
-          - monitoring_thanos_store__environment_unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ monitoring_thanos_store__environment_unknown | join(', ') }},
-          Thanos only reads {{ monitoring_thanos_store__environment_allowed | join(', ') }}.
+          - monitoring_thanos_store__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_store__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_thanos_store__environment_unknown: >-
-          {{ (monitoring_thanos_store__container.environment | default({})).keys()
-             | reject('in', monitoring_thanos_store__environment_allowed) | list }}
+        monitoring_thanos_store__container_environment: >-
+          {{ monitoring_thanos_store__container.environment if monitoring_thanos_store__container.environment | default(none) is mapping else {} }}
+        monitoring_thanos_store__unknown: >-
+          {{ monitoring_thanos_store__container_environment.keys() | map('string') | reject('in', monitoring_thanos_store__environment_allowed) | list }}
+        monitoring_thanos_store__line_breaks: >-
+          {{ monitoring_thanos_store__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_thanos_store__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_thanos_store__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_thanos_store__unknown | join(', ')) ~ ', Thanos only reads '
+                                    ~ (monitoring_thanos_store__environment_allowed | join(', ')) ~ ', the secrets are set with `thanos_store_secrets`.') -%}
+          {%- endif -%}
+          {%- if monitoring_thanos_store__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_thanos_store__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
-    - name: 'Create the data directory'
+    - name: 'Create directories'
       ansible.builtin.file:
-        path: "{{ monitoring_thanos_store__podman_data_dir }}"
-        owner: "{{ monitoring_thanos_store__uid }}"
-        group: "{{ monitoring_thanos_store__gid }}"
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
         mode: '0755'
         state: 'directory'
+      loop:
+        - { path: "{{ monitoring_thanos_store__home }}", owner: 'root', group: 'root' }
+        - { path: "{{ monitoring_thanos_store__podman_data_dir }}", owner: "{{ monitoring_thanos_store__uid }}", group: "{{ monitoring_thanos_store__gid }}" }
+      loop_control:
+        label: "{{ item.path }}"
 
-    # The content of bucket.yml contains the credentials of the object storage,
-    # it is neither part of a file on the host nor of the quadlet unit
-    - name: 'Create or remove the secret of the object storage'
+    # bucket.yml contains no credentials, only the references $(THANOS_SECRET_…) Thanos replaces with the secrets of the environment,
+    # the references are double-quoted, so the replaced secrets stay strings
+    - name: 'Generate bucket.yml'
+      ansible.builtin.copy:
+        content: |
+          #
+          # Ansible managed
+          #
+
+          {{ monitoring_thanos_store__bucket_content }}
+        dest: "{{ monitoring_thanos_store__podman_objstore_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'monitoring_thanos_store__objstore_result'
+      vars:
+        monitoring_thanos_store__bucket_content: >-
+          {%- set ns = namespace(text=monitoring_thanos_store__objstore_rendered | to_nice_yaml(indent=2, sort_keys=false)) -%}
+          {%- for secret in monitoring_thanos_store__secrets_valid -%}
+          {%-   set ns.text = ns.text | replace(': $(' ~ secret.variable ~ ')', ': "$(' ~ secret.variable ~ ')"') -%}
+          {%- endfor -%}
+          {{ ns.text }}
+
+    - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
-        name: "{{ monitoring_thanos_store__podman_objstore_secret }}"
-        data: >-
-          {{ (monitoring_thanos_store__objstore | to_nice_yaml(indent=2, sort_keys=false))
-             if monitoring_thanos_store__objstore | length > 0 else omit }}
-        state: "{{ 'present' if monitoring_thanos_store__objstore | length > 0 else 'absent' }}"
-      register: 'monitoring_thanos_store__objstore_result'
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ monitoring_thanos_store__secrets }}"
+      register: 'monitoring_thanos_store__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -106,6 +266,21 @@
           {% if monitoring_thanos_store__container.requires is defined %}
           Requires={{ monitoring_thanos_store__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_thanos_store__container.wants is defined %}
+          Wants={{ monitoring_thanos_store__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_store__container.after is defined %}
+          After={{ monitoring_thanos_store__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_store__container.part_of is defined %}
+          PartOf={{ monitoring_thanos_store__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_store__container.binds_to is defined %}
+          BindsTo={{ monitoring_thanos_store__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_store__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_thanos_store__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_thanos_store__quadlet_result'
@@ -126,7 +301,9 @@
               {{ (ansible_facts.services[monitoring_thanos_store__container.name + '.service'].state | default('')) == 'running' }}
             monitoring_thanos_store__restart: >-
               {{ monitoring_thanos_store__running | bool
-                 and (monitoring_thanos_store__objstore_result is changed or monitoring_thanos_store__quadlet_result is changed) }}
+                 and (monitoring_thanos_store__objstore_result is changed
+                      or monitoring_thanos_store__secrets_result is changed
+                      or monitoring_thanos_store__quadlet_result is changed) }}
 
       rescue:
 
@@ -138,12 +315,16 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ monitoring_thanos_store__container.name ~ ' did not start' ] + monitoring_thanos_store__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ monitoring_thanos_store__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_thanos_store__start_journal.stdout_lines }}
 
     - name: 'Wait for Thanos Store'
       ansible.builtin.uri:
         url: "http://{{ monitoring_thanos_store__container.ip }}:{{ monitoring_thanos_store__http_port }}/-/ready"
         status_code: [ 200, 503 ]
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
       register: 'monitoring_thanos_store__ready'
       until: monitoring_thanos_store__ready.status | default(-1) == 200
       retries: 60
