@@ -223,6 +223,62 @@
               vars:
                 monitoring_icinga_master__test_rejected_failure: "{{ ansible_failed_result.msg | default('') | string }}"
 
+    # zones.conf is a single file mounted into the running container, the check has to read the new file:
+    # a zone with the name of the zone of the master is a duplicate object, icinga2 daemon -C rejects it and Icinga is not restarted
+    - name: 'Run monitoring_icinga_master with a duplicate zone in zones.conf (expect ERROR)'
+      when: monitoring_icinga_master__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the duplicate zone'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+          register: 'monitoring_icinga_master__test_zone_before'
+          changed_when: false
+
+        - name: 'Run monitoring_icinga_master with a duplicate zone (expect ERROR)'
+          block:
+
+            - name: 'Run monitoring_icinga_master, it has to fail (expect ERROR)'
+              ansible.builtin.include_role:
+                name: 'monitoring_icinga_master'
+              vars:
+                icinga_master_zones:
+                  - name: "{{ monitoring_icinga_master__test_case.role_vars.icinga_master_zone_name }}"
+                    address: '127.0.0.1'
+
+            - name: 'Fail because the duplicate zone was accepted'
+              ansible.builtin.fail:
+                msg: 'icinga2 daemon -C accepted a duplicate zone in zones.conf'
+
+          rescue:
+
+            - name: 'Read the start time of the service after the duplicate zone'
+              ansible.builtin.command:
+                argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'icinga-master' ]
+              register: 'monitoring_icinga_master__test_zone_after'
+              changed_when: false
+
+            - name: 'Read the state of the service after the duplicate zone'
+              ansible.builtin.command:
+                argv: [ 'systemctl', 'is-active', 'icinga-master' ]
+              register: 'monitoring_icinga_master__test_zone_state'
+              changed_when: false
+              failed_when: false
+
+            - name: 'Assert the rejected duplicate zone without restart'
+              ansible.builtin.assert:
+                that:
+                  - monitoring_icinga_master__test_zone_failure is search('icinga2 daemon -C rejects the configuration, Icinga is not restarted')
+                  - monitoring_icinga_master__test_zone_failure is search('Zone')
+                  - monitoring_icinga_master__test_zone_after.stdout == monitoring_icinga_master__test_zone_before.stdout
+                  - monitoring_icinga_master__test_zone_state.stdout == 'active'
+                fail_msg: >-
+                  failure: {{ monitoring_icinga_master__test_zone_failure }},
+                  start before {{ monitoring_icinga_master__test_zone_before.stdout }},
+                  after {{ monitoring_icinga_master__test_zone_after.stdout }}, state {{ monitoring_icinga_master__test_zone_state.stdout }}
+              vars:
+                monitoring_icinga_master__test_zone_failure: "{{ ansible_failed_result.msg | default('') | string }}"
+
     - name: 'Run monitoring_icinga_master with the changed configuration'
       when: monitoring_icinga_master__test_case.side_effect is defined
       block:

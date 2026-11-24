@@ -191,11 +191,13 @@ The role runs with `--check`, also on a host where it never ran, and reports the
 ### Restart and updates
 
 Icinga is restarted if it was running and a file of the configuration, a feature, the podman secret or the quadlet unit changed, otherwise it is started and enabled.
-Before the restart the role checks the configuration with `icinga2 daemon -C` in the running container. If Icinga rejects it, the role does not restart Icinga
+Before the restart the role checks the configuration with `icinga2 daemon -C` in a throwaway container (`podman run --rm --network=none`)
+with the image, the volumes, the secret and the environment of the quadlet unit. If Icinga rejects it, the role does not restart Icinga
 and fails with the output of the check, Icinga keeps running with the former configuration. The files on the host are written already,
 a second run without a change does not restart Icinga either, fix the configuration and run the role again.
-`icinga2.conf`, `constants.conf`, `zones.conf` and `endpoints.conf` are single files mounted into the container, the running container may still see
-their former version, `conf.d`, `features-enabled` and `zones.d` are directories and show the new files.
+The check does not run in the running container: `icinga2.conf`, `constants.conf`, `zones.conf` and `endpoints.conf` are single files mounted into the container,
+the running container still sees their former version after the role replaced them, `conf.d`, `features-enabled` and `zones.d` are directories and show the new files.
+The single files keep the scripts of the mail notifications and `features-available` of the image visible in `/etc/icinga2`.
 If the start fails, the role shows the error and the journal of the service. With the feature `api` the role waits until the API answers and shows the journal otherwise,
 Icinga exits if the configuration is invalid.
 Updates of the image are done by `container_update` with `icinga_master_autoupdate_enabled: true` and `icinga_master_autoupdate_schedule`,
@@ -246,6 +248,8 @@ Changed behavior:
 - `ExecStartPre` uses `install` instead of `cp -uL`, `chown` and `chmod`, it does not depend on the timestamps anymore,
   the timer of `pki_update` restarts Icinga after a renewal of the certificate
 - `requires_mounts_for` of `icinga_master_container` is new
+- `icinga2 daemon -C` runs in a throwaway container with the volumes of the quadlet unit before the restart,
+  the check in the running container did not see changes of `icinga2.conf`, `constants.conf`, `zones.conf` and `endpoints.conf`
 
 Fixed bugs:
 
@@ -262,7 +266,8 @@ an unknown attribute, a boolean that is no boolean, a password in `icinga_master
 an unknown secret, the secret of a missing API user and of a disabled feature, a secret name that is no constant,
 `icinga_master_hosts` not a list and an unknown environment variable and checks that it fails with the expected message
 and the quadlet unit, `mainlog.conf` and `api-users.conf` are unchanged (tasks marked `expect ERROR`),
-then it writes a host with an unknown check command on `molecule-icinga-master`, `icinga2 daemon -C` has to reject it and Icinga must not restart,
+then it writes a host with an unknown check command (`conf.d`) and a duplicate zone (`zones.conf`, a single file mount) on `molecule-icinga-master`,
+`icinga2 daemon -C` has to reject both and Icinga must not restart,
 then it changes `mainlog.severity` on `molecule-icinga-master`, `mainlog.conf` changes, Icinga has to restart and the container has to mount the new file,
 `molecule-icinga-master-default` runs again without a change and Icinga must not restart.
 `verify` checks the quadlet unit with the `install` lines of `ExecStartPre`, owner and mode of the key, the timer of `pki_update`, the enabled features and their files, the lines of the configuration with the constants of the secrets,

@@ -439,13 +439,26 @@
                   or monitoring_icinga_master__secret_result is changed
                   or monitoring_icinga_master__quadlet_result is changed) }}
 
-    # A running Icinga is only restarted with a valid configuration, it keeps running with the former configuration otherwise
+    # A running Icinga is only restarted with a valid configuration, it keeps running with the former configuration otherwise.
+    # The check does not use podman exec: icinga2.conf, constants.conf, zones.conf and endpoints.conf are single files mounted
+    # into the running container, it keeps the former file after template replaced it.
+    # A throwaway container with the volumes, the secret and the environment of the quadlet unit checks the new files,
+    # the image provides the scripts and features-available as in operation, --rm removes the container and its anonymous volumes.
     - name: 'Check the configuration with icinga2 daemon -C'
       when:
         - not ansible_check_mode
         - monitoring_icinga_master__restart | bool
       ansible.builtin.command:
-        argv: [ 'podman', 'exec', "{{ monitoring_icinga_master__container.name }}", 'icinga2', 'daemon', '-C' ]
+        argv: >-
+          {{ [ 'podman', 'run', '--rm', '--network=none', '--entrypoint=icinga2' ]
+             + (monitoring_icinga_master__container.volumes | default([]) | map('regex_replace', '^', '--volume=') | list)
+             + ([ '--secret=' ~ monitoring_icinga_master__config_secret ~ ',' ~ monitoring_icinga_master__config_secret_mount ]
+                if monitoring_icinga_master__secrets | length > 0 else [])
+             + (monitoring_icinga_master__check_environment.items() | map('join', '=') | map('regex_replace', '^', '--env=') | list)
+             + [ monitoring_icinga_master__container.image, 'daemon', '-C' ] }}
+      vars:
+        monitoring_icinga_master__check_environment: >-
+          {{ monitoring_icinga_master__container.environment if monitoring_icinga_master__container.environment | default(none) is mapping else {} }}
       register: 'monitoring_icinga_master__config_check'
       changed_when: false
       failed_when: false
