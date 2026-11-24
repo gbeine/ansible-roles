@@ -34,6 +34,7 @@
           - app_forgejo_runner__test_quadlet_lines | select('search', 'type=env') | list | length == 0
           - app_forgejo_runner__expect.env | length > 0 or app_forgejo_runner__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
           - ('Timezone=' + app_forgejo_runner__test_case.role_vars.forgejo_runner_timezone) in app_forgejo_runner__test_quadlet_lines
+          - (app_forgejo_runner__test_quadlet_lines | select('search', ':/var/run/docker.sock') | list | length > 0) == app_forgejo_runner__expect.docker_socket
           - app_forgejo_runner__test_plain | select('in', app_forgejo_runner__test_quadlet.content | b64decode) | list | length == 0
         fail_msg: "{{ app_forgejo_runner__test_quadlet.content | b64decode }}"
       vars:
@@ -121,3 +122,17 @@
           # Quoted, the colon would make the line a mapping
           - 'app_forgejo_runner__test_journal.stdout is search("with labels: \[molecule\]")'
         fail_msg: "{{ [ 'automatic restarts: ' ~ app_forgejo_runner__test_restarts.stdout ] + app_forgejo_runner__test_journal.stdout_lines | default([]) }}"
+
+    # The runner user writes to the socket of podman as member of the group of the socket
+    - name: 'Check the socket of podman in the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'forgejo-runner', 'sh', '-c', 'test -S /var/run/docker.sock && test -w /var/run/docker.sock' ]
+      register: 'app_forgejo_runner__test_socket'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the socket of podman in the container'
+      ansible.builtin.assert:
+        that:
+          - (app_forgejo_runner__test_socket.rc == 0) == app_forgejo_runner__expect.docker_socket
+        fail_msg: "socket check rc {{ app_forgejo_runner__test_socket.rc }}: {{ app_forgejo_runner__test_socket.stderr }}"

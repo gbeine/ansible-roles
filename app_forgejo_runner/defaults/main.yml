@@ -32,6 +32,10 @@ app_forgejo_runner__keys: "{{ forgejo_runner_keys | default({}) }}"
 # Only the variables of the Docker client, the options of the runner are set with forgejo_runner_config
 app_forgejo_runner__environment: "{{ forgejo_runner_environment }}"
 
+# The socket of podman on the host, mounted to /var/run/docker.sock for the jobs with docker:// labels
+app_forgejo_runner__docker_socket_enable: "{{ forgejo_runner_docker_socket_enable | default(true) }}"
+app_forgejo_runner__docker_socket: "{{ forgejo_runner_docker_socket | default('/run/podman/podman.sock') }}"
+
 app_forgejo_runner__container: "{{ app_forgejo_runner__podman_container_default | combine(forgejo_runner_container | default({})) }}"
 
 app_forgejo_runner__autoupdate_enabled: "{{ forgejo_runner_autoupdate_enabled | default(false) }}"
@@ -165,9 +169,14 @@ app_forgejo_runner__podman_container_default:
                                ~ ',uid=' ~ app_forgejo_runner__uid ~ ',gid=' ~ app_forgejo_runner__gid ~ ',mode=0400') -%}
     {%- endfor -%}
     {{ secrets if secrets | length > 0 else omit }}
+  # The socket exists only after podman.socket started, the bind mount needs it,
+  # forgejo_runner_container.wants and after replace the dependencies completely
+  wants: "{{ [ 'podman.socket' ] if app_forgejo_runner__docker_socket_enable | bool else omit }}"
+  after: "{{ [ 'podman.socket' ] if app_forgejo_runner__docker_socket_enable | bool else omit }}"
   # forgejo_runner_container.volumes replaces the list completely
-  volumes:
-    - "{{ app_forgejo_runner__home }}:/data"
+  volumes: >-
+    {{ [ app_forgejo_runner__home ~ ':/data' ]
+       + ([ app_forgejo_runner__docker_socket ~ ':/var/run/docker.sock' ] if app_forgejo_runner__docker_socket_enable | bool else []) }}
 
 # Generated from internal/pkg/config/config.example.yaml of Forgejo Runner v13.2.2, the secrets set with forgejo_runner_secrets
 app_forgejo_runner__secrets_allowed_options: [ 'cache.secret' ]
