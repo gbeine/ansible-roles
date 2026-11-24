@@ -1,0 +1,254 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_readeck__test_case: "{{ app_readeck__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_readeck__test_vars: "{{ app_readeck__test_case.role_vars }}"
+    app_readeck__test_secrets: "{{ app_readeck__test_vars.readeck_secrets }}"
+    app_readeck__test_config: "{{ app_readeck__test_vars.readeck_config | default({}) }}"
+    app_readeck__test_provider:
+      name: 'Molecule IdP'
+      url: 'https://idp.example.org/realms/molecule'
+      client_id: 'readeck'
+    app_readeck__test_checked_files:
+      - "{{ app_readeck__test_quadlet_path }}"
+      - "{{ app_readeck__test_config_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_readeck__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_readeck__test_checked_files }}"
+      register: 'app_readeck__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_readeck with readeck_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_container: [ 'environment' ]
+        app_readeck__test_invalid:
+          message: 'readeck_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_readeck with readeck_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_secrets:
+          name: 'readeck_secret_key'
+        app_readeck__test_invalid:
+          message: 'readeck_secrets not a list'
+          search: '^`readeck_secrets` has to be a list$'
+
+    - name: 'Run app_readeck with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_secrets: "{{ app_readeck__test_secrets + [ { 'name': 'readeck_other', 'data': 'x' } ] }}"
+        app_readeck__test_invalid:
+          message: 'a secret without target'
+          search: '^`readeck_secrets` entries need name, data and target$'
+
+    - name: 'Run app_readeck with readeck_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: [ 'main' ]
+        app_readeck__test_invalid:
+          message: 'readeck_config not a dictionary'
+          search: '(failed to combine variables, expected dicts|^readeck_config has to be a dictionary of the sections of config\.toml\.$)'
+
+    - name: 'Run app_readeck with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'main': { 'log_levels': 'DEBUG' } }, recursive=true) }}"
+        app_readeck__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options in readeck_config: main\.log_levels\.'
+
+    - name: 'Run app_readeck with an option set by the role (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'server': { 'port': 8080 } }, recursive=true) }}"
+        app_readeck__test_invalid:
+          message: 'an option set by the role'
+          search: '^These options are set by the role and the image and must not be set in readeck_config: server\.port\.$'
+
+    - name: 'Run app_readeck with the secret key in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'main': { 'secret_key': 'molecule-secret-key-plain' } }, recursive=true) }}"
+        app_readeck__test_invalid:
+          message: 'the secret key in the configuration'
+          search: '^These options are passed as secrets with readeck_secrets, not in readeck_config: READECK_SECRET_KEY\.$'
+
+    - name: 'Run app_readeck with a string as boolean in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'worker': { 'start_worker': 'true' } }, recursive=true) }}"
+        app_readeck__test_invalid:
+          message: 'a string as boolean in the configuration'
+          search: '^These options are booleans, use true or false without quotes: worker\.start_worker\.$'
+
+    - name: 'Run app_readeck with a line break in an option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'main': { 'log_level': 'WARN\nDEBUG' } }, recursive=true) }}"
+        app_readeck__test_invalid:
+          message: 'a line break in an option'
+          search: '^Options must not contain line breaks: main\.log_level\.$'
+
+    - name: 'Run app_readeck with the client secret in the provider of OIDC (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'auth': { 'oidc': { 'providers': [ app_readeck__test_provider | combine({ 'client_secret': 'molecule-plain' }) ] } } }) }}"
+        readeck_secrets: "{{ app_readeck__test_secrets[:1] + [ { 'name': 'readeck_oidc_client_secret', 'data': 'x', 'target': 'READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET' } ] }}"
+        app_readeck__test_invalid:
+          message: 'the client secret in the provider of OIDC'
+          search: '^auth\.oidc\.providers\[0\]: client_secret is passed as secret with readeck_secrets, not in readeck_config: READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET\.$'
+
+    - name: 'Run app_readeck with a provider of OIDC without url (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'auth': { 'oidc': { 'providers': [ app_readeck__test_provider | combine({ 'url': '' }) ] } } }) }}"
+        readeck_secrets: "{{ app_readeck__test_secrets[:1] + [ { 'name': 'readeck_oidc_client_secret', 'data': 'x', 'target': 'READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET' } ] }}"
+        app_readeck__test_invalid:
+          message: 'a provider of OIDC without url'
+          search: '^auth\.oidc\.providers\[0\] needs url\.$'
+
+    - name: 'Run app_readeck with a provider of OIDC without its client secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_config: "{{ app_readeck__test_config | combine({ 'auth': { 'oidc': { 'providers': [ app_readeck__test_provider ] } } }) }}"
+        readeck_secrets: "{{ app_readeck__test_secrets[:1] }}"
+        app_readeck__test_invalid:
+          message: 'a provider of OIDC without its client secret'
+          search: '^Readeck needs the secrets READECK_SECRET_KEY, READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET, missing: READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET\.$'
+
+    - name: 'Run app_readeck without the secret key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_secrets: "{{ app_readeck__test_secrets[1:] }}"
+        app_readeck__test_invalid:
+          message: 'no secret key'
+          search: '^Readeck needs the secrets READECK_SECRET_KEY(, READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET)?, missing: READECK_SECRET_KEY\.$'
+
+    - name: 'Run app_readeck with the secret key in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_environment:
+          READECK_SECRET_KEY: 'molecule-secret-key-plain'
+        app_readeck__test_invalid:
+          message: 'the secret key in the environment'
+          search: '^Secrets must not be set in readeck_environment: READECK_SECRET_KEY\.$'
+
+    - name: 'Run app_readeck with an option in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_environment:
+          READECK_LOG_LEVEL: 'debug'
+        app_readeck__test_invalid:
+          message: 'an option in the environment'
+          search: '^Unknown environment variables: READECK_LOG_LEVEL\.'
+
+    - name: 'Run app_readeck with an unknown environment variable in the container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_container:
+          environment:
+            MOLECULE: 'unknown'
+        app_readeck__test_invalid:
+          message: 'an unknown environment variable in the container'
+          search: '^Unknown environment variables: MOLECULE\.'
+
+    - name: 'Run app_readeck with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        readeck_secrets: "{{ app_readeck__test_secrets + [ { 'name': 'readeck_admin_password', 'data': 'x', 'target': 'READECK_ADMIN_PASSWORD' } ] }}"
+        app_readeck__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: READECK_ADMIN_PASSWORD\.'
+
+    - name: 'Change the configuration of Readeck'
+      when: app_readeck__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'readeck' ]
+          register: 'app_readeck__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            readeck_config: "{{ app_readeck__test_config | combine(app_readeck__test_case.side_effect.readeck_config, recursive=true) }}"
+
+        - name: 'Run app_readeck with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'app_readeck'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'readeck' ]
+          register: 'app_readeck__test_started_after'
+          changed_when: false
+
+        # Only the configuration file changes, the quadlet unit is unchanged
+        - name: 'Assert the changed configuration file and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_readeck__config_result is changed
+              - app_readeck__quadlet_result is not changed
+              - app_readeck__test_started_after.stdout | int > app_readeck__test_started_before.stdout | int
+            fail_msg: >-
+              configuration changed: {{ app_readeck__config_result is changed }}, quadlet changed: {{ app_readeck__quadlet_result is changed }},
+              start before {{ app_readeck__test_started_before.stdout }}, after {{ app_readeck__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_readeck__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'readeck' ]
+          register: 'app_readeck__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_readeck without a change'
+          ansible.builtin.include_role:
+            name: 'app_readeck'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'readeck' ]
+          register: 'app_readeck__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_readeck__config_result is not changed
+              - app_readeck__quadlet_result is not changed
+              - app_readeck__secrets_result is not changed
+              - app_readeck__test_unchanged_after.stdout == app_readeck__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ app_readeck__config_result is changed }}, quadlet changed: {{ app_readeck__quadlet_result is changed }},
+              secrets changed: {{ app_readeck__secrets_result is changed }},
+              start before {{ app_readeck__test_unchanged_before.stdout }}, after {{ app_readeck__test_unchanged_after.stdout }}

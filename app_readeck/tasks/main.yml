@@ -1,0 +1,374 @@
+---
+
+- name: 'Deploy Readeck'
+  tags: [ 'app', 'app_readeck' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter or readeck_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_readeck__container | length > 0
+          # The default of the configuration is empty, the configuration is rendered, not counted
+          - app_readeck__config | string | length > 0
+          - app_readeck__config_paths | string | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_readeck__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_readeck__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_readeck__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`readeck_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`readeck_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `readeck_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Readeck ignores unknown options of the configuration file, TOML is typed
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_readeck__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_readeck__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_readeck__config_custom is not mapping -%}
+          {%-   set _ = errors.append('readeck_config has to be a dictionary of the sections of config.toml.') -%}
+          {%- else -%}
+          {%-   set paths = app_readeck__config_paths | map(attribute='path') | list -%}
+          {%-   set role = paths | select('in', app_readeck__config_role) | list -%}
+          {%-   set secrets = paths | select('in', app_readeck__config_secrets.keys() | list) | list -%}
+          {%-   set unknown = paths | reject('in', app_readeck__config_allowed + app_readeck__config_role + secrets) | list -%}
+          {%-   set ns = namespace(booleans=[], integers=[], lines=[]) -%}
+          {%-   for option in app_readeck__config_paths -%}
+          {%-     if option.path in app_readeck__config_booleans and option.value is not boolean -%}
+          {%-       set ns.booleans = ns.booleans + [ option.path ] -%}
+          {%-     elif option.path in app_readeck__config_integers and (option.value is not integer or option.value is boolean) -%}
+          {%-       set ns.integers = ns.integers + [ option.path ] -%}
+          {%-     endif -%}
+          {%-     set values = option.value if (option.value is sequence and option.value is not string and option.value is not mapping) else [ option.value ] -%}
+          {%-     if values | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-       set ns.lines = ns.lines + [ option.path ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if role | length > 0 -%}
+          {%-     set _ = errors.append('These options are set by the role and the image and must not be set in readeck_config: ' ~ (role | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if secrets | length > 0 -%}
+          {%-     set _ = errors.append('These options are passed as secrets with readeck_secrets, not in readeck_config: '
+                                      ~ (secrets | map('extract', app_readeck__config_secrets) | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options in readeck_config: ' ~ (unknown | join(', '))
+                                      ~ '. Allowed are the options of Readeck (app_readeck__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   if ns.booleans | length > 0 -%}
+          {%-     set _ = errors.append('These options are booleans, use true or false without quotes: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.integers | length > 0 -%}
+          {%-     set _ = errors.append('These options are numbers without quotes: ' ~ (ns.integers | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('Options must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set providers = app_readeck__config_paths | selectattr('path', 'eq', 'auth.oidc.providers') | map(attribute='value') | list -%}
+          {%-   if providers | length > 0 -%}
+          {%-     set providers = providers | first -%}
+          {%-     if providers is not sequence or providers is string or providers is mapping or providers | reject('mapping') | list | length > 0 -%}
+          {%-       set _ = errors.append('auth.oidc.providers has to be a list of providers with ' ~ (app_readeck__oidc_required | join(', ')) ~ '.') -%}
+          {%-     else -%}
+          {%-       for provider in providers -%}
+          {%-         set prefix = 'auth.oidc.providers[' ~ loop.index0 ~ ']' -%}
+          {%-         set keys = provider.keys() | map('string') | list -%}
+          {%-         set missing = app_readeck__oidc_required | reject('in', provider | dict2items | selectattr('value', 'string')
+                                                                         | rejectattr('value', 'eq', '') | map(attribute='key') | list) | list -%}
+          {%-         set unknown = keys | reject('in', app_readeck__oidc_allowed + [ 'client_secret' ]) | list -%}
+          {%-         set groups = provider.groups | default([]) -%}
+          {%-         if 'client_secret' in keys -%}
+          {%-           set _ = errors.append(prefix ~ ': client_secret is passed as secret with readeck_secrets, not in readeck_config: READECK_AUTH_OIDC_PROVIDERS_'
+                                            ~ loop.index0 ~ '_CLIENT_SECRET.') -%}
+          {%-         endif -%}
+          {%-         if missing | length > 0 -%}
+          {%-           set _ = errors.append(prefix ~ ' needs ' ~ (missing | join(', ')) ~ '.') -%}
+          {%-         endif -%}
+          {%-         if unknown | length > 0 -%}
+          {%-           set _ = errors.append(prefix ~ ': unknown options ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_readeck__oidc_allowed | join(', ')) ~ '.') -%}
+          {%-         endif -%}
+          {%-         if provider.provisioning is defined and provider.provisioning is not boolean -%}
+          {%-           set _ = errors.append(prefix ~ ': provisioning is a boolean, use true or false without quotes.') -%}
+          {%-         endif -%}
+          {%-         if groups is not sequence or groups is string or groups is mapping
+                         or groups | reject('sequence') | list | length > 0
+                         or groups | select('string') | list | length > 0
+                         or groups | map('length') | reject('eq', 2) | list | length > 0
+                         or groups | flatten | reject('string') | list | length > 0 -%}
+          {%-           set _ = errors.append(prefix ~ ': groups is a list of pairs of a group of the provider and a group of Readeck.') -%}
+          {%-         endif -%}
+          {%-         if provider.values() | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-           set _ = errors.append(prefix ~ ': the options must not contain line breaks.') -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Readeck overwrites the configuration file with a new secret key without READECK_SECRET_KEY,
+    # every provider of OIDC needs its client secret
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_readeck__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_readeck__targets: "{{ app_readeck__secrets | map(attribute='target') | map('string') | list }}"
+        app_readeck__secrets_missing: "{{ app_readeck__secrets_required | reject('in', app_readeck__targets) | list }}"
+        app_readeck__environment_keys: >-
+          {{ (app_readeck__environment.keys() | map('string') | list) if (app_readeck__environment is defined and app_readeck__environment is mapping) else [] }}
+        app_readeck__secrets_in_environment: >-
+          {{ (app_readeck__targets + app_readeck__secrets_allowed) | select('in', app_readeck__environment_keys) | unique | list }}
+        app_readeck__secrets_empty: >-
+          {{ app_readeck__secrets | rejectattr('data', 'none') | map(attribute='data') | map('string') | select('eq', '') | list
+             + app_readeck__secrets | selectattr('data', 'none') | list }}
+        app_readeck__secrets_lines: >-
+          {{ app_readeck__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_readeck__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_readeck__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Readeck needs the secrets ' ~ (app_readeck__secrets_required | join(', ')) ~ ', missing: ' ~ (app_readeck__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_readeck__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in readeck_environment: ' ~ (app_readeck__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_readeck__secrets_empty | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be empty.') -%}
+          {%- endif -%}
+          {%- if app_readeck__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_readeck__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging readeck_container,
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_readeck__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without readeck_secrets
+        app_readeck__container_secrets: >-
+          {{ app_readeck__container.secrets
+             if (app_readeck__container.secrets is defined and app_readeck__container.secrets is sequence and app_readeck__container.secrets is not string)
+             else [] }}
+        app_readeck__container_environment: >-
+          {{ app_readeck__container.environment if app_readeck__container.environment | default(none) is mapping else {} }}
+        app_readeck__environment_unknown: >-
+          {{ app_readeck__container_environment.keys() | map('string') | reject('in', app_readeck__environment_allowed) | list }}
+        app_readeck__environment_line_breaks: >-
+          {{ app_readeck__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_readeck__secrets_unknown: >-
+          {{ app_readeck__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_readeck__secrets_allowed) | list }}
+        app_readeck__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_readeck__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_readeck__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_readeck__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_readeck__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables ' ~ (app_readeck__environment_allowed | join(', ')) ~ ' and the secrets ' ~ (app_readeck__secrets_allowed | join(', '))
+                                    ~ ', the options of Readeck are set with readeck_config.') -%}
+          {%- endif -%}
+          {%- if app_readeck__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_readeck__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of Readeck'
+      ansible.builtin.file:
+        path: "{{ app_readeck__podman_home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+
+    # Readeck runs as app_readeck__uid and writes the database and the content scripts to the data directory
+    - name: 'Create the data directory of Readeck'
+      ansible.builtin.file:
+        path: "{{ app_readeck__podman_home }}/data"
+        owner: "{{ app_readeck__uid }}"
+        group: "{{ app_readeck__gid }}"
+        mode: '0750'
+        state: 'directory'
+
+    # The configuration file contains no secrets
+    - name: 'Write the configuration file'
+      ansible.builtin.copy:
+        content: "{{ '#\n# Ansible managed\n#\n\n' ~ (app_readeck__config_content | community.general.to_toml) }}"
+        dest: "{{ app_readeck__config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+      register: 'app_readeck__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_readeck__secrets }}"
+      register: 'app_readeck__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_readeck__container.name }}"
+        hostname: "{{ app_readeck__container.hostname }}"
+        image: "{{ app_readeck__container.image }}"
+        ip: "{{ app_readeck__container.ip }}"
+        ip6: "{{ app_readeck__container.ipv6 | default(omit) }}"
+        network: "{{ app_readeck__container.network }}"
+        timezone: "{{ app_readeck__container.timezone }}"
+        user: "{{ app_readeck__container.user | default(omit) }}"
+        command: "{{ app_readeck__container.command | default(omit) }}"
+        env: "{{ app_readeck__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_readeck__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_readeck__container.expose | default(omit) }}"
+        label: "{{ app_readeck__container.labels | default(omit) }}"
+        publish: "{{ app_readeck__container.publish | default(omit) }}"
+        secrets: "{{ app_readeck__container.secrets | default(omit) }}"
+        volume: "{{ app_readeck__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_readeck__container.requires is defined %}
+          Requires={{ app_readeck__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_readeck__container.wants is defined %}
+          Wants={{ app_readeck__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_readeck__container.after is defined %}
+          After={{ app_readeck__container.after | join(' ') }}
+          {% endif %}
+          {% if app_readeck__container.part_of is defined %}
+          PartOf={{ app_readeck__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_readeck__container.binds_to is defined %}
+          BindsTo={{ app_readeck__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_readeck__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_readeck__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_readeck__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Readeck'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_readeck__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_readeck__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_readeck__running: >-
+              {{ (ansible_facts.services[app_readeck__container.name + '.service'].state | default('')) == 'running' }}
+            app_readeck__restart: >-
+              {{ app_readeck__running | bool
+                 and (app_readeck__config_result is changed or app_readeck__secrets_result is changed
+                      or app_readeck__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_readeck__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_readeck__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_readeck__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_readeck__start_journal.stdout_lines }}
+
+    # /api/info needs no login, with cert_file Readeck answers with TLS
+    - name: 'Wait for Readeck'
+      ansible.builtin.uri:
+        url: >-
+          {{ 'https' if (app_readeck__config_content.server.cert_file | default('')) | length > 0 else 'http' }}://{{ app_readeck__ip }}:{{ app_readeck__port }}/api/info
+        validate_certs: false
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'app_readeck__ready'
+      until: app_readeck__ready.status | default(0) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Readeck'
+      when:
+        - not ansible_check_mode
+        - app_readeck__ready.status | default(0) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_readeck__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'app_readeck__journal'
+      changed_when: false
+
+    - name: 'Assert that Readeck is available'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__journal is skipped
+        fail_msg: "{{ app_readeck__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_readeck__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_readeck__container.name }}"
+        container_image: "{{ app_readeck__container.image }}"
+        container_schedule: "{{ app_readeck__autoupdate_schedule }}"

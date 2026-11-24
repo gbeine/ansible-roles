@@ -1,0 +1,110 @@
+---
+# Network created by container_podman in prepare.yml
+app_readeck__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_readeck__test_version: '0.23.6'
+app_readeck__test_image: 'codeberg.org/readeck/readeck:0.23.6'
+app_readeck__test_config_path: '/opt/readeck/config.toml'
+app_readeck__test_quadlet_path: '/etc/containers/systemd/readeck.container'
+
+# The user of the login test, verify creates it with the SHA-256 crypt hash of the password (openssl passwd -5 -salt moleculesalt)
+app_readeck__test_user: 'molecule'
+app_readeck__test_password: 'molecule-password'
+app_readeck__test_password_hash: '$5$moleculesalt$iTZDodW/e4EemwABj0zza99VT2gc/ixSyLXEYemWsx.'
+
+app_readeck__test_cases:
+
+  # Only the mandatory variables and the secret key
+  - name: 'molecule-readeck-default'
+    role_vars:
+      readeck_home: '/opt/readeck'
+      readeck_ip: '10.89.0.101'
+      readeck_network: 'podman-molecule'
+      readeck_hostname: 'readeck-default'
+      readeck_timezone: 'Europe/Berlin'
+      readeck_version: '0.23.6'
+      readeck_secrets:
+        - name: 'readeck_secret_key'
+          data: 'molecule-secret-key-default'
+          target: 'READECK_SECRET_KEY'
+    expect:
+      ip: '10.89.0.101'
+      ip6: ~
+      secrets: [ 'molecule-secret-key-default' ]
+      quadlet:
+        - 'Secret=readeck_secret_key,type=env,target=READECK_SECRET_KEY'
+        - 'Volume=/opt/readeck/data:/readeck:Z'
+        - 'Volume=/opt/readeck/config.toml:/etc/readeck/config.toml:ro,Z'
+        - 'User=1000'
+        - 'Group=1000'
+        - 'Exec=/bin/readeck serve -config /etc/readeck/config.toml'
+      config: []
+      oidc: ~
+
+  # IPv6, labels, the log level, the workers of the extractor and a provider of OIDC with its client secret
+  - name: 'molecule-readeck'
+    role_vars:
+      readeck_home: '/opt/readeck'
+      readeck_ip: '10.89.0.102'
+      readeck_ipv6: 'fd00:89::102'
+      readeck_network: 'podman-molecule'
+      readeck_hostname: 'readeck-molecule'
+      readeck_timezone: 'Europe/Berlin'
+      readeck_version: '0.23.6'
+      readeck_labels:
+        traefik.enable: 'false'
+      readeck_config:
+        main:
+          log_level: 'WARN'
+        extractor:
+          workers: 1
+        auth:
+          oidc:
+            providers:
+              - name: 'Molecule IdP'
+                url: 'https://idp.example.org/realms/molecule'
+                client_id: 'readeck'
+                groups: [ [ 'readeck-admins', 'admin' ] ]
+                provisioning: true
+      readeck_secrets:
+        - name: 'readeck_secret_key'
+          data: 'molecule-secret-key-options'
+          target: 'READECK_SECRET_KEY'
+        - name: 'readeck_oidc_client_secret'
+          data: 'molecule-oidc-client-secret'
+          target: 'READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET'
+    # A valid change of the side effect, merged recursively over readeck_config,
+    # the configuration file changes and Readeck has to restart
+    side_effect:
+      readeck_config:
+        main:
+          log_level: 'INFO'
+    expect:
+      ip: '10.89.0.102'
+      ip6: 'fd00:89::102'
+      secrets: [ 'molecule-secret-key-options', 'molecule-oidc-client-secret' ]
+      quadlet:
+        - 'Secret=readeck_secret_key,type=env,target=READECK_SECRET_KEY'
+        - 'Secret=readeck_oidc_client_secret,type=env,target=READECK_AUTH_OIDC_PROVIDERS_0_CLIENT_SECRET'
+        - 'Label=traefik.enable=false'
+        - 'User=1000'
+        - 'Group=1000'
+      config:
+        - '[main]'
+        - 'log_level = "INFO"'
+        - '[extractor]'
+        - 'workers = 1'
+        - '[[auth.oidc.providers]]'
+        - 'name = "Molecule IdP"'
+        - 'url = "https://idp.example.org/realms/molecule"'
+        - 'client_id = "readeck"'
+        - 'groups = [["readeck-admins", "admin"]]'
+        - 'provisioning = true'
+      oidc: 'Molecule IdP'

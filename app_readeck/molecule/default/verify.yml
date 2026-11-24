@@ -1,0 +1,193 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_readeck__test_case: "{{ app_readeck__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_readeck__expect: "{{ app_readeck__test_case.expect }}"
+    app_readeck__test_url: "http://{{ app_readeck__expect.ip }}:8000"
+    # The uri module keeps no cookies of a redirect it does not follow, the session is read from the header Set-Cookie
+    app_readeck__test_session: >-
+      {{ app_readeck__test_login.results[1].set_cookie | default('') | regex_search('sxid=[^;]+') | default('', true) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_readeck__test_quadlet_path }}"
+      register: 'app_readeck__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_readeck__test_image) in app_readeck__test_quadlet_lines
+          - ('IP=' + app_readeck__expect.ip) in app_readeck__test_quadlet_lines
+          - app_readeck__expect.ip6 is none or ('IP6=' + app_readeck__expect.ip6) in app_readeck__test_quadlet_lines
+          - app_readeck__expect.ip6 is not none or app_readeck__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_readeck__expect.quadlet | reject('in', app_readeck__test_quadlet_lines) | list | length == 0
+          - app_readeck__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
+          - app_readeck__expect.secrets | select('in', app_readeck__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_readeck__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        app_readeck__test_quadlet_lines: "{{ (app_readeck__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the configuration file'
+      ansible.builtin.stat:
+        path: "{{ app_readeck__test_config_path }}"
+      register: 'app_readeck__test_config_stat'
+
+    - name: 'Read the content of the configuration file'
+      ansible.builtin.slurp:
+        src: "{{ app_readeck__test_config_path }}"
+      register: 'app_readeck__test_config'
+
+    - name: 'Read the data directory'
+      ansible.builtin.stat:
+        path: "{{ app_readeck__test_case.role_vars.readeck_home }}/data"
+      register: 'app_readeck__test_data_dir'
+
+    - name: 'Read the database of Readeck'
+      ansible.builtin.stat:
+        path: "{{ app_readeck__test_case.role_vars.readeck_home }}/data/data/db.sqlite3"
+      register: 'app_readeck__test_database'
+
+    # The configuration file is the one of the role, Readeck did not write a secret key into it
+    - name: 'Assert the configuration file, the data directory and the database'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__test_config_stat.stat.pw_name == 'root'
+          - app_readeck__test_config_stat.stat.mode == '0644'
+          - app_readeck__expect.config | reject('in', app_readeck__test_config_lines) | list | length == 0
+          - app_readeck__test_config_lines | reject('match', '^(#.*)?$') | list | length == app_readeck__expect.config | length
+          - app_readeck__expect.secrets | select('in', app_readeck__test_config.content | b64decode) | list | length == 0
+          - app_readeck__test_data_dir.stat.uid == 1000
+          - app_readeck__test_data_dir.stat.gid == 1000
+          - app_readeck__test_data_dir.stat.mode == '0750'
+          - app_readeck__test_database.stat.exists
+          - app_readeck__test_database.stat.uid == 1000
+        fail_msg: >-
+          configuration {{ app_readeck__test_config_lines | to_json }},
+          data directory {{ app_readeck__test_data_dir.stat.uid | default('') }}:{{ app_readeck__test_data_dir.stat.gid | default('') }}
+          {{ app_readeck__test_data_dir.stat.mode | default('') }}, database {{ app_readeck__test_database.stat.exists }}
+      vars:
+        app_readeck__test_config_lines: "{{ (app_readeck__test_config.content | b64decode).splitlines() }}"
+
+    - name: 'Read the state of the readeck service'
+      ansible.builtin.command: 'systemctl is-active readeck'
+      register: 'app_readeck__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the readeck container'
+      ansible.builtin.command: 'podman inspect readeck'
+      register: 'app_readeck__test_inspect'
+      changed_when: false
+
+    # podman shows the secrets passed with type=env masked
+    - name: 'Assert the service, the container addresses, the user and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__test_service.stdout == 'active'
+          - app_readeck__test_net.IPAddress == app_readeck__expect.ip
+          - app_readeck__expect.ip6 is none or app_readeck__test_net.GlobalIPv6Address == app_readeck__expect.ip6
+          - app_readeck__test_container.Config.User == '1000:1000'
+          - app_readeck__expect.secrets | select('in', app_readeck__test_env | join(' ')) | list | length == 0
+          - app_readeck__test_env | select('match', 'TZ=') | list | length == 0
+          - app_readeck__test_container.Config.Timezone == app_readeck__test_case.role_vars.readeck_timezone
+        fail_msg: >-
+          service {{ app_readeck__test_service.stdout }}, time zone {{ app_readeck__test_container.Config.Timezone | default('') }},
+          user {{ app_readeck__test_container.Config.User | default('') }},
+          IPv4 {{ app_readeck__test_net.IPAddress }}, IPv6 {{ app_readeck__test_net.GlobalIPv6Address }},
+          environment {{ app_readeck__test_env | reject('search', 'SECRET') | join(', ') }}
+      vars:
+        app_readeck__test_container: "{{ (app_readeck__test_inspect.stdout | from_json)[0] }}"
+        app_readeck__test_net: "{{ app_readeck__test_container.NetworkSettings.Networks[app_readeck__test_case.role_vars.readeck_network] }}"
+        app_readeck__test_env: "{{ app_readeck__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'readeck' ]
+      register: 'app_readeck__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'readeck', '-n', '80', '--no-pager' ]
+      register: 'app_readeck__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_readeck__test_restarts.stdout ] + app_readeck__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the information of Readeck'
+      ansible.builtin.uri:
+        url: "{{ app_readeck__test_url }}/api/info"
+        return_content: true
+      register: 'app_readeck__test_info'
+
+    # The page lists the providers of OIDC, Readeck only starts with the client secret of every provider
+    - name: 'Read the login page'
+      ansible.builtin.uri:
+        url: "{{ app_readeck__test_url }}/login"
+        return_content: true
+      register: 'app_readeck__test_login_page'
+
+    # The hash is no secret, the password is not part of the command line
+    - name: 'Create the user of the login test'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', 'readeck', '/bin/readeck', 'user', '-config', '/etc/readeck/config.toml',
+                '-u', "{{ app_readeck__test_user }}", '-email', "{{ app_readeck__test_user }}@example.org",
+                '-p', "{{ app_readeck__test_password_hash }}" ]
+      register: 'app_readeck__test_create_user'
+      changed_when: true
+
+    - name: 'Log in with a wrong and the right password'
+      ansible.builtin.uri:
+        url: "{{ app_readeck__test_url }}/login"
+        method: 'POST'
+        body_format: 'form-urlencoded'
+        body:
+          username: "{{ app_readeck__test_user }}"
+          password: "{{ app_readeck__test_password if item else 'wrong-password' }}"
+        follow_redirects: 'none'
+        status_code: [ 303, 401, 422 ]
+      loop: [ false, true ]
+      loop_control:
+        label: "{{ 'right password' if item else 'wrong password' }}"
+      register: 'app_readeck__test_login'
+      no_log: true
+
+    - name: 'Read the profile with the session of the login'
+      ansible.builtin.uri:
+        url: "{{ app_readeck__test_url }}/api/profile"
+        headers:
+          Cookie: "{{ app_readeck__test_session }}"
+        return_content: true
+        status_code: [ 200, 401, 403 ]
+      register: 'app_readeck__test_profile'
+
+    - name: 'Assert the version, the providers of OIDC, the login and the profile'
+      ansible.builtin.assert:
+        that:
+          - app_readeck__test_info.json.version.release | default('') == app_readeck__test_version
+          - app_readeck__expect.oidc is none or app_readeck__test_login_page.content is search(app_readeck__expect.oidc)
+          - app_readeck__test_login.results | map(attribute='status') | list in [ [ 401, 303 ], [ 422, 303 ] ]
+          - app_readeck__test_session | length > 0
+          - app_readeck__test_profile.status == 200
+          - app_readeck__test_profile.json.user.username | default('') == app_readeck__test_user
+        fail_msg: >-
+          info {{ app_readeck__test_info.json | default({}) | to_json }},
+          user {{ app_readeck__test_create_user.stdout }},
+          login {{ app_readeck__test_login.results | map(attribute='status') | list }}
+          session cookie {{ app_readeck__test_session | length > 0 }},
+          profile {{ app_readeck__test_profile.status }} {{ app_readeck__test_profile.json | default({}) | to_json }}
