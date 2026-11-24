@@ -44,18 +44,17 @@ to `/var/run/docker.sock`, the default socket of the Docker client of the runner
 the socket has to exist before the container starts. `forgejo_runner_docker_socket_enable: false` removes the volume and the dependencies.
 
 `podman.socket` belongs to root, the runner runs as `forgejo_runner_uid`. With `podman_socket_group_assign: true` of `container_podman`
-the socket belongs to a group, the runner joins it with `forgejo_runner_container.group_add` and the GID of the group,
-the group of the host is not known in the container, so its GID is used. Alternatively the runner runs as root with `forgejo_runner_container.user: '0:0'`.
+the socket belongs to a group, the runner joins it with `forgejo_runner_groups`, a list of names of groups of the host.
+The groups of the host are not known in the container, the role resolves the names to their GIDs with `getent` and passes them as `GroupAdd=`,
+a group has to exist on the host, e.g. created by `container_podman` before the role in the same play. Alternatively the runner runs as root with `forgejo_runner_container.user: '0:0'`.
 Both give the jobs root access to podman on the host, use them only for trusted repositories.
 
 ```yaml
 # container_podman
 podman_socket_group_assign: true
-podman_socket_gid: 550
 
 # app_forgejo_runner
-forgejo_runner_container:
-  group_add: [ '550' ]
+forgejo_runner_groups: [ 'podman' ]
 ```
 
 A socket elsewhere is set with `forgejo_runner_docker_socket`, the client inside the container still uses `/var/run/docker.sock`,
@@ -125,7 +124,7 @@ The check uses the environment of the container after merging `forgejo_runner_co
 
 ### Container
 
-Volumes, additional hosts (`etc_hosts`), the user (`user`), additional groups (`group_add`) and the dependencies are changed with `forgejo_runner_container`, it is merged over the default of the container.
+Volumes, additional hosts (`etc_hosts`), the user (`user`), additional groups as GIDs (`groups`, it replaces the GIDs of `forgejo_runner_groups`) and the dependencies are changed with `forgejo_runner_container`, it is merged over the default of the container.
 The dependencies of the quadlet unit are lists: `requires`, `wants`, `after`, `part_of` and `binds_to` are units,
 `requires_mounts_for` are paths. They are written to `[Unit]` as `Requires=`, `Wants=`, `After=`, `PartOf=`, `BindsTo=` and `RequiresMountsFor=`.
 The merge is not recursive, `forgejo_runner_container.volumes` replaces `/data` and the docker socket, `wants` and `after` replace the dependencies on `podman.socket`,
@@ -152,7 +151,9 @@ The role checks before any change:
 - at least one connection is declared, every connection has `url`, `uuid` and the secret of its token
 - `forgejo_runner_home` is an absolute path, `forgejo_runner_uid` and `forgejo_runner_gid` are numbers
 - `forgejo_runner_docker_socket_enable` is `true` or `false`, with the socket `forgejo_runner_docker_socket` is an absolute path
-- `forgejo_runner_container.group_add`, if set, is a list of names or GIDs of groups
+- `forgejo_runner_groups` is a list of names of groups that exist on the host, in check mode groups that do not exist yet are only reported,
+  an earlier role of the play may create them in the real run
+- `forgejo_runner_container.groups`, if set, is a list of GIDs
 - only allowed environment variables and secrets are set in the container, the values of the environment contain no line breaks
 
 ### Check mode
@@ -198,7 +199,7 @@ The labels of `.runner` go to `runner.labels` or `server.connections.<name>.labe
 - The tag `app_forgejo_runner` stays, the tag `app` is added.
 - The socket of podman is mounted to `/var/run/docker.sock` by default with the dependencies on `podman.socket`,
   the volume of the socket in `forgejo_runner_container.volumes` is no longer needed, `forgejo_runner_docker_socket_enable: false` disables it.
-- `forgejo_runner_docker_socket`, `forgejo_runner_docker_socket_enable` and `group_add` of `forgejo_runner_container` are new.
+- `forgejo_runner_docker_socket`, `forgejo_runner_docker_socket_enable`, `forgejo_runner_groups` and `groups` of `forgejo_runner_container` are new.
 
 ### Tests
 
@@ -207,7 +208,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 
 | Platform | Test case |
 |---|---|
-| `molecule-forgejo-runner-default` | Only the mandatory variables, one connection with the label in `runner.labels`, the docker socket with `group_add` of the group of the socket |
+| `molecule-forgejo-runner-default` | Only the mandatory variables, one connection with the label in `runner.labels`, the docker socket with `forgejo_runner_groups: [ 'podman' ]`, the group of the socket |
 | `molecule-forgejo-runner` | IPv6, labels, dependencies, options, labels of the connection, `runner.envs`, the secret `cache.secret`, `DOCKER_HOST` and no docker socket |
 
 `prepare` creates the podman network with the socket of podman for the group `podman` (GID 550), pulls the images, starts Forgejo with SQLite and registers the runner with `forgejo-cli actions register`.
@@ -216,7 +217,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 an unknown family, an invalid key, a secret without `target`, a connection missing in `forgejo_runner_keys`, a connection without `uuid`,
 a connection without the secret of its token, no connection, the token in `forgejo_runner_config`, `runner.file`, an unknown option, a line break in a value,
 an unknown environment variable, an unknown secret, a line break in `forgejo_runner_container.environment`, a relative home,
-a relative path of the docker socket, `forgejo_runner_docker_socket_enable` not a boolean and `group_add` not a list
+a relative path of the docker socket, `forgejo_runner_docker_socket_enable` not a boolean, `forgejo_runner_groups` not a list, a group that does not exist and a name in `forgejo_runner_container.groups`
 and checks that it fails with the expected message and the quadlet unit and `config.yml` are unchanged (tasks marked `expect ERROR`),
 then it changes `runner.capacity` on `molecule-forgejo-runner`, the runner has to restart,
 `molecule-forgejo-runner-default` runs again without a change and must not restart.

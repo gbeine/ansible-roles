@@ -36,6 +36,9 @@ app_forgejo_runner__environment: "{{ forgejo_runner_environment }}"
 app_forgejo_runner__docker_socket_enable: "{{ forgejo_runner_docker_socket_enable | default(true) }}"
 app_forgejo_runner__docker_socket: "{{ forgejo_runner_docker_socket | default('/run/podman/podman.sock') }}"
 
+# Names of groups of the host the runner joins, e.g. the group of the socket of podman, the role resolves them to their GIDs
+app_forgejo_runner__groups: "{{ forgejo_runner_groups | default([]) }}"
+
 app_forgejo_runner__container: "{{ app_forgejo_runner__podman_container_default | combine(forgejo_runner_container | default({})) }}"
 
 app_forgejo_runner__autoupdate_enabled: "{{ forgejo_runner_autoupdate_enabled | default(false) }}"
@@ -50,6 +53,21 @@ app_forgejo_runner__podman_image: 'data.forgejo.org/forgejo/runner'
 app_forgejo_runner__podman_tag: "{{ app_forgejo_runner__version }}"
 
 app_forgejo_runner__podman_home: "{{ app_forgejo_runner__home }}"
+
+# Names of groups
+app_forgejo_runner__group_pattern: '^[a-z_][a-z0-9_-]*$'
+
+# The GIDs of the groups of forgejo_runner_groups, the names of the host are unknown in the container,
+# invalid or missing names are left out, the validation reports them
+app_forgejo_runner__group_ids: >-
+  {%- set ids = [] -%}
+  {%- set groups = app_forgejo_runner__groups if app_forgejo_runner__groups is sequence and app_forgejo_runner__groups is not string
+                                                    and app_forgejo_runner__groups is not mapping else [] -%}
+  {%- for name in groups | map('string') if name is match(app_forgejo_runner__group_pattern)
+                                            and name in (ansible_facts.getent_group | default({})) -%}
+  {%-   set _ = ids.append(ansible_facts.getent_group[name][1] | string) -%}
+  {%- endfor -%}
+  {{ ids }}
 app_forgejo_runner__podman_config_file: "{{ app_forgejo_runner__podman_home }}/config.yml"
 app_forgejo_runner__secrets_dir: '/run/secrets'
 
@@ -170,6 +188,8 @@ app_forgejo_runner__podman_container_default:
                                ~ ',uid=' ~ app_forgejo_runner__uid ~ ',gid=' ~ app_forgejo_runner__gid ~ ',mode=0400') -%}
     {%- endfor -%}
     {{ secrets if secrets | length > 0 else omit }}
+  # The GIDs of forgejo_runner_groups, the task passes them as group_add (GroupAdd=) if the list is not empty
+  groups: "{{ app_forgejo_runner__group_ids }}"
   # The socket exists only after podman.socket started, the bind mount needs it,
   # forgejo_runner_container.wants and after replace the dependencies completely
   wants: "{{ [ 'podman.socket' ] if app_forgejo_runner__docker_socket_enable | bool else omit }}"

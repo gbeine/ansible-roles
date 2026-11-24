@@ -4,6 +4,15 @@
   tags: [ 'app', 'app_forgejo_runner' ]
   block:
 
+    # The names of forgejo_runner_groups are resolved to their GIDs, the container does not know the groups of the host
+    - name: 'Read the groups of the host'
+      ansible.builtin.getent:
+        database: 'group'
+      check_mode: false
+      when:
+        - app_forgejo_runner__groups is sequence and app_forgejo_runner__groups is not string and app_forgejo_runner__groups is not mapping
+        - app_forgejo_runner__groups | length > 0
+
     # A failing template in the variables (e.g. an unknown filter or forgejo_runner_config not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
@@ -151,10 +160,19 @@
                    and (app_forgejo_runner__docker_socket is not string or app_forgejo_runner__docker_socket is not match('^/[^:]*$')) -%}
           {%-   set _ = errors.append('`forgejo_runner_docker_socket` has to be the absolute path of the socket of podman on the host') -%}
           {%- endif -%}
-          {%- set group_add = app_forgejo_runner__container.group_add | default([]) -%}
-          {%- if group_add is string or group_add is mapping or group_add is not iterable
-                 or group_add | map('string') | reject('match', '^[A-Za-z0-9_][A-Za-z0-9_.-]*$') | list | length > 0 -%}
-          {%-   set _ = errors.append('`forgejo_runner_container.group_add` has to be a list of names or GIDs of groups') -%}
+          {%- set groups = app_forgejo_runner__groups -%}
+          {%- if groups is not sequence or groups is string or groups is mapping
+                 or groups | map('string') | reject('match', app_forgejo_runner__group_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('`forgejo_runner_groups` has to be a list of names of groups of the host') -%}
+          {%- elif not ansible_check_mode -%}
+          {%-   set missing = groups | map('string') | reject('in', ansible_facts.getent_group | default({})) | list -%}
+          {%-   if missing | length > 0 -%}
+          {%-     set _ = errors.append('These groups of `forgejo_runner_groups` do not exist on the host: ' ~ (missing | join(', '))) -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set ids = app_forgejo_runner__container.groups | default([]) -%}
+          {%- if ids is string or ids is mapping or ids is not iterable or ids | map('string') | reject('match', '^[0-9]+$') | list | length > 0 -%}
+          {%-   set _ = errors.append('`forgejo_runner_container.groups` has to be a list of GIDs, names of groups are set with `forgejo_runner_groups`') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -195,6 +213,16 @@
                                     ~ (app_forgejo_runner__environment_line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
+
+    # An earlier role of the play, e.g. container_podman, creates the group only in the real run
+    - name: 'Report the groups that do not exist in check mode'
+      ansible.builtin.debug:
+        msg: >-
+          These groups of `forgejo_runner_groups` do not exist on the host yet, the runner joins them after they are created:
+          {{ app_forgejo_runner__groups | map('string') | reject('in', ansible_facts.getent_group | default({})) | join(', ') }}
+      when:
+        - ansible_check_mode
+        - app_forgejo_runner__groups | map('string') | reject('in', ansible_facts.getent_group | default({})) | list | length > 0
 
     - name: 'Create the home directory'
       ansible.builtin.file:
@@ -237,7 +265,9 @@
         network: "{{ app_forgejo_runner__container.network }}"
         timezone: "{{ app_forgejo_runner__container.timezone }}"
         user: "{{ app_forgejo_runner__container.user | default(omit) }}"
-        group_add: "{{ app_forgejo_runner__container.group_add | default(omit) }}"
+        group_add: >-
+          {{ app_forgejo_runner__container.groups
+             if app_forgejo_runner__container.groups | default([]) | length > 0 else omit }}
         command: "{{ app_forgejo_runner__container.command | default(omit) }}"
         env: "{{ app_forgejo_runner__container.environment | default(omit) }}"
         etc_hosts: "{{ app_forgejo_runner__container.etc_hosts | default(omit) }}"
