@@ -10,7 +10,15 @@ monitoring_thanos_rule__test_network:
   ipv6_prefixlength: 64
 
 monitoring_thanos_rule__test_image: 'docker.io/thanosio/thanos:v0.42.5'
-monitoring_thanos_rule__test_bucket_dir: '/opt/thanos-bucket'
+monitoring_thanos_rule__test_quadlet_path: '/etc/containers/systemd/thanos-rule.container'
+monitoring_thanos_rule__test_home: '/opt/thanos-rule'
+
+# S3 server of prepare.yml, rclone serves the directories of /data as buckets
+monitoring_thanos_rule__test_s3_image: 'docker.io/rclone/rclone:1.76.0'
+monitoring_thanos_rule__test_s3_ip: '10.89.0.65'
+monitoring_thanos_rule__test_s3_dir: '/opt/thanos-s3'
+monitoring_thanos_rule__test_s3_access_key: 'molecule'
+monitoring_thanos_rule__test_s3_secret_key: 'molecule-s3-secret-key'
 # A rule file in the directory of the rule files that is not declared, prepare creates it and the role has to remove it
 monitoring_thanos_rule__test_stale_rule: '/opt/thanos-rule/rules/stale.yml'
 
@@ -30,13 +38,13 @@ monitoring_thanos_rule__test_cases:
       ip: '10.89.0.68'
       ip6: ~
       objstore: false
+      secrets: []
       rules: []
       quadlet:
         - 'Volume=/opt/thanos-rule/data:/var/thanos/rule'
         - 'Volume=/opt/thanos-rule/rules:/etc/thanos/rules:ro'
 
-  # IPv6, labels, two rule files and the upload to a bucket in the file system,
-  # the volume of the bucket is added with thanos_rule_container
+  # IPv6, labels, two rule files and the object storage S3 on the S3 server of prepare.yml with the secret key as secret
   - name: 'molecule-thanos-rule'
     role_vars:
       thanos_rule_version: 'v0.42.5'
@@ -65,14 +73,18 @@ monitoring_thanos_rule__test_cases:
                   expr: 'up == 0'
                   for: '5m'
       thanos_rule_objstore:
-        type: 'FILESYSTEM'
+        type: 'S3'
         config:
-          directory: '/bucket'
-      thanos_rule_container:
-        volumes:
-          - '/opt/thanos-rule/data:/var/thanos/rule'
-          - '/opt/thanos-rule/rules:/etc/thanos/rules:ro'
-          - '/opt/thanos-bucket:/bucket'
+          bucket: 'thanos'
+          endpoint: '10.89.0.65:9000'
+          region: 'us-east-1'
+          insecure: true
+          bucket_lookup_type: 'path'
+          access_key: 'molecule'
+      thanos_rule_secrets:
+        - name: 'thanos_rule_s3_secret_key'
+          data: 'molecule-s3-secret-key'
+          target: 'config.secret_key'
     # side_effect changes a rule, the rule file changes and rule has to restart
     side_effect:
       role_vars:
@@ -95,9 +107,13 @@ monitoring_thanos_rule__test_cases:
       ip: '10.89.0.69'
       ip6: 'fd00:89::69'
       objstore: true
+      secrets:
+        - 'Secret=thanos_rule_s3_secret_key,type=env,target=THANOS_SECRET_CONFIG_SECRET_KEY'
+      bucket:
+        - '  secret_key: "$(THANOS_SECRET_CONFIG_SECRET_KEY)"'
       rules: [ 'alerts', 'molecule' ]
       quadlet:
         - 'Volume=/opt/thanos-rule/data:/var/thanos/rule'
         - 'Volume=/opt/thanos-rule/rules:/etc/thanos/rules:ro'
-        - 'Volume=/opt/thanos-bucket:/bucket'
+        - 'Volume=/opt/thanos-rule/bucket.yml:/etc/thanos/bucket.yml:ro'
         - 'Label=traefik.enable=false'

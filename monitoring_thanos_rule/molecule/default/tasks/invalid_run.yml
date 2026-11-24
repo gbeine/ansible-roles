@@ -1,6 +1,6 @@
 ---
 # Runs monitoring_thanos_rule with the invalid role variables passed as include parameters,
-# the role has to fail before the secret or the quadlet unit changes.
+# the role has to fail before bucket.yml or the quadlet unit changes.
 # Include parameters only exist inside the include, the invalid values are gone afterwards.
 
 - name: "Run monitoring_thanos_rule with invalid variables (expect ERROR): {{ monitoring_thanos_rule__test_invalid.message }}"
@@ -16,18 +16,19 @@
 
   rescue:
 
-    - name: 'Read the checksum of the quadlet unit after the invalid run'
+    - name: 'Read the checksums of the quadlet unit and bucket.yml after the invalid run'
       ansible.builtin.stat:
         path: "{{ item }}"
         checksum_algorithm: 'md5'
       loop: "{{ monitoring_thanos_rule__test_files }}"
       register: 'monitoring_thanos_rule__test_md5_after'
 
-    - name: 'Assert the run failed before the quadlet unit changed'
+    - name: 'Assert the run failed before the quadlet unit and bucket.yml changed'
       ansible.builtin.assert:
         that:
           - monitoring_thanos_rule__test_failure is search(monitoring_thanos_rule__test_invalid.search, multiline=true)
-          - monitoring_thanos_rule__test_md5_before_sums | select | list | length == monitoring_thanos_rule__test_files | length
+          # The quadlet unit exists on every VM, bucket.yml only with object storage, a missing file has to stay missing
+          - monitoring_thanos_rule__test_md5_before_sums | first | length > 0
           - monitoring_thanos_rule__test_md5_after_sums == monitoring_thanos_rule__test_md5_before_sums
         fail_msg: >-
           Failure: {{ monitoring_thanos_rule__test_failure }}
@@ -35,6 +36,10 @@
           after: {{ monitoring_thanos_rule__test_md5_after_sums | join(', ') }}.
       vars:
         # Double quotes, so \n is a line break for the anchors of the searches
-        monitoring_thanos_rule__test_failure: "{{ [ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ] | join('\n') }}"
+        # A loop reports the messages and stderr of thanos tools rules-check in the results of the items
+        monitoring_thanos_rule__test_failure: "{{ ([ ansible_failed_result.msg | default(''), ansible_failed_result.stderr | default('') ]
+          + (ansible_failed_result.results | default([]) | map(attribute='msg', default='') | list)
+          + (ansible_failed_result.results | default([]) | map(attribute='stderr', default='') | list))
+          | join('\n') }}"
         monitoring_thanos_rule__test_md5_before_sums: "{{ monitoring_thanos_rule__test_md5_before.results | map(attribute='stat.checksum', default='') | list }}"
         monitoring_thanos_rule__test_md5_after_sums: "{{ monitoring_thanos_rule__test_md5_after.results | map(attribute='stat.checksum', default='') | list }}"
