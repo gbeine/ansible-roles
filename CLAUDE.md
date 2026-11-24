@@ -67,8 +67,13 @@ The options of an application are passed in this order of preference, the first 
 
 1. A configuration file of the image, the secrets are files referenced in the configuration (see Secrets in the configuration).
 2. A configuration file of the image, the secrets are passed with `*_FILE` or `FILE__*` variables (see Secrets as file variables next to the configuration).
-3. A configuration file of the image as podman secret containing the secrets (see Configuration as secret), only if neither 1 nor 2 is possible.
-4. The environment, only for images without configuration file.
+3. A configuration file of the image, the secrets are passed in the environment with `type=env`, if the image cannot read them from files
+   and the environment takes precedence over the file (see Secrets in the environment, `security_keycloak`).
+4. A configuration file of the image as podman secret containing the secrets (see Configuration as secret), only if neither 1, 2 nor 3 is possible.
+5. The environment, only for images without configuration file.
+
+An image the role provides no files for (no `<home>`) stays configured with the environment,
+even if it could read a configuration file (see `database_phpredisadmin`).
 
 - `<short>_config` is the content of the configuration file in its format (INI, TOML, YAML, JSON, conf, PHP or JS array),
   the values follow `time_chrony` as far as the format allows.
@@ -79,7 +84,7 @@ The options of an application are passed in this order of preference, the first 
 - The format and the path of the file, the reading of secrets from files and the precedence between environment and file
   are confirmed in the sources of the image before a role is migrated.
 - The migration in `docs/notes.md` maps every former environment variable to its path in `<short>_config`,
-  the role rejects former variables in `<short>_environment` with "… are set with `<short>_config` now: …".
+  the role contains no code for former variables, they are unknown variables of `<short>_environment`.
 
 ### Secrets in the configuration
 
@@ -98,7 +103,7 @@ The options of an application are passed in this order of preference, the first 
 
 ### Configuration as secret
 
-The last resort if neither the configuration file nor file variables can provide the secrets (see `security_keycloak`):
+The last resort if neither the configuration file, file variables nor the environment can provide the secrets:
 
 - The secrets are merged into the options and the whole rendered configuration file is the podman secret `<container name>-config`,
   mounted with `type=mount,target=<path of the file>,uid=…,gid=…,mode=0400`, the file never exists on the host.
@@ -211,16 +216,20 @@ Mixed secrets (the image reads some secrets from files, others only from the env
 - All checks run before any change.
 - The task "Render the configuration" evaluates the variables once, failing templates and `combine` stop the role there.
 - Checks collect the failures in a list `errors`, the message only names the failing checks.
-- Names are checked with `<role>__name_pattern` unless an allow list exists.
+- Names the application interprets (e.g. users, keys of the configuration, file names) are checked with a pattern unless an allow list exists.
+  Names of podman secrets and containers are not checked, podman checks them.
 - Line breaks in values and booleans that are no booleans are rejected.
 
 ## Check mode
 
 - Every role runs with `--check` without failing, also on a host where it never ran before.
-- If the packages of a first installation are missing in check mode, the role stops after the installation,
-  there are no files and services to compare.
-- The role detects the missing installation by files or directories of the package (e.g. `/etc/swanctl`, see `security_strongswan`),
-  not only by `ansible_check_mode`: the variable is only set by `--check`, not by `check_mode` of a task.
+- The role runs completely with `--check`, also on a host without the packages, and compares the files, the quadlet units and the services.
+  The configuration is never skipped because a package or a directory is missing, `copy`, `template` and `file` work in check mode
+  without the directory and without the owner.
+- Only tasks that really fail without the installation get a `when` on a stat of the directory they need (`check_mode: false`) with a comment,
+  e.g. `file` with `state: link` to a file of the package, `copy` with `remote_src` into a directory of the package
+  (see `security_strongswan`, `monitoring_icinga_agent`) or a module needing a library installed by the role (see `app_zot`).
+  The stat detects the missing installation also with `check_mode` of a task, `ansible_check_mode` is only set by `--check`.
 - Commands that change something (`command`, `shell`, `raw`, restarts) do not run in check mode, commands that only read run with `check_mode: false`.
 - Files that another role creates only in a real run (e.g. the realm of `pki_easyrsa_deploy`) are reported in check mode, not treated as errors.
 
@@ -239,6 +248,7 @@ Mixed secrets (the image reads some secrets from files, others only from the env
 - The VMs are created with tart by `.molecule/tart/create.yml` and `destroy.yml`.
   Two platforms: `molecule-<short>-default` with the mandatory values only and `molecule-<short>` with the options.
 - Test cases live in `test_cases.yml` with `role_vars`, `side_effect.role_vars` and `expect`.
+- Playbooks that run the role (`converge`, `side_effect`) include `common_filters` and `common_globals` first, like every playbook.
 - Sequence: destroy, syntax, create, prepare, check, converge, idempotence, side_effect, verify, destroy.
 - `check` runs `converge` with `--check` on the VMs where the role never ran (see `security_strongswan`).
 - `prepare` starts the services the role needs, e.g. a database (see `app_bookstack`).
