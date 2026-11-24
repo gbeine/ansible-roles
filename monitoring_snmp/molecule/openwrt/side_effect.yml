@@ -9,7 +9,55 @@
   vars:
     monitoring_snmp__test_case: "{{ monitoring_snmp__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_snmp__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run monitoring_snmp with snmpd disabled'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+      vars:
+        snmpd_config: "{{ monitoring_snmp__test_case.role_vars.snmpd_config | combine({'enabled': false}) }}"
+
+    # /etc/init.d/snmpd enabled exits with 0 if the service is enabled
+    - name: 'Read the state of snmpd after the run with snmpd disabled'
+      ansible.builtin.raw: >-
+        uci get snmpd.general.enabled;
+        /etc/init.d/snmpd enabled && echo 'boot=enabled' || echo 'boot=disabled';
+        pidof snmpd >/dev/null && echo 'process=running' || echo 'process=stopped'
+      register: 'monitoring_snmp__test_disabled'
+      changed_when: false
+
+    - name: 'Run monitoring_snmp with snmpd enabled again'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+
+    - name: 'Read the state of snmpd after the run with snmpd enabled again'
+      ansible.builtin.raw: >-
+        uci get snmpd.general.enabled;
+        /etc/init.d/snmpd enabled && echo 'boot=enabled' || echo 'boot=disabled';
+        pidof snmpd >/dev/null && echo 'process=running' || echo 'process=stopped'
+      register: 'monitoring_snmp__test_enabled'
+      changed_when: false
+
+    - name: 'Assert enabled switches snmpd'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__test_disabled.stdout_lines | map('trim') | list == [ '0', 'boot=disabled', 'process=stopped' ]
+          - monitoring_snmp__test_enabled.stdout_lines | map('trim') | list == [ '1', 'boot=enabled', 'process=running' ]
+        fail_msg: >-
+          Disabled: {{ monitoring_snmp__test_disabled.stdout_lines | map('trim') | join(', ') }},
+          enabled: {{ monitoring_snmp__test_enabled.stdout_lines | map('trim') | join(', ') }}
 
     - name: 'Read the checksum of the snmpd configuration before the invalid runs'
       ansible.builtin.raw: 'md5sum /etc/config/snmpd'

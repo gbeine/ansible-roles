@@ -13,7 +13,8 @@ On Debian the role writes the configuration of `snmpd` to these files:
 ### Settings
 
 `snmpd_config` sets directives of `snmpd.conf`, it is a mapping of the names of the directives to values.
-A list writes the directive once per value, e.g. for `view` or `rocommunity`, an empty list or an empty string comments the directive out.
+A string or number writes `<directive> <value>`, a list writes the directive once per value, e.g. for `view` or `rocommunity`,
+`true` writes the directive without a value, `false`, `null` or an empty list remove the directive, it is written commented out (`#rocommunity`).
 `snmpd.conf` contains all settings of `snmpd.conf` of the Debian package with their description and default, a setting replaces the default completely.
 
 ```yaml
@@ -25,11 +26,14 @@ snmpd_config:
     - 'systemonly included .1.3.6.1.2.1.1'
     - 'systemonly included .1.3.6.1.2.1.25.1'
     - 'all included .1'
-  rocommunity: []
-  rocommunity6: []
-  rouser: []
+  rocommunity: false
+  rocommunity6: false
+  rouser: false
   sysName: 'host42'
 ```
+
+`enabled` (default `true`) is an option of the role and no directive, `false` stops and disables `snmpd`, on OpenWrt it also sets `enabled 0` in the section `general`.
+It is only set in `snmpd_config`, not in the settings of `snmpd_configs`.
 
 Directives that are not in `snmpd.conf` of the package, e.g. `sysName`, are written to the end of `snmpd.conf` as additional settings.
 
@@ -122,6 +126,24 @@ so changed passwords of `createUser` take effect. Users created with `snmpusm` a
 `snmpd` has no test of the configuration, after the reload or restart the role checks that `snmpd` is running
 and that the journal contains no errors or warnings about lines of the configuration files.
 
+### Validation
+
+All checks run before anything changes, the message names only the failing checks:
+
+- `Render the configuration` evaluates the variables once, a failing template (e.g. an unknown filter) or `snmpd_config` not being a dictionary stops the role there,
+- `snmpd_configs` is a list, every config has a `name` of letters, digits, `.`, `_` and `-` and `settings` as dictionary, the names are unique,
+- values are strings, numbers, booleans or lists of them, an empty string is rejected (`false` removes a directive), values must not contain line breaks,
+- options of the role (`enabled`) only in `snmpd_config`, `enabled`, `snmpd_prune` and `snmpd_ssl` are `true` or `false`, `snmpd_unit` is a dictionary,
+- on Debian the directives of the release and the entries of `snmpd_unit`, on OpenWrt the directives the UCI configuration supports.
+
+The messages name the directives, never their values, the values can contain communities and passwords.
+
+### Check mode
+
+The role runs with `--check`, also on a host where `snmpd` is not installed yet, and reports the changes of the files and the UCI configuration.
+On OpenWrt `uci` needs `/etc/config/snmpd` of the package, without the installation (check mode on a new device) the role skips the UCI configuration
+and reports the installation of the packages only.
+
 ### OpenWrt
 
 On OpenWrt the init script of snmpd creates its configuration from the UCI configuration `/etc/config/snmpd`.
@@ -156,9 +178,9 @@ Names and `find` follow the default configuration of OpenWrt, without variables 
 | `engineID`, `engineIDType`, `engineIDNic` | `engineid` | unnamed | `engineidtype`, without it all options |
 | `trapsink`, `trap2sink`, `informsink` | same type | unnamed | `host` |
 | `trapcommunity`, `authtrapenable`, `v1trapaddress`, `trapsess` | same type | unnamed | all options |
-| always | `snmpd` | `general` | `enabled 1` |
+| always | `snmpd` | `general` | `enabled` |
 
-The section `general` gets `enabled 1` and three options derived from the settings:
+The section `general` gets `enabled` (`1`, `0` with `enabled: false`) and three options derived from the settings:
 `ip_protocol` (`ipv4`, `ipv6` or `ipv4/ipv6` from the transports of `agentaddress`), `snmp_port` (the port of the first `agentaddress`, else `161`)
 and `snmp_version` (`v3` with only `usm` groups or only SNMPv3 users, `v1/v2c/v3` with `usm` groups or SNMPv3 users besides v1 or v2c groups, else `v1/v2c`).
 
@@ -169,7 +191,7 @@ The init script of OpenWrt supports less than `snmpd.conf`, the role fails befor
 for options of directives (e.g. `rocommunity … -V view`, `rouser … -V view`, `createUser -e`), for `disk` without size,
 for users of `createUser` without `rouser` or `rwuser` and the reverse, and for passwords with less than 8 characters.
 Templates in the settings and configs (e.g. `{{ netmask | ipv4_netmask2prefixlength }}` of `common_filters`) are rendered completely
-before the translation, a failing template (e.g. an unknown filter) stops the role at `Render the settings and configs`;
+before the translation, a failing template (e.g. an unknown filter) stops the role at `Render the configuration`;
 inside the translation ansible-core would drop such a directive silently and prune would delete its sections.
 The default variant `nossl` is built without OpenSSL, it supports the auth types `MD5` and `SHA` without privacy (at most the level `auth`).
 The auth types `SHA-224` to `SHA-512` and the privacy types `DES`, `AES`, `AES-192` and `AES-256` need `snmpd_ssl: true`, the role fails for other types.
@@ -194,7 +216,9 @@ snmpd_configs:
 - The role installs `snmp-mibs`, `snmpd-nossl` and `snmp-utils-nossl`, with `snmpd_ssl: true` `snmpd-ssl` and `snmp-utils-ssl`, and removes the other variant.
 - With `snmpd_prune` (default `true`) the role removes all sections of `/etc/config/snmpd` that are neither declared by name nor found by `find`.
 - Before a commit the role stores the configuration before the change on the controller in `<playbook_dir>/backups/<inventory_hostname>/snmpd`, secrets are redacted.
-- After a change of the configuration or the packages the role restarts snmpd.
+- After a change of the configuration or the packages the role stops `snmpd`, waits until the process has ended and starts it again,
+  `/etc/init.d/snmpd restart` could start the new process while the former one still holds the port.
+- `true` as value is rejected, every option of the UCI configuration needs a value.
 
 ### Migration
 
@@ -205,6 +229,15 @@ snmpd_configs:
 | `snmpd_agentaddress` (list) | `agentaddress` in `snmpd_config`, a string like `127.0.0.1,[::1]` |
 
 The defaults of the former role are the defaults of Debian 13 as well.
+
+Changed behavior:
+
+- An empty string no longer comments a directive out, the role rejects it, `false` (or `null`, an empty list) removes the directive.
+  `false`, `null` and `true` were written as text before (`rocommunity False`).
+- `enabled` in `snmpd_config` is new, `enabled: false` stops and disables `snmpd`.
+- The messages of the validation name only the failing checks, the names of variables are written in backticks.
+- `snmpd_prune`, `snmpd_ssl`, duplicate names of configs and line breaks in values are checked.
+- On OpenWrt the role stops `snmpd` and waits until the process has ended instead of `restart`, `--check` works on a device without `snmpd`.
 
 The role `bootstrap_openwrt` does not configure snmpd any longer:
 
@@ -231,6 +264,8 @@ snmpd_config:
 
 ### Tests
 
+Both scenarios run `converge` with `--check` first (`check`) on the VMs where the role never ran.
+
 The molecule scenario `default` runs the role in two [tart](https://tart.run) VMs on a macOS controller, the base VM has to be Debian 13.
 The base VM is cloned for every platform and the clones are deleted afterwards, the base VM itself is never changed.
 The playbooks creating and destroying the VMs are shared by all tart scenarios and live in `.molecule/tart/` in the repository root.
@@ -243,7 +278,10 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 `prepare` creates a config in `/etc/snmp/snmpd.conf.d` that is not managed by the role and the oneshot unit `molecule-vpn.service` standing in for a VPN.
 `side_effect` changes the community and checks that `snmpd` is reloaded, not restarted, changes the passwords of the SNMPv3 user and checks that `snmpd` is restarted,
 restarts `molecule-vpn.service` and checks that `snmpd` is restarted, stops it and checks that `snmpd` is stopped,
-then runs the role with an unknown directive and with `podman99.network` as dependency and checks that the role fails at the validation and the configuration files and the drop-in are unchanged (tasks marked `expect ERROR`).
+runs the role with `enabled: false` and checks that `snmpd` is stopped and disabled, then started and enabled again,
+then runs the role with invalid variables (`snmpd_config` not a dictionary, unknown directives in `snmpd_config` and a config, `podman99.network` as dependency,
+an empty value, a dictionary as value, a line break, an invalid and duplicate names of configs, `enabled` in a config and not a boolean, `snmpd_prune` not a boolean)
+and checks that the role fails at the validation and the configuration files and the drop-in are unchanged (tasks marked `expect ERROR`).
 `verify` checks the generated files, their owner and mode, the removal of the unmanaged config, the dependencies of `snmpd` in `systemctl show`, the listening addresses, the AgentX socket
 and reads objects with the communities and the SNMPv3 user, the former community and passwords are rejected.
 
@@ -267,7 +305,9 @@ The molecule scenario `openwrt` runs the role in two clones of the tart VM `open
 | `molecule-snmp-openwrt-default` | No variables, the former default of `bootstrap_openwrt`: `public` and `private` read sysName and sysLocation, a wrong community gets no answer, the exec entry `filedescriptors`, the packages of the nossl variant |
 | `molecule-snmp-openwrt` | Own settings with the community `molecule-ro`, `public` and `private` are rejected, `snmpd_ssl: true` with the packages of the ssl variant, an SNMPv3 user with authPriv (SHA-512, AES) reads the output of an extend command |
 
-`side_effect` runs the role with `proc`, which OpenWrt does not support, with SHA-512 and AES without `snmpd_ssl` and with an unknown filter in `com2sec`, and checks that the role fails at the validation and `/etc/config/snmpd` is unchanged (tasks marked `expect ERROR`).
+`side_effect` runs the role with `enabled: false` and checks `enabled 0` in UCI, the disabled init script and the stopped process, then enables it again,
+runs the role with `proc`, which OpenWrt does not support, with SHA-512 and AES without `snmpd_ssl`, an empty value, a line break, `true` as value, `snmpd_ssl` not a boolean
+and with an unknown filter in `com2sec`, and checks that the role fails at the validation and `/etc/config/snmpd` is unchanged (tasks marked `expect ERROR`).
 The collection `community.openwrt` is required on the controller.
 
 | Environment variable | Default | Description |

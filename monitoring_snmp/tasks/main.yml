@@ -19,6 +19,100 @@
       ansible.builtin.include_vars:
         file: "{{ 'OpenWrt.yml' if monitoring_snmp__openwrt | bool else 'Debian.yml' }}"
 
+    # A failing template in the variables (e.g. an unknown filter or snmpd_config not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__config | to_json | length > 0
+          - monitoring_snmp__configs | to_json | length > 0
+          - monitoring_snmp__unit | to_json | length > 0
+          - monitoring_snmp__prune | to_json | length > 0
+          - monitoring_snmp__ssl | to_json | length > 0
+        quiet: true
+
+    # The values are only named by their directive, they can contain communities and passwords
+    - name: 'Validate the variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_snmp__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_snmp__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = monitoring_snmp__config -%}
+          {%- set configs = monitoring_snmp__configs -%}
+          {%- set settings = [] -%}
+          {%- for key, value in config.items() if key not in monitoring_snmp__role_options -%}
+          {%-   set _ = settings.append({'label': key | string, 'value': value}) -%}
+          {%- endfor -%}
+          {%- if configs is not sequence or configs is string or configs is mapping -%}
+          {%-   set _ = errors.append('`snmpd_configs` has to be a list.') -%}
+          {%- else -%}
+          {%-   set invalid = [] -%}
+          {%-   for c in configs -%}
+          {%-     if c is not mapping or c.name is not defined or c.name | string is not match(monitoring_snmp__name_pattern)
+                     or c.settings is not defined or c.settings is not mapping -%}
+          {%-       set _ = invalid.append(loop.index0 | string) -%}
+          {%-     else -%}
+          {%-       for key, value in c.settings.items() -%}
+          {%-         set _ = settings.append({'label': c.name ~ ': ' ~ key, 'value': value, 'option': key in monitoring_snmp__role_options}) -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('`snmpd_configs` entries need a name of letters, digits, ., _ and - and settings as a dictionary: '
+                                        ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set names = configs | select('mapping') | selectattr('name', 'defined') | map(attribute='name') | map('string') | list -%}
+          {%-   if names | length != names | unique | length -%}
+          {%-     set _ = errors.append('The names of `snmpd_configs` have to be unique.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set options = settings | selectattr('option', 'defined') | selectattr('option') | map(attribute='label') | list -%}
+          {%- if options | length > 0 -%}
+          {%-   set _ = errors.append('Options of the role are only set in `snmpd_config`: ' ~ (options | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set empty = [] -%}
+          {%- set types = [] -%}
+          {%- set lines = [] -%}
+          {%- for s in settings -%}
+          {%-   set values = s.value if (s.value is iterable and s.value is not string and s.value is not mapping) else [s.value] -%}
+          {%-   if s.value is mapping
+                   or (s.value is not string and s.value is iterable
+                       and values | reject('string') | reject('number') | reject('boolean') | list | length > 0) -%}
+          {%-     set _ = types.append(s.label) -%}
+          {%-   elif values | select('string') | select('eq', '') | list | length > 0 -%}
+          {%-     set _ = empty.append(s.label) -%}
+          {%-   elif values | map('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-     set _ = lines.append(s.label) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if types | length > 0 -%}
+          {%-   set _ = errors.append('Values are strings, numbers, booleans or lists of them: ' ~ (types | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if empty | length > 0 -%}
+          {%-   set _ = errors.append('Empty values are not allowed, false removes a directive: ' ~ (empty | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- for option in monitoring_snmp__boolean_options if config[option] is defined and config[option] is not boolean -%}
+          {%-   set _ = errors.append('`snmpd_config.' ~ option ~ '` has to be true or false.') -%}
+          {%- endfor -%}
+          {%- if monitoring_snmp__prune is not boolean -%}
+          {%-   set _ = errors.append('`snmpd_prune` has to be true or false.') -%}
+          {%- endif -%}
+          {%- if monitoring_snmp__ssl is not boolean -%}
+          {%-   set _ = errors.append('`snmpd_ssl` has to be true or false.') -%}
+          {%- endif -%}
+          {%- if monitoring_snmp__unit is not mapping -%}
+          {%-   set _ = errors.append('`snmpd_unit` has to be a dictionary.') -%}
+          {%- endif -%}
+          {{ errors }}
+
     - name: 'Gather the facts of the system'
       ansible.builtin.setup:
         gather_subset: [ 'min' ]

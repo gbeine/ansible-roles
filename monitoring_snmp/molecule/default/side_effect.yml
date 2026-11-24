@@ -17,6 +17,11 @@
       {{ monitoring_snmp__test_configs_community | rejectattr('name', 'eq', 'users') | list
          + [ monitoring_snmp__test_side_effect.users ] }}
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Read the main PID of snmpd before the changed community'
@@ -113,6 +118,39 @@
           After restart: {{ monitoring_snmp__test_unit_restart.stdout_lines | join(', ') }}
           (PID before {{ monitoring_snmp__test_pid_users.stdout }}), after stop: {{ monitoring_snmp__test_unit_stop.stdout }}
 
+    - name: 'Run monitoring_snmp with snmpd disabled'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+      vars:
+        snmpd_config: "{{ monitoring_snmp__test_case.role_vars.snmpd_config | combine({'enabled': false}) }}"
+
+    - name: 'Read the state of snmpd after the run with snmpd disabled'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveState', '--property=UnitFileState', 'snmpd' ]
+      register: 'monitoring_snmp__test_disabled'
+      changed_when: false
+
+    - name: 'Run monitoring_snmp with snmpd enabled again'
+      ansible.builtin.include_role:
+        name: 'monitoring_snmp'
+
+    - name: 'Read the state of snmpd after the run with snmpd enabled again'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveState', '--property=UnitFileState', 'snmpd' ]
+      register: 'monitoring_snmp__test_enabled'
+      changed_when: false
+
+    - name: 'Assert enabled switches snmpd'
+      ansible.builtin.assert:
+        that:
+          - "'ActiveState=inactive' in monitoring_snmp__test_disabled.stdout_lines"
+          - "'UnitFileState=disabled' in monitoring_snmp__test_disabled.stdout_lines"
+          - "'ActiveState=active' in monitoring_snmp__test_enabled.stdout_lines"
+          - "'UnitFileState=enabled' in monitoring_snmp__test_enabled.stdout_lines"
+        fail_msg: >-
+          Disabled: {{ monitoring_snmp__test_disabled.stdout_lines | join(', ') }},
+          enabled: {{ monitoring_snmp__test_enabled.stdout_lines | join(', ') }}
+
     - name: 'Find the configuration files before the invalid runs'
       ansible.builtin.find:
         paths: [ '/etc/snmp', '/etc/snmp/snmpd.conf.d', '/etc/systemd/system/snmpd.service.d' ]
@@ -120,17 +158,99 @@
         get_checksum: true
       register: 'monitoring_snmp__test_files_before'
 
-    - name: 'Run monitoring_snmp with invalid variables (expect ERROR)'
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_snmp with snmpd_config not a dictionary (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      loop:
-        - message: 'Unknown directives in snmpd_config: molecule_unknown'
-          search: 'molecule_unknown'
-          role_vars:
-            snmpd_config: "{{ monitoring_snmp__test_case.role_vars.snmpd_config | combine(monitoring_snmp__test_side_effect.invalid_settings) }}"
-        - message: 'Invalid snmpd_unit entries: podman99.network'
-          search: 'requires: podman99.network'
-          role_vars:
-            snmpd_unit: "{{ monitoring_snmp__test_side_effect.invalid_unit }}"
-      loop_control:
-        loop_var: 'monitoring_snmp__test_invalid'
-        label: "{{ monitoring_snmp__test_invalid.message }}"
+      vars:
+        snmpd_config: 'molecule'
+        monitoring_snmp__test_invalid:
+          message: 'snmpd_config not a dictionary'
+          search: 'expected dicts'
+
+    - name: 'Run monitoring_snmp with an unknown directive (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_config: "{{ monitoring_snmp__test_case.role_vars.snmpd_config | combine(monitoring_snmp__test_side_effect.invalid_settings) }}"
+        monitoring_snmp__test_invalid:
+          message: 'an unknown directive'
+          search: '^Unknown directives in `snmpd_config` or `snmpd_configs` for Net-SNMP 5\.9: molecule_unknown\.$'
+
+    - name: 'Run monitoring_snmp with an unknown directive in a config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_configs: [ { 'name': 'molecule', 'settings': { 'molecule_unknown': 'molecule' } } ]
+        monitoring_snmp__test_invalid:
+          message: 'an unknown directive in a config'
+          search: 'for Net-SNMP 5\.9: molecule: molecule_unknown\.$'
+
+    - name: 'Run monitoring_snmp with an invalid unit (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_unit: "{{ monitoring_snmp__test_side_effect.invalid_unit }}"
+        monitoring_snmp__test_invalid:
+          message: 'the quadlet file of a podman network as unit'
+          search: '^Invalid `snmpd_unit` entries .*: requires: podman99\.network\.$'
+
+    - name: 'Run monitoring_snmp with an empty value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_config: { 'sysLocation': '' }
+        monitoring_snmp__test_invalid:
+          message: 'an empty value'
+          search: '^Empty values are not allowed, false removes a directive: sysLocation\.$'
+
+    - name: 'Run monitoring_snmp with a dictionary as value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_config: { 'sysLocation': { 'molecule': 'molecule' } }
+        monitoring_snmp__test_invalid:
+          message: 'a dictionary as value'
+          search: '^Values are strings, numbers, booleans or lists of them: sysLocation\.$'
+
+    - name: 'Run monitoring_snmp with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_configs: [ { 'name': 'molecule', 'settings': { 'rocommunity': "molecule\nro" } } ]
+        monitoring_snmp__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: molecule: rocommunity\.$'
+
+    - name: 'Run monitoring_snmp with an invalid name of a config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_configs: [ { 'name': 'molecule config', 'settings': {} } ]
+        monitoring_snmp__test_invalid:
+          message: 'an invalid name of a config'
+          search: '^`snmpd_configs` entries need a name of letters, digits, \., _ and - and settings as a dictionary: 0\.$'
+
+    - name: 'Run monitoring_snmp with duplicate names of configs (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_configs: [ { 'name': 'molecule', 'settings': {} }, { 'name': 'molecule', 'settings': {} } ]
+        monitoring_snmp__test_invalid:
+          message: 'duplicate names of configs'
+          search: '^The names of `snmpd_configs` have to be unique\.$'
+
+    - name: 'Run monitoring_snmp with enabled in a config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_configs: [ { 'name': 'molecule', 'settings': { 'enabled': false } } ]
+        monitoring_snmp__test_invalid:
+          message: 'enabled in a config'
+          search: '^Options of the role are only set in `snmpd_config`: molecule: enabled\.$'
+
+    - name: 'Run monitoring_snmp with enabled not a boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_config: { 'enabled': 'no' }
+        monitoring_snmp__test_invalid:
+          message: 'enabled not a boolean'
+          search: '^`snmpd_config\.enabled` has to be true or false\.$'
+
+    - name: 'Run monitoring_snmp with snmpd_prune not a boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        snmpd_prune: 'yes'
+        monitoring_snmp__test_invalid:
+          message: 'snmpd_prune not a boolean'
+          search: '^`snmpd_prune` has to be true or false\.$'

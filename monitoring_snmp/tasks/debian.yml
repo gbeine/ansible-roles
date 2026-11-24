@@ -23,65 +23,58 @@
 
     - name: 'Include OS-specific variables'
       ansible.builtin.include_vars: "{{ item }}"
-      with_first_found:
-        - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['distribution'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
-        - "{{ ansible_facts['os_family'] }}.yml"
+      loop: "{{ query('ansible.builtin.first_found', monitoring_snmp__os_vars) }}"
+      vars:
+        monitoring_snmp__os_vars:
+          - "{{ ansible_facts['distribution'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+          - "{{ ansible_facts['distribution'] }}.yml"
+          - "{{ ansible_facts['os_family'] }}-{{ ansible_facts['distribution_major_version'] }}.yml"
+          - "{{ ansible_facts['os_family'] }}.yml"
 
     - name: 'Include settings of the Net-SNMP release'
       ansible.builtin.include_vars:
         file: "settings-{{ monitoring_snmp__release }}.yml"
 
-    - name: 'Validate settings and configs'
+    # tasks/main.yml validated the types, here the directives of the release and the units are checked
+    - name: 'Validate the directives and the units'
       ansible.builtin.assert:
         that:
-          - monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string and monitoring_snmp__configs is not mapping
-          - monitoring_snmp__unknown_settings | length == 0
-          - monitoring_snmp__invalid_configs | length == 0
-          - monitoring_snmp__unit is mapping
-          - monitoring_snmp__invalid_units | length == 0
-        fail_msg: >-
-          snmpd_unit has to be a mapping and snmpd_configs a list.
-          Unknown directives in snmpd_config for Net-SNMP {{ monitoring_snmp__release }}:
-          {{ monitoring_snmp__unknown_settings | join(', ') | default('none', true) }}.
-          Invalid configs (need name of letters, digits, '.', '_' or '-' and settings with known directives):
-          {{ monitoring_snmp__invalid_configs | join(', ') | default('none', true) }}.
-          Invalid snmpd_unit entries (keys {{ monitoring_snmp__unit_directives.keys() | join(', ') }} with lists of unit names
-          ending with .{{ monitoring_snmp__unit_types | join(', .') }}, the unit of a podman network <name>.network is <name>-network.service):
-          {{ monitoring_snmp__invalid_units | join(', ') | default('none', true) }}.
+          - monitoring_snmp__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_snmp__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_snmp__unknown_settings: >-
-          {{ monitoring_snmp__config.keys() | difference(monitoring_snmp__release_directives) | sort }}
-        monitoring_snmp__invalid_configs: "{{ monitoring_snmp__invalid_configs_json | trim | from_json }}"
-        monitoring_snmp__invalid_configs_json: >-
-          {% set result = [] %}
-          {% for c in (monitoring_snmp__configs if monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string else []) %}
-          {%   if c is not mapping or c.name is not defined or c.name | string is not match('^[A-Za-z0-9._-]+$')
-                  or c.settings is not defined or c.settings is not mapping %}
-          {%     set _ = result.append('config ' ~ loop.index0) %}
-          {%   else %}
-          {%     for name in c.settings.keys() | difference(monitoring_snmp__release_directives) | sort %}
-          {%       set _ = result.append(c.name ~ ': ' ~ name) %}
-          {%     endfor %}
-          {%   endif %}
-          {% endfor %}
-          {{ result | to_json }}
-        monitoring_snmp__invalid_units: "{{ monitoring_snmp__invalid_units_json | trim | from_json }}"
-        monitoring_snmp__invalid_units_json: >-
-          {% set result = [] %}
-          {% set pattern = '^[^/ ]+[.](' ~ monitoring_snmp__unit_types | join('|') ~ ')$' %}
-          {% for key, units in (monitoring_snmp__unit.items() if monitoring_snmp__unit is mapping else []) %}
-          {%   if key not in monitoring_snmp__unit_directives or units is string or units is mapping or units is not iterable %}
-          {%     set _ = result.append(key) %}
-          {%   else %}
-          {%     for unit in units if unit is not string or unit is not match(pattern) %}
-          {%       set _ = result.append(key ~ ': ' ~ unit) %}
-          {%     endfor %}
-          {%   endif %}
-          {% endfor %}
-          {{ result | to_json }}
+        monitoring_snmp__errors: >-
+          {%- set errors = [] -%}
+          {%- set unknown = monitoring_snmp__config.keys() | map('string') | reject('in', monitoring_snmp__role_options)
+                            | reject('in', monitoring_snmp__release_directives) | sort -%}
+          {%- for c in monitoring_snmp__configs -%}
+          {%-   for key in c.settings.keys() | map('string') | reject('in', monitoring_snmp__release_directives) | sort -%}
+          {%-     set _ = unknown.append(c.name ~ ': ' ~ key) -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown directives in `snmpd_config` or `snmpd_configs` for Net-SNMP ' ~ monitoring_snmp__release ~ ': '
+                                      ~ (unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set invalid = [] -%}
+          {%- set pattern = '^[^/ ]+[.](' ~ monitoring_snmp__unit_types | join('|') ~ ')$' -%}
+          {%- for key, units in monitoring_snmp__unit.items() -%}
+          {%-   if key not in monitoring_snmp__unit_directives or units is string or units is mapping or units is not iterable -%}
+          {%-     set _ = invalid.append(key | string) -%}
+          {%-   else -%}
+          {%-     for unit in units if unit is not string or unit is not match(pattern) -%}
+          {%-       set _ = invalid.append(key ~ ': ' ~ unit) -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if invalid | length > 0 -%}
+          {%-   set _ = errors.append('Invalid `snmpd_unit` entries (keys ' ~ (monitoring_snmp__unit_directives.keys() | join(', '))
+                                      ~ ' with lists of unit names ending with .' ~ (monitoring_snmp__unit_types | join(', .'))
+                                      ~ ', the unit of a podman network <name>.network is <name>-network.service): '
+                                      ~ (invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Install Net-SNMP packages'
       ansible.builtin.apt:
@@ -190,6 +183,8 @@
         src: "{{ item }}"
       loop: "{{ [monitoring_snmp__etc_dir + '/snmpd.conf'] + (monitoring_snmp__conf_d_after.files | map(attribute='path') | sort) }}"
       register: 'monitoring_snmp__files_after'
+      # In check mode the files of a first installation do not exist
+      failed_when: false
       no_log: true
       when: 'monitoring_snmp__changed | bool'
 
@@ -200,7 +195,8 @@
       when: 'monitoring_snmp__changed | bool'
 
     # snmpd writes the SNMPv3 users to the persistent file on shutdown,
-    # without removing them changed passwords of createUser do not take effect
+    # without removing them changed passwords of createUser do not take effect,
+    # also if snmpd is disabled, so the next start uses the changed users
     - name: 'Restart snmpd, a directive changed that is applied on a restart only'
       when:
         - not ansible_check_mode
@@ -225,7 +221,18 @@
         state: 'started'
         enabled: true
       register: 'monitoring_snmp__service_result'
-      when: 'not ansible_check_mode'
+      when:
+        - not ansible_check_mode
+        - monitoring_snmp__enabled | bool
+
+    - name: 'Stop and disable snmpd'
+      ansible.builtin.systemd_service:
+        name: "{{ monitoring_snmp__service }}"
+        state: 'stopped'
+        enabled: false
+      when:
+        - not ansible_check_mode
+        - not monitoring_snmp__enabled | bool
 
     - name: 'Reload snmpd'
       ansible.builtin.systemd_service:
@@ -233,6 +240,7 @@
         state: 'reloaded'
       when:
         - not ansible_check_mode
+        - monitoring_snmp__enabled | bool
         - monitoring_snmp__changed | bool
         - not monitoring_snmp__restart_needed | bool
         - monitoring_snmp__service_result is not changed
@@ -240,6 +248,7 @@
     - name: 'Check snmpd after the change'
       when:
         - not ansible_check_mode
+        - monitoring_snmp__enabled | bool
         - monitoring_snmp__changed | bool
       block:
 

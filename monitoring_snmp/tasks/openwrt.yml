@@ -11,15 +11,6 @@
       ansible.builtin.import_role:
         name: 'community.openwrt.init'
 
-    # A failing template in the settings (e.g. an unknown filter) disappears silently inside the translation,
-    # rendering the settings and configs completely shows the error before anything changes
-    - name: 'Render the settings and configs'
-      ansible.builtin.assert:
-        that:
-          - monitoring_snmp__config | to_json | length > 0
-          - monitoring_snmp__configs | to_json | length > 0
-        quiet: true
-
     # The configs are merged into the settings, lists are appended
     - name: 'Translate the settings to the UCI configuration of snmpd'
       ansible.builtin.set_fact:
@@ -29,18 +20,21 @@
         monitoring_snmp__openwrt_translation_json: >-
           {% set ns = namespace(v3=false) %}
           {% set merged = {} %}
-          {% for key, value in monitoring_snmp__config.items() %}
-          {%   set _ = merged.update({key: (value if value is iterable and value is not string and value is not mapping else [value])
-                                           | map('string') | select | list}) %}
-          {% endfor %}
-          {% for config in (monitoring_snmp__configs if monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string else []) %}
-          {%   for key, value in (config.settings if config is mapping and config.settings is mapping else {}).items() %}
-          {%     set values = (value if value is iterable and value is not string and value is not mapping else [value]) | map('string') | select | list %}
-          {%     set _ = merged.update({key: merged.get(key, []) + values}) %}
-          {%   endfor %}
-          {% endfor %}
           {% set sections = [] %}
           {% set errors = [] %}
+          {#  false or null removes a directive, every directive of the UCI configuration needs a value #}
+          {% set settings = monitoring_snmp__config | dict2items | rejectattr('key', 'in', monitoring_snmp__role_options) | list %}
+          {% for config in monitoring_snmp__configs %}
+          {%   set _ = settings.extend(config.settings | dict2items) %}
+          {% endfor %}
+          {% for s in settings %}
+          {%   set values = [] if (s.value is none or s.value is sameas false)
+                            else (s.value if s.value is iterable and s.value is not string else [s.value]) %}
+          {%   if values | select('sameas', true) | list | length > 0 %}
+          {%     set _ = errors.append(s.key ~ ' (true needs a value on OpenWrt)') %}
+          {%   endif %}
+          {%   set _ = merged.update({s.key: merged.get(s.key, []) + (values | reject('sameas', true) | map('string') | list)}) %}
+          {% endfor %}
           {% set counters = {} %}
           {% macro tokens(line) %}{{ line | regex_findall('"[^"]*"|[^ ]+') | map('regex_replace', '^"(.*)"$', '\1') | list | to_json }}{% endmacro %}
           {% for key in merged.keys() | reject('in', monitoring_snmp__openwrt_directives) | sort %}
@@ -231,25 +225,33 @@
                             | map(attribute=1) | map('lower') | list %}
           {% set v3 = ns.v3 or 'usm' in versions %}
           {% set v12 = versions | select('in', ['v1', 'v2c']) | list | length > 0 %}
-          {% set general = {'enabled': '1',
+          {% set general = {'enabled': '1' if monitoring_snmp__enabled | bool else '0',
                             'ip_protocol': 'ipv4/ipv6' if (ipv4 and ipv6) or not (ipv4 or ipv6) else ('ipv6' if ipv6 else 'ipv4'),
                             'snmp_port': port if port is match('^[0-9]+$') else '161',
                             'snmp_version': ('v1/v2c/v3' if v12 or (ns.v3 and not versions) else 'v3') if v3 else 'v1/v2c'} %}
           {% set _ = sections.append({'type': 'snmpd', 'name': 'general', 'options': general}) %}
           {{ {'sections': sections, 'errors': errors} | to_json }}
 
+    # tasks/main.yml validated the types, here the directives are checked against the UCI configuration
     - name: 'Validate the settings for OpenWrt'
       ansible.builtin.assert:
         that:
-          - monitoring_snmp__configs is sequence and monitoring_snmp__configs is not string and monitoring_snmp__configs is not mapping
-          - monitoring_snmp__configs | rejectattr('settings', 'defined') | list | length == 0
-          - monitoring_snmp__unit | length == 0
-          - monitoring_snmp__openwrt_translation.errors | length == 0
-        fail_msg: >-
-          snmpd_configs has to be a list of configs with settings.
-          snmpd_unit is not supported on OpenWrt (procd instead of systemd): {{ monitoring_snmp__unit.keys() | join(', ') | default('none', true) }}.
-          Invalid or unsupported directives on OpenWrt: {{ monitoring_snmp__openwrt_translation.errors | join(', ') | default('none', true) }}.
+          - monitoring_snmp__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_snmp__errors | join(' ') }}"
         quiet: true
+      vars:
+        monitoring_snmp__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_snmp__unit | length > 0 -%}
+          {%-   set _ = errors.append('`snmpd_unit` is not supported on OpenWrt (procd instead of systemd): '
+                                      ~ (monitoring_snmp__unit.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_snmp__openwrt_translation.errors | length > 0 -%}
+          {%-   set _ = errors.append('Invalid or unsupported directives on OpenWrt: '
+                                      ~ (monitoring_snmp__openwrt_translation.errors | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     # The same structure as bootstrap_openwrt__snmpd of bootstrap_openwrt: type, optional name, find and options,
     # names and find follow the default configuration of OpenWrt, unnamed sections are found by find
@@ -279,7 +281,7 @@
           {%     set ns.find = {'group': o.group} %}
           {%   elif t == 'snmpd' %}
           {%     set ns.name = 'general' %}
-          {%     set ns.find = {'enabled': '1'} %}
+          {%     set ns.find = {'enabled': o.enabled} %}
           {%   elif t == 'system' and o.sysName is defined %}
           {%     set ns.find = {'sysName': o.sysName} %}
           {%   elif t == 'engineid' and o.engineidtype is defined %}
@@ -347,114 +349,165 @@
         name: "{{ monitoring_snmp__openwrt_packages_absent | join(',') }}"
         state: 'absent'
 
-    - name: 'Read the current snmpd configuration'
-      community.openwrt.slurp:
-        src: "{{ monitoring_snmp__openwrt_config }}"
-      register: 'monitoring_snmp__openwrt_current'
-      no_log: true
+    # In check mode the packages of a first installation are missing, uci fails without /etc/config/snmpd of the package
+    - name: 'Check the UCI configuration of snmpd'
+      ansible.builtin.raw: "test -f {{ monitoring_snmp__openwrt_config }} && echo 'uci=yes' || echo 'uci=no'"
+      register: 'monitoring_snmp__openwrt_files'
+      changed_when: false
       check_mode: false
 
-    - name: 'Set the sections of the snmpd configuration'
-      community.openwrt.uci:
-        command: 'section'
-        config: 'snmpd'
-        type: "{{ item.type }}"
-        name: "{{ item.name | default(omit) }}"
-        find: "{{ item.find }}"
-        value: "{{ item.options }}"
-        replace: true
-        redact_keys: "{{ monitoring_snmp__openwrt_redact_keys }}"
-      loop: "{{ monitoring_snmp__openwrt_snmpd }}"
-      loop_control:
-        label: "{{ item.name | default(item.type) }}"
+    - name: 'Configure the UCI configuration of snmpd'
+      when: "'uci=yes' in monitoring_snmp__openwrt_files.stdout_lines | map('trim')"
+      block:
 
-    - name: 'Look up the IDs of the unnamed sections'
-      community.openwrt.uci:
-        command: 'find'
-        config: 'snmpd'
-        type: "{{ item.type }}"
-        find: "{{ item.find }}"
-      loop: "{{ monitoring_snmp__openwrt_snmpd | rejectattr('name', 'defined') | list }}"
-      loop_control:
-        label: "{{ item.type }}"
-      register: 'monitoring_snmp__openwrt_found'
-      no_log: true
-      check_mode: false
-      failed_when:
-        - monitoring_snmp__openwrt_found.failed | default(false)
+        - name: 'Read the current snmpd configuration'
+          community.openwrt.slurp:
+            src: "{{ monitoring_snmp__openwrt_config }}"
+          register: 'monitoring_snmp__openwrt_current'
+          no_log: true
+          check_mode: false
+
+        - name: 'Set the sections of the snmpd configuration'
+          community.openwrt.uci:
+            command: 'section'
+            config: 'snmpd'
+            type: "{{ item.type }}"
+            name: "{{ item.name | default(omit) }}"
+            find: "{{ item.find }}"
+            value: "{{ item.options }}"
+            replace: true
+            redact_keys: "{{ monitoring_snmp__openwrt_redact_keys }}"
+          loop: "{{ monitoring_snmp__openwrt_snmpd }}"
+          loop_control:
+            label: "{{ item.name | default(item.type) }}"
+
+        - name: 'Look up the IDs of the unnamed sections'
+          community.openwrt.uci:
+            command: 'find'
+            config: 'snmpd'
+            type: "{{ item.type }}"
+            find: "{{ item.find }}"
+          loop: "{{ monitoring_snmp__openwrt_snmpd | rejectattr('name', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.type }}"
+          register: 'monitoring_snmp__openwrt_found'
+          no_log: true
+          check_mode: false
+          failed_when:
+            - monitoring_snmp__openwrt_found.failed | default(false)
+            - not ansible_check_mode
+
+        - name: 'Read the sections of the snmpd configuration'
+          community.openwrt.uci:
+            command: 'show'
+            config: 'snmpd'
+          register: 'monitoring_snmp__openwrt_show'
+          no_log: true
+          check_mode: false
+
+        - name: 'Determine the sections to delete'
+          ansible.builtin.set_fact:
+            monitoring_snmp__openwrt_delete: >-
+              {{ monitoring_snmp__openwrt_show.result
+                 | regex_findall('(?m)^snmpd\.([^.=\n]+)=([\w-]+)$')
+                 | reverse
+                 | map(attribute='0')
+                 | reject('in',
+                     (monitoring_snmp__openwrt_snmpd | selectattr('name', 'defined') | map(attribute='name') | list)
+                     + (monitoring_snmp__openwrt_found.results | map(attribute='result') | list))
+                 | list }}
+
+        - name: 'Show the sections to delete'
+          ansible.builtin.debug:
+            var: 'monitoring_snmp__openwrt_delete'
+
+        - name: 'Delete the undeclared sections'
+          community.openwrt.uci:
+            command: 'delete'
+            key: "snmpd.{{ item }}"
+          loop: "{{ monitoring_snmp__openwrt_delete }}"
+          when: monitoring_snmp__prune | bool
+
+        - name: 'Read the pending changes of the snmpd configuration'
+          community.openwrt.uci:
+            command: 'changes'
+            config: 'snmpd'
+          register: 'monitoring_snmp__openwrt_pending'
+          no_log: true
+          check_mode: false
+
+        # The backup contains the configuration before this change, it is only written before a commit
+        - name: 'Create the backup directory on the controller'
+          ansible.builtin.file:
+            path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
+            state: 'directory'
+            mode: '0700'
+          delegate_to: 'localhost'
+          check_mode: false
+          when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Store the backup on the controller (secrets redacted)'
+          ansible.builtin.copy:
+            content: >-
+              {{ monitoring_snmp__openwrt_current.content | b64decode
+                 | regex_replace('(?mi)^(\s*(?:option|list)\s+\S*(?:community|secret|pass|key|priv|auth|trapsess)\S*\s+).*$', "\g<1>'REDACTED'") }}
+            dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/snmpd"
+            mode: '0600'
+          delegate_to: 'localhost'
+          no_log: true
+          check_mode: false
+          when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+
+        - name: 'Commit the snmpd configuration'
+          community.openwrt.uci:
+            command: 'commit'
+            config: 'snmpd'
+          register: 'monitoring_snmp__openwrt_commit_result'
+          when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+
+    # /etc/init.d/snmpd restart starts the new process while the former one may still hold the ports,
+    # the role stops snmpd and waits until the process has ended before it starts it again,
+    # snmpd ends a moment after the stop, also if it is disabled
+    - name: 'Stop snmpd'
+      community.openwrt.service:
+        name: 'snmpd'
+        state: 'stopped'
+      register: 'monitoring_snmp__openwrt_stop_result'
+      when:
         - not ansible_check_mode
+        - monitoring_snmp__openwrt_changed | bool or not monitoring_snmp__enabled | bool
 
-    - name: 'Read the sections of the snmpd configuration'
-      community.openwrt.uci:
-        command: 'show'
-        config: 'snmpd'
-      register: 'monitoring_snmp__openwrt_show'
-      no_log: true
-      check_mode: false
+    - name: 'Wait until snmpd has ended'
+      ansible.builtin.raw: 'pidof snmpd'
+      register: 'monitoring_snmp__openwrt_pidof'
+      until: monitoring_snmp__openwrt_pidof.rc != 0
+      retries: 10
+      delay: 1
+      changed_when: false
+      failed_when: false
+      when: monitoring_snmp__openwrt_stop_result is changed
 
-    - name: 'Determine the sections to delete'
-      ansible.builtin.set_fact:
-        monitoring_snmp__openwrt_delete: >-
-          {{ monitoring_snmp__openwrt_show.result
-             | regex_findall('(?m)^snmpd\.([^.=\n]+)=([\w-]+)$')
-             | reverse
-             | map(attribute='0')
-             | reject('in',
-                 (monitoring_snmp__openwrt_snmpd | selectattr('name', 'defined') | map(attribute='name') | list)
-                 + (monitoring_snmp__openwrt_found.results | map(attribute='result') | list))
-             | list }}
-
-    - name: 'Show the sections to delete'
-      ansible.builtin.debug:
-        var: 'monitoring_snmp__openwrt_delete'
-
-    - name: 'Delete the undeclared sections'
-      community.openwrt.uci:
-        command: 'delete'
-        key: "snmpd.{{ item }}"
-      loop: "{{ monitoring_snmp__openwrt_delete }}"
-      when: monitoring_snmp__prune | bool
-
-    - name: 'Read the pending changes of the snmpd configuration'
-      community.openwrt.uci:
-        command: 'changes'
-        config: 'snmpd'
-      register: 'monitoring_snmp__openwrt_pending'
-      no_log: true
-      check_mode: false
-
-    # The backup contains the configuration before this change, it is only written before a commit
-    - name: 'Create the backup directory on the controller'
-      ansible.builtin.file:
-        path: "{{ playbook_dir }}/backups/{{ inventory_hostname }}"
-        state: 'directory'
-        mode: '0700'
-      delegate_to: 'localhost'
-      check_mode: false
-      when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
-
-    - name: 'Store the backup on the controller (secrets redacted)'
-      ansible.builtin.copy:
-        content: >-
-          {{ monitoring_snmp__openwrt_current.content | b64decode
-             | regex_replace('(?mi)^(\s*(?:option|list)\s+\S*(?:community|secret|pass|key|priv|auth|trapsess)\S*\s+).*$', "\g<1>'REDACTED'") }}
-        dest: "{{ playbook_dir }}/backups/{{ inventory_hostname }}/snmpd"
-        mode: '0600'
-      delegate_to: 'localhost'
-      no_log: true
-      check_mode: false
-      when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
-
-    - name: 'Commit the snmpd configuration'
-      community.openwrt.uci:
-        command: 'commit'
-        config: 'snmpd'
-      register: 'monitoring_snmp__openwrt_commit_result'
-      when: monitoring_snmp__openwrt_pending.changes | default({}) | length > 0
+    - name: 'Assert snmpd has ended'
+      ansible.builtin.assert:
+        that:
+          - monitoring_snmp__openwrt_pidof.rc != 0
+        fail_msg: 'snmpd did not end after stopping the service'
+        quiet: true
+      when: monitoring_snmp__openwrt_stop_result is changed
 
     - name: 'Start and enable snmpd'
       community.openwrt.service:
         name: 'snmpd'
         enabled: true
-        state: "{{ 'restarted' if monitoring_snmp__openwrt_changed | bool else 'started' }}"
-      when: not ansible_check_mode
+        state: 'started'
+      when:
+        - not ansible_check_mode
+        - monitoring_snmp__enabled | bool
+
+    - name: 'Disable snmpd'
+      community.openwrt.service:
+        name: 'snmpd'
+        enabled: false
+      when:
+        - not ansible_check_mode
+        - not monitoring_snmp__enabled | bool
