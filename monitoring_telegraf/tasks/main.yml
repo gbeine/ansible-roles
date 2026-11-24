@@ -1,49 +1,193 @@
 ---
 
 - name: 'Install Telegraf'
-  tags: [ 'monitoring_telegraf' ]
+  tags: [ 'monitoring', 'monitoring_telegraf' ]
   block:
 
-    - name: 'Validate plugins and secrets'
+    # A failing template in the variables (e.g. an unknown filter, telegraf_config or telegraf_container not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
-          - monitoring_telegraf__outputs | length > 0
-          - monitoring_telegraf__inputs | length > 0
-          - (monitoring_telegraf__outputs + monitoring_telegraf__inputs) | rejectattr('plugin', 'defined') | list | length == 0
-          - (monitoring_telegraf__processors + monitoring_telegraf__aggregators) | rejectattr('type', 'defined') | list | length == 0
-          - monitoring_telegraf__secrets | rejectattr('name', 'defined') | list | length == 0
-          - monitoring_telegraf__secrets | rejectattr('data', 'defined') | list | length == 0
-          - monitoring_telegraf__secrets | rejectattr('target', 'defined') | list | length == 0
-          - monitoring_telegraf__secrets_in_environment | length == 0
-        fail_msg: >-
-          Telegraf needs at least one output in telegraf_outputs and one input in telegraf_inputs,
-          every output and input needs plugin, every processor and aggregator needs type.
-          Every secret needs name, data and target, secrets must not be set in telegraf_environment:
-          {{ monitoring_telegraf__secrets_in_environment | join(', ') | default('none', true) }}.
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_telegraf__container | length > 0
+          - monitoring_telegraf__config | to_json | length > 0
+          # telegraf_environment has no default, a failing template stops the role here as well
+          - monitoring_telegraf__environment | default({}) | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_telegraf__invalid | join('. ') }}"
         quiet: true
       vars:
-        monitoring_telegraf__secrets_in_environment: >-
-          {{ monitoring_telegraf__secrets | selectattr('target', 'defined') | map(attribute='target')
-             | select('in', monitoring_telegraf__environment.keys() | list) | list }}
+        monitoring_telegraf__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = monitoring_telegraf__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`telegraf_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`telegraf_secrets` entries need name and data') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `telegraf_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # telegraf config check checks the plugins and their options before telegraf.conf is replaced
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_telegraf__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_telegraf__config_json: "{{ monitoring_telegraf__config | to_json }}"
+        monitoring_telegraf__unknown: "{{ monitoring_telegraf__config.keys() | map('string') | reject('in', monitoring_telegraf__config_allowed) | list }}"
+        # Fields carrying secrets, null, an empty string and references of secret stores are allowed,
+        # the lookahead also rejects white space, otherwise \s* would backtrack in front of the value
+        monitoring_telegraf__plain_secrets: >-
+          {{ monitoring_telegraf__config_json
+             | regex_findall('"(' ~ (monitoring_telegraf__config_secret_keys | join('|')) ~ ')"\s*:\s*(?![\s]|null|""|"@\{[^"{}]+\}")')
+             | unique | list }}
+        monitoring_telegraf__unreferenced: >-
+          {{ monitoring_telegraf__secrets | map(attribute='name') | map('string')
+             | reject('in', monitoring_telegraf__config_json | regex_findall('@\{' ~ monitoring_telegraf__secret_store ~ ':([^"{}]+)\}'))
+             | list }}
+        monitoring_telegraf__data: >-
+          {{ monitoring_telegraf__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+             + monitoring_telegraf__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list }}
+        monitoring_telegraf__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = monitoring_telegraf__config -%}
+          {%- if monitoring_telegraf__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown keys in `telegraf_config`: ' ~ (monitoring_telegraf__unknown | join(', '))
+                                    ~ ', allowed are ' ~ (monitoring_telegraf__config_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set tables = ['agent', 'global_tags'] | select('in', config) | reject('in', config | dict2items | selectattr('value', 'mapping')
+                                                                                         | map(attribute='key') | list) | list -%}
+          {%- if tables | length > 0 -%}
+          {%-   set _ = errors.append('These keys of `telegraf_config` are dictionaries: ' ~ (tables | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- set invalid = [] -%}
+          {%- for section in monitoring_telegraf__config_plugin_sections if section in config -%}
+          {%-   if config[section] is not mapping -%}
+          {%-     set _ = invalid.append(section) -%}
+          {%-   else -%}
+          {%-     for plugin, instances in config[section].items()
+                     if instances is string or instances is mapping or instances is not iterable
+                        or instances | reject('mapping') | list | length > 0 -%}
+          {%-       set _ = invalid.append(section ~ '.' ~ plugin) -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if invalid | length > 0 -%}
+          {%-   set _ = errors.append('The plugins of `telegraf_config` are dictionaries of lists of tables, e.g. inputs: {cpu: [ {} ]}: '
+                                    ~ (invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if config.outputs | default({}) is not mapping or config.outputs | default({}) | length == 0
+                 or config.inputs | default({}) is not mapping or config.inputs | default({}) | length == 0 -%}
+          {%-   set _ = errors.append('Telegraf needs at least one output in `telegraf_config.outputs` and one input in `telegraf_config.inputs`.') -%}
+          {%- endif -%}
+          {%- if monitoring_telegraf__plain_secrets | length > 0 -%}
+          {%-   set _ = errors.append('These fields carry secrets, they are `telegraf_secrets` referenced with @{'
+                                    ~ monitoring_telegraf__secret_store ~ ':<name>}: ' ~ (monitoring_telegraf__plain_secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_telegraf__unreferenced | length > 0 -%}
+          {%-   set _ = errors.append('These secrets are not referenced in `telegraf_config` with @{' ~ monitoring_telegraf__secret_store ~ ':<name>}: '
+                                    ~ (monitoring_telegraf__unreferenced | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_telegraf__data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks: ' ~ (monitoring_telegraf__data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_telegraf__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_telegraf__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_telegraf__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_telegraf__environment is not mapping -%}
+          {%-   set _ = errors.append('`telegraf_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = monitoring_telegraf__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of `telegraf_environment` must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging telegraf_container,
+    # unknown variables would change the behavior unexpectedly
+    # An environment that is no mapping is not checked here, the validation of telegraf_environment reports it
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_telegraf__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_telegraf__container_environment: >-
+          {{ monitoring_telegraf__container.environment if monitoring_telegraf__container.environment | default(none) is mapping else {} }}
+        monitoring_telegraf__unknown: >-
+          {{ monitoring_telegraf__container_environment.keys() | map('string') | reject('in', monitoring_telegraf__environment_allowed) | list }}
+        monitoring_telegraf__line_breaks: >-
+          {{ monitoring_telegraf__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_telegraf__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_telegraf__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_telegraf__unknown | join(', ')) ~ ', Telegraf only reads '
+                                    ~ (monitoring_telegraf__environment_allowed | join(', ')) ~ ', the options are set in `telegraf_config`'
+                                    ~ ' and the secrets with `telegraf_secrets`.') -%}
+          {%- endif -%}
+          {%- if monitoring_telegraf__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_telegraf__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Create directories'
       ansible.builtin.file:
         dest: "{{ monitoring_telegraf__podman_home }}"
+        owner: 'root'
+        group: 'root'
         mode: '0755'
         state: 'directory'
 
-    - name: 'Generate configuration'
+    # telegraf config check of the image initialises the plugins in a throwaway container before the file is replaced,
+    # it resolves the references of the secret store, the container gets placeholder files of the secrets,
+    # the podman secrets are created afterwards, so an invalid configuration changes nothing
+    - name: 'Generate the configuration'
       ansible.builtin.copy:
         content: |
           #
           # Ansible managed
           #
 
-          {{ monitoring_telegraf__config | dict2items | rejectattr('value', 'eq', {}) | items2dict | community.general.to_toml }}
+          {{ monitoring_telegraf__config_rendered | community.general.to_toml }}
         dest: "{{ monitoring_telegraf__podman_config_file }}"
         owner: "{{ monitoring_telegraf__uid }}"
         group: "{{ monitoring_telegraf__gid }}"
         mode: '0400'
+        # The names of the secrets are arguments of sh, not part of the script
+        validate: >-
+          podman run --rm --network none --entrypoint sh --tmpfs /run/secrets
+          --volume %s:/etc/telegraf/telegraf.conf:ro {{ monitoring_telegraf__container.image }}
+          -c 'for name in "$@"; do printf placeholder > "/run/secrets/$name"; done;
+          exec telegraf config check --config /etc/telegraf/telegraf.conf' sh
+          {{ monitoring_telegraf__secrets | map(attribute='name') | map('string') | map('quote') | join(' ') }}
       register: 'monitoring_telegraf__config_result'
 
     - name: 'Create secrets'
@@ -67,6 +211,8 @@
         ip6: "{{ monitoring_telegraf__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_telegraf__container.network }}"
         timezone: "{{ monitoring_telegraf__container.timezone }}"
+        cap_add: "{{ monitoring_telegraf__container.cap_add | default(omit) }}"
+        command: "{{ monitoring_telegraf__container.command | default(omit) }}"
         env: "{{ monitoring_telegraf__container.environment | default(omit) }}"
         etc_hosts: "{{ monitoring_telegraf__container.etc_hosts | default(omit) }}"
         expose: "{{ monitoring_telegraf__container.expose | default(omit) }}"
@@ -74,10 +220,7 @@
         publish: "{{ monitoring_telegraf__container.publish | default(omit) }}"
         secrets: "{{ monitoring_telegraf__container.secrets | default(omit) }}"
         volume: "{{ monitoring_telegraf__container.volumes | default(omit) }}"
-        cap_add:
-          - 'cap_net_raw'
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
@@ -89,25 +232,109 @@
           {% if monitoring_telegraf__container.requires is defined %}
           Requires={{ monitoring_telegraf__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_telegraf__container.wants is defined %}
+          Wants={{ monitoring_telegraf__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_telegraf__container.after is defined %}
+          After={{ monitoring_telegraf__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_telegraf__container.part_of is defined %}
+          PartOf={{ monitoring_telegraf__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_telegraf__container.binds_to is defined %}
+          BindsTo={{ monitoring_telegraf__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if monitoring_telegraf__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_telegraf__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_telegraf__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ monitoring_telegraf__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if monitoring_telegraf__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        monitoring_telegraf__running: >-
-          {{ (ansible_facts.services[monitoring_telegraf__container.name + '.service'].state | default('')) == 'running' }}
-        monitoring_telegraf__restart: >-
-          {{ monitoring_telegraf__running | bool
-             and (monitoring_telegraf__config_result is changed
-                  or monitoring_telegraf__secrets_result is changed
-                  or monitoring_telegraf__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Telegraf'
       when: 'not ansible_check_mode'
+      block:
+
+        # systemd counts the automatic restarts, Telegraf exits if a plugin fails to start
+        - name: 'Read the automatic restarts before the start'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', "{{ monitoring_telegraf__container.name }}" ]
+          register: 'monitoring_telegraf__restarts_before'
+          changed_when: false
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_telegraf__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_telegraf__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_telegraf__running: >-
+              {{ (ansible_facts.services[monitoring_telegraf__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_telegraf__restart: >-
+              {{ monitoring_telegraf__running | bool
+                 and (monitoring_telegraf__config_result is changed
+                      or monitoring_telegraf__secrets_result is changed
+                      or monitoring_telegraf__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_telegraf__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_telegraf__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ monitoring_telegraf__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_telegraf__start_journal.stdout_lines }}
+
+    # Telegraf has no API of its own, it exits if an output or input cannot start (e.g. a secret that cannot be read),
+    # so the role waits until it runs for 10 seconds without an automatic restart
+    - name: 'Wait for Telegraf'
+      when: 'not ansible_check_mode'
+      ansible.builtin.command:
+        argv: [ 'sh', '-c', "systemctl show --property=ActiveState --property=ActiveEnterTimestampMonotonic --property=NRestarts {{ monitoring_telegraf__container.name }}; cut -d ' ' -f 1 /proc/uptime" ]
+      register: 'monitoring_telegraf__state'
+      changed_when: false
+      until: >-
+        (monitoring_telegraf__state_values.NRestarts | default(0) | int) > (monitoring_telegraf__restarts_before.stdout | int)
+        or (monitoring_telegraf__state_values.ActiveState | default('') == 'active'
+            and (monitoring_telegraf__state.stdout_lines | last | float) * 1000000
+                - (monitoring_telegraf__state_values.ActiveEnterTimestampMonotonic | default(0) | int) >= 10000000)
+      retries: 30
+      delay: 2
+      vars:
+        monitoring_telegraf__state_values: >-
+          {{ dict(monitoring_telegraf__state.stdout_lines | default([]) | select('search', '=') | map('split', '=', 1)) }}
+
+    - name: 'Read the log of Telegraf'
+      when:
+        - not ansible_check_mode
+        - >-
+          monitoring_telegraf__state_values.ActiveState | default('') != 'active'
+          or (monitoring_telegraf__state_values.NRestarts | default(0) | int) != (monitoring_telegraf__restarts_before.stdout | int)
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_telegraf__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'monitoring_telegraf__journal'
+      changed_when: false
+      vars:
+        monitoring_telegraf__state_values: >-
+          {{ dict(monitoring_telegraf__state.stdout_lines | select('search', '=') | map('split', '=', 1)) }}
+
+    - name: 'Assert that Telegraf runs'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_telegraf__journal is skipped
+        fail_msg: >-
+          {{ [ 'state ' ~ (monitoring_telegraf__state.stdout_lines | join(' ')),
+               'automatic restarts before ' ~ monitoring_telegraf__restarts_before.stdout ]
+             + monitoring_telegraf__journal.stdout_lines | default([]) }}
+        quiet: true
 
     - name: 'Enable autoupdate on container'
       when: 'monitoring_telegraf__autoupdate_enabled | bool'

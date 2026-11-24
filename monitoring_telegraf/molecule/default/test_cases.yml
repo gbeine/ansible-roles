@@ -7,37 +7,80 @@ monitoring_telegraf__test_network:
   netmask: 24
 
 monitoring_telegraf__test_image: 'docker.io/telegraf:alpine'
-monitoring_telegraf__test_secret: 'molecule-telegraf-secret'
+monitoring_telegraf__test_quadlet_path: '/etc/containers/systemd/telegraf.container'
+monitoring_telegraf__test_home: '/opt/telegraf-molecule'
 monitoring_telegraf__test_metrics_dir: '/opt/telegraf-molecule-metrics'
 
-monitoring_telegraf__test_vars:
-  telegraf_home: '/opt/telegraf-molecule'
-  telegraf_ip: '10.89.0.30'
-  telegraf_network: 'podman-molecule'
-  telegraf_hostname: 'telegraf-molecule'
-  telegraf_timezone: 'Europe/Berlin'
-  telegraf_agent_interval: '2s'
-  telegraf_agent_flush_interval: '2s'
-  telegraf_global_tags:
-    secret: '${MOLECULE_SECRET}'
-    env: '${MOLECULE_ENV}'
-  telegraf_environment:
-    MOLECULE_ENV: 'converge'
-  telegraf_secrets:
-    - name: 'telegraf_molecule_secret'
-      data: 'molecule-telegraf-secret'
-      target: 'MOLECULE_SECRET'
-  telegraf_volumes:
-    - '/opt/telegraf-molecule-metrics:/metrics'
-  telegraf_outputs:
-    - plugin: 'file'
-      files: [ '/metrics/metrics.out' ]
-      data_format: 'influx'
-  telegraf_inputs:
-    - plugin: 'cpu'
-      percpu: false
-      totalcpu: true
-    - plugin: 'mem'
+monitoring_telegraf__test_cases:
 
-# Environment changed in side_effect.yml, the running service must be restarted
-monitoring_telegraf__test_side_effect_env: 'side-effect'
+  # The mandatory values, an output and an input
+  - name: 'molecule-telegraf-default'
+    role_vars:
+      telegraf_home: '/opt/telegraf-molecule'
+      telegraf_ip: '10.89.0.30'
+      telegraf_network: 'podman-molecule'
+      telegraf_hostname: 'telegraf-molecule-default'
+      telegraf_timezone: 'Europe/Berlin'
+      telegraf_config:
+        outputs:
+          file:
+            - files: [ 'stdout' ]
+        inputs:
+          mem:
+            - {}
+    expect:
+      ip: '10.89.0.30'
+      secrets: []
+      interval: '10s'
+
+  # Secrets in the secret store, an own agent, global tags, two outputs and the environment
+  - name: 'molecule-telegraf'
+    role_vars:
+      telegraf_home: '/opt/telegraf-molecule'
+      telegraf_ip: '10.89.0.31'
+      telegraf_network: 'podman-molecule'
+      telegraf_hostname: 'telegraf-molecule'
+      telegraf_timezone: 'Europe/Berlin'
+      telegraf_environment:
+        HOST_MOUNT_PREFIX: '/'
+      telegraf_secrets:
+        - name: 'telegraf_molecule_password'
+          data: 'molecule-password'
+      telegraf_container:
+        volumes:
+          - '/opt/telegraf-molecule/telegraf.conf:/etc/telegraf/telegraf.conf:ro'
+          - '/opt/telegraf-molecule-metrics:/metrics'
+      telegraf_config:
+        agent:
+          interval: '2s'
+          flush_interval: '2s'
+          omit_hostname: true
+        global_tags:
+          env: 'molecule'
+        outputs:
+          file:
+            - files: [ '/metrics/metrics.out' ]
+              data_format: 'influx'
+          prometheus_client:
+            - listen: ':9273'
+              basic_username: 'molecule'
+              basic_password: '@{secrets:telegraf_molecule_password}'
+        inputs:
+          cpu:
+            - percpu: false
+              totalcpu: true
+          mem:
+            - {}
+    # A changed secret, the service has to restart and the new password works
+    side_effect:
+      role_vars:
+        telegraf_secrets:
+          - name: 'telegraf_molecule_password'
+            data: 'molecule-changed'
+    expect:
+      ip: '10.89.0.31'
+      secrets: [ 'telegraf_molecule_password' ]
+      interval: '2s'
+      password: 'molecule-changed'
+      old_password: 'molecule-password'
+      environment: [ 'HOST_MOUNT_PREFIX=/' ]

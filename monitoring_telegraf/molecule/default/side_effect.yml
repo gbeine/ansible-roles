@@ -6,35 +6,210 @@
   vars_files:
     - 'test_cases.yml'
 
+  vars:
+    monitoring_telegraf__test_case: "{{ monitoring_telegraf__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_telegraf__test_files:
+      - "{{ monitoring_telegraf__test_quadlet_path }}"
+      - "{{ monitoring_telegraf__test_home }}/telegraf.conf"
+    monitoring_telegraf__test_config: "{{ monitoring_telegraf__test_case.role_vars.telegraf_config }}"
+    monitoring_telegraf__test_secrets: "{{ monitoring_telegraf__test_case.role_vars.telegraf_secrets | default([]) }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
-    - name: 'Read the main PID of telegraf before the change'
-      ansible.builtin.command: 'systemctl show --property=MainPID --value telegraf'
-      register: 'monitoring_telegraf__test_pid_before'
-      changed_when: false
-
-    - name: 'Set the role variables with a changed environment'
+    - name: 'Set the role variables of the test case'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"
-      loop: >-
-        {{ monitoring_telegraf__test_vars
-           | combine({'telegraf_environment': {'MOLECULE_ENV': monitoring_telegraf__test_side_effect_env}})
-           | dict2items }}
+      loop: "{{ monitoring_telegraf__test_case.role_vars | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Run monitoring_telegraf with changed environment'
-      ansible.builtin.include_role:
-        name: 'monitoring_telegraf'
+    - name: 'Read the checksums of the quadlet unit and the configuration before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ monitoring_telegraf__test_files }}"
+      register: 'monitoring_telegraf__test_md5_before'
 
-    - name: 'Read the main PID of telegraf after the change'
-      ansible.builtin.command: 'systemctl show --property=MainPID --value telegraf'
-      register: 'monitoring_telegraf__test_pid_after'
-      changed_when: false
+    # Include parameters take precedence over set_fact and only exist inside the include
+    - name: 'Run monitoring_telegraf with telegraf_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_config: [ 'agent' ]
+        monitoring_telegraf__test_invalid:
+          message: 'telegraf_config is not a dictionary'
+          # combine of the defaults fails before the role checks anything
+          search: 'failed to combine variables, expected dicts'
 
-    - name: 'Assert telegraf was restarted'
-      ansible.builtin.assert:
-        that:
-          - monitoring_telegraf__test_pid_after.stdout != '0'
-          - monitoring_telegraf__test_pid_after.stdout != monitoring_telegraf__test_pid_before.stdout
-        fail_msg: "PID {{ monitoring_telegraf__test_pid_before.stdout }} -> {{ monitoring_telegraf__test_pid_after.stdout }}"
+    - name: 'Run monitoring_telegraf with an unknown key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_config: "{{ monitoring_telegraf__test_config | combine({'agnet': {}}) }}"
+        monitoring_telegraf__test_invalid:
+          message: 'an unknown key'
+          search: '^Unknown keys in `telegraf_config`: agnet, allowed are '
+
+    - name: 'Run monitoring_telegraf without an output (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_secrets: []
+        telegraf_config: "{{ monitoring_telegraf__test_config | combine({'outputs': {}}) }}"
+        monitoring_telegraf__test_invalid:
+          message: 'no output'
+          search: '^Telegraf needs at least one output in `telegraf_config\.outputs` and one input in `telegraf_config\.inputs`\.$'
+
+    - name: 'Run monitoring_telegraf with a plugin that is no list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_config: "{{ monitoring_telegraf__test_config | combine({'inputs': {'mem': {}}}) }}"
+        monitoring_telegraf__test_invalid:
+          message: 'a plugin that is no list'
+          search: '^The plugins of `telegraf_config` are dictionaries of lists of tables, .*: inputs\.mem\.$'
+
+    - name: 'Run monitoring_telegraf with a password in telegraf_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_secrets: []
+        telegraf_config: >-
+          {{ monitoring_telegraf__test_config
+             | combine({'outputs': {'prometheus_client': [ {'listen': ':9273', 'basic_username': 'molecule', 'basic_password': 'molecule'} ]}}) }}
+        monitoring_telegraf__test_invalid:
+          message: 'a password in telegraf_config'
+          search: '^These fields carry secrets, they are `telegraf_secrets` referenced with @\{secrets:<name>\}: basic_password\.$'
+
+    - name: 'Run monitoring_telegraf with a secret that is not referenced (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_secrets: "{{ monitoring_telegraf__test_secrets + [ { 'name': 'telegraf_unused', 'data': 'molecule' } ] }}"
+        monitoring_telegraf__test_invalid:
+          message: 'a secret that is not referenced'
+          search: '^These secrets are not referenced in `telegraf_config` with @\{secrets:<name>\}: telegraf_unused\.$'
+
+    - name: 'Run monitoring_telegraf with a line break in a secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_secrets: [ { 'name': 'telegraf_lines', 'data': "molecule\npassword" } ]
+        monitoring_telegraf__test_invalid:
+          message: 'a line break in a secret'
+          search: 'Secrets are strings that are not empty and without line breaks: telegraf_lines\.$'
+
+    - name: 'Run monitoring_telegraf with a secret without data (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_secrets: [ { 'name': 'telegraf_molecule_password' } ]
+        monitoring_telegraf__test_invalid:
+          message: 'a secret without data'
+          search: '^`telegraf_secrets` entries need name and data$'
+
+    - name: 'Run monitoring_telegraf with telegraf_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_environment: [ 'TZ' ]
+        monitoring_telegraf__test_invalid:
+          message: 'telegraf_environment is not a dictionary'
+          search: '^`telegraf_environment` has to be a dictionary\.$'
+
+    - name: 'Run monitoring_telegraf with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_environment:
+          INFLUX_TOKEN: 'molecule'
+        monitoring_telegraf__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: INFLUX_TOKEN, Telegraf only reads TZ, '
+
+    - name: 'Run monitoring_telegraf with a line break in the environment of the container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_container:
+          environment:
+            TZ: "Europe/Berlin\nmolecule"
+        monitoring_telegraf__test_invalid:
+          message: 'a line break in the environment of the container'
+          search: '^The environment variables must not contain line breaks: TZ\.$'
+
+    # telegraf config check reports options a plugin does not know
+    - name: 'Run monitoring_telegraf with an unknown option of a plugin (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        telegraf_config: "{{ monitoring_telegraf__test_config | combine({'inputs': {'mem': [ {'molecule_unknown': true} ]}}) }}"
+        monitoring_telegraf__test_invalid:
+          message: 'an unknown option of a plugin'
+          search: 'molecule_unknown'
+
+    - name: 'Run monitoring_telegraf with the changed role variables'
+      when: monitoring_telegraf__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'telegraf' ]
+          register: 'monitoring_telegraf__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed role variables'
+          ansible.builtin.set_fact:
+            "{{ item.key }}": "{{ item.value }}"
+          loop: "{{ monitoring_telegraf__test_case.side_effect.role_vars | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+
+        - name: 'Run monitoring_telegraf with the changed role variables'
+          ansible.builtin.include_role:
+            name: 'monitoring_telegraf'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'telegraf' ]
+          register: 'monitoring_telegraf__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed secret and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - monitoring_telegraf__secrets_result is changed
+              - monitoring_telegraf__config_result is not changed
+              - monitoring_telegraf__quadlet_result is not changed
+              - monitoring_telegraf__test_started_after.stdout | int > monitoring_telegraf__test_started_before.stdout | int
+            fail_msg: >-
+              secrets changed: {{ monitoring_telegraf__secrets_result is changed }},
+              configuration changed: {{ monitoring_telegraf__config_result is changed }},
+              quadlet changed: {{ monitoring_telegraf__quadlet_result is changed }},
+              start before {{ monitoring_telegraf__test_started_before.stdout }}, after {{ monitoring_telegraf__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_telegraf__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'telegraf' ]
+          register: 'monitoring_telegraf__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_telegraf without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_telegraf'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'telegraf' ]
+          register: 'monitoring_telegraf__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_telegraf__config_result is not changed
+              - monitoring_telegraf__secrets_result is not changed
+              - monitoring_telegraf__quadlet_result is not changed
+              - monitoring_telegraf__test_unchanged_after.stdout == monitoring_telegraf__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ monitoring_telegraf__config_result is changed }},
+              secrets changed: {{ monitoring_telegraf__secrets_result is changed }},
+              quadlet changed: {{ monitoring_telegraf__quadlet_result is changed }},
+              start before {{ monitoring_telegraf__test_unchanged_before.stdout }}, after {{ monitoring_telegraf__test_unchanged_after.stdout }}

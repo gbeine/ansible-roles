@@ -7,33 +7,34 @@
     - 'test_cases.yml'
 
   vars:
-    monitoring_telegraf__test_config_file: "{{ monitoring_telegraf__test_vars.telegraf_home }}/telegraf.conf"
-    monitoring_telegraf__test_metrics_file: "{{ monitoring_telegraf__test_metrics_dir }}/metrics.out"
+    monitoring_telegraf__test_case: "{{ monitoring_telegraf__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_telegraf__expect: "{{ monitoring_telegraf__test_case.expect }}"
+    monitoring_telegraf__test_config_file: "{{ monitoring_telegraf__test_home }}/telegraf.conf"
 
   tasks:
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/telegraf.container'
+        src: "{{ monitoring_telegraf__test_quadlet_path }}"
       register: 'monitoring_telegraf__test_quadlet'
 
     - name: 'Assert the quadlet unit'
       ansible.builtin.assert:
         that:
-          - monitoring_telegraf__test_lines | select('match', 'Label=') | list | length == 0
-          - ('IP=' + monitoring_telegraf__test_vars.telegraf_ip) in monitoring_telegraf__test_lines
-          - "'Secret=telegraf_molecule_secret,type=env,target=MOLECULE_SECRET' in monitoring_telegraf__test_lines"
-          - monitoring_telegraf__test_lines | select('match', 'Environment=.*MOLECULE_ENV=' + monitoring_telegraf__test_side_effect_env) | list | length == 1
-          - monitoring_telegraf__test_lines | select('search', monitoring_telegraf__test_secret) | list | length == 0
-          - monitoring_telegraf__test_lines | select('match', 'Volume=' + monitoring_telegraf__test_metrics_dir + ':/metrics') | list | length == 1
-        fail_msg: "Quadlet: {{ monitoring_telegraf__test_quadlet.content | b64decode }}"
+          - ('Image=' + monitoring_telegraf__test_image) in monitoring_telegraf__test_lines
+          - ('IP=' + monitoring_telegraf__expect.ip) in monitoring_telegraf__test_lines
+          - ('Volume=' + monitoring_telegraf__test_config_file + ':/etc/telegraf/telegraf.conf:ro') in monitoring_telegraf__test_lines
+          - "'AddCapability=cap_net_raw' in monitoring_telegraf__test_lines"
+          - monitoring_telegraf__test_lines | select('match', 'Secret=') | list == monitoring_telegraf__test_secret_lines
+          - monitoring_telegraf__test_lines | select('search', 'molecule-password|molecule-changed') | list | length == 0
+          - (monitoring_telegraf__test_quadlet.content | b64decode) is not search('/etc/localtime|/etc/timezone')
+        fail_msg: "{{ monitoring_telegraf__test_quadlet.content | b64decode }}"
       vars:
         monitoring_telegraf__test_lines: "{{ (monitoring_telegraf__test_quadlet.content | b64decode).splitlines() }}"
-
-    - name: 'Check the podman secret'
-      ansible.builtin.command:
-        argv: [ 'podman', 'secret', 'exists', 'telegraf_molecule_secret' ]
-      changed_when: false
+        # A template, in a condition Jinja would read \1 as an escape sequence
+        monitoring_telegraf__test_secret_lines: >-
+          {{ monitoring_telegraf__expect.secrets
+             | map('regex_replace', '^(.*)$', 'Secret=\1,type=mount,target=/run/secrets/\1,uid=100,gid=101,mode=0400') | list }}
 
     - name: 'Read the state of the configuration'
       ansible.builtin.stat:
@@ -58,55 +59,107 @@
         that:
           - monitoring_telegraf__test_config_stat.stat.mode == '0400'
           - monitoring_telegraf__test_config_stat.stat.uid == 100
-          - monitoring_telegraf__test_toml.global_tags.secret == '${MOLECULE_SECRET}'
-          - monitoring_telegraf__test_toml.agent.interval == '2s'
-          - monitoring_telegraf__test_toml.outputs.file | length == 1
-          - monitoring_telegraf__test_toml.outputs.file[0].files == [ '/metrics/metrics.out' ]
-          - monitoring_telegraf__test_toml.inputs.keys() | sort == [ 'cpu', 'mem' ]
-          - not monitoring_telegraf__test_toml.inputs.cpu[0].percpu
-          - "'processors' not in monitoring_telegraf__test_toml"
+          - monitoring_telegraf__test_config_stat.stat.gid == 101
+          - monitoring_telegraf__test_toml.agent.interval == monitoring_telegraf__expect.interval
+          - monitoring_telegraf__test_toml.outputs | length > 0
+          - monitoring_telegraf__test_toml.inputs | length > 0
+          - (monitoring_telegraf__test_toml.secretstores.docker | default([]) | map(attribute='id') | list)
+            == ([ 'secrets' ] if monitoring_telegraf__expect.secrets | length > 0 else [])
+          - monitoring_telegraf__test_config.stdout is not search('molecule-password|molecule-changed')
         fail_msg: "Configuration: {{ monitoring_telegraf__test_config.stdout }}"
       vars:
         monitoring_telegraf__test_toml: "{{ monitoring_telegraf__test_config.stdout | from_json }}"
 
-    - name: 'Read the state of the telegraf service'
-      ansible.builtin.command: 'systemctl is-active telegraf'
+    - name: 'Read the time zone and the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'telegraf' ]
+      register: 'monitoring_telegraf__test_inspect'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash
+    - name: 'Read the state and the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveState', '--property=NRestarts', 'telegraf' ]
       register: 'monitoring_telegraf__test_service'
       changed_when: false
-      failed_when: false
-      until: monitoring_telegraf__test_service.stdout == 'active'
-      retries: 10
-      delay: 3
 
-    - name: 'Read the journal of the telegraf service'
-      ansible.builtin.command: 'journalctl -u telegraf --no-pager -n 40'
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'telegraf', '-n', '80', '--no-pager' ]
       register: 'monitoring_telegraf__test_journal'
       changed_when: false
 
-    - name: 'Assert the telegraf service is active'
+    - name: 'Assert the service, the time zone, the environment and that the service did not restart by itself'
       ansible.builtin.assert:
         that:
-          - monitoring_telegraf__test_service.stdout == 'active'
-        fail_msg: "{{ monitoring_telegraf__test_service.stdout }}: {{ monitoring_telegraf__test_journal.stdout_lines }}"
-
-    - name: 'Read the metrics written by telegraf after the side effect'
-      ansible.builtin.command:
-        argv: [ 'grep', '-F', "env={{ monitoring_telegraf__test_side_effect_env }}", "{{ monitoring_telegraf__test_metrics_file }}" ]
-      register: 'monitoring_telegraf__test_metrics'
-      changed_when: false
-      failed_when: false
-      until: >-
-        monitoring_telegraf__test_metrics.stdout_lines | select('match', '^cpu,') | list | length > 0
-        and monitoring_telegraf__test_metrics.stdout_lines | select('match', '^mem,') | list | length > 0
-      retries: 15
-      delay: 2
-
-    - name: 'Assert the metrics carry the tags of the environment and the secret'
-      ansible.builtin.assert:
-        that:
-          - monitoring_telegraf__test_metrics.stdout_lines | select('match', '^cpu,') | list | length > 0
-          - monitoring_telegraf__test_metrics.stdout_lines | select('match', '^mem,') | list | length > 0
-          - monitoring_telegraf__test_metrics.stdout_lines | select('search', 'secret=' + monitoring_telegraf__test_secret) | list | length > 0
+          - "'ActiveState=active' in monitoring_telegraf__test_service.stdout_lines"
+          - "'NRestarts=0' in monitoring_telegraf__test_service.stdout_lines"
+          - (monitoring_telegraf__test_inspect.stdout.split(' ', 1) | first) == monitoring_telegraf__test_case.role_vars.telegraf_timezone
+          - monitoring_telegraf__test_env | select('match', 'TZ=') | list | length == 0
+          - monitoring_telegraf__expect.environment | default([]) | reject('in', monitoring_telegraf__test_env) | list | length == 0
         fail_msg: >-
-          {{ monitoring_telegraf__test_metrics.stdout_lines[-5:] | default([]) }}
-          {{ monitoring_telegraf__test_journal.stdout_lines }}
+          {{ [ 'inspect ' ~ monitoring_telegraf__test_inspect.stdout, 'service ' ~ (monitoring_telegraf__test_service.stdout_lines | join(' ')) ]
+             + monitoring_telegraf__test_journal.stdout_lines }}
+      vars:
+        monitoring_telegraf__test_env: "{{ monitoring_telegraf__test_inspect.stdout.split(' ', 1) | last | from_json }}"
+
+    - name: 'Check the secrets, the metrics and the basic authentication'
+      when: monitoring_telegraf__expect.secrets | length > 0
+      block:
+
+        # The secret store reads the files as the user telegraf of the image
+        - name: 'Read the owner, the mode and the content of the secret as the user telegraf'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', '--user', 'telegraf', 'telegraf', 'sh', '-c', 'stat -c "%u %g %a" "$1" && cat "$1"', 'sh',
+                    "/run/secrets/{{ monitoring_telegraf__expect.secrets | first }}" ]
+          register: 'monitoring_telegraf__test_secret'
+          changed_when: false
+
+        - name: 'Assert the secret file'
+          ansible.builtin.assert:
+            that:
+              - monitoring_telegraf__test_secret.stdout_lines == [ '100 101 400', monitoring_telegraf__expect.password ]
+            fail_msg: "{{ monitoring_telegraf__test_secret.stdout_lines | first }}"
+
+        # prometheus_client reads basic_password from the secret store
+        - name: 'Read the metrics with the password of the secret'
+          ansible.builtin.uri:
+            url: "http://{{ monitoring_telegraf__expect.ip }}:9273/metrics"
+            url_username: 'molecule'
+            url_password: "{{ monitoring_telegraf__expect.password }}"
+            force_basic_auth: true
+            return_content: true
+          register: 'monitoring_telegraf__test_metrics'
+          until: monitoring_telegraf__test_metrics.status == 200 and monitoring_telegraf__test_metrics.content is search('^mem_total', multiline=true)
+          retries: 15
+          delay: 2
+          no_log: true
+
+        - name: 'Read the metrics with the former password'
+          ansible.builtin.uri:
+            url: "http://{{ monitoring_telegraf__expect.ip }}:9273/metrics"
+            url_username: 'molecule'
+            url_password: "{{ monitoring_telegraf__expect.old_password }}"
+            force_basic_auth: true
+            status_code: [ 401 ]
+          no_log: true
+
+        - name: 'Read the metrics written to the file'
+          ansible.builtin.command:
+            argv: [ 'grep', '-E', '^(cpu|mem),', "{{ monitoring_telegraf__test_metrics_dir }}/metrics.out" ]
+          register: 'monitoring_telegraf__test_file'
+          changed_when: false
+          failed_when: false
+          until: >-
+            monitoring_telegraf__test_file.stdout_lines | select('match', '^cpu,') | list | length > 0
+            and monitoring_telegraf__test_file.stdout_lines | select('match', '^mem,') | list | length > 0
+          retries: 15
+          delay: 2
+
+        - name: 'Assert the metrics carry the global tags'
+          ansible.builtin.assert:
+            that:
+              - monitoring_telegraf__test_file.stdout_lines | select('match', '^cpu,') | list | length > 0
+              - monitoring_telegraf__test_file.stdout_lines | select('match', '^mem,') | list | length > 0
+              - monitoring_telegraf__test_file.stdout_lines | reject('search', 'env=molecule') | list | length == 0
+            fail_msg: "{{ monitoring_telegraf__test_file.stdout_lines[-5:] | default([]) }}"
