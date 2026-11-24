@@ -15,7 +15,7 @@
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/thanos-sidecar.container'
+        src: "{{ monitoring_thanos_sidecar__test_quadlet_path }}"
       register: 'monitoring_thanos_sidecar__test_quadlet'
 
     # podman may quote values, the quotes are removed before the lines are compared
@@ -30,14 +30,16 @@
           - ('User=65534' in monitoring_thanos_sidecar__test_quadlet_lines)
           - ('Group=65534' in monitoring_thanos_sidecar__test_quadlet_lines)
           - monitoring_thanos_sidecar__expect.quadlet | reject('in', monitoring_thanos_sidecar__test_quadlet_lines) | list | length == 0
-          # The time zone is set with TZ, /etc/localtime is not mounted
-          - monitoring_thanos_sidecar__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          # The time zone is set by podman, /etc/localtime is not mounted and TZ is not set
+          - monitoring_thanos_sidecar__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone|TZ=') | list | length == 0
+          - ('Timezone=' + monitoring_thanos_sidecar__test_case.role_vars.thanos_sidecar_timezone) in monitoring_thanos_sidecar__test_quadlet_lines
           - monitoring_thanos_sidecar__test_exec is search('^Exec=sidecar ')
           - monitoring_thanos_sidecar__test_exec is search('--tsdb.path=/prometheus')
           - monitoring_thanos_sidecar__test_exec is search('--prometheus.url=' + monitoring_thanos_sidecar__test_case.role_vars.thanos_sidecar_prometheus_url)
           - (monitoring_thanos_sidecar__test_exec is search('--objstore.config-file=/etc/thanos/bucket.yml')) == monitoring_thanos_sidecar__expect.objstore
-          - ('Secret=thanos-sidecar-objstore,type=mount,target=/etc/thanos/bucket.yml' in monitoring_thanos_sidecar__test_quadlet_lines)
-            == monitoring_thanos_sidecar__expect.objstore
+          - (monitoring_thanos_sidecar__test_quadlet_lines | select('search', '/etc/thanos/bucket.yml:ro') | list | length > 0) == monitoring_thanos_sidecar__expect.objstore
+          - monitoring_thanos_sidecar__test_quadlet_lines | select('match', 'Secret=') | list == monitoring_thanos_sidecar__expect.secrets
+          - monitoring_thanos_sidecar__test_quadlet_lines | select('search', monitoring_thanos_sidecar__test_s3_secret_key) | list | length == 0
         fail_msg: "{{ monitoring_thanos_sidecar__test_quadlet_lines | to_json }}"
       vars:
         monitoring_thanos_sidecar__test_quadlet_lines: "{{ (monitoring_thanos_sidecar__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -50,28 +52,51 @@
       changed_when: false
       failed_when: false
 
-    - name: 'Read the environment of the container'
+    - name: 'Read the time zone and the environment of the container'
       ansible.builtin.command:
-        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'thanos-sidecar' ]
-      register: 'monitoring_thanos_sidecar__test_env'
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'thanos-sidecar' ]
+      register: 'monitoring_thanos_sidecar__test_inspect'
       changed_when: false
 
-    - name: 'Read the secret of the object storage'
+    # systemd counts only the restarts after a crash
+    - name: 'Read the automatic restarts of the service'
       ansible.builtin.command:
-        argv: [ 'podman', 'secret', 'exists', 'thanos-sidecar-objstore' ]
-      register: 'monitoring_thanos_sidecar__test_secret'
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'thanos-sidecar' ]
+      register: 'monitoring_thanos_sidecar__test_restarts'
       changed_when: false
-      failed_when: false
 
-    - name: 'Assert the service, the environment and the secret'
+    - name: 'Read the state of bucket.yml'
+      ansible.builtin.stat:
+        path: "{{ monitoring_thanos_sidecar__test_home }}/bucket.yml"
+      register: 'monitoring_thanos_sidecar__test_bucket_stat'
+
+    # Without object storage there is no bucket.yml
+    - name: 'Read bucket.yml'
+      when: monitoring_thanos_sidecar__expect.objstore
+      ansible.builtin.slurp:
+        src: "{{ monitoring_thanos_sidecar__test_home }}/bucket.yml"
+      register: 'monitoring_thanos_sidecar__test_bucket'
+
+    - name: 'Assert the service, the time zone, the environment and bucket.yml'
       ansible.builtin.assert:
         that:
           - monitoring_thanos_sidecar__test_service.stdout == 'active'
-          - ('TZ=' + monitoring_thanos_sidecar__test_case.role_vars.thanos_sidecar_timezone) in (monitoring_thanos_sidecar__test_env.stdout | from_json)
-          - (monitoring_thanos_sidecar__test_secret.rc == 0) == monitoring_thanos_sidecar__expect.objstore
+          - monitoring_thanos_sidecar__test_restarts.stdout | int == 0
+          - (monitoring_thanos_sidecar__test_inspect.stdout.split(' ', 1) | first) == monitoring_thanos_sidecar__test_case.role_vars.thanos_sidecar_timezone
+          - monitoring_thanos_sidecar__test_env | select('match', 'TZ=') | list | length == 0
+          - monitoring_thanos_sidecar__test_bucket_stat.stat.exists == monitoring_thanos_sidecar__expect.objstore
+          # The secrets are passed in the environment of the container, bucket.yml contains the double-quoted references
+          - monitoring_thanos_sidecar__expect.bucket | default([]) | reject('in', monitoring_thanos_sidecar__test_bucket_lines) | list | length == 0
+          - monitoring_thanos_sidecar__test_bucket_lines | select('search', monitoring_thanos_sidecar__test_s3_secret_key) | list | length == 0
+          - not monitoring_thanos_sidecar__expect.objstore or monitoring_thanos_sidecar__test_bucket_stat.stat.mode == '0644'
+          - not monitoring_thanos_sidecar__expect.objstore or monitoring_thanos_sidecar__test_bucket_stat.stat.uid == 0
         fail_msg: >-
-          service {{ monitoring_thanos_sidecar__test_service.stdout }}, environment {{ monitoring_thanos_sidecar__test_env.stdout }},
-          secret exists {{ monitoring_thanos_sidecar__test_secret.rc == 0 }}
+          service {{ monitoring_thanos_sidecar__test_service.stdout }}, automatic restarts {{ monitoring_thanos_sidecar__test_restarts.stdout }},
+          time zone {{ monitoring_thanos_sidecar__test_inspect.stdout.split(' ', 1) | first }}, bucket.yml {{ monitoring_thanos_sidecar__test_bucket_lines }}
+      vars:
+        monitoring_thanos_sidecar__test_env: "{{ monitoring_thanos_sidecar__test_inspect.stdout.split(' ', 1) | last | from_json }}"
+        monitoring_thanos_sidecar__test_bucket_lines: >-
+          {{ (monitoring_thanos_sidecar__test_bucket.content | b64decode).splitlines() if monitoring_thanos_sidecar__test_bucket is not skipped else [] }}
 
     # The sidecar is ready after it read the external labels of Prometheus
     - name: 'Wait until the sidecar is ready'

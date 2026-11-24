@@ -16,18 +16,10 @@
 
   roles:
     - role: 'common_filters'
+    - role: 'common_globals'
     - role: 'container_podman'
 
   tasks:
-
-    # monitoring_prometheus mounts /etc/timezone, the base VM has none
-    - name: 'Ensure /etc/timezone exists'
-      ansible.builtin.copy:
-        dest: '/etc/timezone'
-        content: |
-          Etc/UTC
-        force: false
-        mode: '0644'
 
     - name: 'Pull the images, so the first start of the services does not time out'
       containers.podman.podman_image:
@@ -35,19 +27,37 @@
       loop:
         - "{{ monitoring_thanos_sidecar__test_prometheus_image }}"
         - "{{ monitoring_thanos_sidecar__test_image }}"
+        - "{{ monitoring_thanos_sidecar__test_s3_image }}"
       register: 'monitoring_thanos_sidecar__test_pull'
       until: monitoring_thanos_sidecar__test_pull is succeeded
       retries: 5
       delay: 30
 
-    # The bucket of the object storage FILESYSTEM, written by the sidecar as nobody
-    - name: 'Create the directory of the bucket'
+    # rclone serves every directory of /data as bucket
+    - name: 'Create the bucket thanos of the S3 server'
       ansible.builtin.file:
-        path: "{{ monitoring_thanos_sidecar__test_bucket_dir }}"
-        owner: '65534'
-        group: '65534'
+        path: "{{ monitoring_thanos_sidecar__test_s3_dir }}/thanos"
         mode: '0755'
         state: 'directory'
+
+    # The S3 server of the object storage S3 of molecule-thanos-sidecar, the secret key is the secret of the test case
+    - name: 'Start the S3 server'
+      containers.podman.podman_container:
+        name: 'molecule-s3'
+        image: "{{ monitoring_thanos_sidecar__test_s3_image }}"
+        network: "{{ monitoring_thanos_sidecar__test_network.name }}"
+        ip: "{{ monitoring_thanos_sidecar__test_s3_ip }}"
+        volume:
+          - "{{ monitoring_thanos_sidecar__test_s3_dir }}:/data"
+        command:
+          - 'serve'
+          - 's3'
+          - '/data'
+          - '--addr'
+          - ':9000'
+          - '--auth-key'
+          - "{{ monitoring_thanos_sidecar__test_s3_access_key }},{{ monitoring_thanos_sidecar__test_s3_secret_key }}"
+        state: 'started'
 
     - name: 'Set the role variables of Prometheus'
       ansible.builtin.set_fact:
