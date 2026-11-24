@@ -206,6 +206,8 @@ Mixed secrets (the image reads some secrets from files, others only from the env
 - Python code of a role is an Ansible module in `library/` of the role, never a script run with `command`, `shell` or `script`.
   Modules of molecule tests live in `molecule/<scenario>/library/`.
 - Modules are named `<role>_<purpose>` (e.g. `database_mongodb_logins`), so they do not collide with modules of collections.
+- Modules used by several roles live in `common_library/library/` as `common_library_<purpose>` (e.g. `common_library_htpasswd`),
+  the roles declare `- role: 'common_library'` in `dependencies` of `meta/main.yml`, the only allowed change of `meta/main.yml`.
 - Modules have `DOCUMENTATION`, `EXAMPLES` and `RETURN`, options carrying passwords are `no_log: true`,
   so the tasks need no `no_log` and errors stay visible. Missing libraries are reported with `missing_required_lib`.
 - Modules running code in a container (e.g. `podman exec`) pass data and passwords on stdin, never as arguments.

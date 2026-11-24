@@ -70,7 +70,7 @@ zot_users:
     password: "{{ vault_zot_ci_password }}"
 ```
 
-The module `app_zot_htpasswd` writes `htpasswd` with all users of `zot_users`, users missing there are removed.
+The module `common_library_htpasswd` of the role `common_library` (a dependency of the role) writes `htpasswd` with all users of `zot_users`, users missing there are removed.
 It keeps the bcrypt hash of a password if it matches the password and hashes new passwords with bcrypt (`$2y$`),
 so the file only changes if a user or a password changes. The passwords are an option with `no_log`.
 zot watches the file and reads it again when it changes, a changed user needs no restart.
@@ -173,6 +173,7 @@ without `zot_autoupdate_schedule` the schedule of `container_update` is used.
 ### Migration
 
 The role is new, there are no former variables.
+The role depends on `common_library`, its module `common_library_htpasswd` writes `htpasswd`.
 
 - `TZ` is not set anymore, the time zone is set by podman with `zot_timezone`, zot reads `/etc/localtime`.
   `zot_environment` has no default anymore, without it the quadlet unit has no environment.

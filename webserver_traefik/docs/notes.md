@@ -83,7 +83,7 @@ traefik_dynamic:
 
 `traefik_usersfile` contains the htpasswd files of the middleware `basicAuth`, the name of the file without `.htpasswd` and the passwords of its users by their names.
 The role writes them to `<traefik_home>/users/<name>.htpasswd` with mode `0600`, the directory is mounted read-only to `/etc/traefik/users`.
-The module `webserver_traefik_htpasswd` of the role hashes the passwords with bcrypt (`$2y$`), it keeps the hash of a password that did not change,
+The module `common_library_htpasswd` of the role `common_library` (a dependency of the role) hashes the passwords with bcrypt (`$2y$`), it keeps the hash of a password that did not change,
 so the file only changes if a user or a password changes. Users missing in `traefik_usersfile` are removed from the file, `null` removes the whole file.
 The role installs `python3-bcrypt` for the module. bcrypt only uses 72 bytes, longer passwords are rejected.
 
@@ -255,6 +255,7 @@ Updates of the image are done by `container_update` with `traefik_autoupdate_ena
 - `traefik_usersfile` (htpasswd files) and `traefik_realms` (local certificates) are new.
   The directories `<traefik_home>/users` and `<traefik_home>/certs` are always mounted, the quadlet unit changes once and Traefik restarts.
   `volumes` in `traefik_container` replaces the default and needs the two volumes for these features.
+- The role depends on `common_library`, its module `common_library_htpasswd` writes the htpasswd files.
 
 ### Tests
 

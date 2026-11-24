@@ -7,13 +7,13 @@ __metaclass__ = type
 
 DOCUMENTATION = r'''
 ---
-module: app_zot_htpasswd
-short_description: Writes the htpasswd file of zot with bcrypt hashes of the passwords
+module: common_library_htpasswd
+short_description: Writes an htpasswd file with bcrypt hashes of the passwords
 description:
-  - Writes the htpasswd file of zot with all given users, users missing in O(passwords) are removed.
+  - Writes an htpasswd file with all given users, users missing in O(passwords) are removed.
   - Keeps the hash of a password if it matches the password, so the file only changes if a user or a password changes.
     New passwords are hashed with bcrypt (C($2y$)) and the cost O(bcrypt_cost).
-  - zot watches the file and reads it again when it changes, it needs no restart.
+  - The module reports C(changed) only if a user, a password, the owner, the group or the mode changes.
 requirements:
   - bcrypt
 options:
@@ -44,11 +44,12 @@ options:
 '''
 
 EXAMPLES = r'''
-- name: 'Write the users of zot'
-  app_zot_htpasswd:
-    path: '/opt/zot/etc/htpasswd'
+- name: 'Write the users of the dashboard'
+  common_library_htpasswd:
+    path: '/opt/traefik/users/dashboard.htpasswd'
     passwords:
       admin: 'secret-admin-password'
+      viewer: 'secret-viewer-password'
 '''
 
 RETURN = r'''
