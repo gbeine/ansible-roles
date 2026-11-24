@@ -15,8 +15,12 @@ monitoring_prometheus__labels: "{{ prometheus_labels }}"
 
 monitoring_prometheus__version: "{{ prometheus_version | default('latest') }}"
 
-# Files below /run/secrets in the container, e.g. for password_file or bearer_token_file in the configuration
+# Secrets with name and data, mounted to /run/secrets/<name>, prometheus_config references them,
+# e.g. with password_file or bearer_token_file
 monitoring_prometheus__secrets: "{{ prometheus_secrets | default([]) }}"
+
+# Prometheus reads no variables besides TZ, without prometheus_environment the container has no environment
+monitoring_prometheus__environment: "{{ prometheus_environment }}"
 
 # prometheus.yml, every key replaces the key of the default (the prometheus.yml of the image)
 monitoring_prometheus__config: "{{ monitoring_prometheus__config_default | combine(prometheus_config | default({})) }}"
@@ -33,16 +37,11 @@ monitoring_prometheus__autoupdate_schedule: "{{ prometheus_autoupdate_schedule }
 # Defaults - do not change
 #
 
-monitoring_prometheus__etc_dir: '/etc/prometheus'
-monitoring_prometheus__rules_dir: "{{ monitoring_prometheus__etc_dir }}/rules"
-monitoring_prometheus__data_dir: '/prometheus'
-monitoring_prometheus__secrets_dir: '/run/secrets'
-
 # User and group nobody of the image
 monitoring_prometheus__uid: 65534
 monitoring_prometheus__gid: 65534
 
-# documentation/examples/prometheus.yml of the image without comments and empty keys
+# documentation/examples/prometheus.yml of Prometheus v3.16.0 without comments and empty keys
 monitoring_prometheus__config_default:
   global:
     scrape_interval: '15s'
@@ -55,7 +54,28 @@ monitoring_prometheus__config_default:
             app: 'prometheus'
       scrape_native_histograms: true
 
-# Names of rule files and secrets
+# Generated from the yaml tags of Config in config/config.go of Prometheus v3.16.0, update with new versions of the image,
+# promtool checks the keys below
+monitoring_prometheus__config_allowed:
+  - 'global'
+  - 'runtime'
+  - 'alerting'
+  - 'rule_files'
+  - 'scrape_config_files'
+  - 'scrape_configs'
+  - 'storage'
+  - 'tracing'
+  - 'remote_write'
+  - 'remote_read'
+  - 'otlp'
+
+# Fields carrying secrets, the secrets are files of prometheus_secrets referenced with the *_file fields
+monitoring_prometheus__config_secret_keys: [ 'password', 'bearer_token', 'credentials', 'client_secret', 'secret_key' ]
+
+# The variables of the image, Prometheus reads no other variables
+monitoring_prometheus__environment_allowed: [ 'TZ' ]
+
+# Names of rule files
 monitoring_prometheus__name_pattern: '^[A-Za-z0-9._-]+$'
 
 monitoring_prometheus__podman_name: 'prometheus'
@@ -75,23 +95,21 @@ monitoring_prometheus__podman_container_default:
   ipv6: "{{ monitoring_prometheus__ipv6 | default(omit) }}"
   network: "{{ monitoring_prometheus__network }}"
   timezone: "{{ monitoring_prometheus__timezone }}"
-  # prometheus_container.environment replaces the dictionary completely
-  environment:
-    TZ: "{{ monitoring_prometheus__timezone }}"
+  environment: "{{ monitoring_prometheus__environment | default(omit) }}"
   labels: "{{ monitoring_prometheus__labels | default(omit) }}"
   # The flags of the image, prometheus_container.command replaces them completely
   command:
-    - "--config.file={{ monitoring_prometheus__etc_dir }}/prometheus.yml"
-    - "--storage.tsdb.path={{ monitoring_prometheus__data_dir }}"
+    - '--config.file=/etc/prometheus/prometheus.yml'
+    - '--storage.tsdb.path=/prometheus'
+  # Only entries with a name, broken entries are reported by the validation
   secrets: >-
-    {{ (monitoring_prometheus__secrets | map(attribute='name')
-        | map('regex_replace', '^(.*)$', '\1,type=mount,target=' ~ monitoring_prometheus__secrets_dir ~ '/\1') | list)
-      if (monitoring_prometheus__secrets | default([]) | length > 0)
-      else omit }}
+    {{ (monitoring_prometheus__secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name') | map('string')
+        | map('regex_replace', '^(.*)$', '\1,type=mount,target=/run/secrets/\1') | list)
+       if (monitoring_prometheus__secrets is sequence and monitoring_prometheus__secrets is not string
+           and monitoring_prometheus__secrets | select('mapping') | selectattr('name', 'defined') | list | length > 0)
+       else omit }}
   # prometheus_container.volumes replaces them completely
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
-    - "{{ monitoring_prometheus__podman_config_file }}:{{ monitoring_prometheus__etc_dir }}/prometheus.yml:ro"
-    - "{{ monitoring_prometheus__podman_rules_dir }}:{{ monitoring_prometheus__rules_dir }}:ro"
-    - "{{ monitoring_prometheus__podman_data_dir }}:{{ monitoring_prometheus__data_dir }}"
+    - "{{ monitoring_prometheus__podman_config_file }}:/etc/prometheus/prometheus.yml:ro"
+    - "{{ monitoring_prometheus__podman_rules_dir }}:/etc/prometheus/rules:ro"
+    - "{{ monitoring_prometheus__podman_data_dir }}:/prometheus"

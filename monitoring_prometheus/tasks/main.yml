@@ -4,15 +4,19 @@
   tags: [ 'monitoring', 'monitoring_prometheus' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or prometheus_config not a dictionary)
+    # A failing template in the variables (e.g. an unknown filter, prometheus_config or prometheus_container not a dictionary)
     # stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - monitoring_prometheus__container | length > 0
           - (monitoring_prometheus__config | to_json | length) + (monitoring_prometheus__rules | to_json | length) > 0
+          # prometheus_environment has no default, a failing template stops the role here as well
+          - monitoring_prometheus__environment | default({}) | length >= 0
         quiet: true
 
-    - name: 'Validate the role variables'
+    - name: 'Validate the secrets'
       ansible.builtin.assert:
         that:
           - monitoring_prometheus__invalid | length == 0
@@ -22,28 +26,131 @@
       vars:
         monitoring_prometheus__invalid: >-
           {%- set errors = [] -%}
-          {%- set rules = monitoring_prometheus__rules -%}
-          {%- if rules is not mapping -%}
-          {%-   set _ = errors.append('prometheus_rules has to be a dictionary') -%}
-          {%- else -%}
-          {%-   set names = rules.keys() | reject('match', monitoring_prometheus__name_pattern) | list -%}
-          {%-   if names | length > 0 -%}
-          {%-     set _ = errors.append('prometheus_rules has invalid names: ' ~ names | join(', ')) -%}
-          {%-   endif -%}
-          {%-   set values = rules | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
-          {%-   if values | length > 0 -%}
-          {%-     set _ = errors.append('prometheus_rules entries have to be dictionaries: ' ~ values | join(', ')) -%}
-          {%-   endif -%}
-          {%- endif -%}
           {%- set secrets = monitoring_prometheus__secrets -%}
           {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
-          {%-   set _ = errors.append('prometheus_secrets has to be a list') -%}
+          {%-   set _ = errors.append('`prometheus_secrets` has to be a list') -%}
           {%- elif secrets | reject('mapping') | list | length > 0
                    or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
-                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
-                   or secrets | select('mapping') | selectattr('name', 'defined') | map(attribute='name')
-                      | map('string') | reject('match', monitoring_prometheus__name_pattern) | list | length > 0 -%}
-          {%-   set _ = errors.append('prometheus_secrets entries need name of letters, digits, ., _ or - and data') -%}
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`prometheus_secrets` entries need name and data') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `prometheus_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # promtool checks the keys below the first level before prometheus.yml is replaced
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_prometheus__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_prometheus__config_json: "{{ monitoring_prometheus__config | to_json }}"
+        monitoring_prometheus__unknown: "{{ monitoring_prometheus__config.keys() | map('string') | reject('in', monitoring_prometheus__config_allowed) | list }}"
+        # Fields carrying secrets with a value, null and an empty string are allowed
+        monitoring_prometheus__plain_secrets: >-
+          {{ monitoring_prometheus__config_json
+             | regex_findall('"(' ~ (monitoring_prometheus__config_secret_keys | join('|')) ~ ')"\s*:\s*(?!null)(?!"")')
+             | unique | list }}
+        monitoring_prometheus__unreferenced: >-
+          {{ monitoring_prometheus__secrets | map(attribute='name') | map('string')
+             | reject('in', monitoring_prometheus__config_json | regex_findall('/run/secrets/([^"]+)')) | list }}
+        monitoring_prometheus__data: >-
+          {{ monitoring_prometheus__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+             + monitoring_prometheus__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list }}
+        monitoring_prometheus__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_prometheus__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown keys in `prometheus_config`: ' ~ (monitoring_prometheus__unknown | join(', '))
+                                    ~ ', allowed are the keys of `monitoring_prometheus__config_allowed`.') -%}
+          {%- endif -%}
+          {%- if monitoring_prometheus__plain_secrets | length > 0 -%}
+          {%-   set _ = errors.append('These fields carry secrets, they are files of `prometheus_secrets` referenced with the *_file fields: '
+                                    ~ (monitoring_prometheus__plain_secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_prometheus__unreferenced | length > 0 -%}
+          {%-   set _ = errors.append('These secrets are not referenced in `prometheus_config` with /run/secrets/<name>: '
+                                    ~ (monitoring_prometheus__unreferenced | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if monitoring_prometheus__data | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks: ' ~ (monitoring_prometheus__data | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the rule files'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_prometheus__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_prometheus__errors: >-
+          {%- set errors = [] -%}
+          {%- set rules = monitoring_prometheus__rules -%}
+          {%- if rules is not mapping -%}
+          {%-   set _ = errors.append('`prometheus_rules` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set names = rules.keys() | map('string') | reject('match', monitoring_prometheus__name_pattern) | list -%}
+          {%-   set values = rules | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The names of `prometheus_rules` consist of letters, digits, ., _ and -: ' ~ (names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if values | length > 0 -%}
+          {%-     set _ = errors.append('The rule files of `prometheus_rules` are dictionaries: ' ~ (values | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_prometheus__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_prometheus__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_prometheus__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_prometheus__environment is not mapping -%}
+          {%-   set _ = errors.append('`prometheus_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = monitoring_prometheus__environment | dict2items | selectattr('value', 'string') | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of `prometheus_environment` must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment of the container after merging prometheus_container,
+    # unknown variables would change the behavior unexpectedly
+    # An environment that is no mapping is not checked here, the validation of prometheus_environment reports it
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_prometheus__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_prometheus__container_environment: >-
+          {{ monitoring_prometheus__container.environment if monitoring_prometheus__container.environment | default(none) is mapping else {} }}
+        monitoring_prometheus__unknown: >-
+          {{ monitoring_prometheus__container_environment.keys() | map('string') | reject('in', monitoring_prometheus__environment_allowed) | list }}
+        monitoring_prometheus__line_breaks: >-
+          {{ monitoring_prometheus__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_prometheus__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_prometheus__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_prometheus__unknown | join(', ')) ~ ', Prometheus only reads '
+                                    ~ (monitoring_prometheus__environment_allowed | join(', ')) ~ ', the secrets are set with `prometheus_secrets`.') -%}
+          {%- endif -%}
+          {%- if monitoring_prometheus__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_prometheus__line_breaks | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -113,7 +220,7 @@
 
           {{ (monitoring_prometheus__config
               | combine({'rule_files': (monitoring_prometheus__config.rule_files | default([], true))
-                                       + [monitoring_prometheus__rules_dir + '/*.yml']})
+                                       + [ '/etc/prometheus/rules/*.yml' ]})
               if monitoring_prometheus__rules | length > 0 else monitoring_prometheus__config)
              | to_nice_yaml(indent=2, sort_keys=false) }}
         dest: "{{ monitoring_prometheus__podman_config_file }}"
@@ -122,8 +229,8 @@
         mode: '0644'
         validate: >-
           podman run --rm --network none --user 0 --entrypoint /bin/promtool
-          --volume %s:{{ monitoring_prometheus__etc_dir }}/prometheus.yml:ro {{ monitoring_prometheus__container.image }}
-          check config --syntax-only {{ monitoring_prometheus__etc_dir }}/prometheus.yml
+          --volume %s:/etc/prometheus/prometheus.yml:ro {{ monitoring_prometheus__container.image }}
+          check config --syntax-only /etc/prometheus/prometheus.yml
       register: 'monitoring_prometheus__config_result'
 
     - name: 'Create secrets'
@@ -156,7 +263,6 @@
         secrets: "{{ monitoring_prometheus__container.secrets | default(omit) }}"
         volume: "{{ monitoring_prometheus__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
@@ -168,27 +274,91 @@
           {% if monitoring_prometheus__container.requires is defined %}
           Requires={{ monitoring_prometheus__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_prometheus__container.wants is defined %}
+          Wants={{ monitoring_prometheus__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_prometheus__container.after is defined %}
+          After={{ monitoring_prometheus__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_prometheus__container.part_of is defined %}
+          PartOf={{ monitoring_prometheus__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_prometheus__container.binds_to is defined %}
+          BindsTo={{ monitoring_prometheus__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if monitoring_prometheus__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_prometheus__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_prometheus__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd_service:
-        name: "{{ monitoring_prometheus__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if monitoring_prometheus__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        monitoring_prometheus__running: >-
-          {{ (ansible_facts.services[monitoring_prometheus__container.name + '.service'].state | default('')) == 'running' }}
-        monitoring_prometheus__restart: >-
-          {{ monitoring_prometheus__running | bool
-             and (monitoring_prometheus__config_result is changed
-                  or monitoring_prometheus__rules_result is changed
-                  or monitoring_prometheus__rules_removed is changed
-                  or monitoring_prometheus__secrets_result is changed
-                  or monitoring_prometheus__quadlet_result is changed) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Prometheus'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ monitoring_prometheus__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if monitoring_prometheus__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            monitoring_prometheus__running: >-
+              {{ (ansible_facts.services[monitoring_prometheus__container.name + '.service'].state | default('')) == 'running' }}
+            monitoring_prometheus__restart: >-
+              {{ monitoring_prometheus__running | bool
+                 and (monitoring_prometheus__config_result is changed
+                      or monitoring_prometheus__rules_result is changed
+                      or monitoring_prometheus__rules_removed is changed
+                      or monitoring_prometheus__secrets_result is changed
+                      or monitoring_prometheus__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ monitoring_prometheus__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'monitoring_prometheus__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ monitoring_prometheus__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_prometheus__start_journal.stdout_lines }}
+
+    # Prometheus replays the write-ahead log before it is ready
+    - name: 'Wait for Prometheus'
+      when: 'not ansible_check_mode'
+      ansible.builtin.uri:
+        url: "http://{{ monitoring_prometheus__container.ip }}:9090/-/ready"
+        status_code: [ 200, 503 ]
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'monitoring_prometheus__ready'
+      until: monitoring_prometheus__ready.status | default(-1) == 200
+      retries: 60
+      delay: 2
+      failed_when: false
+
+    - name: 'Read the log of Prometheus'
+      when:
+        - not ansible_check_mode
+        - monitoring_prometheus__ready.status | default(-1) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ monitoring_prometheus__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'monitoring_prometheus__journal'
+      changed_when: false
+
+    - name: 'Assert that Prometheus answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__journal is skipped
+        fail_msg: "{{ monitoring_prometheus__journal.stdout_lines | default([]) }}"
+        quiet: true
 
     - name: 'Enable autoupdate on container'
       when: 'monitoring_prometheus__autoupdate_enabled | bool'

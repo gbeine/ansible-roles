@@ -62,6 +62,37 @@
       vars:
         monitoring_prometheus__test_stats: "{{ monitoring_prometheus__test_files.results | map(attribute='stat') | list }}"
 
+    - name: 'Read the time zone and the environment of the container'
+      ansible.builtin.command:
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'prometheus' ]
+      register: 'monitoring_prometheus__test_inspect'
+      changed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'prometheus' ]
+      register: 'monitoring_prometheus__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'prometheus', '-n', '80', '--no-pager' ]
+      register: 'monitoring_prometheus__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the time zone, no TZ, no volumes of the time zone and that the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - monitoring_prometheus__test_restarts.stdout | int == 0
+          - (monitoring_prometheus__test_inspect.stdout.split(' ', 1) | first) == monitoring_prometheus__test_case.role_vars.prometheus_timezone
+          - (monitoring_prometheus__test_inspect.stdout.split(' ', 1) | last | from_json) | select('match', 'TZ=') | list | length == 0
+          - (monitoring_prometheus__test_quadlet.content | b64decode) is not search('/etc/localtime|/etc/timezone')
+        fail_msg: >-
+          {{ [ 'inspect ' ~ monitoring_prometheus__test_inspect.stdout, 'automatic restarts: ' ~ monitoring_prometheus__test_restarts.stdout ]
+             + monitoring_prometheus__test_journal.stdout_lines | default([]) }}
+
     - name: 'Wait until Prometheus is ready'
       ansible.builtin.uri:
         url: "{{ monitoring_prometheus__test_url }}/-/ready"

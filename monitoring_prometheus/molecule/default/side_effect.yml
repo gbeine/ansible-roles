@@ -11,6 +11,13 @@
     monitoring_prometheus__test_files:
       - "{{ monitoring_prometheus__test_quadlet_path }}"
       - "{{ monitoring_prometheus__test_case.role_vars.prometheus_home }}/prometheus.yml"
+    monitoring_prometheus__test_config: "{{ monitoring_prometheus__test_case.role_vars.prometheus_config | default({}) }}"
+    monitoring_prometheus__test_secrets: "{{ monitoring_prometheus__test_case.role_vars.prometheus_secrets | default([]) }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
@@ -46,7 +53,7 @@
             groups: []
         monitoring_prometheus__test_invalid:
           message: 'an invalid rule name'
-          search: '^prometheus_rules has invalid names: molecule rules$'
+          search: '^The names of `prometheus_rules` consist of letters, digits, \., _ and -: molecule rules\.$'
 
     - name: 'Run monitoring_prometheus with a secret without data (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
@@ -55,7 +62,81 @@
           - name: 'prometheus_molecule_password'
         monitoring_prometheus__test_invalid:
           message: 'a secret without data'
-          search: '^prometheus_secrets entries need name of letters, digits, \., _ or - and data$'
+          search: '^`prometheus_secrets` entries need name and data$'
+
+    - name: 'Run monitoring_prometheus with an unknown key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_config: "{{ monitoring_prometheus__test_config | combine({ 'scrape_config': [] }) }}"
+        monitoring_prometheus__test_invalid:
+          message: 'an unknown key'
+          search: '^Unknown keys in `prometheus_config`: scrape_config, allowed are '
+
+    - name: 'Run monitoring_prometheus with a password in prometheus_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_config:
+          scrape_configs:
+            - job_name: 'plain'
+              basic_auth:
+                username: 'molecule'
+                password: 'molecule-plain-password'
+              static_configs:
+                - targets: [ 'localhost:9090' ]
+        prometheus_secrets: []
+        monitoring_prometheus__test_invalid:
+          message: 'a password in prometheus_config'
+          search: '^These fields carry secrets, they are files of `prometheus_secrets` referenced with the \*_file fields: password\.$'
+
+    - name: 'Run monitoring_prometheus with a secret that is not referenced (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_secrets: "{{ monitoring_prometheus__test_secrets + [ { 'name': 'prometheus_unused', 'data': 'x' } ] }}"
+        monitoring_prometheus__test_invalid:
+          message: 'a secret that is not referenced'
+          search: '^These secrets are not referenced in `prometheus_config` with /run/secrets/<name>: prometheus_unused\.$'
+
+    - name: 'Run monitoring_prometheus with a line break in a secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_config:
+          scrape_configs:
+            - job_name: 'lines'
+              basic_auth:
+                username: 'molecule'
+                password_file: '/run/secrets/prometheus_lines'
+              static_configs:
+                - targets: [ 'localhost:9090' ]
+        prometheus_secrets: [ { 'name': 'prometheus_lines', 'data': "molecule\npassword" } ]
+        monitoring_prometheus__test_invalid:
+          message: 'a line break in a secret'
+          search: '^Secrets are strings that are not empty and without line breaks: prometheus_lines\.$'
+
+    - name: 'Run monitoring_prometheus with prometheus_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_environment: [ 'TZ' ]
+        monitoring_prometheus__test_invalid:
+          message: 'prometheus_environment not a dictionary'
+          search: '^`prometheus_environment` has to be a dictionary\.$'
+
+    - name: 'Run monitoring_prometheus with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_environment: { 'GOGC': '50' }
+        monitoring_prometheus__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: GOGC, Prometheus only reads TZ'
+
+    - name: 'Run monitoring_prometheus with a line break in the environment of the container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        prometheus_container:
+          environment:
+            TZ: "Europe/Berlin\nUTC"
+        monitoring_prometheus__test_invalid:
+          message: 'a line break in the environment of the container'
+          search: '^The environment variables must not contain line breaks: TZ\.$'
 
     # promtool check rules fails in the throwaway container, the rule file is not written,
     # Prometheus 3 accepts UTF-8 metric names, the error is in the expression
@@ -77,6 +158,7 @@
     - name: 'Run monitoring_prometheus with an invalid configuration (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
+        prometheus_secrets: []
         prometheus_config:
           global:
             scrape_interval: 'often'
@@ -121,3 +203,40 @@
               rule files removed: {{ monitoring_prometheus__rules_removed is changed }},
               quadlet changed: {{ monitoring_prometheus__quadlet_result is changed }},
               start before {{ monitoring_prometheus__test_started_before.stdout }}, after {{ monitoring_prometheus__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_prometheus__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'prometheus' ]
+          register: 'monitoring_prometheus__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_prometheus without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_prometheus'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'prometheus' ]
+          register: 'monitoring_prometheus__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_prometheus__config_result is not changed
+              - monitoring_prometheus__rules_result is not changed
+              - monitoring_prometheus__rules_removed is not changed
+              - monitoring_prometheus__secrets_result is not changed
+              - monitoring_prometheus__quadlet_result is not changed
+              - monitoring_prometheus__test_unchanged_after.stdout == monitoring_prometheus__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ monitoring_prometheus__config_result is changed }},
+              rule files changed: {{ monitoring_prometheus__rules_result is changed }},
+              rule files removed: {{ monitoring_prometheus__rules_removed is changed }},
+              secrets changed: {{ monitoring_prometheus__secrets_result is changed }},
+              quadlet changed: {{ monitoring_prometheus__quadlet_result is changed }},
+              start before {{ monitoring_prometheus__test_unchanged_before.stdout }}, after {{ monitoring_prometheus__test_unchanged_after.stdout }}
