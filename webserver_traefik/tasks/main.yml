@@ -100,6 +100,56 @@
           {%-   if contents | length > 0 -%}
           {%-     set _ = errors.append('The content of a file of traefik_dynamic is a dictionary or null: ' ~ (contents | join(', ')) ~ '.') -%}
           {%-   endif -%}
+          {%-   if webserver_traefik__realms_file in dynamic.keys() | map('string') -%}
+          {%-     set _ = errors.append(webserver_traefik__realms_file ~ ' is the file of the certificates of traefik_realms, it is no file of traefik_dynamic.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set usersfile = webserver_traefik__usersfile -%}
+          {%- if usersfile is not mapping -%}
+          {%-   set _ = errors.append('traefik_usersfile has to be a dictionary of htpasswd files and their users.') -%}
+          {%- else -%}
+          {%-   set names = usersfile.keys() | map('string') | reject('match', webserver_traefik__dynamic_name_pattern) | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The files of traefik_usersfile are names without .htpasswd of letters, digits, _, . and -: ' ~ (names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set ns = namespace(contents=[], users=[], passwords=[]) -%}
+          {%-   for name, users in usersfile.items() if users is not none -%}
+          {%-     if users is not mapping or users | length == 0 -%}
+          {%-       set ns.contents = ns.contents + [ name | string ] -%}
+          {%-     else -%}
+          {%-       for user, password in users.items() -%}
+          {%-         if user is not string or user is not match(webserver_traefik__user_pattern) -%}
+          {%-           set ns.users = ns.users + [ name ~ ': ' ~ user ] -%}
+          {%-         elif password is boolean or not (password is string or password is number)
+                           or (password | string | length) == 0 or (password | string) is search('[\r\n]')
+                           or ((password | string).encode('utf-8') | length) > 72 -%}
+          {%-           set ns.passwords = ns.passwords + [ name ~ ': ' ~ user ] -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns.contents | length > 0 -%}
+          {%-     set _ = errors.append('The users of a file of traefik_usersfile are a dictionary of users and their passwords or null: ' ~ (ns.contents | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.users | length > 0 -%}
+          {%-     set _ = errors.append('The users of traefik_usersfile are names of letters, digits, _, ., @ and -: ' ~ (ns.users | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.passwords | length > 0 -%}
+          {%-     set _ = errors.append('The passwords of traefik_usersfile are strings of 1 to 72 bytes without line breaks (bcrypt): ' ~ (ns.passwords | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set realms = webserver_traefik__realms -%}
+          {%- if realms is string or realms is mapping or realms is not sequence -%}
+          {%-   set _ = errors.append('traefik_realms has to be a list of realms.') -%}
+          {%- else -%}
+          {%-   set names = realms | map('string') | reject('match', webserver_traefik__realm_pattern) | list
+                            + realms | reject('string') | map('string') | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The realms of traefik_realms are names of letters, digits, _, . and -: ' ~ (names | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if realms | map('string') | unique | list | length != realms | length -%}
+          {%-     set _ = errors.append('The realms of traefik_realms have to be unique.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
@@ -146,14 +196,98 @@
         webserver_traefik__unknown: >-
           {{ webserver_traefik__container.environment.keys() | map('string') | reject('in', webserver_traefik__environment_allowed) | list }}
 
+    # The certificates are created by another role (e.g. pki_easyrsa_deploy), they are installed on every start of Traefik
+    - name: 'Read the certificates of the realms'
+      ansible.builtin.stat:
+        path: "{{ webserver_traefik__realms_dir }}/{{ item.0 }}/{{ item.1 }}"
+      loop: "{{ webserver_traefik__realms_valid | product([ 'fullchain.pem', 'privkey.pem' ]) | list }}"
+      loop_control:
+        label: "{{ item.0 }}/{{ item.1 }}"
+      register: 'webserver_traefik__realms_stat'
+      check_mode: false
+
+    # In check mode another role may create the certificates only in a real run, they are reported
+    - name: 'Validate the certificates of the realms'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or webserver_traefik__realms_missing | length == 0
+        fail_msg: "The certificates of traefik_realms are missing in {{ webserver_traefik__realms_dir }}: {{ webserver_traefik__realms_missing | join(', ') }}."
+        quiet: true
+      vars:
+        webserver_traefik__realms_missing: >-
+          {{ webserver_traefik__realms_stat.results | rejectattr('stat.exists') | map(attribute='item') | map('join', '/') | list }}
+
+    - name: 'Report the missing certificates of the realms in check mode'
+      when:
+        - ansible_check_mode
+        - webserver_traefik__realms_missing | length > 0
+      ansible.builtin.debug:
+        msg: "The certificates of traefik_realms are missing in {{ webserver_traefik__realms_dir }}: {{ webserver_traefik__realms_missing | join(', ') }}."
+      vars:
+        webserver_traefik__realms_missing: >-
+          {{ webserver_traefik__realms_stat.results | rejectattr('stat.exists') | map(attribute='item') | map('join', '/') | list }}
+
     - name: 'Create directories'
       ansible.builtin.file:
-        path: "{{ item }}"
-        mode: '0755'
+        path: "{{ item.path }}"
+        owner: 'root'
+        group: 'root'
+        mode: "{{ item.mode }}"
         state: 'directory'
       loop:
-        - "{{ webserver_traefik__podman_home }}"
-        - "{{ webserver_traefik__podman_config_dir }}"
+        - { path: "{{ webserver_traefik__podman_home }}", mode: '0755' }
+        - { path: "{{ webserver_traefik__podman_config_dir }}", mode: '0755' }
+        # The htpasswd files and the keys of the realms are only read by Traefik (root)
+        - { path: "{{ webserver_traefik__users_dir }}", mode: '0700' }
+        - { path: "{{ webserver_traefik__certs_dir }}", mode: '0700' }
+      loop_control:
+        label: "{{ item.path }}"
+
+    # The htpasswd module hashes the passwords with bcrypt
+    - name: 'Install bcrypt for the htpasswd files'
+      when: webserver_traefik__usersfile | dict2items | rejectattr('value', 'none') | list | length > 0
+      ansible.builtin.apt:
+        name: 'python3-bcrypt'
+        state: 'present'
+      register: 'webserver_traefik__bcrypt_result'
+
+    # The passwords are an option with no_log.
+    # In check mode bcrypt is missing on a fresh host, the users are compared after the installation
+    - name: 'Write the htpasswd files'
+      when: not ansible_check_mode or webserver_traefik__bcrypt_result is not changed
+      webserver_traefik_htpasswd:
+        path: "{{ webserver_traefik__users_dir }}/{{ item.key }}.htpasswd"
+        passwords: "{{ item.value }}"
+      loop: "{{ webserver_traefik__usersfile | dict2items | rejectattr('value', 'none') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'webserver_traefik__usersfile_result'
+
+    - name: 'Remove the htpasswd files set to null'
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__users_dir }}/{{ item.key }}.htpasswd"
+        state: 'absent'
+      loop: "{{ webserver_traefik__usersfile | dict2items | selectattr('value', 'none') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: 'webserver_traefik__usersfile_removed'
+
+    - name: 'Find the certificates of the realms'
+      ansible.builtin.find:
+        paths: "{{ webserver_traefik__certs_dir }}"
+        file_type: 'any'
+        hidden: true
+      register: 'webserver_traefik__certs_found'
+
+    # The certificates of removed realms, the certificates of the realms are installed on the start of Traefik
+    - name: 'Remove the certificates of removed realms'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ webserver_traefik__certs_found.files | map(attribute='path')
+           | reject('in', webserver_traefik__realms_valid | product([ '.crt', '.key' ]) | map('join') | map('regex_replace', '^', webserver_traefik__certs_dir ~ '/') | list)
+           | list }}
 
     - name: 'Generate traefik.yml'
       ansible.builtin.copy:
@@ -182,6 +316,22 @@
       loop: "{{ webserver_traefik__dynamic | dict2items | rejectattr('value', 'none') | list }}"
       loop_control:
         label: "{{ item.key }}"
+
+    # Traefik reads realms.yml with the file provider, it loads the certificates when the file changes
+    - name: 'Generate the dynamic configuration of the realms'
+      when: webserver_traefik__realms_valid | length > 0
+      ansible.builtin.copy:
+        content: "{{ webserver_traefik__realms_config | to_nice_yaml(indent=2) }}"
+        dest: "{{ webserver_traefik__podman_config_dir }}/{{ webserver_traefik__realms_file }}.yml"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+
+    - name: 'Remove the dynamic configuration of the realms'
+      when: webserver_traefik__realms_valid | length == 0
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__podman_config_dir }}/{{ webserver_traefik__realms_file }}.yml"
+        state: 'absent'
 
     - name: 'Remove the dynamic configuration set to null'
       ansible.builtin.file:
@@ -215,6 +365,9 @@
           WantedBy=default.target
 
           [Service]
+          {% for command in webserver_traefik__container.exec_start_pre | default([]) %}
+          ExecStartPre={{ command }}
+          {% endfor %}
           RestartSec=5
           Restart=always
 
@@ -258,7 +411,8 @@
               {{ (ansible_facts.services[webserver_traefik__container.name + '.service'].state | default('')) == 'running' }}
             webserver_traefik__restart: >-
               {{ webserver_traefik__running | bool
-                 and (webserver_traefik__config_result is changed or webserver_traefik__quadlet_result is changed) }}
+                 and (webserver_traefik__config_result is changed or webserver_traefik__quadlet_result is changed
+                      or webserver_traefik__usersfile_result is changed or webserver_traefik__usersfile_removed is changed) }}
 
         - name: 'Wait for the entry points of Traefik'
           ansible.builtin.wait_for:
@@ -278,6 +432,17 @@
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
             msg: "{{ [ webserver_traefik__container.name ~ ' did not start' ] + webserver_traefik__start_journal.stdout_lines }}"
+
+    - name: 'Restart Traefik after a renewal of the certificate of a realm'
+      when:
+        - webserver_traefik__pki_update_enabled | bool
+        - webserver_traefik__realms_valid | length > 0
+      ansible.builtin.include_role:
+        name: 'pki_update'
+      vars:
+        pki_service: "{{ webserver_traefik__container.name }}"
+        pki_certificate: "{{ webserver_traefik__realms_valid | map('regex_replace', '^', webserver_traefik__realms_dir ~ '/') | map('regex_replace', '$', '/fullchain.pem') | list }}"
+        pki_schedule: "{{ webserver_traefik__pki_update_schedule }}"
 
     - name: 'Enable autoupdate on container'
       when: 'webserver_traefik__autoupdate_enabled | bool'

@@ -20,10 +20,24 @@ webserver_traefik__provider_podman: "{{ traefik_provider_podman | default(true) 
 webserver_traefik__config: >-
   {{ webserver_traefik__config_default
      | combine(webserver_traefik__config_provider_podman if webserver_traefik__provider_podman | bool else {}, recursive=true)
+     | combine(webserver_traefik__config_provider_file if webserver_traefik__realms_valid | length > 0 else {}, recursive=true)
      | combine(traefik_config | default({}), recursive=true) }}
 
 # Files of the dynamic configuration in <traefik_home>/dynamic, name without .yml and content, null removes the file
 webserver_traefik__dynamic: "{{ traefik_dynamic | default({}) }}"
+
+# The htpasswd files of the middleware basicAuth, the name of the file without .htpasswd and the passwords of the users by their names,
+# written to <traefik_home>/users/<name>.htpasswd (/etc/traefik/users/<name>.htpasswd in the container), null removes the file
+webserver_traefik__usersfile: "{{ traefik_usersfile | default({}) }}"
+
+# The realms of PKI with local certificates, <realm>/fullchain.pem and <realm>/privkey.pem in the directory of the realms,
+# the certificates are installed on every start of Traefik and configured in the dynamic file realms.yml
+webserver_traefik__realms: "{{ traefik_realms | default([]) }}"
+webserver_traefik__realms_dir: "{{ common_globals__pki_realms_dir }}"
+
+# The timer of pki_update restarts Traefik after the renewal of the certificate of a realm
+webserver_traefik__pki_update_enabled: "{{ traefik_pki_update_enabled | default(true) }}"
+webserver_traefik__pki_update_schedule: "{{ traefik_pki_update_schedule | default('*-*-* 00/4:00:00') }}"
 
 # Variables of the image that are no options of Traefik, the options are set with traefik_config
 webserver_traefik__environment: "{{ traefik_environment }}"
@@ -63,6 +77,13 @@ webserver_traefik__config_provider_podman:
       endpoint: 'unix:///var/run/docker.sock'
       exposedByDefault: false
 
+# Traefik reads realms.yml with the file provider
+webserver_traefik__config_provider_file:
+  providers:
+    file:
+      directory: '/etc/traefik/dynamic'
+      watch: true
+
 # The options of traefik_config, the role checks that it is a dictionary
 webserver_traefik__config_custom: "{{ traefik_config | default({}) }}"
 
@@ -97,6 +118,25 @@ webserver_traefik__former_variables:
   traefik_secrets: 'Traefik has no secrets, the options are set in traefik_config'
 
 webserver_traefik__dynamic_name_pattern: '^[A-Za-z0-9_.-]+$'
+webserver_traefik__user_pattern: '^[A-Za-z0-9_.@-]+$'
+webserver_traefik__realm_pattern: '^[A-Za-z0-9_.-]+$'
+
+# The dynamic file of the certificates of the realms, without .yml, it is no name of traefik_dynamic
+webserver_traefik__realms_file: 'realms'
+
+# The realms if traefik_realms is a list of names, the validation reports other values
+webserver_traefik__realms_valid: >-
+  {{ webserver_traefik__realms | map('string') | select('match', webserver_traefik__realm_pattern) | unique | list
+     if webserver_traefik__realms is sequence and webserver_traefik__realms is not string and webserver_traefik__realms is not mapping else [] }}
+
+# The content of realms.yml
+webserver_traefik__realms_config: >-
+  {%- set certificates = [] -%}
+  {%- for realm in webserver_traefik__realms_valid -%}
+  {%-   set _ = certificates.append({ 'certFile': webserver_traefik__certs_container_dir ~ '/' ~ realm ~ '.crt',
+                                      'keyFile': webserver_traefik__certs_container_dir ~ '/' ~ realm ~ '.key' }) -%}
+  {%- endfor -%}
+  {{ { 'tls': { 'certificates': certificates } } }}
 
 # The variables of lego v5.6.0 (the ACME client of Traefik v3.7.19) read by the library, the options of Traefik are set with traefik_config
 webserver_traefik__environment_allowed:
@@ -118,6 +158,10 @@ webserver_traefik__podman_home: "{{ webserver_traefik__home }}"
 webserver_traefik__podman_config_dir: "{{ webserver_traefik__podman_home }}/dynamic"
 webserver_traefik__podman_config_file: "{{ webserver_traefik__podman_home }}/traefik.yml"
 webserver_traefik__podman_acme_file: "{{ webserver_traefik__podman_home }}/acme.json"
+webserver_traefik__users_dir: "{{ webserver_traefik__podman_home }}/users"
+webserver_traefik__certs_dir: "{{ webserver_traefik__podman_home }}/certs"
+webserver_traefik__users_container_dir: '/etc/traefik/users'
+webserver_traefik__certs_container_dir: '/etc/traefik/certs'
 
 webserver_traefik__podman_container_default:
   name: "{{ webserver_traefik__podman_name }}"
@@ -138,8 +182,19 @@ webserver_traefik__podman_container_default:
   volumes: >-
     {{ [ webserver_traefik__podman_config_dir + ':/etc/traefik/dynamic:ro',
          webserver_traefik__podman_config_file + ':/etc/traefik/traefik.yml:ro',
-         webserver_traefik__podman_acme_file + ':/etc/traefik/acme.json' ]
+         webserver_traefik__podman_acme_file + ':/etc/traefik/acme.json',
+         webserver_traefik__users_dir + ':' + webserver_traefik__users_container_dir + ':ro',
+         webserver_traefik__certs_dir + ':' + webserver_traefik__certs_container_dir + ':ro' ]
        + ([ webserver_traefik__podman_socket + ':/var/run/docker.sock:ro' ] if webserver_traefik__provider_podman | bool else []) }}
+  # Installs the certificates of the realms on every start, install follows the links of the source and sets the mode.
+  # A renewed certificate is used after the next restart, the timer of pki_update restarts Traefik after a renewal.
+  exec_start_pre: >-
+    {%- set commands = [] -%}
+    {%- for realm in webserver_traefik__realms_valid -%}
+    {%-   set _ = commands.append('install -m 0644 ' ~ webserver_traefik__realms_dir ~ '/' ~ realm ~ '/fullchain.pem ' ~ webserver_traefik__certs_dir ~ '/' ~ realm ~ '.crt') -%}
+    {%-   set _ = commands.append('install -m 0400 ' ~ webserver_traefik__realms_dir ~ '/' ~ realm ~ '/privkey.pem ' ~ webserver_traefik__certs_dir ~ '/' ~ realm ~ '.key') -%}
+    {%- endfor -%}
+    {{ commands }}
 
 # Generated from docs/content/reference/static-configuration/file.yaml of Traefik v3.7.19, update with new versions of Traefik:
 # the options of traefik.yml with their types, bool, int (a number), duration (a string like 10s or a number of seconds),

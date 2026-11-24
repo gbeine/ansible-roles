@@ -1,6 +1,6 @@
 Traefik runs in the official container image [traefik](https://hub.docker.com/_/traefik) as podman quadlet,
-it publishes the ports 80 and 443 of the host. `traefik_home` contains `traefik.yml`, `acme.json` and the files of the dynamic configuration in `dynamic`,
-they are mounted to `/etc/traefik`.
+it publishes the ports 80 and 443 of the host. `traefik_home` contains `traefik.yml`, `acme.json`, the files of the dynamic configuration in `dynamic`,
+the htpasswd files in `users` and the certificates of the realms in `certs`, they are mounted to `/etc/traefik`.
 
 ### Configuration
 
@@ -79,6 +79,74 @@ traefik_dynamic:
 
 `acme.json` is created empty with mode `0600` and never changed by the role, Traefik stores the certificates of ACME in it.
 
+### Users
+
+`traefik_usersfile` contains the htpasswd files of the middleware `basicAuth`, the name of the file without `.htpasswd` and the passwords of its users by their names.
+The role writes them to `<traefik_home>/users/<name>.htpasswd` with mode `0600`, the directory is mounted read-only to `/etc/traefik/users`.
+The module `webserver_traefik_htpasswd` of the role hashes the passwords with bcrypt (`$2y$`), it keeps the hash of a password that did not change,
+so the file only changes if a user or a password changes. Users missing in `traefik_usersfile` are removed from the file, `null` removes the whole file.
+The role installs `python3-bcrypt` for the module. bcrypt only uses 72 bytes, longer passwords are rejected.
+
+```yaml
+traefik_usersfile:
+  dashboard:
+    admin: "{{ vault_traefik_admin_password }}"
+    viewer: "{{ vault_traefik_viewer_password }}"
+  old: ~
+traefik_dynamic:
+  dashboard:
+    http:
+      routers:
+        dashboard:
+          rule: 'Host(`traefik.example.org`)'
+          entryPoints: [ 'websecure' ]
+          service: 'api@internal'
+          middlewares: [ 'dashboard-auth' ]
+          tls: {}
+      middlewares:
+        dashboard-auth:
+          basicAuth:
+            usersFile: '/etc/traefik/users/dashboard.htpasswd'
+```
+
+The middleware can also be set with the labels of a container, e.g. `traefik.http.middlewares.auth.basicauth.usersfile=/etc/traefik/users/dashboard.htpasswd`.
+
+### Certificates
+
+`traefik_realms` is a list of realms of the PKI with local certificates, e.g. of `pki_easyrsa_deploy`.
+Every realm has `<realm>/fullchain.pem` and `<realm>/privkey.pem` in the directory of the realms (`common_globals__pki_realms_dir`, default `/etc/pki/realms`).
+The quadlet unit installs them on every start of Traefik with `ExecStartPre` to `<traefik_home>/certs/<realm>.crt` (`0644`) and `<realm>.key` (`0400`),
+`install` follows the links of the source. The directory is mounted read-only to `/etc/traefik/certs`.
+The role writes the dynamic file `realms.yml` with the certificates and adds the file provider to `traefik.yml`, Traefik chooses the certificate by the name of the server (SNI):
+
+```yaml
+traefik_realms: [ 'example.org', 'example.net' ]
+```
+
+```yaml
+# <traefik_home>/dynamic/realms.yml
+tls:
+  certificates:
+    - certFile: '/etc/traefik/certs/example.org.crt'
+      keyFile: '/etc/traefik/certs/example.org.key'
+    - certFile: '/etc/traefik/certs/example.net.crt'
+      keyFile: '/etc/traefik/certs/example.net.key'
+```
+
+```yaml
+# Added to traefik.yml with traefik_realms
+providers:
+  file:
+    directory: '/etc/traefik/dynamic'
+    watch: true
+```
+
+`realms` is no name of `traefik_dynamic`, a file provider with another directory in `traefik_config` does not read `realms.yml`.
+Without `traefik_realms` the role removes `realms.yml`, the certificates of removed realms are removed from `<traefik_home>/certs`.
+A renewed certificate is used after the next restart of Traefik. With `traefik_pki_update_enabled: true` (default) the role installs `pki_update`,
+its timer (`traefik_pki_update_schedule`, default `*-*-* 00/4:00:00`) restarts Traefik if one of the `fullchain.pem` of the realms is newer than the start of Traefik.
+The timer stays if the realms are removed later.
+
 ### Secrets
 
 The role has no secrets. `traefik.yml` cannot read options from files and Traefik ignores its `TRAEFIK_*` variables
@@ -135,6 +203,8 @@ traefik_container:
 | `<traefik_home>/traefik.yml` | `/etc/traefik/traefik.yml` (read-only) |
 | `<traefik_home>/dynamic` | `/etc/traefik/dynamic` (read-only) |
 | `<traefik_home>/acme.json` | `/etc/traefik/acme.json` |
+| `<traefik_home>/users` | `/etc/traefik/users` (read-only) |
+| `<traefik_home>/certs` | `/etc/traefik/certs` (read-only) |
 | `/run/podman/podman.sock` | `/var/run/docker.sock` (read-only, with `traefik_provider_podman`) |
 
 ### Validation
@@ -143,7 +213,11 @@ The role checks before any change:
 
 - the former variable `traefik_secrets` is not set
 - `traefik_config` is a dictionary of known options with the types of the schema (booleans, numbers, durations, strings, lists, dictionaries) and values without line breaks
-- `traefik_dynamic` is a dictionary, the names of the files consist of letters, digits, `_`, `.` and `-`, the contents are dictionaries or `null`
+- `traefik_dynamic` is a dictionary, the names of the files consist of letters, digits, `_`, `.` and `-`, the contents are dictionaries or `null`, `realms` is no file
+- `traefik_usersfile` is a dictionary, the names of the files consist of letters, digits, `_`, `.` and `-`, the users of a file are a dictionary or `null`,
+  the names of the users consist of letters, digits, `_`, `.`, `@` and `-`, the passwords are strings or numbers of 1 to 72 bytes without line breaks
+- `traefik_realms` is a list of unique names of letters, digits, `_`, `.` and `-`, `fullchain.pem` and `privkey.pem` of every realm exist
+  (in check mode missing certificates are reported, another role may create them only in a real run)
 - `traefik_environment`, if set, is a dictionary without options of Traefik and line breaks, only allowed environment variables are set in the container
 
 If `traefik_container` or `traefik_config` is no dictionary, merging it with the default fails before anything changes.
@@ -151,13 +225,16 @@ Traefik itself checks the values at the start, the role waits until the entry po
 
 ### Check mode
 
-The role runs with `--check`, also on a host where it never ran, and compares `traefik.yml`, the dynamic configuration and the quadlet unit.
+The role runs with `--check`, also on a host where it never ran, and compares `traefik.yml`, the dynamic configuration, the htpasswd files and the quadlet unit.
+The htpasswd files are not compared while `python3-bcrypt` is not installed yet.
 The start of Traefik and the wait for the entry points do not run in check mode.
 
 ### Restart and updates
 
-Traefik is restarted if it was running and `traefik.yml` or the quadlet unit changed, otherwise it is started and enabled.
+Traefik is restarted if it was running and `traefik.yml`, the quadlet unit or an htpasswd file changed, otherwise it is started and enabled.
+Traefik reads an htpasswd file only when it builds the middleware, a changed file needs a restart.
 The files of the dynamic configuration need no restart, Traefik watches them with `providers.file.watch`.
+The certificates of the realms are installed on every start, `pki_update` restarts Traefik after a renewal.
 Updates of the image are done by `container_update` with `traefik_autoupdate_enabled: true` and `traefik_autoupdate_schedule` (default `*-*-* 00/4:00:00`).
 
 ### Migration
@@ -175,6 +252,9 @@ Updates of the image are done by `container_update` with `traefik_autoupdate_ena
 - A file of `traefik_dynamic` set to `null` is removed, the files are written with mode `0644`.
 - The tags are `webserver` and `webserver_traefik`.
 - The dependencies `requires`, `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` are set with `traefik_container`.
+- `traefik_usersfile` (htpasswd files) and `traefik_realms` (local certificates) are new.
+  The directories `<traefik_home>/users` and `<traefik_home>/certs` are always mounted, the quadlet unit changes once and Traefik restarts.
+  `volumes` in `traefik_container` replaces the default and needs the two volumes for these features.
 
 ### Tests
 
@@ -185,17 +265,24 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Test case |
 |---|---|
 | `molecule-traefik-default` | The mandatory values only, IPv4, the docker provider routes to a labeled container through the podman socket |
-| `molecule-traefik` | IPv4 and IPv6, `traefik_provider_podman: false`, the file provider with a file of `traefik_dynamic`, a file removed with `null`, `serversTransport` removed with `null`, `traefik_environment` and dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
+| `molecule-traefik` | IPv4 and IPv6, `traefik_provider_podman: false`, the file provider with a file of `traefik_dynamic`, a file removed with `null`, `serversTransport` removed with `null`, `traefik_environment`, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`), an htpasswd file for the dashboard and one removed with `null`, two realms with local certificates |
 
 `prepare` sets up podman with the socket and the network `podman-molecule` with the role `container_podman`, pulls the images
 and starts the container `molecule-whoami` (`docker.io/traefik/whoami`) with the labels of the docker provider as backend of the routes.
+On `molecule-traefik` it creates self-signed certificates of the realms `realm1` and `realm2` with `openssl`, an htpasswd file and a certificate that the role removes.
 `check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `traefik_container` and `traefik_config` not a dictionary, unknown options and sections, options of the wrong type and line breaks,
 an invalid dynamic configuration, `traefik_dynamic` not a dictionary, the former variable `traefik_secrets`, `TRAEFIK_LOG_LEVEL` in `traefik_environment`
-and an unknown variable in `traefik_container.environment` and checks that it fails with the expected message and the quadlet unit and `traefik.yml` are unchanged
-(tasks marked `expect ERROR`), then it changes `log.level` on `molecule-traefik`, `traefik.yml` changes and Traefik has to restart.
+and an unknown variable in `traefik_container.environment`, invalid htpasswd files (name of the file, user, line break, too long password, no users),
+`traefik_usersfile` not a dictionary, `traefik_realms` not a list, invalid and duplicate realms, `realms` in `traefik_dynamic` and a realm without certificates
+and checks that it fails with the expected message and the quadlet unit and `traefik.yml` are unchanged (tasks marked `expect ERROR`),
+then it changes `log.level` on `molecule-traefik`, `traefik.yml` changes and Traefik has to restart,
+then it changes the password of `admin`, the htpasswd file changes and Traefik has to restart.
 `verify` checks the quadlet unit, `traefik.yml`, the files of the dynamic configuration, the service, the container addresses, the redirect from http to https
 and the routes on port 443: the route of the docker provider or of the dynamic configuration has to answer with whoami, the other one with 404.
+It checks the htpasswd files (users, bcrypt, mode `0600`, the removed file), the certificates in `<traefik_home>/certs` and `realms.yml`,
+the certificate served for every realm (`openssl s_client` with the name of the realm), the certificates watched by `pki_update`
+and the login on the dashboard: `401` without a password and with the former password, `200` with the changed password.
 The VMs need access to Docker Hub for `docker.io/traefik:v3` and `docker.io/traefik/whoami`.
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `containers.podman`.

@@ -127,6 +127,61 @@
           message: 'an unknown variable in traefik_container.environment'
           search: '^Unknown environment variables: FOO\.'
 
+    - name: 'Run webserver_traefik with invalid htpasswd files (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_usersfile:
+          'bad name':
+            admin: 'molecule-password'
+          dashboard:
+            'bad user': 'molecule-password'
+            admin: "molecule\npassword"
+            viewer: "{{ 'x' * 73 }}"
+          empty: {}
+        webserver_traefik__test_invalid:
+          message: 'invalid htpasswd files'
+          search: >-
+            The files of traefik_usersfile are names without \.htpasswd of letters, digits, _, \. and -: bad name\.
+            The users of a file of traefik_usersfile are a dictionary of users and their passwords or null: empty\.
+            The users of traefik_usersfile are names of letters, digits, _, \., @ and -: dashboard: bad user\.
+            The passwords of traefik_usersfile are strings of 1 to 72 bytes without line breaks \(bcrypt\): dashboard: admin, dashboard: viewer\.$
+
+    - name: 'Run webserver_traefik with traefik_usersfile not a dictionary and traefik_realms not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_usersfile: [ 'dashboard' ]
+        traefik_realms: 'realm1'
+        webserver_traefik__test_invalid:
+          message: 'traefik_usersfile not a dictionary and traefik_realms not a list'
+          search: '^traefik_usersfile has to be a dictionary of htpasswd files and their users\. traefik_realms has to be a list of realms\.$'
+
+    - name: 'Run webserver_traefik with invalid and duplicate realms (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_realms: [ 'bad realm', 'realm1', 'realm1' ]
+        webserver_traefik__test_invalid:
+          message: 'invalid and duplicate realms'
+          search: >-
+            ^The realms of traefik_realms are names of letters, digits, _, \. and -: bad realm\.
+            The realms of traefik_realms have to be unique\.$
+
+    - name: 'Run webserver_traefik with the file of the realms in traefik_dynamic (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_dynamic:
+          realms: {}
+        webserver_traefik__test_invalid:
+          message: 'the file of the realms in traefik_dynamic'
+          search: '^realms is the file of the certificates of traefik_realms, it is no file of traefik_dynamic\.$'
+
+    - name: 'Run webserver_traefik with a realm without certificates (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        traefik_realms: [ 'missing' ]
+        webserver_traefik__test_invalid:
+          message: 'a realm without certificates'
+          search: '^The certificates of traefik_realms are missing in /etc/pki/realms: missing/fullchain\.pem, missing/privkey\.pem\.$'
+
     - name: 'Run webserver_traefik with the changed configuration'
       when: webserver_traefik__test_case.side_effect is defined
       block:
@@ -160,3 +215,41 @@
               traefik.yml changed: {{ webserver_traefik__config_result is changed }},
               quadlet changed: {{ webserver_traefik__quadlet_result is changed }},
               PID {{ webserver_traefik__test_pid_before.stdout }} -> {{ webserver_traefik__test_pid_after.stdout }}
+
+    # Traefik reads the htpasswd file only when it builds the middleware, a changed password restarts Traefik
+    - name: 'Run webserver_traefik with a changed password'
+      when: webserver_traefik__test_case.side_effect.usersfile is defined
+      block:
+
+        - name: 'Read the main PID of Traefik before the changed password'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value traefik'
+          register: 'webserver_traefik__test_password_pid_before'
+          changed_when: false
+
+        - name: 'Set the changed password'
+          ansible.builtin.set_fact:
+            traefik_usersfile: >-
+              {{ webserver_traefik__test_vars.traefik_usersfile | combine(webserver_traefik__test_case.side_effect.usersfile, recursive=true) }}
+
+        - name: 'Run webserver_traefik with the changed password'
+          ansible.builtin.include_role:
+            name: 'webserver_traefik'
+
+        - name: 'Read the main PID of Traefik after the changed password'
+          ansible.builtin.command: 'systemctl show --property=MainPID --value traefik'
+          register: 'webserver_traefik__test_password_pid_after'
+          changed_when: false
+
+        - name: 'Assert the changed htpasswd file and the restart of Traefik'
+          ansible.builtin.assert:
+            that:
+              - webserver_traefik__usersfile_result is changed
+              - webserver_traefik__config_result is not changed
+              - webserver_traefik__quadlet_result is not changed
+              - webserver_traefik__test_password_pid_after.stdout != '0'
+              - webserver_traefik__test_password_pid_after.stdout != webserver_traefik__test_password_pid_before.stdout
+            fail_msg: >-
+              htpasswd changed: {{ webserver_traefik__usersfile_result is changed }},
+              traefik.yml changed: {{ webserver_traefik__config_result is changed }},
+              quadlet changed: {{ webserver_traefik__quadlet_result is changed }},
+              PID {{ webserver_traefik__test_password_pid_before.stdout }} -> {{ webserver_traefik__test_password_pid_after.stdout }}

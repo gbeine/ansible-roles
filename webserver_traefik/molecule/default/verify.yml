@@ -134,3 +134,162 @@
             webserver_traefik__test_routes.results | selectattr('item.value', 'eq', 200)
             | rejectattr('content', 'search', 'Hostname: ') | list | length == 0
         fail_msg: "{{ webserver_traefik__test_routes.results | map(attribute='content') | list }}"
+
+    - name: 'Read the htpasswd files'
+      ansible.builtin.slurp:
+        src: "{{ webserver_traefik__expect.home }}/users/{{ item }}.htpasswd"
+      loop: "{{ webserver_traefik__expect.users.keys() | list }}"
+      register: 'webserver_traefik__test_users'
+
+    - name: 'Read the state of the htpasswd files'
+      ansible.builtin.stat:
+        path: "{{ webserver_traefik__expect.home }}/users/{{ item }}.htpasswd"
+      loop: "{{ webserver_traefik__expect.users.keys() | list + webserver_traefik__expect.users_absent }}"
+      register: 'webserver_traefik__test_users_stat'
+
+    # The users of every file with bcrypt hashes and mode 0600, the files set to null are removed
+    - name: 'Assert the htpasswd files'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_users_found == webserver_traefik__expect.users
+          - >-
+            webserver_traefik__test_users.results | map(attribute='content') | map('b64decode')
+            | map('regex_findall', '(?m)^[^:]+:(.*)$') | flatten | reject('match', '[$]2y[$]10[$]') | list | length == 0
+          - >-
+            webserver_traefik__test_users_stat.results | selectattr('item', 'in', webserver_traefik__expect.users.keys() | list)
+            | map(attribute='stat.mode', default='') | reject('eq', '0600') | list | length == 0
+          - >-
+            webserver_traefik__test_users_stat.results | selectattr('item', 'in', webserver_traefik__expect.users_absent)
+            | selectattr('stat.exists') | list | length == 0
+        fail_msg: >-
+          users {{ webserver_traefik__test_users_found }},
+          files {{ webserver_traefik__test_users_stat.results | map(attribute='item')
+                   | zip(webserver_traefik__test_users_stat.results | map(attribute='stat') | map(attribute='mode', default='absent'))
+                   | map('join', ': ') | join(', ') }}
+      vars:
+        webserver_traefik__test_users_found: >-
+          {{ dict(webserver_traefik__test_users.results | map(attribute='item')
+                  | zip(webserver_traefik__test_users.results | map(attribute='content') | map('b64decode')
+                        | map('regex_findall', '(?m)^([^:]+):') | map('sort'))) }}
+
+    - name: 'Find the certificates of the realms'
+      ansible.builtin.find:
+        paths: "{{ webserver_traefik__expect.home }}/certs"
+        file_type: 'any'
+        hidden: true
+      register: 'webserver_traefik__test_certs'
+
+    - name: 'Read the dynamic configuration of the realms'
+      when: webserver_traefik__expect.realms | length > 0
+      ansible.builtin.slurp:
+        src: "{{ webserver_traefik__expect.home }}/dynamic/realms.yml"
+      register: 'webserver_traefik__test_realms'
+
+    # The certificates of the realms are installed by ExecStartPre, the certificate of the removed realm is gone
+    - name: 'Assert the certificates and realms.yml'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_certs.files | map(attribute='path') | map('basename') | sort == webserver_traefik__expect.certs | sort
+          - >-
+            webserver_traefik__test_certs.files | selectattr('path', 'search', '[.]key$')
+            | map(attribute='mode') | reject('eq', '0400') | list | length == 0
+          - >-
+            webserver_traefik__test_certs.files | selectattr('path', 'search', '[.]crt$')
+            | map(attribute='mode') | reject('eq', '0644') | list | length == 0
+          - >-
+            webserver_traefik__expect.realms | length == 0
+            or (webserver_traefik__test_realms.content | b64decode | from_yaml).tls.certificates == webserver_traefik__test_realms_expected
+        fail_msg: >-
+          certificates {{ webserver_traefik__test_certs.files | map(attribute='path') | map('basename') | list }},
+          realms.yml {{ webserver_traefik__test_realms.content | default('') | b64decode }}
+      vars:
+        webserver_traefik__test_realms_expected: >-
+          {%- set certificates = [] -%}
+          {%- for realm in webserver_traefik__expect.realms -%}
+          {%-   set _ = certificates.append({ 'certFile': '/etc/traefik/certs/' ~ realm ~ '.crt', 'keyFile': '/etc/traefik/certs/' ~ realm ~ '.key' }) -%}
+          {%- endfor -%}
+          {{ certificates }}
+
+    # Traefik chooses the certificate by the name of the server (SNI)
+    - name: 'Read the certificates served for the realms'
+      ansible.builtin.command:
+        argv: [ 'openssl', 's_client', '-connect', "{{ webserver_traefik__expect.ip }}:443", '-servername', "{{ item }}.molecule" ]
+        stdin: ''
+      loop: "{{ webserver_traefik__expect.realms }}"
+      register: 'webserver_traefik__test_served'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the certificates served for the realms'
+      ansible.builtin.assert:
+        that:
+          - item.stdout is search('subject=[ ]*CN[ ]*=[ ]*' ~ item.item ~ '[.]molecule')
+        fail_msg: "{{ item.stdout }} {{ item.stderr }}"
+      loop: "{{ webserver_traefik__test_served.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 'Read the override of pki_update'
+      ansible.builtin.stat:
+        path: '/etc/systemd/system/pki-update@traefik.service.d/override.conf'
+      register: 'webserver_traefik__test_pki_stat'
+
+    - name: 'Read the content of the override of pki_update'
+      when: webserver_traefik__test_pki_stat.stat.exists
+      ansible.builtin.slurp:
+        src: '/etc/systemd/system/pki-update@traefik.service.d/override.conf'
+      register: 'webserver_traefik__test_pki'
+
+    # pki_update watches the certificates of all realms, without realms it is not installed
+    - name: 'Assert the certificates watched by pki_update'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_pki_stat.stat.exists == (webserver_traefik__expect.realms | length > 0)
+          - >-
+            webserver_traefik__expect.realms | length == 0
+            or ('Environment="PKI_CERTIFICATES=' ~ webserver_traefik__test_pki_certificates ~ '"')
+               in (webserver_traefik__test_pki.content | b64decode).splitlines()
+        fail_msg: "{{ webserver_traefik__test_pki.content | default('') | b64decode }}"
+      vars:
+        webserver_traefik__test_pki_certificates: >-
+          {{ webserver_traefik__expect.realms | map('regex_replace', '^', webserver_traefik__test_realms_dir ~ '/')
+             | map('regex_replace', '$', '/fullchain.pem') | join(' ') }}
+
+    # Traefik loads the dynamic configuration after the start, the requests are repeated until the status matches
+    - name: 'Request the dashboard without login'
+      when: webserver_traefik__expect.login is defined
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1/api/version'
+        headers:
+          Host: "{{ webserver_traefik__expect.login.host }}"
+        validate_certs: false
+        status_code: [ 401, 404 ]
+      register: 'webserver_traefik__test_anonymous'
+      until: webserver_traefik__test_anonymous.status == 401
+      retries: 15
+      delay: 2
+
+    - name: 'Request the dashboard with the password of the htpasswd file'
+      when: webserver_traefik__expect.login is defined
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1/api/version'
+        headers:
+          Host: "{{ webserver_traefik__expect.login.host }}"
+        url_username: "{{ webserver_traefik__expect.login.user }}"
+        url_password: "{{ webserver_traefik__expect.login.password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: 'webserver_traefik__test_login'
+
+    - name: 'Request the dashboard with the former password'
+      when: webserver_traefik__expect.login is defined
+      ansible.builtin.uri:
+        url: 'https://127.0.0.1/api/version'
+        headers:
+          Host: "{{ webserver_traefik__expect.login.host }}"
+        url_username: "{{ webserver_traefik__expect.login.user }}"
+        url_password: 'molecule-admin-password'
+        force_basic_auth: true
+        validate_certs: false
+        status_code: [ 401 ]

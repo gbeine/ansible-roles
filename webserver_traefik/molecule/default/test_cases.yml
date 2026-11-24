@@ -24,6 +24,9 @@ webserver_traefik__test_whoami:
     traefik.http.routers.whoami.tls: 'true'
     traefik.http.services.whoami.loadbalancer.server.port: '80'
 
+# The directory of the realms, common_globals__pki_realms_dir
+webserver_traefik__test_realms_dir: '/etc/pki/realms'
+
 webserver_traefik__test_cases:
 
   # The mandatory values only, the docker provider routes to the labeled container through the podman socket
@@ -42,12 +45,15 @@ webserver_traefik__test_cases:
         - 'Volume=/opt/traefik-molecule/dynamic:/etc/traefik/dynamic:ro'
         - 'Volume=/opt/traefik-molecule/traefik.yml:/etc/traefik/traefik.yml:ro'
         - 'Volume=/opt/traefik-molecule/acme.json:/etc/traefik/acme.json'
+        - 'Volume=/opt/traefik-molecule/users:/etc/traefik/users:ro'
+        - 'Volume=/opt/traefik-molecule/certs:/etc/traefik/certs:ro'
         - 'Volume=/run/podman/podman.sock:/var/run/docker.sock:ro'
       quadlet_absent:
         - '/etc/localtime'
         - '/etc/timezone'
         - 'Environment='
         - 'Wants='
+        - 'ExecStartPre='
       config:
         log:
           level: 'WARN'
@@ -59,7 +65,12 @@ webserver_traefik__test_cases:
             exposedByDefault: false
       config_absent: []
       dynamic: []
-      dynamic_absent: []
+      dynamic_absent: [ 'realms' ]
+      # The htpasswd files with their users, the removed files, the realms and the files of the certificates
+      users: {}
+      users_absent: []
+      realms: []
+      certs: []
       # Host header and the expected status of the requests on port 443
       routes:
         whoami.molecule: 200
@@ -97,19 +108,45 @@ webserver_traefik__test_cases:
                 loadBalancer:
                   servers:
                     - url: 'http://10.89.0.20:80'
+        # The dashboard of Traefik (api@internal) with the users of the htpasswd file dashboard
+        dashboard:
+          http:
+            routers:
+              dashboard:
+                rule: 'Host(`dashboard.molecule`)'
+                entryPoints: [ 'websecure' ]
+                service: 'api@internal'
+                middlewares: [ 'dashboard-auth' ]
+                tls: {}
+            middlewares:
+              dashboard-auth:
+                basicAuth:
+                  usersFile: '/etc/traefik/users/dashboard.htpasswd'
         # Created in prepare.yml, null removes the file
         stale: ~
+      traefik_usersfile:
+        dashboard:
+          admin: 'molecule-admin-password'
+          viewer: 'molecule-viewer-password'
+        # Created in prepare.yml, null removes the file
+        stale: ~
+      # The certificates are created in prepare.yml
+      traefik_realms: [ 'realm1', 'realm2' ]
       traefik_environment:
         LEGO_DISABLE_CNAME_SUPPORT: 'true'
       traefik_container:
         wants: [ 'network-online.target' ]
         after: [ 'network-online.target' ]
         requires_mounts_for: [ '/srv/traefik-molecule' ]
-    # side_effect changes the log level, traefik.yml changes and Traefik is restarted
+    # side_effect changes the log level, traefik.yml changes and Traefik is restarted,
+    # then it changes the password of admin, the htpasswd file changes and Traefik is restarted
     side_effect:
       config:
         log:
           level: 'INFO'
+      usersfile:
+        dashboard:
+          admin: 'molecule-admin-changed'
     expect:
       home: '/srv/traefik-molecule'
       ip: '10.89.0.11'
@@ -118,6 +155,12 @@ webserver_traefik__test_cases:
         - 'Volume=/srv/traefik-molecule/dynamic:/etc/traefik/dynamic:ro'
         - 'Volume=/srv/traefik-molecule/traefik.yml:/etc/traefik/traefik.yml:ro'
         - 'Volume=/srv/traefik-molecule/acme.json:/etc/traefik/acme.json'
+        - 'Volume=/srv/traefik-molecule/users:/etc/traefik/users:ro'
+        - 'Volume=/srv/traefik-molecule/certs:/etc/traefik/certs:ro'
+        - 'ExecStartPre=install -m 0644 /etc/pki/realms/realm1/fullchain.pem /srv/traefik-molecule/certs/realm1.crt'
+        - 'ExecStartPre=install -m 0400 /etc/pki/realms/realm1/privkey.pem /srv/traefik-molecule/certs/realm1.key'
+        - 'ExecStartPre=install -m 0644 /etc/pki/realms/realm2/fullchain.pem /srv/traefik-molecule/certs/realm2.crt'
+        - 'ExecStartPre=install -m 0400 /etc/pki/realms/realm2/privkey.pem /srv/traefik-molecule/certs/realm2.key'
         - 'Environment=LEGO_DISABLE_CNAME_SUPPORT=true'
         - 'Wants=network-online.target'
         - 'After=network-online.target'
@@ -137,8 +180,19 @@ webserver_traefik__test_cases:
       config_absent:
         - 'serversTransport'
         - 'docker'
-      dynamic: [ 'molecule' ]
+      dynamic: [ 'molecule', 'dashboard', 'realms' ]
       dynamic_absent: [ 'stale' ]
       routes:
         dynamic.molecule: 200
         whoami.molecule: 404
+      users:
+        dashboard: [ 'admin', 'viewer' ]
+      users_absent: [ 'stale' ]
+      # The login on the dashboard after side_effect changed the password
+      login:
+        host: 'dashboard.molecule'
+        user: 'admin'
+        password: 'molecule-admin-changed'
+      realms: [ 'realm1', 'realm2' ]
+      # old.crt is created in prepare.yml and removed by the role
+      certs: [ 'realm1.crt', 'realm1.key', 'realm2.crt', 'realm2.key' ]

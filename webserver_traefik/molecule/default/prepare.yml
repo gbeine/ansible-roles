@@ -55,3 +55,54 @@
           http: {}
         mode: '0644'
       loop: "{{ webserver_traefik__test_case.expect.dynamic_absent }}"
+
+    # The certificates of the realms, the role installs them on the start of Traefik
+    - name: 'Create the directories of the realms'
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__test_realms_dir }}/{{ item }}"
+        mode: '0755'
+        state: 'directory'
+      loop: "{{ webserver_traefik__test_case.expect.realms }}"
+
+    - name: 'Create the self-signed certificates of the realms'
+      ansible.builtin.command:
+        argv:
+          - 'openssl'
+          - 'req'
+          - '-x509'
+          - '-newkey'
+          - 'rsa:2048'
+          - '-nodes'
+          - '-days'
+          - '30'
+          - '-subj'
+          - "/CN={{ item }}.molecule"
+          - '-addext'
+          - "subjectAltName=DNS:{{ item }}.molecule"
+          - '-keyout'
+          - "{{ webserver_traefik__test_realms_dir }}/{{ item }}/privkey.pem"
+          - '-out'
+          - "{{ webserver_traefik__test_realms_dir }}/{{ item }}/fullchain.pem"
+        creates: "{{ webserver_traefik__test_realms_dir }}/{{ item }}/fullchain.pem"
+      loop: "{{ webserver_traefik__test_case.expect.realms }}"
+
+    # The role removes the htpasswd file with null in traefik_usersfile and the certificates of removed realms
+    - name: 'Create the directories of the users and the certificates'
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__test_case.expect.home }}/{{ item }}"
+        mode: '0700'
+        state: 'directory'
+      loop: [ 'users', 'certs' ]
+
+    - name: 'Create an htpasswd file that is removed'
+      ansible.builtin.copy:
+        dest: "{{ webserver_traefik__test_case.expect.home }}/users/{{ item }}.htpasswd"
+        content: "stale:$2y$10$invalid\n"
+        mode: '0600'
+      loop: "{{ webserver_traefik__test_case.expect.users_absent }}"
+
+    - name: 'Create the certificate of a removed realm'
+      ansible.builtin.copy:
+        dest: "{{ webserver_traefik__test_case.expect.home }}/certs/old.crt"
+        content: "molecule\n"
+        mode: '0644'
