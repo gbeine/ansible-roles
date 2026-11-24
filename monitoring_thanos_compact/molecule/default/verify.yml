@@ -15,7 +15,7 @@
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/thanos-compact.container'
+        src: "{{ monitoring_thanos_compact__test_quadlet_path }}"
       register: 'monitoring_thanos_compact__test_quadlet'
 
     # podman may quote values, the quotes are removed before the lines are compared
@@ -30,13 +30,14 @@
           - ('User=65534' in monitoring_thanos_compact__test_quadlet_lines)
           - ('Group=65534' in monitoring_thanos_compact__test_quadlet_lines)
           - monitoring_thanos_compact__expect.quadlet | reject('in', monitoring_thanos_compact__test_quadlet_lines) | list | length == 0
-          # The time zone is set with TZ, /etc/localtime is not mounted
-          - monitoring_thanos_compact__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone') | list | length == 0
+          # The time zone is set by podman, /etc/localtime is not mounted and TZ is not set
+          - monitoring_thanos_compact__test_quadlet_lines | select('search', '/etc/localtime|/etc/timezone|TZ=') | list | length == 0
+          - ('Timezone=' + monitoring_thanos_compact__test_case.role_vars.thanos_compact_timezone) in monitoring_thanos_compact__test_quadlet_lines
           - monitoring_thanos_compact__test_exec is search('^Exec=compact --wait ')
           - monitoring_thanos_compact__test_exec is search('--data-dir=/var/thanos/compact')
-          - (monitoring_thanos_compact__test_exec is search('--objstore.config-file=/etc/thanos/bucket.yml')) == monitoring_thanos_compact__expect.objstore
-          - ('Secret=thanos-compact-objstore,type=mount,target=/etc/thanos/bucket.yml' in monitoring_thanos_compact__test_quadlet_lines)
-            == monitoring_thanos_compact__expect.objstore
+          - monitoring_thanos_compact__test_exec is search('--objstore.config-file=/etc/thanos/bucket.yml')
+          - monitoring_thanos_compact__test_quadlet_lines | select('match', 'Secret=') | list == monitoring_thanos_compact__expect.secrets
+          - monitoring_thanos_compact__test_quadlet_lines | select('search', monitoring_thanos_compact__test_s3_secret_key) | list | length == 0
         fail_msg: "{{ monitoring_thanos_compact__test_quadlet_lines | to_json }}"
       vars:
         monitoring_thanos_compact__test_quadlet_lines: "{{ (monitoring_thanos_compact__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
@@ -49,28 +50,48 @@
       changed_when: false
       failed_when: false
 
-    - name: 'Read the environment of the container'
+    - name: 'Read the time zone and the environment of the container'
       ansible.builtin.command:
-        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config.Env {{ "}}" }}', 'thanos-compact' ]
-      register: 'monitoring_thanos_compact__test_env'
+        argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} .Config.Timezone {{ "}}" }} {{ "{{" }} json .Config.Env {{ "}}" }}', 'thanos-compact' ]
+      register: 'monitoring_thanos_compact__test_inspect'
       changed_when: false
 
-    - name: 'Read the secret of the object storage'
+    # systemd counts only the restarts after a crash
+    - name: 'Read the automatic restarts of the service'
       ansible.builtin.command:
-        argv: [ 'podman', 'secret', 'exists', 'thanos-compact-objstore' ]
-      register: 'monitoring_thanos_compact__test_secret'
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'thanos-compact' ]
+      register: 'monitoring_thanos_compact__test_restarts'
       changed_when: false
-      failed_when: false
 
-    - name: 'Assert the service, the environment and the secret'
+    - name: 'Read bucket.yml'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_thanos_compact__test_home }}/bucket.yml"
+      register: 'monitoring_thanos_compact__test_bucket'
+
+    - name: 'Read the state of bucket.yml'
+      ansible.builtin.stat:
+        path: "{{ monitoring_thanos_compact__test_home }}/bucket.yml"
+      register: 'monitoring_thanos_compact__test_bucket_stat'
+
+    - name: 'Assert the service, the time zone, the environment and bucket.yml'
       ansible.builtin.assert:
         that:
           - monitoring_thanos_compact__test_service.stdout == 'active'
-          - ('TZ=' + monitoring_thanos_compact__test_case.role_vars.thanos_compact_timezone) in (monitoring_thanos_compact__test_env.stdout | from_json)
-          - (monitoring_thanos_compact__test_secret.rc == 0) == monitoring_thanos_compact__expect.objstore
+          - monitoring_thanos_compact__test_restarts.stdout | int == 0
+          - (monitoring_thanos_compact__test_inspect.stdout.split(' ', 1) | first) == monitoring_thanos_compact__test_case.role_vars.thanos_compact_timezone
+          - monitoring_thanos_compact__test_env | select('match', 'TZ=') | list | length == 0
+          # The secrets are passed in the environment of the container, not in bucket.yml,
+          # compact reaching the bucket of the S3 server shows the replaced reference
+          - monitoring_thanos_compact__expect.bucket | default([]) | reject('in', monitoring_thanos_compact__test_bucket_lines) | list | length == 0
+          - monitoring_thanos_compact__test_bucket_lines | select('search', monitoring_thanos_compact__test_s3_secret_key) | list | length == 0
+          - monitoring_thanos_compact__test_bucket_stat.stat.mode == '0644'
+          - monitoring_thanos_compact__test_bucket_stat.stat.uid == 0
         fail_msg: >-
-          service {{ monitoring_thanos_compact__test_service.stdout }}, environment {{ monitoring_thanos_compact__test_env.stdout }},
-          secret exists {{ monitoring_thanos_compact__test_secret.rc == 0 }}
+          service {{ monitoring_thanos_compact__test_service.stdout }}, automatic restarts {{ monitoring_thanos_compact__test_restarts.stdout }},
+          time zone {{ monitoring_thanos_compact__test_inspect.stdout.split(' ', 1) | first }}, bucket.yml {{ monitoring_thanos_compact__test_bucket_lines }}
+      vars:
+        monitoring_thanos_compact__test_env: "{{ monitoring_thanos_compact__test_inspect.stdout.split(' ', 1) | last | from_json }}"
+        monitoring_thanos_compact__test_bucket_lines: "{{ (monitoring_thanos_compact__test_bucket.content | b64decode).splitlines() }}"
 
     - name: 'Read the data directory'
       ansible.builtin.stat:

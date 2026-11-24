@@ -9,7 +9,15 @@
   vars:
     monitoring_thanos_compact__test_case: "{{ monitoring_thanos_compact__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     monitoring_thanos_compact__test_files:
-      - '/etc/containers/systemd/thanos-compact.container'
+      - "{{ monitoring_thanos_compact__test_quadlet_path }}"
+      - "{{ monitoring_thanos_compact__test_home }}/bucket.yml"
+    monitoring_thanos_compact__test_objstore: "{{ monitoring_thanos_compact__test_case.role_vars.thanos_compact_objstore }}"
+    monitoring_thanos_compact__test_secrets: "{{ monitoring_thanos_compact__test_case.role_vars.thanos_compact_secrets | default([]) }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
 
   tasks:
 
@@ -20,7 +28,7 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: 'Read the checksum of the quadlet unit before the invalid runs'
+    - name: 'Read the checksums of the quadlet unit and bucket.yml before the invalid runs'
       ansible.builtin.stat:
         path: "{{ item }}"
         checksum_algorithm: 'md5'
@@ -37,49 +45,91 @@
           # combine of the defaults fails before the role checks anything
           search: 'failed to combine variables, expected dicts'
 
-    - name: 'Run monitoring_thanos_compact with an object storage without type (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        thanos_compact_objstore:
-          config:
-            directory: '/bucket'
-        monitoring_thanos_compact__test_invalid:
-          message: 'an object storage without type'
-          search: '^thanos_compact_objstore needs type$'
-
-    - name: 'Run monitoring_thanos_compact without object storage (expect ERROR)'
-      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
-      vars:
-        thanos_compact_objstore: {}
-        monitoring_thanos_compact__test_invalid:
-          message: 'no object storage'
-          search: '^thanos_compact_objstore is required$'
-
     - name: 'Run monitoring_thanos_compact with an object storage not a dictionary (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
+        thanos_compact_secrets: []
         thanos_compact_objstore: 'FILESYSTEM'
         monitoring_thanos_compact__test_invalid:
           message: 'an object storage not a dictionary'
-          search: '^thanos_compact_objstore has to be a dictionary$'
+          search: '^`thanos_compact_objstore` has to be a dictionary\.$'
 
-    - name: 'Run monitoring_thanos_compact with a line break in the environment (expect ERROR)'
+    - name: 'Run monitoring_thanos_compact with an unknown type and an unknown key of the object storage (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
-        thanos_compact_environment:
-          TZ: "Europe/Berlin\nUTC"
+        thanos_compact_objstore: "{{ monitoring_thanos_compact__test_objstore | combine({ 'type': 'MEMORY', 'bucket': 'thanos' }) }}"
         monitoring_thanos_compact__test_invalid:
-          message: 'a line break in the environment'
-          search: '^Values of thanos_compact_environment must not contain line breaks: TZ$'
+          message: 'an unknown type and an unknown key of the object storage'
+          search: '^Unknown keys in `thanos_compact_objstore`: bucket, allowed are type, config, prefix\. `thanos_compact_objstore\.type` has to be one of FILESYSTEM, '
+
+    - name: 'Run monitoring_thanos_compact with a secret key in the object storage (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_secrets: []
+        thanos_compact_objstore: "{{ monitoring_thanos_compact__test_objstore | combine({ 'config': { 'secret_key': 'molecule' } }, recursive=true) }}"
+        monitoring_thanos_compact__test_invalid:
+          message: 'a secret key in the object storage'
+          search: '^These fields carry secrets, they are set with `thanos_compact_secrets`, not in `thanos_compact_objstore`: secret_key\.$'
+
+    - name: 'Run monitoring_thanos_compact with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_secrets: [ { 'name': 'thanos_compact_molecule', 'data': 'molecule' } ]
+        monitoring_thanos_compact__test_invalid:
+          message: 'a secret without target'
+          search: '^`thanos_compact_secrets` entries need name, data and target$'
+
+    - name: 'Run monitoring_thanos_compact with an unknown target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_secrets: [ { 'name': 'thanos_compact_molecule', 'data': 'molecule', 'target': 'config.bucket' } ]
+        monitoring_thanos_compact__test_invalid:
+          message: 'an unknown target'
+          search: '^Unknown secrets: config\.bucket, the targets are paths of options of `thanos_compact_objstore` ending in '
+
+    - name: 'Run monitoring_thanos_compact with a target set in the object storage (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_objstore: "{{ monitoring_thanos_compact__test_objstore | combine({ 'config': { 'password': '' } }, recursive=true) }}"
+        thanos_compact_secrets: [ { 'name': 'thanos_compact_molecule', 'data': 'molecule', 'target': 'config.password' } ]
+        monitoring_thanos_compact__test_invalid:
+          message: 'a target set in the object storage'
+          search: '^The targets of `thanos_compact_secrets` must not be set in `thanos_compact_objstore`: config\.password\.$'
+
+    - name: 'Run monitoring_thanos_compact with a quote in a secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_secrets: [ { 'name': 'thanos_compact_molecule', 'data': 'molecule"secret', 'target': 'config.secret_key' } ]
+        monitoring_thanos_compact__test_invalid:
+          message: 'a quote in a secret'
+          search: 'Secrets are strings that are not empty and without line breaks, " and .: thanos_compact_molecule\.$'
+
+    - name: 'Run monitoring_thanos_compact with thanos_compact_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_environment: [ 'TZ' ]
+        monitoring_thanos_compact__test_invalid:
+          message: 'thanos_compact_environment is not a dictionary'
+          search: '^`thanos_compact_environment` has to be a dictionary\.$'
+
+    - name: 'Run monitoring_thanos_compact with a line break in the environment of the container (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        thanos_compact_container:
+          environment:
+            TZ: "Europe/Berlin\nUTC"
+        monitoring_thanos_compact__test_invalid:
+          message: 'a line break in the environment of the container'
+          search: '^The environment variables must not contain line breaks: TZ\.$'
 
     - name: 'Run monitoring_thanos_compact with an unknown environment variable (expect ERROR)'
       ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
       vars:
         thanos_compact_environment:
-          MOLECULE_UNKNOWN: 'molecule'
+          AWS_SECRET_ACCESS_KEY: 'molecule'
         monitoring_thanos_compact__test_invalid:
           message: 'an unknown environment variable'
-          search: '^Unknown environment variables: MOLECULE_UNKNOWN, Thanos only reads TZ.$'
+          search: '^Unknown environment variables: AWS_SECRET_ACCESS_KEY, Thanos only reads TZ, the secrets are set with `thanos_compact_secrets`\.$'
 
     - name: 'Run monitoring_thanos_compact with the changed role variables'
       when: monitoring_thanos_compact__test_case.side_effect is defined
@@ -108,13 +158,48 @@
           register: 'monitoring_thanos_compact__test_started_after'
           changed_when: false
 
-        - name: 'Assert the changed secret and the restart of the service'
+        - name: 'Assert the changed bucket.yml and the restart of the service'
           ansible.builtin.assert:
             that:
               - monitoring_thanos_compact__objstore_result is changed
+              - monitoring_thanos_compact__secrets_result is not changed
               - monitoring_thanos_compact__quadlet_result is not changed
               - monitoring_thanos_compact__test_started_after.stdout | int > monitoring_thanos_compact__test_started_before.stdout | int
             fail_msg: >-
-              secret changed: {{ monitoring_thanos_compact__objstore_result is changed }},
+              bucket.yml changed: {{ monitoring_thanos_compact__objstore_result is changed }},
+              secrets changed: {{ monitoring_thanos_compact__secrets_result is changed }},
               quadlet changed: {{ monitoring_thanos_compact__quadlet_result is changed }},
               start before {{ monitoring_thanos_compact__test_started_before.stdout }}, after {{ monitoring_thanos_compact__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_thanos_compact__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'thanos-compact' ]
+          register: 'monitoring_thanos_compact__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_thanos_compact without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_thanos_compact'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'thanos-compact' ]
+          register: 'monitoring_thanos_compact__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_thanos_compact__objstore_result is not changed
+              - monitoring_thanos_compact__secrets_result is not changed
+              - monitoring_thanos_compact__quadlet_result is not changed
+              - monitoring_thanos_compact__test_unchanged_after.stdout == monitoring_thanos_compact__test_unchanged_before.stdout
+            fail_msg: >-
+              bucket.yml changed: {{ monitoring_thanos_compact__objstore_result is changed }},
+              secrets changed: {{ monitoring_thanos_compact__secrets_result is changed }},
+              quadlet changed: {{ monitoring_thanos_compact__quadlet_result is changed }},
+              start before {{ monitoring_thanos_compact__test_unchanged_before.stdout }}, after {{ monitoring_thanos_compact__test_unchanged_after.stdout }}
