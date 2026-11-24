@@ -30,13 +30,14 @@ Query reads no credentials, it has no object storage and no secrets.
 
 ### Allowed variables
 
-Thanos reads no environment variables, the role only allows `TZ` in `thanos_query_environment`, it is set to `thanos_query_timezone`.
-This prevents unexpected behavior by accident, e.g. by a variable meant for another image.
+Thanos reads no environment variables, the role only allows `TZ` in `thanos_query_environment`.
+`thanos_query_environment` has no default, without it the container has no environment, the time zone is set by podman with `thanos_query_timezone`.
+This prevents unexpected behavior by accident, e.g. by a variable meant for another image, the flags are set with `thanos_query_container.command`.
 The check uses the environment of the container after merging `thanos_query_container`.
 
 ### Container
 
-Ports, volumes, flags and dependencies (`requires`) are changed with `thanos_query_container`, it is merged over the default of the container.
+Ports, volumes, flags and dependencies (`requires`, `wants`, `after`, `part_of`, `binds_to`, `requires_mounts_for`) are changed with `thanos_query_container`, it is merged over the default of the container.
 The merge is not recursive, `publish`, `volumes` and `command` replace the values of the default completely.
 The default mounts nothing, the command has `--endpoint.sd-config` and `--query.replica-label`.
 Further flags (see the [flags of query](https://thanos.io/tip/components/query.md/#flags)) need the complete list,
@@ -56,15 +57,19 @@ thanos_query_container:
 
 ### Validation
 
-The role checks before any change:
+The role checks before any change, the messages name only the failing checks:
 
+- `Render the configuration` evaluates the variables once, missing `thanos_query_endpoints`, `thanos_query_container` that is no dictionary
+  or a failing template (e.g. an unknown filter) stop the role there
 - `thanos_query_endpoints` is a non-empty list of strings
 - the addresses contain only letters, digits, `.`, `_`, `-`, `+`, `:` and brackets and are unique
-- the values of `thanos_query_environment` contain no line breaks
-- only `TZ` is set in the environment of the container
+- `thanos_query_environment` is a dictionary without line breaks
+- only `TZ` is set in the environment of the container, the values contain no line breaks
 
-If `thanos_query_container` or `thanos_query_environment` is no dictionary, merging it with the default fails before anything changes,
-the same applies to a failing template in the variables, e.g. an unknown filter.
+### Check mode
+
+The role runs with `--check`, also on a host where it never ran, and reports the changes of the quadlet unit,
+query is neither started nor restarted.
 
 ### Restart and updates
 
@@ -94,9 +99,10 @@ The other components are the roles `monitoring_thanos_sidecar`, `monitoring_than
 
 Changed behavior:
 
-- `/etc/localtime` and `/etc/timezone` are no longer mounted, the time zone is set with `thanos_query_timezone` and `TZ`,
+- `/etc/localtime` and `/etc/timezone` are no longer mounted and `TZ` has no default, the time zone is set by podman with `thanos_query_timezone`,
   the quadlet unit changes once and query restarts, volumes in `thanos_query_container` should no longer contain them
-- `thanos_query_environment` sets the environment, it is checked against the allowed variables
+- `thanos_query_environment` has no default and is checked against the allowed variables
+- the quadlet unit has the dependencies `Wants`, `After`, `PartOf`, `BindsTo` and `RequiresMountsFor` of `thanos_query_container` besides `Requires`
 - the addresses of `thanos_query_endpoints` are checked, an address containing `'` broke the quoted argument of the quadlet unit before
 - the role waits until query is ready and shows the journal if the start fails
 - the container keeps its name `thanos-query`
@@ -115,11 +121,13 @@ The scenario `default` has two VMs:
 
 `prepare` creates the podman network, pulls the images and runs Prometheus with `monitoring_prometheus`
 and the sidecar with `monitoring_thanos_sidecar`.
+`check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `thanos_query_container` not a dictionary, the endpoints not a list and empty,
-an invalid and a duplicate address, a line break in the environment and an unknown environment variable
-and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
-then it adds an endpoint that does not run on `molecule-thanos-query`, the quadlet unit changes and query has to restart.
-`verify` checks the quadlet unit without volumes and secrets, the service, the environment,
+an invalid and a duplicate address, `thanos_query_environment` not a dictionary, a line break in the environment and in the environment of the container
+and an unknown environment variable and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
+then it adds an endpoint that does not run on `molecule-thanos-query`, the quadlet unit changes and query has to restart,
+and runs the role again on `molecule-thanos-query-default`, query must not restart.
+`verify` checks the quadlet unit without volumes and secrets, the time zone without `TZ`, the service without automatic restarts,
 the configuration of the endpoints in the command of the container, that query is ready, is connected to the sidecar
 and returns the samples of Prometheus.
 

@@ -30,8 +30,10 @@
           - ('User=65534' in monitoring_thanos_query__test_quadlet_lines)
           - ('Group=65534' in monitoring_thanos_query__test_quadlet_lines)
           - monitoring_thanos_query__expect.quadlet | reject('in', monitoring_thanos_query__test_quadlet_lines) | list | length == 0
-          # The time zone is set with TZ, nothing is mounted
+          # The time zone is set by podman, nothing is mounted and TZ is not set
           - monitoring_thanos_query__test_quadlet_lines | select('match', 'Volume=') | list | length == 0
+          - monitoring_thanos_query__test_quadlet_lines | select('search', 'TZ=') | list | length == 0
+          - ('Timezone=' + monitoring_thanos_query__test_case.role_vars.thanos_query_timezone) in monitoring_thanos_query__test_quadlet_lines
           - monitoring_thanos_query__test_quadlet_lines | select('match', 'Secret=') | list | length == 0
           - monitoring_thanos_query__test_exec is search('^Exec=query ')
           - monitoring_thanos_query__test_exec is search('--query.replica-label=replica')
@@ -49,6 +51,13 @@
       changed_when: false
       failed_when: false
 
+    # systemd counts only the restarts after a crash
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'thanos-query' ]
+      register: 'monitoring_thanos_query__test_restarts'
+      changed_when: false
+
     - name: 'Read the environment and the command of the container'
       ansible.builtin.command:
         argv: [ 'podman', 'inspect', '--format', '{{ "{{" }} json .Config {{ "}}" }}', 'thanos-query' ]
@@ -60,10 +69,11 @@
       ansible.builtin.assert:
         that:
           - monitoring_thanos_query__test_service.stdout == 'active'
-          - ('TZ=' + monitoring_thanos_query__test_case.role_vars.thanos_query_timezone) in monitoring_thanos_query__test_container.Env
+          - monitoring_thanos_query__test_restarts.stdout | int == 0
+          - monitoring_thanos_query__test_container.Env | select('match', 'TZ=') | list | length == 0
           - ('--endpoint.sd-config=' + monitoring_thanos_query__test_endpoints) in monitoring_thanos_query__test_container.Cmd
         fail_msg: >-
-          service {{ monitoring_thanos_query__test_service.stdout }}, environment {{ monitoring_thanos_query__test_container.Env }},
+          service {{ monitoring_thanos_query__test_service.stdout }}, automatic restarts {{ monitoring_thanos_query__test_restarts.stdout }}, environment {{ monitoring_thanos_query__test_container.Env }},
           command {{ monitoring_thanos_query__test_container.Cmd }}, expected endpoints {{ monitoring_thanos_query__test_endpoints }}
       vars:
         monitoring_thanos_query__test_container: "{{ monitoring_thanos_query__test_config.stdout | from_json }}"

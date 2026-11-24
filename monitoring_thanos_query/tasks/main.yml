@@ -4,65 +4,93 @@
   tags: [ 'monitoring', 'monitoring_thanos_query' ]
   block:
 
-    # A failing template in the variables (e.g. an unknown filter or thanos_query_container not a dictionary)
-    # stops the role here before anything changes
+    # A failing template in the variables (e.g. an unknown filter, thanos_query_container not a dictionary
+    # or missing thanos_query_endpoints) stops the role here before anything changes
     - name: 'Render the configuration'
       ansible.builtin.assert:
         that:
           # The container contains omit (e.g. ipv6), it is counted, not serialized
           - monitoring_thanos_query__container | length > 0
+          # thanos_query_environment has no default, a failing template stops the role here as well
+          - monitoring_thanos_query__environment | default({}) | length >= 0
         quiet: true
 
-    - name: 'Validate the role variables'
+    - name: 'Validate the endpoints'
       ansible.builtin.assert:
         that:
-          - monitoring_thanos_query__invalid | length == 0
+          - monitoring_thanos_query__errors | length == 0
         # Only the failing checks are reported
-        fail_msg: "{{ monitoring_thanos_query__invalid | join('. ') }}"
+        fail_msg: "{{ monitoring_thanos_query__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_thanos_query__invalid: >-
+        monitoring_thanos_query__errors: >-
           {%- set errors = [] -%}
           {%- set endpoints = monitoring_thanos_query__endpoints -%}
           {%- if endpoints is string or endpoints is mapping or endpoints is not sequence
                  or endpoints | length == 0 or endpoints | reject('string') | list | length > 0 -%}
-          {%-   set _ = errors.append('thanos_query_endpoints has to be a list of addresses') -%}
+          {%-   set _ = errors.append('`thanos_query_endpoints` has to be a list of addresses.') -%}
           {%- else -%}
           {%-   set invalid = endpoints | reject('match', monitoring_thanos_query__endpoint_pattern) | list -%}
           {%-   if invalid | length > 0 -%}
-          {%-     set _ = errors.append('thanos_query_endpoints has invalid addresses: ' ~ invalid | join(', ')) -%}
+          {%-     set _ = errors.append('`thanos_query_endpoints` has invalid addresses: ' ~ (invalid | join(', ')) ~ '.') -%}
           {%-   endif -%}
-          {%-   set duplicates = [] -%}
-          {%-   for address in endpoints | unique -%}
-          {%-     if endpoints | select('eq', address) | list | length > 1 -%}
-          {%-       set _ = duplicates.append(address) -%}
-          {%-     endif -%}
-          {%-   endfor -%}
+          {%-   set duplicates = endpoints | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
           {%-   if duplicates | length > 0 -%}
-          {%-     set _ = errors.append('thanos_query_endpoints has duplicate addresses: ' ~ duplicates | join(', ')) -%}
+          {%-     set _ = errors.append('`thanos_query_endpoints` has duplicate addresses: ' ~ (duplicates | join(', ')) ~ '.') -%}
           {%-   endif -%}
           {%- endif -%}
-          {%- set lines = monitoring_thanos_query__environment | dict2items | selectattr('value', 'string')
-                          | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
-          {%- if lines | length > 0 -%}
-          {%-   set _ = errors.append('Values of thanos_query_environment must not contain line breaks: ' ~ lines | join(', ')) -%}
+          {{ errors }}
+
+    - name: 'Validate the environment'
+      when: monitoring_thanos_query__environment is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_thanos_query__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_query__errors | join(' ') }}"
+        quiet: true
+      vars:
+        monitoring_thanos_query__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_thanos_query__environment is not mapping -%}
+          {%-   set _ = errors.append('`thanos_query_environment` has to be a dictionary.') -%}
+          {%- else -%}
+          {%-   set lines = monitoring_thanos_query__environment | dict2items | selectattr('value', 'string')
+                            | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list -%}
+          {%-   if lines | length > 0 -%}
+          {%-     set _ = errors.append('The values of `thanos_query_environment` must not contain line breaks: ' ~ (lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
           {{ errors }}
 
     # Checks the environment of the container after merging thanos_query_container,
     # unknown variables would change the behavior unexpectedly
+    # An environment that is no mapping is not checked here, the validation of thanos_query_environment reports it
     - name: 'Validate the allowed environment variables'
       ansible.builtin.assert:
         that:
-          - monitoring_thanos_query__environment_unknown | length == 0
-        fail_msg: >-
-          Unknown environment variables: {{ monitoring_thanos_query__environment_unknown | join(', ') }},
-          Thanos only reads {{ monitoring_thanos_query__environment_allowed | join(', ') }}.
+          - monitoring_thanos_query__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ monitoring_thanos_query__errors | join(' ') }}"
         quiet: true
       vars:
-        monitoring_thanos_query__environment_unknown: >-
-          {{ (monitoring_thanos_query__container.environment | default({})).keys()
-             | reject('in', monitoring_thanos_query__environment_allowed) | list }}
+        monitoring_thanos_query__container_environment: >-
+          {{ monitoring_thanos_query__container.environment if monitoring_thanos_query__container.environment | default(none) is mapping else {} }}
+        monitoring_thanos_query__unknown: >-
+          {{ monitoring_thanos_query__container_environment.keys() | map('string') | reject('in', monitoring_thanos_query__environment_allowed) | list }}
+        monitoring_thanos_query__line_breaks: >-
+          {{ monitoring_thanos_query__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        monitoring_thanos_query__errors: >-
+          {%- set errors = [] -%}
+          {%- if monitoring_thanos_query__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (monitoring_thanos_query__unknown | join(', ')) ~ ', Thanos only reads '
+                                    ~ (monitoring_thanos_query__environment_allowed | join(', ')) ~ ', the flags are set with `thanos_query_container.command`.') -%}
+          {%- endif -%}
+          {%- if monitoring_thanos_query__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (monitoring_thanos_query__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
@@ -97,6 +125,21 @@
           {% if monitoring_thanos_query__container.requires is defined %}
           Requires={{ monitoring_thanos_query__container.requires | join(' ') }}
           {% endif %}
+          {% if monitoring_thanos_query__container.wants is defined %}
+          Wants={{ monitoring_thanos_query__container.wants | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_query__container.after is defined %}
+          After={{ monitoring_thanos_query__container.after | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_query__container.part_of is defined %}
+          PartOf={{ monitoring_thanos_query__container.part_of | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_query__container.binds_to is defined %}
+          BindsTo={{ monitoring_thanos_query__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if monitoring_thanos_query__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ monitoring_thanos_query__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
       register: 'monitoring_thanos_query__quadlet_result'
@@ -129,13 +172,17 @@
 
         - name: 'Fail with the log of the failed start'
           ansible.builtin.fail:
-            msg: "{{ [ monitoring_thanos_query__container.name ~ ' did not start' ] + monitoring_thanos_query__start_journal.stdout_lines }}"
+            msg: >-
+              {{ [ monitoring_thanos_query__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + monitoring_thanos_query__start_journal.stdout_lines }}
 
     # Query is ready after it started its HTTP server, the endpoints are connected in the background
     - name: 'Wait for Thanos Query'
       ansible.builtin.uri:
         url: "http://{{ monitoring_thanos_query__container.ip }}:{{ monitoring_thanos_query__http_port }}/-/ready"
         status_code: [ 200, 503 ]
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
       register: 'monitoring_thanos_query__ready'
       until: monitoring_thanos_query__ready.status | default(-1) == 200
       retries: 60
