@@ -1,0 +1,262 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_linkding__test_case: "{{ app_linkding__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_linkding__test_vars: "{{ app_linkding__test_case.role_vars }}"
+    app_linkding__test_environment: "{{ app_linkding__test_vars.linkding_environment | default({}) }}"
+    app_linkding__test_secrets: "{{ app_linkding__test_vars.linkding_secrets | default([]) }}"
+    app_linkding__test_admin: "{{ app_linkding__test_vars.linkding_admin }}"
+    app_linkding__test_checked_files:
+      - "{{ app_linkding__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ app_linkding__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ app_linkding__test_checked_files }}"
+      register: 'app_linkding__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run app_linkding with linkding_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_container: [ 'environment' ]
+        app_linkding__test_invalid:
+          message: 'linkding_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_linkding with linkding_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: [ 'LD_ENABLE_OIDC' ]
+        app_linkding__test_invalid:
+          message: 'linkding_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run app_linkding with linkding_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_secrets:
+          name: 'linkding_db_password'
+        app_linkding__test_invalid:
+          message: 'linkding_secrets not a list'
+          search: '^`linkding_secrets` has to be a list$'
+
+    - name: 'Run app_linkding with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_secrets: "{{ app_linkding__test_secrets + [ { 'name': 'linkding_other', 'data': 'x' } ] }}"
+        app_linkding__test_invalid:
+          message: 'a secret without target'
+          search: '^`linkding_secrets` entries need name, data and target$'
+
+    - name: 'Run app_linkding with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_ENABLE_MOLECULE': true }) }}"
+        app_linkding__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: LD_ENABLE_MOLECULE\.'
+
+    - name: 'Run app_linkding with the password of the superuser in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_SUPERUSER_PASSWORD': 'molecule-plain' }) }}"
+        app_linkding__test_invalid:
+          message: 'the password of the superuser in the environment'
+          search: '^LD_SUPERUSER_PASSWORD must not be set in linkding_environment, it is linkding_admin\.$'
+
+    - name: 'Run app_linkding with the port of the server in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_SERVER_PORT': 8080 }) }}"
+        app_linkding__test_invalid:
+          message: 'the port of the server in the environment'
+          search: '^LD_SERVER_PORT must not be set in linkding_environment, it is the port of the container\.$'
+
+    - name: 'Run app_linkding with a secret in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_DB_PASSWORD': 'molecule-plain' }) }}"
+        app_linkding__test_invalid:
+          message: 'a secret in the environment'
+          search: '^Secrets must not be set in linkding_environment: LD_DB_PASSWORD\.$'
+
+    - name: 'Run app_linkding with a string as boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_ENABLE_SNAPSHOTS': 'True' }) }}"
+        app_linkding__test_invalid:
+          message: 'a string as boolean'
+          search: '^These variables are booleans, use true or false without quotes: LD_ENABLE_SNAPSHOTS\.$'
+
+    - name: 'Run app_linkding with a string as integer (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_SESSION_COOKIE_AGE': '3600' }) }}"
+        app_linkding__test_invalid:
+          message: 'a string as integer'
+          search: '^These variables are integers without quotes: LD_SESSION_COOKIE_AGE\.$'
+
+    - name: 'Run app_linkding with an unknown engine of the database (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_DB_ENGINE': 'mysql' }) }}"
+        app_linkding__test_invalid:
+          message: 'an unknown engine of the database'
+          search: '^LD_DB_ENGINE has to be one of sqlite, postgres\.$'
+
+    - name: 'Run app_linkding with OIDC without the secret of the client (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_environment: "{{ app_linkding__test_environment | combine({ 'LD_ENABLE_OIDC': true }) }}"
+        linkding_secrets: []
+        app_linkding__test_invalid:
+          message: 'OIDC without the secret of the client'
+          search: '^OIDC \(LD_ENABLE_OIDC\) needs .* the secret OIDC_RP_CLIENT_SECRET, missing: .*OIDC_RP_CLIENT_SECRET\.$'
+
+    - name: 'Run app_linkding with linkding_admin not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_admin: 'molecule'
+        app_linkding__test_invalid:
+          message: 'linkding_admin not a dictionary'
+          search: '^linkding_admin has to be a dictionary with name, password and optionally email\.$'
+
+    - name: 'Run app_linkding with an administrator without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_admin:
+          name: 'molecule'
+        app_linkding__test_invalid:
+          message: 'an administrator without password'
+          search: '^linkding_admin needs a password\.$'
+
+    - name: 'Run app_linkding with an invalid name of the administrator (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_admin: "{{ app_linkding__test_admin | combine({ 'name': 'molecule admin' }) }}"
+        app_linkding__test_invalid:
+          message: 'an invalid name of the administrator'
+          search: '^linkding_admin needs a name of 1 to 150 letters, digits and @, \., \+, - and _\.$'
+
+    - name: 'Run app_linkding with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        linkding_secrets: "{{ app_linkding__test_secrets + [ { 'name': 'linkding_superuser_password', 'data': 'x', 'target': 'LD_SUPERUSER_PASSWORD' } ] }}"
+        app_linkding__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: LD_SUPERUSER_PASSWORD\.'
+
+    - name: 'Change the environment and the password of the administrator'
+      when: app_linkding__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change of the environment'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'linkding' ]
+          register: 'app_linkding__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            linkding_environment: "{{ app_linkding__test_environment | combine(app_linkding__test_case.side_effect.linkding_environment) }}"
+
+        - name: 'Run app_linkding with the changed environment'
+          ansible.builtin.include_role:
+            name: 'app_linkding'
+
+        - name: 'Read the start time of the service after the change of the environment'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'linkding' ]
+          register: 'app_linkding__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - app_linkding__quadlet_result is changed
+              - app_linkding__admin_result is not changed
+              - app_linkding__test_started_after.stdout | int > app_linkding__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ app_linkding__quadlet_result is changed }}, administrator changed: {{ app_linkding__admin_result is changed }},
+              start before {{ app_linkding__test_started_before.stdout }}, after {{ app_linkding__test_started_after.stdout }}
+
+        - name: 'Set the changed password of the administrator'
+          ansible.builtin.set_fact:
+            linkding_admin: "{{ app_linkding__test_admin | combine({ 'password': app_linkding__test_case.side_effect.password }) }}"
+
+        - name: 'Run app_linkding with the changed password of the administrator'
+          ansible.builtin.include_role:
+            name: 'app_linkding'
+
+        - name: 'Read the start time of the service after the change of the password'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'linkding' ]
+          register: 'app_linkding__test_started_password'
+          changed_when: false
+
+        # The password is changed in the database, linkding keeps running
+        - name: 'Assert the changed password without a restart'
+          ansible.builtin.assert:
+            that:
+              - app_linkding__admin_result is changed
+              - not app_linkding__admin_result.created
+              - app_linkding__quadlet_result is not changed
+              - app_linkding__test_started_password.stdout == app_linkding__test_started_after.stdout
+            fail_msg: >-
+              administrator changed: {{ app_linkding__admin_result is changed }}, quadlet changed: {{ app_linkding__quadlet_result is changed }},
+              start before {{ app_linkding__test_started_after.stdout }}, after {{ app_linkding__test_started_password.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: app_linkding__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'linkding' ]
+          register: 'app_linkding__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run app_linkding without a change'
+          ansible.builtin.include_role:
+            name: 'app_linkding'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'linkding' ]
+          register: 'app_linkding__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - app_linkding__quadlet_result is not changed
+              - app_linkding__secrets_result is not changed
+              - app_linkding__admin_result is not changed
+              - app_linkding__test_unchanged_after.stdout == app_linkding__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ app_linkding__quadlet_result is changed }}, secrets changed: {{ app_linkding__secrets_result is changed }},
+              administrator changed: {{ app_linkding__admin_result is changed }},
+              start before {{ app_linkding__test_unchanged_before.stdout }}, after {{ app_linkding__test_unchanged_after.stdout }}

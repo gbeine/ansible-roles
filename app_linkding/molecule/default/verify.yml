@@ -1,0 +1,168 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    app_linkding__test_case: "{{ app_linkding__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    app_linkding__expect: "{{ app_linkding__test_case.expect }}"
+    app_linkding__test_url: "http://{{ app_linkding__expect.ip }}:9090"
+    app_linkding__test_admin: "{{ app_linkding__test_case.role_vars.linkding_admin.name }}"
+    # The uri module keeps no cookies of a redirect it does not follow, the cookies are read from the header Set-Cookie
+    app_linkding__test_csrf_cookie: >-
+      {{ app_linkding__test_login_page.set_cookie | default('') | regex_search('ld_csrftoken=[^;]+') | default('', true) }}
+    app_linkding__test_csrf_token: >-
+      {{ app_linkding__test_login_page.content | default('') | regex_findall('name="csrfmiddlewaretoken" value="([^"]+)"') | first | default('') }}
+    app_linkding__test_session: >-
+      {{ app_linkding__test_login.results[1].set_cookie | default('') | regex_search('ld_sessionid=[^;]+') | default('', true) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ app_linkding__test_quadlet_path }}"
+      register: 'app_linkding__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + app_linkding__test_image) in app_linkding__test_quadlet_lines
+          - ('IP=' + app_linkding__expect.ip) in app_linkding__test_quadlet_lines
+          - app_linkding__expect.ip6 is none or ('IP6=' + app_linkding__expect.ip6) in app_linkding__test_quadlet_lines
+          - app_linkding__expect.ip6 is not none or app_linkding__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - app_linkding__expect.quadlet | reject('in', app_linkding__test_quadlet_lines) | list | length == 0
+          - app_linkding__test_quadlet_lines | select('search', 'LD_SUPERUSER') | list | length == 0
+          - app_linkding__expect.password not in (app_linkding__test_quadlet.content | b64decode)
+          - app_linkding__expect.secrets | select('in', app_linkding__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ app_linkding__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        app_linkding__test_quadlet_lines: "{{ (app_linkding__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the state of the linkding service'
+      ansible.builtin.command: 'systemctl is-active linkding'
+      register: 'app_linkding__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the linkding container'
+      ansible.builtin.command: 'podman inspect linkding'
+      register: 'app_linkding__test_inspect'
+      changed_when: false
+
+    # podman shows the secrets passed with type=env masked
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__test_service.stdout == 'active'
+          - app_linkding__test_net.IPAddress == app_linkding__expect.ip
+          - app_linkding__expect.ip6 is none or app_linkding__test_net.GlobalIPv6Address == app_linkding__expect.ip6
+          - ('TZ=' + app_linkding__test_case.role_vars.linkding_timezone) in app_linkding__test_env
+          - app_linkding__test_container.Config.Timezone == app_linkding__test_case.role_vars.linkding_timezone
+          - app_linkding__expect.secrets | select('in', app_linkding__test_env | join(' ')) | list | length == 0
+          - app_linkding__expect.password not in (app_linkding__test_env | join(' '))
+        fail_msg: >-
+          service {{ app_linkding__test_service.stdout }}, time zone {{ app_linkding__test_container.Config.Timezone | default('') }},
+          IPv4 {{ app_linkding__test_net.IPAddress }}, IPv6 {{ app_linkding__test_net.GlobalIPv6Address }},
+          environment {{ app_linkding__test_env | reject('search', 'SECRET') | join(', ') }}
+      vars:
+        app_linkding__test_container: "{{ (app_linkding__test_inspect.stdout | from_json)[0] }}"
+        app_linkding__test_net: "{{ app_linkding__test_container.NetworkSettings.Networks[app_linkding__test_case.role_vars.linkding_network] }}"
+        app_linkding__test_env: "{{ app_linkding__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'linkding' ]
+      register: 'app_linkding__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'linkding', '-n', '80', '--no-pager' ]
+      register: 'app_linkding__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ app_linkding__test_restarts.stdout ] + app_linkding__test_journal.stdout_lines | default([]) }}"
+
+    # bootstrap.sh gives the data directory to www-data (UID 33)
+    - name: 'Read the files of the data directory'
+      ansible.builtin.stat:
+        path: "{{ app_linkding__test_case.role_vars.linkding_home }}/data/{{ item }}"
+      loop: [ 'db.sqlite3', 'secretkey.txt' ]
+      register: 'app_linkding__test_data'
+
+    - name: 'Assert the database and the secret key owned by www-data'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__test_data.results | map(attribute='stat') | selectattr('exists') | list | length == 2
+          - app_linkding__test_data.results | map(attribute='stat') | map(attribute='uid', default=-1) | reject('eq', 33) | list | length == 0
+        fail_msg: >-
+          {{ app_linkding__test_data.results | map(attribute='stat') | map('dict2items')
+             | map('selectattr', 'key', 'in', [ 'path', 'exists', 'uid', 'pw_name' ]) | map('items2dict') | list | to_json }}
+
+    - name: 'Read the health check'
+      ansible.builtin.uri:
+        url: "{{ app_linkding__test_url }}/health"
+        return_content: true
+      register: 'app_linkding__test_health'
+
+    - name: 'Read the login page'
+      ansible.builtin.uri:
+        url: "{{ app_linkding__test_url }}/login/"
+        return_content: true
+      register: 'app_linkding__test_login_page'
+
+    # Django checks the token of the form against the cookie, without HTTPS it checks no referer
+    # linkding answers a failed login with 401 (LinkdingLoginView.form_invalid)
+    - name: 'Log in with a wrong and the right password'
+      ansible.builtin.uri:
+        url: "{{ app_linkding__test_url }}/login/"
+        method: 'POST'
+        headers:
+          Cookie: "{{ app_linkding__test_csrf_cookie }}"
+        body_format: 'form-urlencoded'
+        body:
+          csrfmiddlewaretoken: "{{ app_linkding__test_csrf_token }}"
+          username: "{{ app_linkding__test_admin }}"
+          password: "{{ app_linkding__expect.password if item else 'wrong-password' }}"
+        follow_redirects: 'none'
+        status_code: [ 302, 401, 403 ]
+      loop: [ false, true ]
+      loop_control:
+        label: "{{ 'right password' if item else 'wrong password' }}"
+      register: 'app_linkding__test_login'
+      no_log: true
+
+    - name: 'Read the bookmarks with the session of the login'
+      ansible.builtin.uri:
+        url: "{{ app_linkding__test_url }}/bookmarks"
+        headers:
+          Cookie: "{{ app_linkding__test_session }}"
+        follow_redirects: 'none'
+        status_code: [ 200, 302 ]
+      register: 'app_linkding__test_bookmarks'
+
+    - name: 'Assert the health check, the login and the bookmarks'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__test_health.status == 200
+          - (app_linkding__test_login_page.content is search('Login with OIDC')) == app_linkding__expect.oidc
+          - app_linkding__test_login.results | map(attribute='status') | list == [ 401, 302 ]
+          - app_linkding__test_login.results[0].set_cookie | default('') is not search('ld_sessionid=')
+          - app_linkding__test_session | length > 0
+          - app_linkding__test_bookmarks.status == 200
+        fail_msg: >-
+          health {{ app_linkding__test_health.status }}, csrf cookie {{ app_linkding__test_csrf_cookie | length > 0 }},
+          csrf token {{ app_linkding__test_csrf_token | length > 0 }},
+          OIDC on the login page {{ app_linkding__test_login_page.content is search('Login with OIDC') }},
+          login {{ app_linkding__test_login.results | map(attribute='status') | list }},
+          session {{ app_linkding__test_session | length > 0 }}, bookmarks {{ app_linkding__test_bookmarks.status }}

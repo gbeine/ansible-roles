@@ -1,0 +1,366 @@
+---
+
+- name: 'Deploy linkding'
+  tags: [ 'app', 'app_linkding' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter, linkding_container or linkding_environment not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - app_linkding__container | length > 0
+          - app_linkding__environment | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_linkding__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        app_linkding__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = app_linkding__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`linkding_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`linkding_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `linkding_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # OIDC needs the endpoints, the client and its secret, the variables of the role and the secrets are not set in the environment
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_linkding__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_linkding__set: "{{ app_linkding__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}"
+        app_linkding__targets: "{{ app_linkding__secrets | map(attribute='target') | map('string') | list }}"
+        app_linkding__oidc_enabled: "{{ app_linkding__environment.LD_ENABLE_OIDC | default(false) is sameas true }}"
+        app_linkding__oidc_missing: >-
+          {{ (app_linkding__oidc_required | reject('in', app_linkding__set) | list)
+             + ([ app_linkding__oidc_secret ] if app_linkding__oidc_secret not in app_linkding__targets else []) }}
+        app_linkding__secrets_in_environment: >-
+          {{ (app_linkding__targets + app_linkding__secrets_allowed) | select('in', app_linkding__environment.keys() | list) | unique | list }}
+        app_linkding__role_in_environment: >-
+          {{ app_linkding__environment_role.keys() | select('in', app_linkding__environment.keys() | list) | list }}
+        app_linkding__secrets_empty: >-
+          {{ app_linkding__secrets | selectattr('data', 'none') | list
+             + app_linkding__secrets | rejectattr('data', 'none') | map(attribute='data') | map('string') | select('eq', '') | list }}
+        app_linkding__secrets_lines: >-
+          {{ app_linkding__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list }}
+        app_linkding__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_linkding__oidc_enabled | bool and app_linkding__oidc_missing | length > 0 -%}
+          {%-   set _ = errors.append('OIDC (LD_ENABLE_OIDC) needs ' ~ (app_linkding__oidc_required | join(', ')) ~ ' in linkding_environment and the secret '
+                                    ~ app_linkding__oidc_secret ~ ', missing: ' ~ (app_linkding__oidc_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_linkding__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in linkding_environment: ' ~ (app_linkding__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- for variable in app_linkding__role_in_environment -%}
+          {%-   set _ = errors.append(variable ~ ' must not be set in linkding_environment, it is ' ~ app_linkding__environment_role[variable] ~ '.') -%}
+          {%- endfor -%}
+          {%- if app_linkding__secrets_empty | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be empty.') -%}
+          {%- endif -%}
+          {%- if app_linkding__secrets_lines | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not contain line breaks: ' ~ (app_linkding__secrets_lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # linkding compares the booleans with a fixed spelling, the role writes it, so the inventory uses YAML values
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_linkding__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_linkding__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], integers=[], numbers=[], json=[], lines=[]) -%}
+          {%- for key, value in app_linkding__environment.items() if value is not none -%}
+          {%-   if key in app_linkding__environment_booleans and value is not boolean -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif key in app_linkding__environment_integers and (value is not integer or value is boolean) -%}
+          {%-     set ns.integers = ns.integers + [ key ] -%}
+          {%-   elif key in app_linkding__environment_numbers and (value is not number or value is boolean) -%}
+          {%-     set ns.numbers = ns.numbers + [ key ] -%}
+          {%-   elif key in app_linkding__environment_json and value is not mapping -%}
+          {%-     set ns.json = ns.json + [ key ] -%}
+          {%-   elif key not in app_linkding__environment_json and (value is mapping or (value is sequence and value is not string)) -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, use true or false without quotes: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.integers | length > 0 -%}
+          {%-   set _ = errors.append('These variables are integers without quotes: ' ~ (ns.integers | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.numbers | length > 0 -%}
+          {%-   set _ = errors.append('These variables are numbers without quotes: ' ~ (ns.numbers | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.json | length > 0 -%}
+          {%-   set _ = errors.append('These variables are dictionaries, the role passes them as JSON: ' ~ (ns.json | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must be strings, numbers or booleans without line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_linkding__environment.LD_DB_ENGINE is defined and app_linkding__environment.LD_DB_ENGINE not in app_linkding__db_engines -%}
+          {%-   set _ = errors.append('LD_DB_ENGINE has to be one of ' ~ (app_linkding__db_engines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The names of Django, the password is checked by the module with check_password
+    - name: 'Validate the administrator'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_linkding__errors | join(' ') }}"
+        quiet: true
+      vars:
+        app_linkding__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = app_linkding__admin -%}
+          {%- if admin is not mapping -%}
+          {%-   set _ = errors.append('linkding_admin has to be a dictionary with name, password and optionally email.') -%}
+          {%- else -%}
+          {%-   set unknown = admin.keys() | map('string') | reject('in', app_linkding__admin_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in linkding_admin: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (app_linkding__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if (admin.name | default('') | string) is not match(app_linkding__admin_name_pattern) -%}
+          {%-     set _ = errors.append('linkding_admin needs a name of 1 to 150 letters, digits and @, ., +, - and _.') -%}
+          {%-   endif -%}
+          {%-   if admin.email is defined and admin.email is not none and (admin.email | string) is not match(app_linkding__admin_email_pattern) -%}
+          {%-     set _ = errors.append('The email of linkding_admin is not valid.') -%}
+          {%-   endif -%}
+          {%-   if admin.password is not defined or admin.password is none or (admin.password | string) == '' -%}
+          {%-     set _ = errors.append('linkding_admin needs a password.') -%}
+          {%-   elif (admin.password | string) is search('[\r\n]') -%}
+          {%-     set _ = errors.append('The password of linkding_admin must not contain line breaks.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging linkding_container,
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ app_linkding__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without linkding_secrets
+        app_linkding__container_secrets: >-
+          {{ app_linkding__container.secrets
+             if (app_linkding__container.secrets is defined and app_linkding__container.secrets is sequence and app_linkding__container.secrets is not string)
+             else [] }}
+        app_linkding__container_environment: >-
+          {{ app_linkding__container.environment if app_linkding__container.environment | default(none) is mapping else {} }}
+        app_linkding__environment_unknown: >-
+          {{ app_linkding__container_environment.keys() | map('string') | reject('in', app_linkding__environment_allowed) | list }}
+        app_linkding__environment_line_breaks: >-
+          {{ app_linkding__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        app_linkding__secrets_unknown: >-
+          {{ app_linkding__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', app_linkding__secrets_allowed) | list }}
+        app_linkding__errors: >-
+          {%- set errors = [] -%}
+          {%- if app_linkding__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (app_linkding__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if app_linkding__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (app_linkding__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of linkding (app_linkding__environment_allowed) and the secrets ' ~ (app_linkding__secrets_allowed | join(', '))
+                                    ~ ', the administrator is set with linkding_admin.') -%}
+          {%- endif -%}
+          {%- if app_linkding__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (app_linkding__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create the directory of linkding'
+      ansible.builtin.file:
+        path: "{{ app_linkding__podman_home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+
+    # bootstrap.sh of the image runs as root and gives the data directory to www-data (UID and GID 33), uwsgi runs as www-data
+    - name: 'Create the data directory of linkding'
+      ansible.builtin.file:
+        path: "{{ app_linkding__podman_data_dir }}"
+        owner: '33'
+        group: '33'
+        mode: '0755'
+        state: 'directory'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ app_linkding__secrets }}"
+      register: 'app_linkding__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ app_linkding__container.name }}"
+        hostname: "{{ app_linkding__container.hostname }}"
+        image: "{{ app_linkding__container.image }}"
+        ip: "{{ app_linkding__container.ip }}"
+        ip6: "{{ app_linkding__container.ipv6 | default(omit) }}"
+        network: "{{ app_linkding__container.network }}"
+        timezone: "{{ app_linkding__container.timezone }}"
+        user: "{{ app_linkding__container.user | default(omit) }}"
+        command: "{{ app_linkding__container.command | default(omit) }}"
+        env: "{{ app_linkding__container.environment | default(omit) }}"
+        etc_hosts: "{{ app_linkding__container.etc_hosts | default(omit) }}"
+        expose: "{{ app_linkding__container.expose | default(omit) }}"
+        label: "{{ app_linkding__container.labels | default(omit) }}"
+        publish: "{{ app_linkding__container.publish | default(omit) }}"
+        secrets: "{{ app_linkding__container.secrets | default(omit) }}"
+        volume: "{{ app_linkding__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if app_linkding__container.requires is defined %}
+          Requires={{ app_linkding__container.requires | join(' ') }}
+          {% endif %}
+          {% if app_linkding__container.wants is defined %}
+          Wants={{ app_linkding__container.wants | join(' ') }}
+          {% endif %}
+          {% if app_linkding__container.after is defined %}
+          After={{ app_linkding__container.after | join(' ') }}
+          {% endif %}
+          {% if app_linkding__container.part_of is defined %}
+          PartOf={{ app_linkding__container.part_of | join(' ') }}
+          {% endif %}
+          {% if app_linkding__container.binds_to is defined %}
+          BindsTo={{ app_linkding__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if app_linkding__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ app_linkding__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'app_linkding__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start linkding'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ app_linkding__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if app_linkding__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            app_linkding__running: >-
+              {{ (ansible_facts.services[app_linkding__container.name + '.service'].state | default('')) == 'running' }}
+            app_linkding__restart: >-
+              {{ app_linkding__running | bool
+                 and (app_linkding__secrets_result is changed or app_linkding__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ app_linkding__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'app_linkding__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ app_linkding__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + app_linkding__start_journal.stdout_lines }}
+
+    # bootstrap.sh migrates the database before uwsgi starts, the health check answers then
+    - name: 'Wait for linkding'
+      ansible.builtin.uri:
+        url: "http://{{ app_linkding__ip }}:{{ app_linkding__port }}/{{ app_linkding__environment.LD_CONTEXT_PATH | default('', true) }}health"
+        return_content: true
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'app_linkding__ready'
+      until: app_linkding__ready.status | default(0) == 200
+      retries: 90
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of linkding'
+      when:
+        - not ansible_check_mode
+        - app_linkding__ready.status | default(0) != 200
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ app_linkding__container.name }}", '-n', '80', '--no-pager' ]
+      register: 'app_linkding__journal'
+      changed_when: false
+
+    - name: 'Assert that linkding answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - app_linkding__journal is skipped
+        fail_msg: "{{ app_linkding__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # The module creates the administrator in the database of linkding and keeps its password,
+    # the password is an option with no_log, it is passed to the Django shell on stdin
+    - name: 'Create the administrator'
+      when: 'not ansible_check_mode'
+      app_linkding_admin:
+        container: "{{ app_linkding__container.name }}"
+        name: "{{ app_linkding__admin.name | string }}"
+        email: "{{ app_linkding__admin.email | default('', true) | string }}"
+        password: "{{ app_linkding__admin.password | string }}"
+      register: 'app_linkding__admin_result'
+
+    - name: 'Enable autoupdate on container'
+      when: 'app_linkding__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ app_linkding__container.name }}"
+        container_image: "{{ app_linkding__container.image }}"
+        container_schedule: "{{ app_linkding__autoupdate_schedule }}"

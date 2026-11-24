@@ -1,0 +1,87 @@
+---
+# Network created by container_podman in prepare.yml
+app_linkding__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+app_linkding__test_image: 'docker.io/sissbruecker/linkding:1.47.0'
+app_linkding__test_quadlet_path: '/etc/containers/systemd/linkding.container'
+
+app_linkding__test_cases:
+
+  # Only the mandatory variables and the administrator
+  - name: 'molecule-linkding-default'
+    role_vars:
+      linkding_home: '/opt/linkding'
+      linkding_ip: '10.89.0.103'
+      linkding_network: 'podman-molecule'
+      linkding_hostname: 'linkding-default'
+      linkding_timezone: 'Europe/Berlin'
+      linkding_version: '1.47.0'
+      linkding_admin:
+        name: 'molecule'
+        password: 'molecule-admin-default'
+    expect:
+      ip: '10.89.0.103'
+      ip6: ~
+      password: 'molecule-admin-default'
+      secrets: []
+      quadlet:
+        - 'Environment=TZ=Europe/Berlin'
+        - 'Volume=/opt/linkding/data:/etc/linkding/data:Z'
+      oidc: false
+
+  # IPv6, labels, typed variables, OIDC with dummy endpoints and the secret of the client, the administrator with email
+  - name: 'molecule-linkding'
+    role_vars:
+      linkding_home: '/opt/linkding'
+      linkding_ip: '10.89.0.104'
+      linkding_ipv6: 'fd00:89::104'
+      linkding_network: 'podman-molecule'
+      linkding_hostname: 'linkding-molecule'
+      linkding_timezone: 'Europe/Berlin'
+      linkding_version: '1.47.0'
+      linkding_labels:
+        traefik.enable: 'false'
+      linkding_environment:
+        LD_SESSION_COOKIE_AGE: 3600
+        LD_DISABLE_REQUEST_LOGS: true
+        LD_ENABLE_OIDC: true
+        OIDC_OP_AUTHORIZATION_ENDPOINT: 'https://idp.example.org/realms/molecule/protocol/openid-connect/auth'
+        OIDC_OP_TOKEN_ENDPOINT: 'https://idp.example.org/realms/molecule/protocol/openid-connect/token'
+        OIDC_OP_USER_ENDPOINT: 'https://idp.example.org/realms/molecule/protocol/openid-connect/userinfo'
+        OIDC_OP_JWKS_ENDPOINT: 'https://idp.example.org/realms/molecule/protocol/openid-connect/certs'
+        OIDC_RP_CLIENT_ID: 'linkding'
+      linkding_secrets:
+        - name: 'linkding_oidc_client_secret'
+          data: 'molecule-oidc-client-secret'
+          target: 'OIDC_RP_CLIENT_SECRET'
+      linkding_admin:
+        name: 'molecule'
+        email: 'molecule@example.org'
+        password: 'molecule-admin-options'
+    # Valid changes of the side effect: the environment changes the quadlet unit and linkding has to restart,
+    # the password of the administrator changes without a restart
+    side_effect:
+      linkding_environment:
+        LD_SESSION_COOKIE_AGE: 7200
+      password: 'molecule-admin-changed'
+    expect:
+      ip: '10.89.0.104'
+      ip6: 'fd00:89::104'
+      password: 'molecule-admin-changed'
+      secrets: [ 'molecule-oidc-client-secret' ]
+      quadlet:
+        - 'Environment=TZ=Europe/Berlin'
+        - 'Environment=LD_SESSION_COOKIE_AGE=7200'
+        - 'Environment=LD_DISABLE_REQUEST_LOGS=true'
+        - 'Environment=LD_ENABLE_OIDC=True'
+        - 'Environment=OIDC_RP_CLIENT_ID=linkding'
+        - 'Secret=linkding_oidc_client_secret,type=env,target=OIDC_RP_CLIENT_SECRET'
+        - 'Label=traefik.enable=false'
+      oidc: true
