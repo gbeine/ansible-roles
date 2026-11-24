@@ -1,8 +1,51 @@
 ---
 
+# Members of the group can write to the socket of podman, the GID is allocated by adduser unless podman_socket_gid is set
+- name: Create the group of podman.socket
+  ansible.builtin.group:
+    name: "{{ container_podman__socket_group }}"
+    gid: "{{ container_podman__socket_gid | default(omit) }}"
+    system: true
+    state: 'present'
+  when: container_podman__socket_group_assign | bool
+
+- name: Create the directory of the drop-ins of podman.socket
+  ansible.builtin.file:
+    path: "{{ container_podman__socket_dropin_dir }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0755'
+    state: 'directory'
+  when: container_podman__socket_group_assign | bool
+
+- name: Generate the drop-in of podman.socket
+  ansible.builtin.template:
+    src: 'podman-socket-override.conf.j2'
+    dest: "{{ container_podman__socket_dropin_dir }}/override.conf"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  register: container_podman__socket_dropin
+  when: container_podman__socket_group_assign | bool
+
+# The group stays, it may still have members
+- name: Remove the drop-in of podman.socket
+  ansible.builtin.file:
+    path: "{{ container_podman__socket_dropin_dir }}/override.conf"
+    state: 'absent'
+  register: container_podman__socket_dropin_removed
+  when: not container_podman__socket_group_assign | bool
+
+# A changed drop-in takes effect when the socket is created again
 - name: Configure podman.socket
   ansible.builtin.systemd_service:
     name: 'podman.socket'
+    daemon_reload: "{{ container_podman__socket_changed | bool }}"
     enabled: "{{ container_podman__socket_enabled | bool }}"
-    state: "{{ 'started' if container_podman__socket_enabled | bool else 'stopped' }}"
+    state: >-
+      {{ ('restarted' if container_podman__socket_changed | bool else 'started')
+         if container_podman__socket_enabled | bool else 'stopped' }}
+  vars:
+    container_podman__socket_changed: >-
+      {{ container_podman__socket_dropin is changed or container_podman__socket_dropin_removed is changed }}
   when: not ansible_check_mode

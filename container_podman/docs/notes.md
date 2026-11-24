@@ -109,6 +109,29 @@ The API is served **without authentication and with root privileges**, so bind i
 Additional units required by the service can be set as list in `podman_tcp_requires`.
 Setting `podman_tcp_address` to an empty value removes the service again.
 
+### Group of podman.socket
+
+`podman.socket` (`/run/podman/podman.sock`) belongs to root with mode `0660` by default, only root can use it.
+With `podman_socket_group_assign: true` the role creates the system group `podman_socket_group` (default `podman`)
+and writes the drop-in `/etc/systemd/system/podman.socket.d/override.conf` with `SocketGroup=` and `SocketMode=` (`podman_socket_mode`, default `'0660'`),
+so the members of the group can write to the socket, e.g. a service user of a reverse proxy or of Renovate.
+Members of the group can start containers with root privileges through the socket, it is equivalent to root access.
+The role adds no members, they are added by the roles of the users.
+
+```yaml
+podman_socket_group_assign: true
+podman_socket_group: 'podman'
+podman_socket_mode: '0660'
+```
+
+adduser allocates the GID from the dynamic range of system groups, `podman_socket_gid` sets a fixed GID between 100 and 999.
+If the group already exists with another GID, the role fails before it changes anything, it never changes the GID of an existing group.
+A changed drop-in reloads systemd and restarts the enabled socket.
+With `podman_socket_group_assign: false` (the default) the role creates no group and removes the drop-in, an existing group stays, it may still have members.
+
+The role checks before any change that `podman_socket_group_assign` is `true` or `false` and, if it is `true`, that the group is a name of lower case letters, digits, `_` and `-`,
+the mode is an octal mode as string and `podman_socket_gid`, if set, is a number from 100 to 999.
+
 ### Image cleanup
 
 A systemd timer removes unused images every night, see `podman_cleanup_on_calendar` (default `*-*-* 02:00:00`).
@@ -137,9 +160,11 @@ The scenario runs the role twice:
 | Step | What happens |
 |---|---|
 | `prepare` | runs the role in check mode before podman is installed, it has to skip the configuration without errors and changes, installs podman and creates the networks `molstale` (unused) and `molbusy` (used by a container) and the orphaned quadlet `molghost.network` |
-| `converge`, `idempotence` | creates `molnet-a` (IPv4 and IPv6) and `molnet-b` (without DNS), enables socket, TCP service and image cleanup, prunes `molstale` and `molghost`, keeps `molbusy` |
-| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, runs the role with the undeclared default network `molnet-b`, which has to fail before any change, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled |
+| `converge`, `idempotence` | creates `molnet-a` (IPv4 and IPv6) and `molnet-b` (without DNS), enables socket, TCP service and image cleanup, creates the group `podman` of the socket with the drop-in, prunes `molstale` and `molghost`, keeps `molbusy` |
+| `side_effect` | checks the state after converge, starts the quadlet container `molapp` in `molnet-a`, runs the role with the undeclared default network `molnet-b` and with an invalid mode and GID of the group of the socket, which have to fail before any change, then runs the role again: `molnet-a` is readdressed, `molnet-b` is no longer declared, socket, TCP service and image cleanup are disabled, the drop-in of the socket is removed and the group stays |
 | `verify` | checks the state after the second run, `molapp` has to run with an address from the new subnet |
+
+After converge the state check reads the drop-in, the group with a GID below 1000 and the group and mode of `/run/podman/podman.sock`, after the second run the drop-in has to be removed.
 
 The containers use `docker.io/library/alpine:3`, so the VM needs access to Docker Hub. The image can be changed in `molecule/default/test_cases.yml`.
 

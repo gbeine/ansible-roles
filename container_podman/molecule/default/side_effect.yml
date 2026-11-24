@@ -105,6 +105,45 @@
                 in (container_podman__test_networks_failed.stdout | from_json | map(attribute='name') | list)
             fail_msg: "Failure: {{ ansible_failed_result.msg | default('') }}"
 
+    - name: 'Run container_podman with an invalid group of the socket'
+      block:
+
+        - name: 'Read the drop-in of the socket before the failed run'
+          ansible.builtin.stat:
+            path: '/etc/systemd/system/podman.socket.d/override.conf'
+            checksum_algorithm: 'md5'
+          register: 'container_podman__test_dropin_before'
+
+        - name: 'Run container_podman with the invalid group of the socket, it has to fail'
+          ansible.builtin.include_role:
+            name: 'container_podman'
+          vars:
+            podman_socket_group_assign: "{{ container_podman__test_case.invalid_socket.podman_socket_group_assign }}"
+            podman_socket_mode: "{{ container_podman__test_case.invalid_socket.podman_socket_mode }}"
+            podman_socket_gid: "{{ container_podman__test_case.invalid_socket.podman_socket_gid }}"
+            # The run before set the undeclared default network as fact, include parameters take precedence
+            podman_default_network: "{{ container_podman__test_case.side_effect.role_vars.podman_default_network }}"
+
+        - name: 'Fail because the invalid group of the socket was accepted'
+          ansible.builtin.fail:
+            msg: 'The invalid group of the socket was accepted'
+
+      rescue:
+
+        - name: 'Read the drop-in of the socket after the failed run'
+          ansible.builtin.stat:
+            path: '/etc/systemd/system/podman.socket.d/override.conf'
+            checksum_algorithm: 'md5'
+          register: 'container_podman__test_dropin_after'
+
+        - name: 'Assert the run failed at the validation of the group of the socket before any change'
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg | default('') is search('`podman_socket_mode` is an octal mode as string')
+              - ansible_failed_result.msg | default('') is search('`podman_socket_gid` is a GID of the dynamic system range from 100 to 999')
+              - container_podman__test_dropin_after.stat.checksum | default('') == container_podman__test_dropin_before.stat.checksum | default('')
+            fail_msg: "Failure: {{ ansible_failed_result.msg | default('') }}"
+
     - name: 'Set the role variables of the second run'
       ansible.builtin.set_fact:
         "{{ item.key }}": "{{ item.value }}"

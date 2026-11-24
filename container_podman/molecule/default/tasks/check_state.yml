@@ -147,3 +147,46 @@
     that:
       - container_podman__test_ping.content | trim == 'OK'
   when: container_podman__test_expect.tcp
+
+- name: 'Read the drop-in of podman.socket'
+  ansible.builtin.slurp:
+    src: '/etc/systemd/system/podman.socket.d/override.conf'
+  register: 'container_podman__test_dropin'
+  failed_when: false
+
+- name: 'Read the group of podman.socket'
+  ansible.builtin.command:
+    argv: [ 'getent', 'group', "{{ container_podman__test_expect.socket_group }}" ]
+  register: 'container_podman__test_socket_group'
+  changed_when: false
+
+# The group of the socket exists after the first run, the second run removes the drop-in and keeps the group
+- name: 'Assert the drop-in and the group of podman.socket'
+  ansible.builtin.assert:
+    that:
+      - (container_podman__test_dropin.content is defined) == container_podman__test_expect.socket_dropin
+      - not container_podman__test_expect.socket_dropin
+        or ('SocketGroup=' + container_podman__test_expect.socket_group) in container_podman__test_dropin_lines
+      - not container_podman__test_expect.socket_dropin
+        or ('SocketMode=' + container_podman__test_expect.socket_mode) in container_podman__test_dropin_lines
+      - (container_podman__test_socket_group.stdout.split(':')[2] | int) < 1000
+    fail_msg: "drop-in {{ container_podman__test_dropin_lines }}, group {{ container_podman__test_socket_group.stdout }}"
+  vars:
+    container_podman__test_dropin_lines: "{{ (container_podman__test_dropin.content | b64decode).splitlines() if container_podman__test_dropin.content is defined else [] }}"
+
+- name: 'Read the socket of podman'
+  ansible.builtin.stat:
+    path: '/run/podman/podman.sock'
+  register: 'container_podman__test_socket_file'
+  when: container_podman__test_expect.socket_dropin
+
+- name: 'Assert the group and the mode of the socket of podman'
+  ansible.builtin.assert:
+    that:
+      - container_podman__test_socket_file.stat.exists
+      - container_podman__test_socket_file.stat.gr_name == container_podman__test_expect.socket_group
+      - container_podman__test_socket_file.stat.mode == container_podman__test_expect.socket_mode
+    fail_msg: >-
+      socket exists {{ container_podman__test_socket_file.stat.exists }},
+      group {{ container_podman__test_socket_file.stat.gr_name | default('') }}, mode {{ container_podman__test_socket_file.stat.mode | default('') }}
+  when: container_podman__test_expect.socket_dropin

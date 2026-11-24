@@ -23,6 +23,58 @@
           declared: {{ container_podman__networks | selectattr('name', 'defined') | map(attribute='name') | join(', ') }}
         quiet: true
 
+    - name: Validate the group of the socket
+      ansible.builtin.assert:
+        that:
+          - container_podman__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ container_podman__errors | join(' ') }}"
+        quiet: true
+      vars:
+        container_podman__errors: >-
+          {%- set errors = [] -%}
+          {%- if container_podman__socket_group_assign is not boolean -%}
+          {%-   set _ = errors.append('`podman_socket_group_assign` has to be true or false.') -%}
+          {%- elif container_podman__socket_group_assign -%}
+          {%-   if container_podman__socket_group is not string or container_podman__socket_group is not match(container_podman__group_pattern) -%}
+          {%-     set _ = errors.append('`podman_socket_group` is a name of a group of lower case letters, digits, _ and -, starting with a letter or _.') -%}
+          {%-   endif -%}
+          {%-   if container_podman__socket_mode is not string or container_podman__socket_mode is not match('^0?[0-7]{3}$') -%}
+          {%-     set _ = errors.append('`podman_socket_mode` is an octal mode as string, e.g. "0660".') -%}
+          {%-   endif -%}
+          {%-   if container_podman__socket_gid is defined
+                   and (container_podman__socket_gid is not integer or container_podman__socket_gid is boolean
+                        or container_podman__socket_gid < 100 or container_podman__socket_gid > 999) -%}
+          {%-     set _ = errors.append('`podman_socket_gid` is a GID of the dynamic system range from 100 to 999, without it adduser allocates one.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # groupmod would change the GID of an existing group and leave files with the former GID
+    - name: Read the group of the socket
+      ansible.builtin.command:
+        argv: [ 'getent', 'group', "{{ container_podman__socket_group }}" ]
+      register: container_podman__socket_group_entry
+      changed_when: false
+      failed_when: container_podman__socket_group_entry.rc not in [ 0, 2 ]
+      check_mode: false
+      when:
+        - container_podman__socket_group_assign | bool
+        - container_podman__socket_gid is defined
+
+    - name: Validate the GID of the existing group of the socket
+      ansible.builtin.assert:
+        that:
+          - container_podman__socket_group_entry.rc != 0
+            or (container_podman__socket_group_entry.stdout.split(':')[2] | int) == container_podman__socket_gid
+        fail_msg: >-
+          The group `{{ container_podman__socket_group }}` exists with the GID {{ container_podman__socket_group_entry.stdout.split(':')[2] | default('') }},
+          `podman_socket_gid` is {{ container_podman__socket_gid }}, the role does not change the GID of an existing group.
+        quiet: true
+      when:
+        - container_podman__socket_group_assign | bool
+        - container_podman__socket_gid is defined
+
     - name: Include OS-specific variables
       ansible.builtin.include_vars: "{{ item }}"
       with_first_found:
