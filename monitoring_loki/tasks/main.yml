@@ -102,7 +102,7 @@
           {%- endfor -%}
           {%- set duplicates = monitoring_loki__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list -%}
           {%- set data = monitoring_loki__secrets | rejectattr('data', 'string') | map(attribute='name') | list
-                         + monitoring_loki__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list -%}
+                         + monitoring_loki__secrets | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n"\\\\]') | map(attribute='name') | list -%}
           {%- if monitoring_loki__unknown | length > 0 -%}
           {%-   set _ = errors.append('Unknown secrets: ' ~ (monitoring_loki__unknown | join(', ')) ~ ', the targets are paths of options of `loki_config`'
                                     ~ ' ending in ' ~ (monitoring_loki__config_secret_keys | join(', ')) ~ ', e.g. common.storage.s3.secret_access_key.') -%}
@@ -117,7 +117,7 @@
           {%-   set _ = errors.append('The paths of these secrets lead through values of `loki_config` that are no dictionaries: ' ~ (ns.paths | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if data | length > 0 -%}
-          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks: ' ~ (data | unique | join(', ')) ~ '.') -%}
+          {%-   set _ = errors.append('Secrets are strings that are not empty and without line breaks, " and \\: ' ~ (data | unique | join(', ')) ~ '.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -203,6 +203,7 @@
 
     # Loki checks the configuration in a throwaway container before it is replaced, unknown fields are errors,
     # the secrets are replaced by placeholders there
+    # Loki replaces the references before it parses the YAML, they are double-quoted, so the replaced secrets stay strings
     - name: 'Generate the configuration'
       ansible.builtin.copy:
         content: |
@@ -210,7 +211,7 @@
           # Ansible managed
           #
 
-          {{ monitoring_loki__config_rendered | to_nice_yaml(indent=2, sort_keys=false) }}
+          {{ monitoring_loki__config_content }}
         dest: "{{ monitoring_loki__podman_config_file }}"
         owner: 'root'
         group: 'root'
@@ -221,6 +222,13 @@
           --volume %s:/etc/loki/config.yaml:ro {{ monitoring_loki__container.image }}
           -config.file=/etc/loki/config.yaml -config.expand-env=true -verify-config
       register: 'monitoring_loki__config_result'
+      vars:
+        monitoring_loki__config_content: >-
+          {%- set ns = namespace(text=monitoring_loki__config_rendered | to_nice_yaml(indent=2, sort_keys=false)) -%}
+          {%- for secret in monitoring_loki__secrets_valid -%}
+          {%-   set ns.text = ns.text | replace(': ${' ~ secret.variable ~ '}', ': "${' ~ secret.variable ~ '}"') -%}
+          {%- endfor -%}
+          {{ ns.text }}
 
     - name: 'Create secrets'
       no_log: true

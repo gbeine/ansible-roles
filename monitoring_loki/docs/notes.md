@@ -36,7 +36,10 @@ with `type=env` and referenced in `config.yaml`, Loki expands the references wit
 e.g. `common.storage.s3.secret_access_key`. The last key of the path is one of the fields carrying secrets:
 `secret_access_key`, `password`, `basic_auth_password`, `client_secret`, `account_key`, `sas_token`, `session_token`, `secret_key`
 and `service_account`. The role passes the secret as `LOKI_SECRET_<PATH>` (the path in upper case, dots replaced by `_`)
-and writes the reference `${LOKI_SECRET_<PATH>}` to the option in `config.yaml`, `config.yaml` and the quadlet unit never contain the secret.
+and writes the reference `"${LOKI_SECRET_<PATH>}"` to the option in `config.yaml`, `config.yaml` and the quadlet unit never contain the secret.
+Loki replaces the references before it parses the YAML, the reference is double-quoted, so the replaced secret stays a string,
+e.g. a secret containing `: ` or ` #` neither breaks the YAML nor is cut off.
+The data of a secret must not contain line breaks, `"` and `\`, they would end the string or start an escape sequence.
 
 ```yaml
 loki_config:
@@ -89,7 +92,7 @@ loki_container:
 The role checks before any change:
 
 - `loki_secrets` is a list of entries with `name`, `data` and `target` and unique names, every target is a path ending in a field carrying secrets
-  and set once, it is not set in `loki_config` and leads through dictionaries only, the data are strings without line breaks,
+  and set once, it is not set in `loki_config` and leads through dictionaries only, the data are strings without line breaks, `"` and `\`,
   podman checks the names of the secrets
 - `loki_config` contains only known keys on the first level and no field carrying secrets
 - `loki_environment`, if set, is a dictionary without line breaks
@@ -118,6 +121,8 @@ without `loki_autoupdate_schedule` the schedule of `container_update` is used.
 - The targets of `loki_secrets` are the paths of the options now, e.g. `ruler.alertmanager_client.basic_auth_password` instead of `LOKI_ALERTMANAGER_PASSWORD`.
   Remove the references `${LOKI_…}` from `loki_config`, the role writes the references itself.
 - `TZ` is not set by default anymore, the time zone is set by podman with `loki_timezone`.
+- The references of the secrets are double-quoted in `config.yaml`, before a secret containing e.g. `: ` or ` #` broke the YAML or was cut off.
+  `config.yaml` changes once and Loki restarts, secrets containing `"` or `\` are rejected.
 - Unknown keys on the first level of `loki_config` are rejected, `requires_mounts_for`, `wants`, `after`, `part_of` and `binds_to` of `loki_container` are new.
 
 ### Tests
@@ -133,14 +138,14 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 `prepare` creates the podman network, installs `curl` and pulls the image.
 `check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `loki_container` and `loki_config` not a dictionary, an unknown key, a password in `loki_config`,
-a secret without `target`, an unknown secret, a target set twice, a secret in a list, `loki_environment` not a dictionary,
+a secret without `target`, an unknown secret, a target set twice, a secret in a list, a quote in a secret, `loki_environment` not a dictionary,
 an unknown variable, a line break in a value and an unknown field rejected by `loki -verify-config`
 and checks that it fails with the expected message and the quadlet unit and `config.yaml` are unchanged (tasks marked `expect ERROR`),
 then it pushes a log line and changes the limits on `molecule-loki`, `config.yaml` changes and Loki has to restart,
 `molecule-loki-default` runs again without a change and Loki must not restart.
 `verify` checks the quadlet unit with the flags and the secret without its value, the service without automatic restarts, the addresses,
 the time zone and no `TZ` in the environment,
-the files and that `config.yaml` references the secret, `/ready`, the version and the running configuration of `/config`
+the files and that `config.yaml` references the secret double-quoted, `/ready`, the version and the running configuration of `/config`
 (no reports of the usage, the limits, the expanded password of the Alertmanager),
 pushes a log line and finds it with `query_range`, on `molecule-loki` also the line pushed before the restart.
 
