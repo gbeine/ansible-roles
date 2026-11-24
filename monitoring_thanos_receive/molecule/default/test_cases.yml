@@ -11,7 +11,15 @@ monitoring_thanos_receive__test_network:
 
 monitoring_thanos_receive__test_image: 'docker.io/thanosio/thanos:v0.42.5'
 monitoring_thanos_receive__test_prometheus_image: 'docker.io/prom/prometheus:latest'
-monitoring_thanos_receive__test_bucket_dir: '/opt/thanos-bucket'
+monitoring_thanos_receive__test_quadlet_path: '/etc/containers/systemd/thanos-receive.container'
+monitoring_thanos_receive__test_home: '/opt/thanos-receive'
+
+# S3 server of prepare.yml, rclone serves the directories of /data as buckets
+monitoring_thanos_receive__test_s3_image: 'docker.io/rclone/rclone:1.76.0'
+monitoring_thanos_receive__test_s3_ip: '10.89.0.53'
+monitoring_thanos_receive__test_s3_dir: '/opt/thanos-s3'
+monitoring_thanos_receive__test_s3_access_key: 'molecule'
+monitoring_thanos_receive__test_s3_secret_key: 'molecule-s3-secret-key'
 
 monitoring_thanos_receive__test_cases:
 
@@ -43,10 +51,11 @@ monitoring_thanos_receive__test_cases:
       ip: '10.89.0.55'
       ip6: ~
       objstore: false
+      secrets: []
       quadlet:
         - 'Volume=/opt/thanos-receive/data:/var/thanos/receive'
 
-  # IPv6, labels and the upload to a bucket in the file system, the volume of the bucket is added with thanos_receive_container
+  # IPv6, labels and the object storage S3 on the S3 server of prepare.yml with the secret key as secret
   - name: 'molecule-thanos-receive'
     prometheus_vars:
       prometheus_home: '/opt/prometheus-molecule'
@@ -73,25 +82,41 @@ monitoring_thanos_receive__test_cases:
       thanos_receive_labels:
         traefik.enable: 'false'
       thanos_receive_objstore:
-        type: 'FILESYSTEM'
+        type: 'S3'
         config:
-          directory: '/bucket'
-      thanos_receive_container:
-        volumes:
-          - '/opt/thanos-receive/data:/var/thanos/receive'
-          - '/opt/thanos-bucket:/bucket'
-    # side_effect changes the object storage, the secret changes and receive has to restart
+          bucket: 'thanos'
+          endpoint: '10.89.0.53:9000'
+          region: 'us-east-1'
+          insecure: true
+          bucket_lookup_type: 'path'
+          access_key: 'molecule'
+      thanos_receive_secrets:
+        - name: 'thanos_receive_s3_secret_key'
+          data: 'molecule-s3-secret-key'
+          target: 'config.secret_key'
+    # side_effect changes the prefix of the object storage, bucket.yml changes and receive has to restart
     side_effect:
       role_vars:
         thanos_receive_objstore:
-          type: 'FILESYSTEM'
+          type: 'S3'
+          prefix: 'molecule'
           config:
-            directory: '/bucket/changed'
+            bucket: 'thanos'
+            endpoint: '10.89.0.53:9000'
+            region: 'us-east-1'
+            insecure: true
+            bucket_lookup_type: 'path'
+            access_key: 'molecule'
     expect:
       ip: '10.89.0.57'
       ip6: 'fd00:89::57'
       objstore: true
+      secrets:
+        - 'Secret=thanos_receive_s3_secret_key,type=env,target=THANOS_SECRET_CONFIG_SECRET_KEY'
+      bucket:
+        - 'prefix: molecule'
+        - '  secret_key: "$(THANOS_SECRET_CONFIG_SECRET_KEY)"'
       quadlet:
         - 'Volume=/opt/thanos-receive/data:/var/thanos/receive'
-        - 'Volume=/opt/thanos-bucket:/bucket'
+        - 'Volume=/opt/thanos-receive/bucket.yml:/etc/thanos/bucket.yml:ro'
         - 'Label=traefik.enable=false'
