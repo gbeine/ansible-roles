@@ -24,7 +24,7 @@
       ansible.builtin.assert:
         that:
           - ('Environment=PKI_SERVICE=' ~ pki_update__test_service ~ '.service') in pki_update__test_lines[0]
-          - ('Environment=PKI_CERTIFICATE=' ~ pki_update__test_expect.certificate) in pki_update__test_lines[0]
+          - ('Environment="PKI_CERTIFICATES=' ~ (pki_update__test_expect.certificates | join(' ')) ~ '"') in pki_update__test_lines[0]
           - pki_update__test_lines[1] | select('match', '^OnCalendar=') | list == [ 'OnCalendar=', 'OnCalendar=' ~ pki_update__test_expect.schedule ]
         fail_msg: "{{ pki_update__test_lines | to_json }}"
       vars:
@@ -43,13 +43,14 @@
           - "'ActiveState=active' in pki_update__test_timer.stdout_lines"
         fail_msg: "{{ pki_update__test_timer.stdout_lines }}"
 
-    # The certificate is older than the start of the service, the condition skips the restart
-    - name: 'Run the check with a certificate older than the service'
+    # The certificates are older than the start of the service, the condition skips the restart
+    - name: 'Run the check with certificates older than the service'
       block:
 
-        - name: 'Make the certificate older than the start of the service'
+        - name: 'Make the certificates older than the start of the service'
           ansible.builtin.command:
-            argv: [ 'touch', '-d', '-1 day', "{{ pki_update__test_expect.certificate }}" ]
+            argv: [ 'touch', '-d', '-1 day', "{{ item }}" ]
+          loop: "{{ pki_update__test_expect.certificates }}"
           changed_when: true
 
         - name: 'Read the main PID of the service before the check'
@@ -69,13 +70,14 @@
           register: 'pki_update__test_pid_old_after'
           changed_when: false
 
-    # The renewed certificate is newer than the start of the service, the service restarts
+    # The renewed certificate is newer than the start of the service, the service restarts,
+    # with several certificates the last one is renewed
     - name: 'Run the check with a renewed certificate'
       block:
 
-        - name: 'Renew the certificate'
+        - name: 'Renew the last certificate'
           ansible.builtin.command:
-            argv: [ 'touch', "{{ pki_update__test_expect.certificate }}" ]
+            argv: [ 'touch', "{{ pki_update__test_expect.certificates | last }}" ]
           changed_when: true
 
         - name: 'Run the check'
@@ -111,13 +113,14 @@
           old certificate: PID {{ pki_update__test_pid_old_before.stdout }} -> {{ pki_update__test_pid_old_after.stdout }},
           renewed certificate: PID {{ pki_update__test_pid_new_after.stdout }}, second check: PID {{ pki_update__test_pid_new_again.stdout }}
 
-    # A missing certificate fails the unit, so it is visible in systemctl --failed
+    # A missing certificate fails the unit, so it is visible in systemctl --failed,
+    # with several certificates the first one is missing
     - name: 'Run the check with a missing certificate'
       block:
 
-        - name: 'Move the certificate away'
+        - name: 'Move the first certificate away'
           ansible.builtin.command:
-            argv: [ 'mv', "{{ pki_update__test_expect.certificate }}", "{{ pki_update__test_expect.certificate }}.molecule" ]
+            argv: [ 'mv', "{{ pki_update__test_expect.certificates | first }}", "{{ pki_update__test_expect.certificates | first }}.molecule" ]
           changed_when: true
 
         - name: 'Run the check, it has to fail (expect ERROR)'
@@ -136,9 +139,9 @@
 
       always:
 
-        - name: 'Move the certificate back'
+        - name: 'Move the first certificate back'
           ansible.builtin.command:
-            argv: [ 'mv', "{{ pki_update__test_expect.certificate }}.molecule", "{{ pki_update__test_expect.certificate }}" ]
+            argv: [ 'mv', "{{ pki_update__test_expect.certificates | first }}.molecule", "{{ pki_update__test_expect.certificates | first }}" ]
           changed_when: true
 
         - name: 'Reset the failed check'

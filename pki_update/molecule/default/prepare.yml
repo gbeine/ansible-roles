@@ -8,7 +8,11 @@
 
   vars:
     pki_update__test_case: "{{ pki_update__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
-    pki_update__test_certificate: "{{ pki_update__test_case.expect.archive | default(pki_update__test_case.expect.certificate) }}"
+    pki_update__test_expect: "{{ pki_update__test_case.expect }}"
+    # The files of the certificates, the first certificate is a link to the archive if there is one
+    pki_update__test_files: >-
+      {{ ([ pki_update__test_expect.archive ] + pki_update__test_expect.certificates[1:])
+         if pki_update__test_expect.archive is defined else pki_update__test_expect.certificates }}
 
   tasks:
 
@@ -31,21 +35,22 @@
 
     - name: 'Create the directories of the certificate'
       ansible.builtin.file:
-        path: "{{ item | dirname }}"
+        path: "{{ item }}"
         state: 'directory'
         mode: '0755'
-      loop: "{{ [ pki_update__test_case.expect.certificate, pki_update__test_certificate ] | unique }}"
+      loop: "{{ (pki_update__test_expect.certificates + pki_update__test_files) | map('dirname') | unique }}"
 
-    - name: 'Create the certificate'
+    - name: 'Create the certificates'
       ansible.builtin.copy:
-        dest: "{{ pki_update__test_certificate }}"
+        dest: "{{ item }}"
         content: "molecule\n"
         mode: '0644'
+      loop: "{{ pki_update__test_files }}"
 
     # The structure of certbot, live links to the archive
     - name: 'Create the link of certbot'
-      when: pki_update__test_case.expect.archive is defined
+      when: pki_update__test_expect.archive is defined
       ansible.builtin.file:
-        src: "../../archive/{{ pki_update__test_case.expect.archive | dirname | basename }}/{{ pki_update__test_case.expect.archive | basename }}"
-        dest: "{{ pki_update__test_case.expect.certificate }}"
+        src: "../../archive/{{ pki_update__test_expect.archive | dirname | basename }}/{{ pki_update__test_expect.archive | basename }}"
+        dest: "{{ pki_update__test_expect.certificates | first }}"
         state: 'link'

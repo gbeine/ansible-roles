@@ -7,11 +7,16 @@ Description=Restart %i after the renewal of its certificate
 
 [Service]
 Type=oneshot
-# Restart only a running service whose certificate is newer than its start, a missing certificate fails the unit.
+# Restart only a running service if one of its certificates is newer than its start, a missing certificate fails the unit.
+# Every certificate is checked, so a missing one fails the unit also if another one was renewed.
 # $$ passes $ to the shell, %% passes %.
 ExecCondition=/usr/bin/sh -c '\
   systemctl is-active --quiet "$$PKI_SERVICE" || exit 1; \
-  CERT=$$(stat -L -c %%Y "$$PKI_CERTIFICATE") || exit 255; \
   STARTED=$$(systemctl show --timestamp=unix --property=ActiveEnterTimestamp --value "$$PKI_SERVICE"); \
-  [ "$$CERT" -gt "$${STARTED#@}" ]'
+  RENEWED=1; \
+  for CERT in $$PKI_CERTIFICATES; do \
+    MODIFIED=$$(stat -L -c %%Y "$$CERT") || exit 255; \
+    [ "$$MODIFIED" -gt "$${STARTED#@}" ] && RENEWED=0; \
+  done; \
+  exit $$RENEWED'
 ExecStart=/usr/bin/systemctl restart ${PKI_SERVICE}
