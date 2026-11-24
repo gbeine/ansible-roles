@@ -91,7 +91,7 @@ prometheus_config:
 
 Unlike other roles the secrets have no `target`: the options carrying secrets are part of lists (e.g. `scrape_configs`, `remote_write`),
 a path to the option cannot address them. The role checks instead that every secret is referenced with `/run/secrets/<name>` in `prometheus_config`
-and that the fields `password`, `bearer_token`, `credentials`, `client_secret` and `secret_key` are not set, the secrets are files.
+and that the fields `password`, `bearer_token`, `credentials`, `client_secret` and `secret_key` have no value (`null` or an empty string are allowed), the secrets are files.
 
 ### Data
 
