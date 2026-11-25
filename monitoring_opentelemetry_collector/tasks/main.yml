@@ -7,18 +7,28 @@
       {{ monitoring_opentelemetry_collector__distributions | reject('eq', monitoring_opentelemetry_collector__distribution) | list }}
     monitoring_opentelemetry_collector__config_file: "/etc/{{ monitoring_opentelemetry_collector__distribution }}/config.yaml"
     monitoring_opentelemetry_collector__user: "{{ monitoring_opentelemetry_collector__users[monitoring_opentelemetry_collector__distribution] }}"
-    monitoring_opentelemetry_collector__journal_members: >-
-      {{ (ansible_facts.getent_group[monitoring_opentelemetry_collector__journal_group][2] | default('')).split(',') | select | list }}
-    # The membership differs from otelcol_journal_enabled
-    monitoring_opentelemetry_collector__journal_change: >-
-      {{ monitoring_opentelemetry_collector__journal_enabled | bool
-         != (monitoring_opentelemetry_collector__user in monitoring_opentelemetry_collector__journal_members) }}
+    # The groups of the service user, the journal with otelcol_journal_enabled and the logs with otelcol_logs_enabled
+    monitoring_opentelemetry_collector__memberships:
+      - group: "{{ monitoring_opentelemetry_collector__journal_group }}"
+        enabled: "{{ monitoring_opentelemetry_collector__journal_enabled | bool }}"
+      - group: "{{ monitoring_opentelemetry_collector__logs_group }}"
+        enabled: "{{ monitoring_opentelemetry_collector__logs_enabled | bool }}"
+    # The memberships that differ from their option
+    monitoring_opentelemetry_collector__membership_changes: >-
+      {%- set changes = [] -%}
+      {%- for membership in monitoring_opentelemetry_collector__memberships -%}
+      {%-   set members = (ansible_facts.getent_group[membership.group][2] | default('')).split(',') | select | list -%}
+      {%-   if (membership.enabled | bool) != (monitoring_opentelemetry_collector__user in members) -%}
+      {%-     set _ = changes.append(membership) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ changes }}
     # The package restarts the collector on its installation, the configuration and the secrets are written afterwards
     monitoring_opentelemetry_collector__restart_needed: >-
       {{ monitoring_opentelemetry_collector__config_result is changed
          or monitoring_opentelemetry_collector__secrets_result is changed
          or monitoring_opentelemetry_collector__secrets_removed is changed
-         or monitoring_opentelemetry_collector__journal_result is changed }}
+         or monitoring_opentelemetry_collector__membership_result is changed }}
     monitoring_opentelemetry_collector__installed_version: >-
       {{ (ansible_facts['packages'][monitoring_opentelemetry_collector__distribution] | default([{}]) | first).version | default('') }}
     monitoring_opentelemetry_collector__package: >-
@@ -58,6 +68,9 @@
           {%- endif -%}
           {%- if monitoring_opentelemetry_collector__journal_enabled is not boolean -%}
           {%-   set _ = errors.append('`otelcol_journal_enabled` has to be true or false.') -%}
+          {%- endif -%}
+          {%- if monitoring_opentelemetry_collector__logs_enabled is not boolean -%}
+          {%-   set _ = errors.append('`otelcol_logs_enabled` has to be true or false.') -%}
           {%- endif -%}
           {{ errors }}
 
@@ -281,34 +294,35 @@
           check_mode: false
           when: monitoring_opentelemetry_collector__tempdir.path is defined
 
-    # The user is created by the package, the process gets the changed groups with the restart of the collector
-    - name: 'Read the members of the group of the journal'
+    # The user is created by the package, the process gets the changed groups with the restart of the collector.
+    # All groups are read at once, getent in a loop would keep only the facts of the last group.
+    - name: 'Read the groups'
       ansible.builtin.getent:
         database: 'group'
-        key: "{{ monitoring_opentelemetry_collector__journal_group }}"
 
     # user with append cannot remove a group, both directions use gpasswd, the command does not run in check mode
-    - name: 'Change the membership of the service user in the group of the journal'
-      when:
-        - not ansible_check_mode
-        - monitoring_opentelemetry_collector__journal_change | bool
+    - name: 'Change the memberships of the service user'
+      when: not ansible_check_mode
       ansible.builtin.command:
         argv:
           - 'gpasswd'
-          - "{{ '--add' if monitoring_opentelemetry_collector__journal_enabled | bool else '--delete' }}"
+          - "{{ '--add' if item.enabled | bool else '--delete' }}"
           - "{{ monitoring_opentelemetry_collector__user }}"
-          - "{{ monitoring_opentelemetry_collector__journal_group }}"
-      register: 'monitoring_opentelemetry_collector__journal_result'
+          - "{{ item.group }}"
+      loop: "{{ monitoring_opentelemetry_collector__membership_changes }}"
+      loop_control:
+        label: "{{ item.group }}"
+      register: 'monitoring_opentelemetry_collector__membership_result'
       changed_when: true
 
-    - name: 'Report the change of the membership in the group of the journal in check mode'
-      when:
-        - ansible_check_mode
-        - monitoring_opentelemetry_collector__journal_change | bool
+    - name: 'Report the changes of the memberships in check mode'
+      when: ansible_check_mode
       ansible.builtin.debug:
         msg: >-
-          {{ monitoring_opentelemetry_collector__user }} would be {{ 'added to' if monitoring_opentelemetry_collector__journal_enabled | bool else 'removed from' }}
-          {{ monitoring_opentelemetry_collector__journal_group }}.
+          {{ monitoring_opentelemetry_collector__user }} would be {{ 'added to' if item.enabled | bool else 'removed from' }} {{ item.group }}.
+      loop: "{{ monitoring_opentelemetry_collector__membership_changes }}"
+      loop_control:
+        label: "{{ item.group }}"
 
     # The group is created by the package, in check mode of a first installation it is missing
     - name: 'Create the directory of the secrets'
