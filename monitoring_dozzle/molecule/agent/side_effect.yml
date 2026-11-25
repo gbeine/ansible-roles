@@ -1,0 +1,143 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_dozzle__test_case: "{{ monitoring_dozzle__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_dozzle__test_vars: "{{ monitoring_dozzle__test_case.role_vars }}"
+    monitoring_dozzle__test_environment: "{{ monitoring_dozzle__test_vars.dozzle_environment | default({}) }}"
+    # The agent has no users.yml, only the quadlet unit is checked
+    monitoring_dozzle__test_checked_files:
+      - "{{ monitoring_dozzle__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ monitoring_dozzle__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Run the agent with invalid variables'
+      when: monitoring_dozzle__test_case.expect.agent
+      block:
+
+        - name: 'Read the checksums of the checked files before the invalid runs'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: 'md5'
+          loop: "{{ monitoring_dozzle__test_checked_files }}"
+          register: 'monitoring_dozzle__test_md5_before'
+
+        # Include parameters take precedence over set_fact and only exist inside the include
+
+        - name: 'Run the agent without the key of the pair (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            dozzle_secrets: "{{ monitoring_dozzle__test_secrets | rejectattr('target', 'eq', 'DOZZLE_KEY_PEM') | list }}"
+            monitoring_dozzle__test_invalid:
+              message: 'the agent without the key of the pair'
+              search: '^The agent needs the secrets DOZZLE_CERT_PEM, DOZZLE_KEY_PEM, missing: DOZZLE_KEY_PEM\.$'
+
+        - name: 'Run the agent with users (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            dozzle_users:
+              admin:
+                password: 'molecule-admin-password'
+            monitoring_dozzle__test_invalid:
+              message: 'the agent with users'
+              search: '^The agent has no login, dozzle_users must not be set\.$'
+
+        - name: 'Run the agent with a provider of the login (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            dozzle_environment: "{{ monitoring_dozzle__test_environment | combine({ 'DOZZLE_AUTH_PROVIDER': 'simple' }) }}"
+            monitoring_dozzle__test_invalid:
+              message: 'the agent with a provider of the login'
+              search: '^The agent has no login, DOZZLE_AUTH_PROVIDER must not be set in dozzle_environment\.$'
+
+        - name: 'Run the agent with a certificate that is no PEM (expect ERROR)'
+          ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+          vars:
+            dozzle_secrets: >-
+              {{ monitoring_dozzle__test_secrets | rejectattr('target', 'eq', 'DOZZLE_CERT_PEM') | list
+                 + [ { 'name': 'dozzle_cert_pem', 'data': 'molecule-no-certificate', 'target': 'DOZZLE_CERT_PEM' } ] }}
+            monitoring_dozzle__test_invalid:
+              message: 'a certificate that is no PEM'
+              search: '^DOZZLE_CERT_PEM has to be a certificate and DOZZLE_KEY_PEM a private key in PEM, invalid: DOZZLE_CERT_PEM\.$'
+
+    - name: 'Change the environment of the agent'
+      when: monitoring_dozzle__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            dozzle_environment: "{{ monitoring_dozzle__test_case.side_effect.environment }}"
+
+        - name: 'Run monitoring_dozzle with the changed environment'
+          ansible.builtin.include_role:
+            name: 'monitoring_dozzle'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart'
+          ansible.builtin.assert:
+            that:
+              - monitoring_dozzle__quadlet_result is changed
+              - monitoring_dozzle__test_started_after.stdout | int > monitoring_dozzle__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ monitoring_dozzle__quadlet_result is changed }},
+              start before {{ monitoring_dozzle__test_started_before.stdout }}, after {{ monitoring_dozzle__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: monitoring_dozzle__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run monitoring_dozzle without a change'
+          ansible.builtin.include_role:
+            name: 'monitoring_dozzle'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'dozzle' ]
+          register: 'monitoring_dozzle__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - monitoring_dozzle__quadlet_result is not changed
+              - monitoring_dozzle__secrets_result is not changed
+              - monitoring_dozzle__users_result is not changed
+              - monitoring_dozzle__test_unchanged_after.stdout == monitoring_dozzle__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ monitoring_dozzle__quadlet_result is changed }}, secrets changed: {{ monitoring_dozzle__secrets_result is changed }},
+              users changed: {{ monitoring_dozzle__users_result is changed }},
+              start before {{ monitoring_dozzle__test_unchanged_before.stdout }}, after {{ monitoring_dozzle__test_unchanged_after.stdout }}

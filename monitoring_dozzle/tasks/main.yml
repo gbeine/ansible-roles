@@ -38,7 +38,8 @@
           {%- endif -%}
           {{ errors }}
 
-    # The login is mandatory, every way to log in needs its variables and secrets
+    # The login of the server is mandatory, every way to log in needs its variables and secrets.
+    # The agent has no login, it needs the pair the hub connects with.
     - name: 'Validate environment and secrets'
       ansible.builtin.assert:
         that:
@@ -64,22 +65,51 @@
              | rejectattr('data', 'string') | map(attribute='name') | list
              + monitoring_dozzle__secrets | selectattr('target', 'in', monitoring_dozzle__secrets_env)
              | selectattr('data', 'string') | selectattr('data', 'search', '\s') | map(attribute='name') | list }}
+        monitoring_dozzle__cert_missing: "{{ monitoring_dozzle__cert_secrets | reject('in', monitoring_dozzle__secret_targets) | list }}"
+        # Without one of the files Dozzle silently uses the pair built into every image
+        monitoring_dozzle__cert_invalid: >-
+          {{ monitoring_dozzle__secrets | selectattr('target', 'eq', 'DOZZLE_CERT_PEM')
+             | rejectattr('data', 'search', '-----BEGIN CERTIFICATE-----') | map(attribute='target') | list
+             + monitoring_dozzle__secrets | selectattr('target', 'eq', 'DOZZLE_KEY_PEM')
+             | rejectattr('data', 'search', 'PRIVATE KEY-----') | map(attribute='target') | list }}
+        monitoring_dozzle__command: "{{ monitoring_dozzle__container.command | default(none) }}"
         monitoring_dozzle__mcp_token_short: >-
           {{ monitoring_dozzle__secrets | selectattr('target', 'eq', 'DOZZLE_MCP_TOKEN')
              | map(attribute='data') | map('string') | map('length') | select('lt', monitoring_dozzle__mcp_token_length) | list | length > 0 }}
         monitoring_dozzle__errors: >-
           {%- set errors = [] -%}
-          {%- if monitoring_dozzle__auth_provider not in monitoring_dozzle__auth_providers -%}
-          {%-   set _ = errors.append('DOZZLE_AUTH_PROVIDER has to be one of ' ~ (monitoring_dozzle__auth_providers | join(', ')) ~ ', got ' ~ monitoring_dozzle__auth_provider ~ '.') -%}
+          {%- if monitoring_dozzle__command is not none and monitoring_dozzle__command not in [ 'agent', [ 'agent' ] ] -%}
+          {%-   set _ = errors.append('`dozzle_container.command` has to be agent or not set.') -%}
           {%- endif -%}
-          {%- if monitoring_dozzle__auth_provider == 'simple' and (monitoring_dozzle__users is not mapping or monitoring_dozzle__users | length == 0) -%}
-          {%-   set _ = errors.append('The provider simple needs at least one user in dozzle_users.') -%}
+          {%- if monitoring_dozzle__agent | bool -%}
+          {%-   if monitoring_dozzle__cert_missing | length > 0 -%}
+          {%-     set _ = errors.append('The agent needs the secrets ' ~ (monitoring_dozzle__cert_secrets | join(', ')) ~ ', missing: ' ~ (monitoring_dozzle__cert_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if 'DOZZLE_AUTH_PROVIDER' in monitoring_dozzle__environment -%}
+          {%-     set _ = errors.append('The agent has no login, DOZZLE_AUTH_PROVIDER must not be set in dozzle_environment.') -%}
+          {%-   endif -%}
+          {%-   if monitoring_dozzle__users is not mapping or monitoring_dozzle__users | length > 0 -%}
+          {%-     set _ = errors.append('The agent has no login, dozzle_users must not be set.') -%}
+          {%-   endif -%}
+          {%- else -%}
+          {%-   if monitoring_dozzle__auth_provider not in monitoring_dozzle__auth_providers -%}
+          {%-     set _ = errors.append('DOZZLE_AUTH_PROVIDER has to be one of ' ~ (monitoring_dozzle__auth_providers | join(', ')) ~ ', got ' ~ monitoring_dozzle__auth_provider ~ '.') -%}
+          {%-   endif -%}
+          {%-   if monitoring_dozzle__auth_provider == 'simple' and (monitoring_dozzle__users is not mapping or monitoring_dozzle__users | length == 0) -%}
+          {%-     set _ = errors.append('The provider simple needs at least one user in dozzle_users.') -%}
+          {%-   endif -%}
+          {%-   if monitoring_dozzle__environment_missing | length > 0 -%}
+          {%-     set _ = errors.append('The provider ' ~ monitoring_dozzle__auth_provider ~ ' needs the environment variables ' ~ (monitoring_dozzle__environment_needed | join(', ')) ~ ', missing or empty: ' ~ (monitoring_dozzle__environment_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if monitoring_dozzle__secrets_missing | length > 0 -%}
+          {%-     set _ = errors.append('The provider ' ~ monitoring_dozzle__auth_provider ~ ' needs the secrets ' ~ (monitoring_dozzle__secrets_needed | join(', ')) ~ ', missing: ' ~ (monitoring_dozzle__secrets_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if monitoring_dozzle__cert_missing | length == 1 -%}
+          {%-     set _ = errors.append('DOZZLE_CERT_PEM and DOZZLE_KEY_PEM have to be set together, missing: ' ~ (monitoring_dozzle__cert_missing | join(', ')) ~ '.') -%}
+          {%-   endif -%}
           {%- endif -%}
-          {%- if monitoring_dozzle__environment_missing | length > 0 -%}
-          {%-   set _ = errors.append('The provider ' ~ monitoring_dozzle__auth_provider ~ ' needs the environment variables ' ~ (monitoring_dozzle__environment_needed | join(', ')) ~ ', missing or empty: ' ~ (monitoring_dozzle__environment_missing | join(', ')) ~ '.') -%}
-          {%- endif -%}
-          {%- if monitoring_dozzle__secrets_missing | length > 0 -%}
-          {%-   set _ = errors.append('The provider ' ~ monitoring_dozzle__auth_provider ~ ' needs the secrets ' ~ (monitoring_dozzle__secrets_needed | join(', ')) ~ ', missing: ' ~ (monitoring_dozzle__secrets_missing | join(', ')) ~ '.') -%}
+          {%- if monitoring_dozzle__cert_invalid | length > 0 -%}
+          {%-   set _ = errors.append('DOZZLE_CERT_PEM has to be a certificate and DOZZLE_KEY_PEM a private key in PEM, invalid: ' ~ (monitoring_dozzle__cert_invalid | join(', ')) ~ '.') -%}
           {%- endif -%}
           {%- if monitoring_dozzle__secrets_in_environment | length > 0 -%}
           {%-   set _ = errors.append('Secrets and their file variables must not be set in dozzle_environment: ' ~ (monitoring_dozzle__secrets_in_environment | join(', ')) ~ '.') -%}
@@ -240,6 +270,7 @@
 
     # The module of the users hashes the passwords with bcrypt
     - name: 'Install bcrypt for the users of Dozzle'
+      when: not monitoring_dozzle__agent | bool
       ansible.builtin.apt:
         name: 'python3-bcrypt'
         state: 'present'
@@ -298,6 +329,7 @@
         name: "{{ monitoring_dozzle__container.name }}"
         hostname: "{{ monitoring_dozzle__container.hostname }}"
         image: "{{ monitoring_dozzle__container.image }}"
+        command: "{{ monitoring_dozzle__container.command | default(omit) }}"
         ip: "{{ monitoring_dozzle__container.ip }}"
         ip6: "{{ monitoring_dozzle__container.ipv6 | default(omit) }}"
         network: "{{ monitoring_dozzle__container.network }}"
@@ -374,6 +406,9 @@
 
     # The health check answers without login below the base path of Dozzle
     - name: 'Wait for Dozzle'
+      when:
+        - not ansible_check_mode
+        - not monitoring_dozzle__agent | bool
       ansible.builtin.uri:
         url: "http://{{ monitoring_dozzle__ip }}:{{ monitoring_dozzle__port }}{{ monitoring_dozzle__base }}healthcheck"
         # Without the container the address does not answer, a short timeout ends the wait in time
@@ -385,12 +420,25 @@
       retries: 60
       delay: 2
       failed_when: false
-      when: 'not ansible_check_mode'
+
+    # The agent has no HTTP, its health check connects with the pair of the agent by RPC
+    - name: 'Wait for the agent'
+      when:
+        - not ansible_check_mode
+        - monitoring_dozzle__agent | bool
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', "{{ monitoring_dozzle__container.name }}", '/dozzle', 'healthcheck' ]
+      register: 'monitoring_dozzle__agent_ready'
+      until: monitoring_dozzle__agent_ready.rc | default(-1) == 0
+      retries: 60
+      delay: 2
+      changed_when: false
+      failed_when: false
 
     - name: 'Read the log of Dozzle'
       when:
         - not ansible_check_mode
-        - monitoring_dozzle__ready.status | default(-1) != 200
+        - (monitoring_dozzle__agent_ready.rc | default(-1) != 0) if monitoring_dozzle__agent | bool else (monitoring_dozzle__ready.status | default(-1) != 200)
       ansible.builtin.command:
         argv: [ 'journalctl', '-u', "{{ monitoring_dozzle__container.name }}", '-n', '50', '--no-pager' ]
       register: 'monitoring_dozzle__journal'

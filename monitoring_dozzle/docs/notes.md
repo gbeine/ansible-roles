@@ -10,7 +10,7 @@ Dozzle is configured with environment variables in `dozzle_environment`, merged 
 Booleans may be given as YAML booleans, the role passes them as `true` or `false`.
 The variables are described in the [documentation of Dozzle](https://dozzle.dev/guide/supported-env-vars).
 
-The default sets `DOZZLE_AUTH_PROVIDER` to `simple`, `DOZZLE_NO_ANALYTICS` to `true`,
+The default sets `DOZZLE_AUTH_PROVIDER` to `simple` (not for the agent), `DOZZLE_NO_ANALYTICS` to `true`,
 `DOZZLE_ENABLE_ACTIONS` and `DOZZLE_ENABLE_SHELL` to `false` and `DOZZLE_AUTO_UPDATE` and `DOZZLE_AUTO_CLEANUP` to `off`.
 Settings set by a variable are locked, the file `dozzle.yml` written by the setup wizard cannot change them,
 so nobody can enable the actions, the shell or the updates of the containers in the web interface.
@@ -38,6 +38,49 @@ The login is mandatory, `DOZZLE_AUTH_PROVIDER` has to be one of:
 
 `none`, `github` and `google` are not allowed, the login with GitHub uses `simple` with `DOZZLE_AUTH_GITHUB_CLIENT_ID`,
 the secret `DOZZLE_AUTH_GITHUB_CLIENT_SECRET` and users with `github` in `dozzle_users`.
+
+### Agent
+
+With `dozzle_container.command: 'agent'` Dozzle runs as agent (`dozzle agent`): a hub, a Dozzle on another host, shows the containers of this host.
+The agent listens on port 7007 with gRPC, it has no web interface, no login and no users, the hub authenticates with a pair of certificate and key (mTLS).
+The secrets `DOZZLE_CERT_PEM` and `DOZZLE_KEY_PEM` are mandatory, the hub needs the same pair.
+Without them Dozzle uses the pair built into every image, anybody reaching the port could read the logs and control the containers.
+`dozzle_users` and `DOZZLE_AUTH_PROVIDER` must not be set. Other commands than `agent` are not allowed.
+`DOZZLE_ENABLE_ACTIONS` and `DOZZLE_ENABLE_SHELL` stay `false` by default, the agent then refuses the actions and the shell from every hub.
+The port is published with `dozzle_container.publish`, the variable `DOZZLE_AGENT_ADDR` is not allowed.
+
+```yaml
+# The agent
+dozzle_container:
+  command: 'agent'
+  publish: [ '7007:7007' ]
+dozzle_secrets:
+  - name: 'dozzle_cert_pem'
+    data: "{{ vault_dozzle_cert_pem }}"
+    target: 'DOZZLE_CERT_PEM'
+  - name: 'dozzle_key_pem'
+    data: "{{ vault_dozzle_key_pem }}"
+    target: 'DOZZLE_KEY_PEM'
+
+# The hub
+dozzle_environment:
+  DOZZLE_REMOTE_AGENT: 'agent.example.org:7007'
+dozzle_secrets:
+  - name: 'dozzle_cert_pem'
+    data: "{{ vault_dozzle_cert_pem }}"
+    target: 'DOZZLE_CERT_PEM'
+  - name: 'dozzle_key_pem'
+    data: "{{ vault_dozzle_key_pem }}"
+    target: 'DOZZLE_KEY_PEM'
+```
+
+Each end presents the pair and trusts only its certificate, so it has to be a CA valid for servers and clients, like the pair of `dozzle generate-certs`:
+
+```shell
+openssl req -x509 -newkey ed25519 -nodes -keyout dozzle_key.pem -out dozzle_cert.pem -days 1825 -subj '/O=Dozzle' \
+  -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,digitalSignature,keyCertSign' \
+  -addext 'extendedKeyUsage=serverAuth,clientAuth'
+```
 
 ### Users
 
@@ -82,6 +125,11 @@ The role installs `python3-bcrypt` for the module. Without `dozzle_users` and wi
   Dozzle only reads the secrets of the logins from files (`fileBackedEnvNames` in `internal/cli/secrets.go`), not the token of MCP.
   The token needs at least 32 characters without whitespace.
 
+- `DOZZLE_CERT_PEM` and `DOZZLE_KEY_PEM`, the pair of the agent and the hub (see Agent), are mounted as `/run/secrets/<name>`,
+  the role sets `DOZZLE_CERT` and `DOZZLE_KEY` to the files. Dozzle reads the pair from `DOZZLE_CERT_PEM` and `DOZZLE_KEY_PEM` in the environment
+  or from the files named by `DOZZLE_CERT` and `DOZZLE_KEY` (`ReadCertificates` in `internal/cli/certs.go`), so the key is not part of the environment.
+  The agent needs both, the hub needs both or none, a certificate without key would make Dozzle use the pair built into the image.
+
 No target and no file variable may be set in `dozzle_environment`.
 
 ```yaml
@@ -98,7 +146,8 @@ it stops before any change if unknown variables or secrets are set.
 This prevents unexpected behavior by accident, e.g. by a typo or a variable that has to be passed as secret, Dozzle itself only warns about unknown variables.
 The check uses the environment and the secrets of the container after merging `dozzle_container`.
 The list is generated from the `env` tags of `internal/cli/args.go` of Dozzle v11.5.0 without the secrets,
-`DOZZLE_NAMESPACE` of k8s and `DOZZLE_CERT` and `DOZZLE_KEY` of the agents, new versions of the image may add variables.
+`DOZZLE_NAMESPACE` of k8s and `DOZZLE_AGENT_ADDR` of the agent, new versions of the image may add variables.
+`DOZZLE_CERT` and `DOZZLE_KEY` are the file variables of the pair, they are set by the role.
 
 ### Container
 
@@ -115,7 +164,11 @@ The directories belong to root with the mode `0750`.
 The role checks before any change:
 
 - `dozzle_secrets` is a list of entries with `name`, `data` and `target` and unique names
-- `DOZZLE_AUTH_PROVIDER` is `simple`, `oidc` or `forward-proxy`, `simple` has users, `oidc` has its variables and its secret
+- `dozzle_container.command` is `agent` or not set
+- the server: `DOZZLE_AUTH_PROVIDER` is `simple`, `oidc` or `forward-proxy`, `simple` has users, `oidc` has its variables and its secret,
+  `DOZZLE_CERT_PEM` and `DOZZLE_KEY_PEM` are set together or not at all
+- the agent: `DOZZLE_CERT_PEM` and `DOZZLE_KEY_PEM` are set, `dozzle_users` and `DOZZLE_AUTH_PROVIDER` are not set
+- `DOZZLE_CERT_PEM` contains a certificate and `DOZZLE_KEY_PEM` a private key in PEM
 - no secret, no file variable of a secret and no variable set by the role is set in `dozzle_environment`
 - the token of MCP has at least 32 characters without whitespace
 - values contain no line breaks, booleans are `true` or `false`
@@ -134,7 +187,8 @@ The start and the wait for Dozzle do not run in check mode, the users are not co
 
 Dozzle is restarted if it was running and a secret or the quadlet unit changed, e.g. after changing `dozzle_environment`,
 otherwise it is started and enabled. Changed users need no restart. If the start fails, the role shows the error and the journal of the service.
-Afterwards the role waits up to 120 seconds for `/healthcheck` and shows the journal if Dozzle does not answer.
+Afterwards the role waits up to 120 seconds for `/healthcheck` and shows the journal if Dozzle does not answer,
+the agent has no HTTP, the role runs `/dozzle healthcheck` in the container, it connects to the agent with the pair by RPC.
 Updates of the image are done by `container_update` with `dozzle_autoupdate_enabled: true` and `dozzle_autoupdate_schedule`,
 without `dozzle_autoupdate_schedule` the schedule of `container_update` is used.
 
@@ -144,6 +198,8 @@ The role is new, there are no former variables.
 
 - `TZ` is not set anymore, the time zone is set by podman with `dozzle_timezone`.
 - The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `dozzle_container` are new.
+- The agent (`dozzle_container.command: 'agent'`) with the secrets `DOZZLE_CERT_PEM` and `DOZZLE_KEY_PEM` is new,
+  the hub connects to agents with the same secrets and `DOZZLE_REMOTE_AGENT`.
 
 ### Tests
 
@@ -160,7 +216,7 @@ and starts the container `molecule-logger`, which writes a line every two second
 `check` runs `converge` with `--check` on the new VMs.
 `side_effect` runs the role with `dozzle_container` and `dozzle_environment` not a dictionary, a secret without `target`, without login, the provider `simple` without users,
 OIDC without issuer, the token of MCP in the environment, `DOZZLE_MODE` in the environment, a short token of MCP, an unknown variable, an unknown secret,
-an invalid boolean, a line break in a value, a short password and an unknown role of a user
+an invalid boolean, a line break in a value, a short password and an unknown role of a user, another command than `agent` and a certificate of the agents without key
 and checks that it fails with the expected message and the quadlet unit and `users.yml` are unchanged (tasks marked `expect ERROR`),
 then it changes `DOZZLE_LEVEL` and the password of the administrator on `molecule-dozzle`, the quadlet unit and `users.yml` change and Dozzle has to restart,
 `molecule-dozzle-default` runs again without a change and Dozzle must not restart.
@@ -169,6 +225,24 @@ the addresses, the time zone and the environment without `TZ`,
 `users.yml` with its mode, the bcrypt hashes matching the passwords and no password in plain text, the health check,
 the login with the passwords (200), a wrong one and the former one (401), the version with and without session (401)
 and that the stream of the events of the administrator contains `molecule-logger`, the guest with its filter does not see it.
+
+The molecule scenario `agent` runs the agent and a hub in two VMs, both use a pair of the test in `test_cases.yml`:
+
+| Platform | Test case |
+|---|---|
+| `molecule-dozzle-agent` | The agent with the pair, port 7007 published on the VM, `prepare` starts `molecule-logger` |
+| `molecule-dozzle-hub` | The server with a user and the pair, `DOZZLE_REMOTE_AGENT` is the agent on its VM |
+
+`side_effect` runs the agent without the key, with users, with `DOZZLE_AUTH_PROVIDER` and with a certificate that is no PEM
+and checks that it fails with the expected message and the quadlet unit is unchanged (tasks marked `expect ERROR`),
+then it changes `DOZZLE_LEVEL` of the agent, the quadlet unit changes and the agent has to restart, the hub runs again without a change and must not restart.
+`verify` checks the quadlet units with `Exec=agent` and the mounted pair, the environment with `DOZZLE_CERT` and `DOZZLE_KEY`
+and without the pair and `DOZZLE_AUTH_PROVIDER` on the agent, the services without automatic restarts and without the pair built into the image.
+On the agent there is no `users.yml`, the port 7007 answers and `/dozzle healthcheck` connects with the pair.
+The tart VMs do not reach each other, so `verify` starts a temporary hub with the pair in the network of the agent on its VM,
+without the socket it only knows the containers of the agent: its stream of the events contains `molecule-logger`,
+`/dozzle agent-test` connects with the pair and fails with the pair built into the image.
+On the hub the login works and the stream of the events shows its own containers.
 
 | Environment variable | Default | Description |
 |---|---|---|
@@ -179,4 +253,5 @@ and that the stream of the events of the administrator contains `molecule-logger
 ```shell
 cd monitoring_dozzle
 MOLECULE_TART_IMAGE='debian' molecule test
+MOLECULE_TART_IMAGE='debian' molecule test -s agent
 ```

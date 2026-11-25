@@ -1,0 +1,49 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_dozzle__test_case: "{{ monitoring_dozzle__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    podman_networks:
+      - "{{ monitoring_dozzle__test_network }}"
+    podman_default_network: "{{ monitoring_dozzle__test_network.name }}"
+    # Dozzle reads the containers with the Docker API of the podman socket
+    podman_socket_enabled: true
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify signs in at the hub with curl, it keeps the cookies of the session in a file
+    - name: 'Install curl'
+      ansible.builtin.apt:
+        name: [ 'curl' ]
+        state: 'present'
+        update_cache: true
+
+    - name: 'Pull the images, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop:
+        - "{{ monitoring_dozzle__test_image }}"
+        - "{{ monitoring_dozzle__test_logger.image }}"
+      register: 'monitoring_dozzle__test_pull'
+      until: monitoring_dozzle__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    # Only the agent runs the logger, the hub shows it only through the agent
+    - name: 'Start a container writing logs'
+      when: monitoring_dozzle__test_case.logger
+      containers.podman.podman_container:
+        name: "{{ monitoring_dozzle__test_logger.name }}"
+        image: "{{ monitoring_dozzle__test_logger.image }}"
+        command: [ 'sh', '-c', "while true; do echo '{{ monitoring_dozzle__test_logger.line }}'; sleep 2; done" ]
+        state: 'started'

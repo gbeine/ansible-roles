@@ -1,0 +1,122 @@
+---
+# Network created by container_podman in prepare.yml
+monitoring_dozzle__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+monitoring_dozzle__test_image: 'docker.io/amir20/dozzle:latest'
+monitoring_dozzle__test_quadlet_path: '/etc/containers/systemd/dozzle.container'
+monitoring_dozzle__test_users_path: '/opt/dozzle/data/users.yml'
+
+# A container writing a line every two seconds, started by prepare.yml on the agent, the hub has to show it
+monitoring_dozzle__test_logger:
+  name: 'molecule-logger'
+  image: 'docker.io/library/busybox:latest'
+  line: 'molecule dozzle line'
+
+# The address of the agent the hub connects to, the agent publishes its port on the VM.
+# The tart VMs do not reach each other, the hub VM points to the agent like in operation,
+# the connection is checked on the agent VM with a temporary hub in the network of the agent.
+monitoring_dozzle__test_agent: "{{ hostvars['molecule-dozzle-agent']['ansible_host'] }}:7007"
+monitoring_dozzle__test_agent_local: '10.89.0.112:7007'
+monitoring_dozzle__test_hub:
+  name: 'molecule-hub'
+  ip: '10.89.0.120'
+
+# The pair of the test, only used by molecule: ed25519, self-signed, CA with serverAuth and clientAuth, valid until 2036
+monitoring_dozzle__test_secrets:
+  - name: 'dozzle_cert_pem'
+    target: 'DOZZLE_CERT_PEM'
+    data: |
+      -----BEGIN CERTIFICATE-----
+      MIIBejCCASygAwIBAgIUaPFqOiDIPIjvnBhN2BaN2J/5nCEwBQYDK2VwMBoxGDAW
+      BgNVBAoMD0RvenpsZSBNb2xlY3VsZTAeFw0yNjExMjUxNTEyMzBaFw0zNjExMjIx
+      NTEyMzBaMBoxGDAWBgNVBAoMD0RvenpsZSBNb2xlY3VsZTAqMAUGAytlcAMhAILN
+      C+joq5riokuYF2cawnwcxxEIDqFfeCCtES5cEFEao4GDMIGAMB0GA1UdDgQWBBTK
+      XvHr8uy53MhMv7U82jopWk0JGjAfBgNVHSMEGDAWgBTKXvHr8uy53MhMv7U82jop
+      Wk0JGjAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIChDAdBgNVHSUEFjAU
+      BggrBgEFBQcDAQYIKwYBBQUHAwIwBQYDK2VwA0EAcvbe9ZEjrbs/xdIZWvpLs1AP
+      kKgks+M2uo1C8FXY5xLTHjagqNFKphAdKf8k/HqrcMxRoeJOQNSqZxO3x/zfAg==
+      -----END CERTIFICATE-----
+  - name: 'dozzle_key_pem'
+    target: 'DOZZLE_KEY_PEM'
+    data: |
+      -----BEGIN PRIVATE KEY-----
+      MC4CAQAwBQYDK2VwBCIEIPyxPMo+70NOWTtDyQGfoUBtPRnBF50KUUd/hjH5LOlY
+      -----END PRIVATE KEY-----
+
+monitoring_dozzle__test_cases:
+
+  # The agent with the pair, the hub reaches it on the published port 7007
+  - name: 'molecule-dozzle-agent'
+    logger: true
+    role_vars:
+      dozzle_home: '/opt/dozzle'
+      dozzle_ip: '10.89.0.112'
+      dozzle_network: 'podman-molecule'
+      dozzle_hostname: 'dozzle-agent'
+      dozzle_timezone: 'Europe/Berlin'
+      dozzle_container:
+        command: 'agent'
+        publish: [ '7007:7007' ]
+      dozzle_environment:
+        DOZZLE_HOSTNAME: 'molecule-agent'
+        DOZZLE_LEVEL: 'debug'
+      dozzle_secrets: "{{ monitoring_dozzle__test_secrets }}"
+    # side_effect changes the log level, the quadlet unit changes and the agent is restarted
+    side_effect:
+      environment:
+        DOZZLE_HOSTNAME: 'molecule-agent'
+        DOZZLE_LEVEL: 'info'
+    expect:
+      agent: true
+      ip: '10.89.0.112'
+      quadlet:
+        - 'Exec=agent'
+        - 'PublishPort=7007:7007'
+        - 'Secret=dozzle_cert_pem,type=mount,target=/run/secrets/dozzle_cert_pem'
+        - 'Secret=dozzle_key_pem,type=mount,target=/run/secrets/dozzle_key_pem'
+      env:
+        - 'DOZZLE_CERT=/run/secrets/dozzle_cert_pem'
+        - 'DOZZLE_KEY=/run/secrets/dozzle_key_pem'
+        - 'DOZZLE_MODE=server'
+        - 'DOZZLE_HOSTNAME=molecule-agent'
+        - 'DOZZLE_LEVEL=info'
+        - 'DOZZLE_ENABLE_ACTIONS=false'
+        - 'DOZZLE_ENABLE_SHELL=false'
+      env_absent: [ 'DOZZLE_AUTH_PROVIDER', 'DOZZLE_CERT_PEM', 'DOZZLE_KEY_PEM' ]
+
+  # The hub with a user, it connects to the agent with the same pair
+  - name: 'molecule-dozzle-hub'
+    logger: false
+    role_vars:
+      dozzle_home: '/opt/dozzle'
+      dozzle_ip: '10.89.0.113'
+      dozzle_network: 'podman-molecule'
+      dozzle_hostname: 'dozzle-hub'
+      dozzle_timezone: 'Europe/Berlin'
+      dozzle_environment:
+        DOZZLE_REMOTE_AGENT: "{{ monitoring_dozzle__test_agent }}"
+      dozzle_secrets: "{{ monitoring_dozzle__test_secrets }}"
+      dozzle_users:
+        admin:
+          name: 'Molecule Admin'
+          email: 'admin@molecule.test'
+          password: 'molecule-admin-password'
+    expect:
+      agent: false
+      ip: '10.89.0.113'
+      login: { username: 'admin', password: 'molecule-admin-password' }
+      quadlet:
+        - 'Secret=dozzle_cert_pem,type=mount,target=/run/secrets/dozzle_cert_pem'
+        - 'Secret=dozzle_key_pem,type=mount,target=/run/secrets/dozzle_key_pem'
+      env:
+        - 'DOZZLE_AUTH_PROVIDER=simple'
+        - 'DOZZLE_CERT=/run/secrets/dozzle_cert_pem'
+        - 'DOZZLE_KEY=/run/secrets/dozzle_key_pem'
+      env_absent: [ 'DOZZLE_CERT_PEM', 'DOZZLE_KEY_PEM' ]

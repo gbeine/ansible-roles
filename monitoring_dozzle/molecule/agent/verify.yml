@@ -1,0 +1,241 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    monitoring_dozzle__test_case: "{{ monitoring_dozzle__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    monitoring_dozzle__expect: "{{ monitoring_dozzle__test_case.expect }}"
+    monitoring_dozzle__test_url: "http://{{ monitoring_dozzle__expect.ip }}:8080"
+    # The pair and the passwords of the test case, they must not be part of the unit or the environment
+    monitoring_dozzle__test_plain: >-
+      {{ monitoring_dozzle__test_secrets | map(attribute='data') | map('trim') | list
+         + (monitoring_dozzle__test_case.role_vars.dozzle_users | default({})).values() | map(attribute='password') | list }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ monitoring_dozzle__test_quadlet_path }}"
+      register: 'monitoring_dozzle__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + monitoring_dozzle__test_image) in monitoring_dozzle__test_quadlet_lines
+          - ('IP=' + monitoring_dozzle__expect.ip) in monitoring_dozzle__test_quadlet_lines
+          - monitoring_dozzle__expect.quadlet | reject('in', monitoring_dozzle__test_quadlet_lines) | list | length == 0
+          - monitoring_dozzle__expect.agent or monitoring_dozzle__test_quadlet_lines | select('match', 'Exec=') | list | length == 0
+          - monitoring_dozzle__test_plain | select('in', monitoring_dozzle__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ monitoring_dozzle__test_quadlet_lines | to_json }}"
+      vars:
+        monitoring_dozzle__test_quadlet_lines: "{{ (monitoring_dozzle__test_quadlet.content | b64decode | regex_replace('[\\x22\\x27]', '')).splitlines() }}"
+
+    - name: 'Read the state of the dozzle service'
+      ansible.builtin.command: 'systemctl is-active dozzle'
+      register: 'monitoring_dozzle__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the dozzle container'
+      ansible.builtin.command: 'podman inspect dozzle'
+      register: 'monitoring_dozzle__test_inspect'
+      changed_when: false
+
+    # The pair is mounted as files, DOZZLE_CERT and DOZZLE_KEY name them, DOZZLE_CERT_PEM and DOZZLE_KEY_PEM are not set
+    - name: 'Assert the service, the address and the environment'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__test_service.stdout == 'active'
+          - monitoring_dozzle__test_container.NetworkSettings.Networks[monitoring_dozzle__test_case.role_vars.dozzle_network].IPAddress == monitoring_dozzle__expect.ip
+          - monitoring_dozzle__expect.env | reject('in', monitoring_dozzle__test_env) | list | length == 0
+          - monitoring_dozzle__test_env_names | select('in', monitoring_dozzle__expect.env_absent) | list | length == 0
+          - monitoring_dozzle__test_plain | select('in', monitoring_dozzle__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ monitoring_dozzle__test_service.stdout }}, environment {{ monitoring_dozzle__test_env | join(', ') }}
+      vars:
+        monitoring_dozzle__test_container: "{{ (monitoring_dozzle__test_inspect.stdout | from_json)[0] }}"
+        monitoring_dozzle__test_env: "{{ monitoring_dozzle__test_container.Config.Env }}"
+        monitoring_dozzle__test_env_names: "{{ monitoring_dozzle__test_env | map('regex_replace', '=.*$', '') | list }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'dozzle' ]
+      register: 'monitoring_dozzle__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'dozzle', '-n', '80', '--no-pager' ]
+      register: 'monitoring_dozzle__test_journal'
+      changed_when: false
+      failed_when: false
+
+    # The agent warns about the pair built into the image, with the pair of the test it must not
+    - name: 'Assert the service did not restart by itself and uses the pair of the test'
+      ansible.builtin.assert:
+        that:
+          - monitoring_dozzle__test_restarts.stdout | int == 0
+          - monitoring_dozzle__test_journal.stdout is not search('built-in certificate')
+        fail_msg: "{{ [ 'automatic restarts: ' ~ monitoring_dozzle__test_restarts.stdout ] + monitoring_dozzle__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Check the agent'
+      when: monitoring_dozzle__expect.agent
+      block:
+
+        - name: 'Read the users of Dozzle'
+          ansible.builtin.stat:
+            path: "{{ monitoring_dozzle__test_users_path }}"
+          register: 'monitoring_dozzle__test_users_file'
+
+        - name: 'Wait for the published port of the agent'
+          ansible.builtin.wait_for:
+            host: '127.0.0.1'
+            port: 7007
+            timeout: 30
+
+        # The health check of the agent connects to it by RPC with the pair
+        - name: 'Run the health check of the agent'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'dozzle', '/dozzle', 'healthcheck' ]
+          register: 'monitoring_dozzle__test_health'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the agent'
+          ansible.builtin.assert:
+            that:
+              - not monitoring_dozzle__test_users_file.stat.exists
+              - monitoring_dozzle__test_health.rc == 0
+            fail_msg: >-
+              users.yml {{ monitoring_dozzle__test_users_file.stat.exists }},
+              health check {{ monitoring_dozzle__test_health.rc }} {{ monitoring_dozzle__test_health.stderr_lines + monitoring_dozzle__test_health.stdout_lines }}
+
+        # The tart VMs do not reach each other, a temporary hub in the network of the agent connects with the pair.
+        # It has no socket, it only knows the containers of the agent.
+        - name: 'Connect a temporary hub to the agent'
+          block:
+
+            - name: 'Start the temporary hub'
+              ansible.builtin.command:
+                argv:
+                  - 'podman'
+                  - 'run'
+                  - '--detach'
+                  - '--rm'
+                  - "--name={{ monitoring_dozzle__test_hub.name }}"
+                  - "--network={{ monitoring_dozzle__test_network.name }}"
+                  - "--ip={{ monitoring_dozzle__test_hub.ip }}"
+                  - '--secret=dozzle_cert_pem,type=mount,target=/run/secrets/dozzle_cert_pem'
+                  - '--secret=dozzle_key_pem,type=mount,target=/run/secrets/dozzle_key_pem'
+                  - '--env=DOZZLE_CERT=/run/secrets/dozzle_cert_pem'
+                  - '--env=DOZZLE_KEY=/run/secrets/dozzle_key_pem'
+                  - "--env=DOZZLE_REMOTE_AGENT={{ monitoring_dozzle__test_agent_local }}"
+                  - '--env=DOZZLE_AUTH_PROVIDER=none'
+                  - '--env=DOZZLE_NO_ANALYTICS=true'
+                  - "{{ monitoring_dozzle__test_image }}"
+              changed_when: true
+
+            # The stream of the events starts with the containers, curl stops it after 5 seconds
+            - name: 'Read the containers of the temporary hub'
+              ansible.builtin.command:
+                argv: [ 'curl', '--silent', '--no-buffer', '--max-time', '5', "http://{{ monitoring_dozzle__test_hub.ip }}:8080/api/events/stream" ]
+              register: 'monitoring_dozzle__test_hub_events'
+              until: monitoring_dozzle__test_hub_events.stdout is search('"name":\s*"' ~ monitoring_dozzle__test_logger.name ~ '"')
+              retries: 12
+              delay: 5
+              changed_when: false
+              # curl ends with 28 when the time is up
+              failed_when: monitoring_dozzle__test_hub_events.rc not in [ 0, 7, 28 ]
+
+            # agent-test connects with the pair of the hub and reads the host of the agent
+            - name: 'Connect to the agent with the pair'
+              ansible.builtin.command:
+                argv: [ 'podman', 'exec', "{{ monitoring_dozzle__test_hub.name }}", '/dozzle', 'agent-test', "{{ monitoring_dozzle__test_agent_local }}" ]
+              register: 'monitoring_dozzle__test_agent_test'
+              changed_when: false
+              failed_when: false
+
+            # Without the pair Dozzle uses the pair built into the image, the agent has to refuse it
+            - name: 'Connect to the agent with the pair built into the image'
+              ansible.builtin.command:
+                argv: [ 'podman', 'run', '--rm', "--network={{ monitoring_dozzle__test_network.name }}",
+                        "{{ monitoring_dozzle__test_image }}", 'agent-test', "{{ monitoring_dozzle__test_agent_local }}" ]
+              register: 'monitoring_dozzle__test_agent_builtin'
+              changed_when: false
+              failed_when: false
+
+            - name: 'Assert the connections to the agent'
+              ansible.builtin.assert:
+                that:
+                  - monitoring_dozzle__test_hub_events.stdout is search('"name":\s*"' ~ monitoring_dozzle__test_logger.name ~ '"')
+                  - monitoring_dozzle__test_agent_test.rc == 0
+                  - monitoring_dozzle__test_agent_builtin.rc != 0
+                fail_msg: >-
+                  agent-test with the pair {{ monitoring_dozzle__test_agent_test.rc }}
+                  {{ monitoring_dozzle__test_agent_test.stderr_lines + monitoring_dozzle__test_agent_test.stdout_lines }},
+                  with the built-in pair {{ monitoring_dozzle__test_agent_builtin.rc }},
+                  events {{ monitoring_dozzle__test_hub_events.stdout | truncate(1000) }}
+
+          always:
+
+            - name: 'Remove the temporary hub'
+              ansible.builtin.command:
+                argv: [ 'podman', 'rm', '--force', "{{ monitoring_dozzle__test_hub.name }}" ]
+              changed_when: true
+
+    - name: 'Check the hub'
+      when: not monitoring_dozzle__expect.agent
+      block:
+
+        - name: 'Create the cookie file'
+          ansible.builtin.tempfile:
+            suffix: '.cookies'
+          register: 'monitoring_dozzle__test_cookie_file'
+
+        - name: 'Log in at the hub'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--show-error',
+                    '--cookie-jar', "{{ monitoring_dozzle__test_cookie_file.path }}",
+                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                    '--data-urlencode', "username={{ monitoring_dozzle__expect.login.username }}",
+                    '--data-urlencode', 'password@-',
+                    "{{ monitoring_dozzle__test_url }}/api/token" ]
+            stdin: "{{ monitoring_dozzle__expect.login.password }}"
+            stdin_add_newline: false
+          register: 'monitoring_dozzle__test_login'
+          changed_when: false
+          no_log: true
+
+        # The tart VMs do not reach each other, the hub shows its own containers, the connection is checked on the agent VM.
+        # The stream of the events starts with the containers, curl stops it after 5 seconds
+        - name: 'Read the containers of the hub'
+          ansible.builtin.command:
+            argv: [ 'curl', '--silent', '--no-buffer', '--max-time', '5',
+                    '--cookie', "{{ monitoring_dozzle__test_cookie_file.path }}",
+                    "{{ monitoring_dozzle__test_url }}/api/events/stream" ]
+          register: 'monitoring_dozzle__test_events'
+          changed_when: false
+          # curl ends with 28 when the time is up
+          failed_when: monitoring_dozzle__test_events.rc not in [ 0, 28 ]
+
+        - name: 'Assert the login and the containers of the hub'
+          ansible.builtin.assert:
+            that:
+              - monitoring_dozzle__test_login.stdout == '200'
+              - monitoring_dozzle__test_events.stdout is search('"name":\s*"dozzle"')
+            fail_msg: >-
+              login {{ monitoring_dozzle__test_login.stdout }}, events {{ monitoring_dozzle__test_events.stdout | truncate(1000) }}
+
+      always:
+
+        - name: 'Remove the cookie file'
+          when: monitoring_dozzle__test_cookie_file.path is defined
+          ansible.builtin.file:
+            path: "{{ monitoring_dozzle__test_cookie_file.path }}"
+            state: 'absent'

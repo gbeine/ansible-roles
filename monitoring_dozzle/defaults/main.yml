@@ -17,8 +17,11 @@ monitoring_dozzle__version: "{{ dozzle_version | default('latest') }}"
 
 monitoring_dozzle__container: "{{ monitoring_dozzle__podman_container_default | combine(dozzle_container | default({})) }}"
 
-# The configuration of Dozzle, see internal/cli/args.go of Dozzle
-monitoring_dozzle__environment: "{{ monitoring_dozzle__environment_default | combine(dozzle_environment | default({})) }}"
+# Dozzle runs as agent with dozzle_container.command 'agent', the hub connects to it on port 7007
+monitoring_dozzle__agent: "{{ (dozzle_container | default({})).command | default('') in [ 'agent', [ 'agent' ] ] }}"
+
+# The configuration of Dozzle, see internal/cli/args.go of Dozzle, the agent has no login
+monitoring_dozzle__environment: "{{ monitoring_dozzle__environment_default | combine({} if monitoring_dozzle__agent | bool else monitoring_dozzle__environment_auth) | combine(dozzle_environment | default({})) }}"
 
 # Secrets with name, data and target, the secrets of Dozzle without file variable are passed in the environment,
 # the others are mounted below /run/secrets and the role sets the file variable of the target
@@ -37,13 +40,16 @@ monitoring_dozzle__autoupdate_schedule: "{{ dozzle_autoupdate_schedule }}"
 
 # Settings set by a variable are locked, the file dozzle.yml in /data cannot change them
 monitoring_dozzle__environment_default:
-  DOZZLE_AUTH_PROVIDER: 'simple'
   DOZZLE_NO_ANALYTICS: true
   DOZZLE_ENABLE_ACTIONS: false
   DOZZLE_ENABLE_SHELL: false
   # The image is updated by container_update, not by Dozzle
   DOZZLE_AUTO_UPDATE: 'off'
   DOZZLE_AUTO_CLEANUP: 'off'
+
+# The login of the server, the agent has none
+monitoring_dozzle__environment_auth:
+  DOZZLE_AUTH_PROVIDER: 'simple'
 
 # Set by the role, without login anybody may create an account with the setup wizard,
 # swarm and k8s do not exist with podman and the port is fixed
@@ -53,6 +59,10 @@ monitoring_dozzle__environment_role:
   DOZZLE_ADDR: ':8080'
 
 monitoring_dozzle__port: 8080
+# The port of the agent (default of --agent-addr in internal/cli/agent_command.go)
+monitoring_dozzle__agent_port: 7007
+# The pair the agent and the hub authenticate each other with, mandatory for the agent
+monitoring_dozzle__cert_secrets: [ 'DOZZLE_CERT_PEM', 'DOZZLE_KEY_PEM' ]
 
 # The ways to log in to Dozzle, there is no way without login,
 # github and google are aliases of simple
@@ -83,9 +93,13 @@ monitoring_dozzle__secret_variables: "{{ monitoring_dozzle__secret_files.keys() 
 
 # The secrets mounted as files, Dozzle reads the variable target from the file variable
 # (fileBackedEnvNames in internal/cli/secrets.go of Dozzle v11.5.0)
+# Dozzle reads the pair of the agent from DOZZLE_CERT_PEM and DOZZLE_KEY_PEM in the environment or from the files
+# named by DOZZLE_CERT and DOZZLE_KEY (ReadCertificates in internal/cli/certs.go), the role mounts the pair as files
 monitoring_dozzle__secret_files:
   DOZZLE_AUTH_GITHUB_CLIENT_SECRET: 'DOZZLE_AUTH_GITHUB_CLIENT_SECRET_FILE'
   DOZZLE_AUTH_OIDC_CLIENT_SECRET: 'DOZZLE_AUTH_OIDC_CLIENT_SECRET_FILE'
+  DOZZLE_CERT_PEM: 'DOZZLE_CERT'
+  DOZZLE_KEY_PEM: 'DOZZLE_KEY'
 
 # The secrets passed in the environment, Dozzle has no file variable for them
 monitoring_dozzle__secrets_env: [ 'DOZZLE_MCP_TOKEN' ]
@@ -127,7 +141,7 @@ monitoring_dozzle__environment_container: >-
 
 # The variables of Dozzle, the variables set by the role and the file variables of the secrets.
 # Generated from the env tags of internal/cli/args.go of Dozzle v11.5.0 without the secrets,
-# DOZZLE_NAMESPACE (k8s) and DOZZLE_CERT and DOZZLE_KEY (agents), update with new versions of the image
+# DOZZLE_NAMESPACE (k8s) and DOZZLE_AGENT_ADDR of the agent (the port is changed with publish), update with new versions of the image
 monitoring_dozzle__environment_allowed:
   - 'TZ'
   - 'DOZZLE_AUTH_GITHUB_CLIENT_ID'
@@ -173,6 +187,8 @@ monitoring_dozzle__environment_allowed:
   # The file variables of the secrets, set by the role
   - 'DOZZLE_AUTH_GITHUB_CLIENT_SECRET_FILE'
   - 'DOZZLE_AUTH_OIDC_CLIENT_SECRET_FILE'
+  - 'DOZZLE_CERT'
+  - 'DOZZLE_KEY'
 
 monitoring_dozzle__podman_name: 'dozzle'
 monitoring_dozzle__podman_image: 'docker.io/amir20/dozzle'
