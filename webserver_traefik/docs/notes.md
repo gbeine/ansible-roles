@@ -182,6 +182,47 @@ the names of entry points, certificate resolvers and plugins are free, the confi
 The options of Traefik (`TRAEFIK_*`) are rejected, Traefik ignores them with `traefik.yml`.
 The check of the environment uses the environment of the container after merging `traefik_container`.
 
+### Logs
+
+`traefik_accesslog_enabled: true` writes the access log of Traefik to `<traefik_home>/log/access.log` (`/var/log/traefik/access.log` in the container)
+and installs a configuration of logrotate in `/etc/logrotate.d/<container name>`, logrotate has to be installed on the host.
+The role creates `<traefik_home>/log` (owner `root`, mode `0750`) and mounts it to `/var/log/traefik`.
+`traefik_config.accessLog` adds options to the access log, e.g. the format or filters,
+the log of Traefik is written to the directory as well with `log.filePath: '/var/log/traefik/traefik.log'`.
+
+```yaml
+traefik_accesslog_enabled: true
+traefik_config:
+  accessLog:
+    format: 'json'
+    filters:
+      statusCodes: [ '400-599' ]
+```
+
+logrotate rotates every file `<traefik_home>/log/*.log` daily and keeps 7 compressed files:
+
+```
+<traefik_home>/log/*.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        /usr/bin/podman kill --signal=USR1 <container name> >/dev/null 2>&1 || true
+    endscript
+}
+```
+
+- logrotate runs on the host, the paths are the paths of the host, not `/var/log/traefik` of the container.
+- Traefik closes and reopens its log files on `USR1`, it creates the new files itself, so there is no `create`.
+  `sharedscripts` sends the signal once for all files, `delaycompress` keeps the last file uncompressed while Traefik may still write to it.
+- `podman` is called with its path, the `PATH` of logrotate is minimal, a stopped container (e.g. during an update) does not fail logrotate.
+
+`traefik_accesslog_enabled: false` (default) removes the configuration of logrotate, `<traefik_home>/log` and its files stay.
+
 ### Container
 
 Ports, volumes, labels, additional hosts (`etc_hosts`) and dependencies are changed with `traefik_container`, it is merged over the default of the container.
@@ -206,6 +247,7 @@ traefik_container:
 | `<traefik_home>/users` | `/etc/traefik/users` (read-only) |
 | `<traefik_home>/certs` | `/etc/traefik/certs` (read-only) |
 | `/run/podman/podman.sock` | `/var/run/docker.sock` (read-only, with `traefik_provider_podman`) |
+| `<traefik_home>/log` | `/var/log/traefik` (with `traefik_accesslog_enabled`) |
 
 ### Validation
 
@@ -219,6 +261,7 @@ The role checks before any change:
 - `traefik_realms` is a list of unique names of letters, digits, `_`, `.` and `-`, `fullchain.pem` and `privkey.pem` of every realm exist
   (in check mode missing certificates are reported, another role may create them only in a real run)
 - `traefik_environment`, if set, is a dictionary without options of Traefik and line breaks, only allowed environment variables are set in the container
+- `traefik_accesslog_enabled` is `true` or `false`
 
 If `traefik_container` or `traefik_config` is no dictionary, merging it with the default fails before anything changes.
 Traefik itself checks the values at the start, the role waits until the entry points on all addresses (e.g. `:80`) accept connections and shows the journal otherwise.
@@ -256,6 +299,7 @@ Updates of the image are done by `container_update` with `traefik_autoupdate_ena
   The directories `<traefik_home>/users` and `<traefik_home>/certs` are always mounted, the quadlet unit changes once and Traefik restarts.
   `volumes` in `traefik_container` replaces the default and needs the two volumes for these features.
 - The role depends on `common_library`, its module `common_library_htpasswd` writes the htpasswd files.
+- `traefik_accesslog_enabled` is new (default `false`), it writes the access log to `<traefik_home>/log` and rotates it with logrotate.
 
 ### Tests
 
@@ -266,13 +310,13 @@ The playbooks creating and destroying the VMs are shared by all tart scenarios a
 | Platform | Test case |
 |---|---|
 | `molecule-traefik-default` | The mandatory values only, IPv4, the docker provider routes to a labeled container through the podman socket |
-| `molecule-traefik` | IPv4 and IPv6, `traefik_provider_podman: false`, the file provider with a file of `traefik_dynamic`, a file removed with `null`, `serversTransport` removed with `null`, `traefik_environment`, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`), an htpasswd file for the dashboard and one removed with `null`, two realms with local certificates |
+| `molecule-traefik` | IPv4 and IPv6, `traefik_provider_podman: false`, the file provider with a file of `traefik_dynamic`, a file removed with `null`, `serversTransport` removed with `null`, `traefik_environment`, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`), an htpasswd file for the dashboard and one removed with `null`, two realms with local certificates, the access log with logrotate |
 
-`prepare` sets up podman with the socket and the network `podman-molecule` with the role `container_podman`, pulls the images
+`prepare` installs `logrotate` and sets up podman with the socket and the network `podman-molecule` with the role `container_podman`, pulls the images
 and starts the container `molecule-whoami` (`docker.io/traefik/whoami`) with the labels of the docker provider as backend of the routes.
 On `molecule-traefik` it creates self-signed certificates of the realms `realm1` and `realm2` with `openssl`, an htpasswd file and a certificate that the role removes.
 `check` runs `converge` with `--check` on the VMs where the role never ran.
-`side_effect` runs the role with `traefik_container` and `traefik_config` not a dictionary, unknown options and sections, options of the wrong type and line breaks,
+`side_effect` runs the role with `traefik_accesslog_enabled` not a boolean, `traefik_container` and `traefik_config` not a dictionary, unknown options and sections, options of the wrong type and line breaks,
 an invalid dynamic configuration, `traefik_dynamic` not a dictionary, the former variable `traefik_secrets`, `TRAEFIK_LOG_LEVEL` in `traefik_environment`
 and an unknown variable in `traefik_container.environment`, invalid htpasswd files (name of the file, user, line break, too long password, no users),
 `traefik_usersfile` not a dictionary, `traefik_realms` not a list, invalid and duplicate realms, `realms` in `traefik_dynamic` and a realm without certificates
@@ -284,6 +328,9 @@ and the routes on port 443: the route of the docker provider or of the dynamic c
 It checks the htpasswd files (users, bcrypt, mode `0600`, the removed file), the certificates in `<traefik_home>/certs` and `realms.yml`,
 the certificate served for every realm (`openssl s_client` with the name of the realm), the certificates watched by `pki_update`
 and the login on the dashboard: `401` without a password and with the former password, `200` with the changed password.
+On `molecule-traefik` it checks the configuration of logrotate with `logrotate --debug`, finds a request in `access.log`, rotates the logs with `logrotate --force`
+and finds the next request in the new `access.log` and the former one in `access.log.1`, Traefik reopened the file on `USR1`.
+On `molecule-traefik-default` there is no configuration of logrotate and no access log.
 The VMs need access to Docker Hub for `docker.io/traefik:v3` and `docker.io/traefik/whoami`.
 
 Requirements on the controller: `tart`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`), `molecule` and the collection `containers.podman`.

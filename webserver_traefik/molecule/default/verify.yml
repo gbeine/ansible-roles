@@ -293,3 +293,83 @@
         force_basic_auth: true
         validate_certs: false
         status_code: [ 401 ]
+
+    - name: 'Read the configuration of logrotate'
+      ansible.builtin.stat:
+        path: '/etc/logrotate.d/traefik'
+      register: 'webserver_traefik__test_logrotate_stat'
+
+    - name: 'Check the access log and its rotation'
+      when: webserver_traefik__expect.accesslog
+      vars:
+        webserver_traefik__test_log: "{{ webserver_traefik__expect.home }}/log/access.log"
+      block:
+
+        # logrotate -d only reads and checks the configuration
+        - name: 'Check the configuration of logrotate'
+          ansible.builtin.command:
+            argv: [ 'logrotate', '--debug', '/etc/logrotate.d/traefik' ]
+          register: 'webserver_traefik__test_logrotate_debug'
+          changed_when: false
+
+        - name: 'Request a route before the rotation'
+          ansible.builtin.uri:
+            url: 'https://127.0.0.1/molecule-before-rotation'
+            headers:
+              Host: 'dynamic.molecule'
+            validate_certs: false
+            status_code: [ 200, 404 ]
+
+        - name: 'Read the access log before the rotation'
+          ansible.builtin.slurp:
+            src: "{{ webserver_traefik__test_log }}"
+          register: 'webserver_traefik__test_log_before'
+          until: webserver_traefik__test_log_before.content | b64decode is search('molecule-before-rotation')
+          retries: 10
+          delay: 1
+
+        # postrotate sends USR1, Traefik reopens access.log
+        - name: 'Rotate the logs'
+          ansible.builtin.command:
+            argv: [ 'logrotate', '--force', '/etc/logrotate.d/traefik' ]
+          changed_when: true
+
+        - name: 'Request a route after the rotation'
+          ansible.builtin.uri:
+            url: 'https://127.0.0.1/molecule-after-rotation'
+            headers:
+              Host: 'dynamic.molecule'
+            validate_certs: false
+            status_code: [ 200, 404 ]
+
+        - name: 'Read the access log after the rotation'
+          ansible.builtin.slurp:
+            src: "{{ webserver_traefik__test_log }}"
+          register: 'webserver_traefik__test_log_after'
+          until: webserver_traefik__test_log_after.content | b64decode is search('molecule-after-rotation')
+          retries: 10
+          delay: 1
+
+        - name: 'Read the rotated access log'
+          ansible.builtin.slurp:
+            src: "{{ webserver_traefik__test_log }}.1"
+          register: 'webserver_traefik__test_log_rotated'
+
+        - name: 'Assert the access log and its rotation'
+          ansible.builtin.assert:
+            that:
+              - webserver_traefik__test_logrotate_debug.rc == 0
+              - webserver_traefik__test_logrotate_debug.stderr is not search('error', ignorecase=true)
+              - webserver_traefik__test_log_rotated.content | b64decode is search('molecule-before-rotation')
+              - webserver_traefik__test_log_after.content | b64decode is not search('molecule-before-rotation')
+            fail_msg: >-
+              logrotate {{ webserver_traefik__test_logrotate_debug.stderr_lines }},
+              access.log {{ webserver_traefik__test_log_after.content | b64decode }},
+              access.log.1 {{ webserver_traefik__test_log_rotated.content | default('') | b64decode }}
+
+    - name: 'Assert the configuration of logrotate'
+      ansible.builtin.assert:
+        that:
+          - webserver_traefik__test_logrotate_stat.stat.exists == webserver_traefik__expect.accesslog
+        fail_msg: "/etc/logrotate.d/traefik exists: {{ webserver_traefik__test_logrotate_stat.stat.exists }}"
+

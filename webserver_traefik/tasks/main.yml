@@ -151,6 +151,9 @@
           {%-     set _ = errors.append('The realms of traefik_realms have to be unique.') -%}
           {%-   endif -%}
           {%- endif -%}
+          {%- if webserver_traefik__accesslog_enabled is not boolean -%}
+          {%-   set _ = errors.append('traefik_accesslog_enabled has to be true or false.') -%}
+          {%- endif -%}
           {{ errors }}
 
     # The options of Traefik could be set with TRAEFIK_*, Traefik ignores them if traefik.yml exists,
@@ -242,6 +245,48 @@
         - { path: "{{ webserver_traefik__certs_dir }}", mode: '0700' }
       loop_control:
         label: "{{ item.path }}"
+
+    # logrotate refuses directories other users can write to, the logs and the directory stay without the access log
+    - name: 'Create the directory of the logs'
+      when: webserver_traefik__accesslog_enabled | bool
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__log_dir }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0750'
+        state: 'directory'
+
+    # Traefik reopens its log files on USR1, it creates the new files itself, so there is no create.
+    # The PATH of logrotate is minimal, a stopped container must not make logrotate fail.
+    - name: 'Write the configuration of logrotate'
+      when: webserver_traefik__accesslog_enabled | bool
+      ansible.builtin.copy:
+        content: |
+          #
+          # Ansible managed
+          #
+          {{ webserver_traefik__log_dir }}/*.log {
+              daily
+              rotate 7
+              missingok
+              notifempty
+              compress
+              delaycompress
+              sharedscripts
+              postrotate
+                  /usr/bin/podman kill --signal=USR1 {{ webserver_traefik__container.name }} >/dev/null 2>&1 || true
+              endscript
+          }
+        dest: "{{ webserver_traefik__logrotate_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+
+    - name: 'Remove the configuration of logrotate'
+      when: not webserver_traefik__accesslog_enabled | bool
+      ansible.builtin.file:
+        path: "{{ webserver_traefik__logrotate_file }}"
+        state: 'absent'
 
     # The htpasswd module hashes the passwords with bcrypt
     - name: 'Install bcrypt for the htpasswd files'

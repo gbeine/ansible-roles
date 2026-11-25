@@ -21,6 +21,7 @@ webserver_traefik__config: >-
   {{ webserver_traefik__config_default
      | combine(webserver_traefik__config_provider_podman if webserver_traefik__provider_podman | bool else {}, recursive=true)
      | combine(webserver_traefik__config_provider_file if webserver_traefik__realms_valid | length > 0 else {}, recursive=true)
+     | combine(webserver_traefik__config_accesslog if webserver_traefik__accesslog_enabled | bool else {}, recursive=true)
      | combine(traefik_config | default({}), recursive=true) }}
 
 # Files of the dynamic configuration in <traefik_home>/dynamic, name without .yml and content, null removes the file
@@ -38,6 +39,9 @@ webserver_traefik__realms_dir: "{{ common_globals__pki_realms_dir }}"
 # The timer of pki_update restarts Traefik after the renewal of the certificate of a realm
 webserver_traefik__pki_update_enabled: "{{ traefik_pki_update_enabled | default(true) }}"
 webserver_traefik__pki_update_schedule: "{{ traefik_pki_update_schedule | default('*-*-* 00/4:00:00') }}"
+
+# The access log in <traefik_home>/log/access.log (/var/log/traefik in the container), rotated daily by logrotate on the host
+webserver_traefik__accesslog_enabled: "{{ traefik_accesslog_enabled | default(false) }}"
 
 # Variables of the image that are no options of Traefik, the options are set with traefik_config
 webserver_traefik__environment: "{{ traefik_environment }}"
@@ -78,6 +82,11 @@ webserver_traefik__config_provider_podman:
       exposedByDefault: false
 
 # Traefik reads realms.yml with the file provider
+# The access log with traefik_accesslog_enabled, traefik_config.accessLog adds options, e.g. format or filters
+webserver_traefik__config_accesslog:
+  accessLog:
+    filePath: "{{ webserver_traefik__log_container_dir }}/access.log"
+
 webserver_traefik__config_provider_file:
   providers:
     file:
@@ -161,6 +170,10 @@ webserver_traefik__podman_acme_file: "{{ webserver_traefik__podman_home }}/acme.
 webserver_traefik__users_dir: "{{ webserver_traefik__podman_home }}/users"
 webserver_traefik__certs_dir: "{{ webserver_traefik__podman_home }}/certs"
 webserver_traefik__users_container_dir: '/etc/traefik/users'
+# The logs of Traefik, rotated by logrotate on the host
+webserver_traefik__log_dir: "{{ webserver_traefik__podman_home }}/log"
+webserver_traefik__log_container_dir: '/var/log/traefik'
+webserver_traefik__logrotate_file: "/etc/logrotate.d/{{ webserver_traefik__container.name }}"
 webserver_traefik__certs_container_dir: '/etc/traefik/certs'
 
 webserver_traefik__podman_container_default:
@@ -185,7 +198,8 @@ webserver_traefik__podman_container_default:
          webserver_traefik__podman_acme_file + ':/etc/traefik/acme.json',
          webserver_traefik__users_dir + ':' + webserver_traefik__users_container_dir + ':ro',
          webserver_traefik__certs_dir + ':' + webserver_traefik__certs_container_dir + ':ro' ]
-       + ([ webserver_traefik__podman_socket + ':/var/run/docker.sock:ro' ] if webserver_traefik__provider_podman | bool else []) }}
+       + ([ webserver_traefik__podman_socket + ':/var/run/docker.sock:ro' ] if webserver_traefik__provider_podman | bool else [])
+       + ([ webserver_traefik__log_dir + ':' + webserver_traefik__log_container_dir ] if webserver_traefik__accesslog_enabled | bool else []) }}
   # Installs the certificates of the realms on every start, install follows the links of the source and sets the mode.
   # A renewed certificate is used after the next restart, the timer of pki_update restarts Traefik after a renewal.
   exec_start_pre: >-
