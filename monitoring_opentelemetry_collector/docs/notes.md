@@ -87,7 +87,7 @@ except to a reference of the environment (`${env:NAME}`), the environment is set
 
 The receiver `journald` of `otelcol-contrib` reads the journal of systemd with `journalctl`, the service user needs to be a member of `systemd-journal`.
 `otelcol_journal_enabled: true` adds the user `otel` (`otelcol`) or `otelcol-contrib` to the group, `false` (default) removes it again.
-The receiver `filelog` reads log files, on Debian the members of `adm` read the logs in `/var/log` and the access log of `webserver_traefik`
+The receiver `file_log` reads log files, on Debian the members of `adm` read the logs in `/var/log` and the access log of `webserver_traefik`
 (`<traefik_home>/log`, group `adm`). `otelcol_logs_enabled: true` adds the service user to `adm`, `false` (default) removes it again.
 A changed membership restarts the collector, the running process only gets the groups it was started with.
 
@@ -112,21 +112,24 @@ otelcol_distribution: 'otelcol-contrib'
 otelcol_logs_enabled: true
 otelcol_config:
   receivers:
-    filelog/traefik:
+    file_log/traefik:
       include: [ '/opt/traefik/log/access.log' ]
       start_at: 'end'
   service:
     pipelines:
       logs:
-        receivers: [ 'filelog/traefik' ]
+        receivers: [ 'file_log/traefik' ]
         processors: [ 'batch' ]
         exporters: [ 'otlphttp/backend' ]
 ```
+
+The collector still accepts the former names `filelog` and `resourcedetection` of `file_log` and `resource_detection`, it reports them as deprecated.
 
 ### Allowed keys
 
 The role only allows the keys `receivers`, `exporters`, `processors`, `connectors`, `extensions` and `service` on the first level of `otelcol_config`,
 generated from `Config` in `otelcol/config.go` of the OpenTelemetry Collector v0.165.0, the collector checks the keys below with `validate`.
+The role does not check the names of the components, the new names (e.g. `file_log`, `resource_detection`) and the former ones are checked by `validate`.
 This prevents unexpected behavior by accident, e.g. by a typo or a password that has to be passed as secret.
 
 ### Validation
@@ -157,7 +160,7 @@ Without the package the unit of the collector is missing, starting and restartin
   stay, set them to `null` to remove them.
 - `otelcol_secrets` is new, secrets passed with `${env:NAME}` keep working.
 - `otelcol_journal_enabled` is new, it adds the service user to `systemd-journal`, e.g. for the receiver `journald`.
-- `otelcol_logs_enabled` is new, it adds the service user to `adm`, e.g. for the receiver `filelog`.
+- `otelcol_logs_enabled` is new, it adds the service user to `adm`, e.g. for the receiver `file_log`.
 - Unknown keys on the first level of `otelcol_config` and fields carrying secrets with a value are rejected.
 - Fixed bug: the secrets were written as JSON strings with quotes, string fields like passwords received the quotes as part of the value.
   The next run writes the files verbatim and restarts the collector.
