@@ -14,6 +14,10 @@ security_strongswan__config: "{{ security_strongswan__config_default | combine(s
 # empty if the role does not manage the certificates
 security_strongswan__certificate: "{{ strongswan_certificate | default({}) }}"
 
+# On Debian the timer of pki_update restarts strongSwan after a renewal of the certificate of the sources realm and certbot
+security_strongswan__pki_update_enabled: "{{ strongswan_pki_update_enabled | default(true) }}"
+security_strongswan__pki_update_schedule: "{{ strongswan_pki_update_schedule | default('*-*-* 00/4:00:00') }}"
+
 #
 # Defaults - do not change
 #
@@ -56,6 +60,30 @@ security_strongswan__realm_files:
   - src: "{{ security_strongswan__realm_dir }}/public/crl.pem"
     dest: "{{ security_strongswan__crl_file }}"
     mode: '0644'
+# The files of the realm of pki_certbot, links to its archive
+security_strongswan__certbot_live_dir: >-
+  {{ security_strongswan__certificate_merged.home | default('') }}/etc/live/{{ security_strongswan__certificate_merged.realm | default('') }}
+security_strongswan__certbot_files:
+  - src: "{{ security_strongswan__certbot_live_dir }}/cert.pem"
+    dest: "{{ security_strongswan__cert_file }}"
+    mode: '0644'
+  - src: "{{ security_strongswan__certbot_live_dir }}/chain.pem"
+    dest: "{{ security_strongswan__chain_file }}"
+    mode: '0644'
+  - src: "{{ security_strongswan__certbot_live_dir }}/privkey.pem"
+    dest: "{{ security_strongswan__key_file }}"
+    mode: '0600'
+
+# On Debian ExecStartPre of strongswan.service copies these files at every start, the sources realm and certbot
+security_strongswan__start_files: >-
+  {%- set source = security_strongswan__certificate_merged.source | default('') -%}
+  {{ security_strongswan__realm_files if source == 'realm'
+     else (security_strongswan__certbot_files if source == 'certbot' else []) }}
+# pki_update restarts strongSwan when the certificate or the key is newer than the start, a new CRL is loaded at the next start
+security_strongswan__pki_update_certificates: >-
+  {{ security_strongswan__start_files | selectattr('dest', 'in', [ security_strongswan__cert_file, security_strongswan__key_file ])
+     | map(attribute='src') | list }}
+
 # The files of the realm missing on the host, read by tasks/main.yml
 security_strongswan__realm_missing: >-
   {{ security_strongswan__realm_stat.results | default([]) | rejectattr('stat.exists') | map(attribute='item.src') | list }}

@@ -107,25 +107,30 @@ strongswan_certificate:
     - 'security_strongswan'
 ```
 
-The source `realm` copies the files of the realm in every run, `pki_easyrsa_deploy` changes them only in a run of Ansible.
-A certificate renewed or built again by `pki_easyrsa_cert` is loaded by the next run of the role after `pki_easyrsa_deploy`.
+On Debian the sources `realm` and `certbot` are copied at every start of `strongswan.service`:
+the drop-in `/etc/systemd/system/strongswan.service.d/certificate.conf` runs `install` for every file with `ExecStartPre`,
+`install` follows the symlinks of certbot. charon loads the copies with `swanctl --load-all` after the start.
+The timer of `pki_update` (`pki-update@strongswan.timer`, every four hours by default) restarts strongSwan if the certificate or the key
+of the realm is newer than the start, the established tunnels are negotiated again.
+`strongswan_pki_update_enabled: false` disables the timer, `strongswan_pki_update_schedule` sets `OnCalendar`.
 
-With the source `realm` the role copies the CRL of the realm to `/etc/swanctl/x509crl/crl.pem`, strongSwan rejects revoked certificates of the peers.
-`pki_easyrsa_ca` renews the CRL before it expires, a play has to run the roles at least every `EASYRSA_CRL_DAYS / 2` days.
+| Source | Copied at the start | Watched by `pki_update` |
+|---|---|---|
+| `realm` | `public/<realm>.crt`, `private/<realm>.key`, `public/ca.crt`, `public/crl.pem` | `public/<realm>.crt`, `private/<realm>.key` |
+| `certbot` | `live/<realm>/cert.pem`, `chain.pem`, `privkey.pem` | `live/<realm>/cert.pem`, `privkey.pem` |
+
+With the source `realm` the CRL of the realm is copied to `/etc/swanctl/x509crl/crl.pem`, strongSwan rejects revoked certificates of the peers.
+A new CRL alone does not restart strongSwan, it is loaded at the next start, e.g. after the next renewal of the certificate.
+`pki_easyrsa_ca` renews the CRL before it expires, strongSwan has to restart at least every `EASYRSA_CRL_DAYS / 2` days.
+The root of the CA of the source `certbot` is still copied from the controller by the role.
 
 The role owns `/etc/swanctl/x509ca/` and `/etc/swanctl/x509crl/`: it removes every file there that does not belong to the current source,
 e.g. the CA of a former `ca_name` or `chain.pem` of a former source, swanctl would load them as trusted CAs and CRLs otherwise.
 After a removal the role loads the credentials with `swanctl --load-all --clear`, so charon forgets the removed files.
 Without `strongswan_certificate` the role does not touch the directories.
 
-The renewal of certbot and acme is deployed without Ansible:
-
-- `certbot`: the path unit `strongswan-certificate.path` watches the directory `live/<realm>/`, certbot replaces its symlinks after a renewal.
-  A watch on `cert.pem` would follow the symlink to the former file in `archive/`, which never changes.
-  `strongswan-certificate.service` runs `/usr/local/libexec/strongswan-certbot-deploy`, which waits 5 seconds until certbot replaced all symlinks,
-  copies the files and runs `swanctl --load-creds`.
-  Without the source `certbot` the role removes the units and the script.
-- `acme`: acme calls the hotplug scripts with `ACTION` `issued` and `renewed`,
+The renewal of acme on OpenWrt is deployed without Ansible:
+acme calls the hotplug scripts with `ACTION` `issued` and `renewed`,
   `/etc/hotplug.d/acme/50-strongswan` copies the files and runs `swanctl --load-creds`. Without the source `acme` the role removes the script.
 
 ### OpenWrt
@@ -160,17 +165,17 @@ the role fails with the messages of `swanctl` then.
 
 ### Check mode
 
-On Debian the role runs with `--check` also on a host without strongSwan and compares `ansible.conf`, the certificates from the controller
-and the deployment of the certificate of `pki_certbot`. Only the copies of the certificates of the host (the realm of `pki_easyrsa_deploy`
-and the certificate of `pki_certbot`) are skipped, they need the directories of `/etc/swanctl` of the package.
-The role detects the missing package by the missing `/etc/swanctl`, so it works with `--check` and with `check_mode` of a task.
+On Debian the role runs with `--check` also on a host without strongSwan and compares `ansible.conf`, the certificates from the controller,
+the drop-in of the copy at the start and the units of `pki_update`. Missing files of the realm or of certbot are only reported.
 On OpenWrt the role stops after the installation if strongSwan is missing, the UCI configuration of strongSwan does not exist then.
 
 ### Restart and reload
 
 strongSwan is started and enabled, or stopped and disabled with `enabled: false`.
-A changed configuration or certificate is loaded with `swanctl --load-all` without a restart, established security associations stay.
+A changed configuration or certificate from the controller is loaded with `swanctl --load-all` without a restart, established security associations stay.
 If the role removed files of `x509ca/` or `x509crl/`, it adds `--clear`, the credentials are loaded again from the files.
+A written or removed drop-in of the copy at the start (source `realm` or `certbot` on Debian) restarts strongSwan instead,
+`ExecStartPre` copies the files and charon loads everything. After a renewal `pki_update` restarts strongSwan.
 
 ### Migration
 
@@ -178,6 +183,18 @@ The role is new, there are no former variables.
 
 - The source `realm` deploys the certificates and the CRL of `pki_easyrsa_deploy`, the role depends on `common_globals` for the directory of the realms.
 - Files of former sources and names in `x509ca/` and `x509crl/` are removed, before they stayed trusted.
+- On Debian the sources `realm` and `certbot` are copied at every start of strongSwan by `ExecStartPre` instead of a run of the role,
+  `pki_update` restarts strongSwan after a renewal (new variables `strongswan_pki_update_enabled` and `strongswan_pki_update_schedule`).
+  A realm deployed by `pki_easyrsa_deploy` in the same play is used after the next restart.
+- The path unit of certbot and its script are no longer managed, remove them on hosts of a former version:
+
+  ```shell
+  systemctl disable --now strongswan-certificate.path
+  rm /etc/systemd/system/strongswan-certificate.path /etc/systemd/system/strongswan-certificate.service /usr/local/libexec/strongswan-certbot-deploy
+  systemctl daemon-reload
+  ```
+
+- `pki_update` has no removal: after a change from `realm` or `certbot` to `files` disable the timer with `systemctl disable --now pki-update@strongswan.timer`.
 
 ### Tests
 
@@ -203,13 +220,14 @@ The scenario `default` runs `check` after `prepare`: `converge` with `--check` o
 an invalid boolean, an unknown source, the source of the other platform, a source without its mandatory keys and a missing file on the controller,
 on Debian the source `realm` with `ca`, with an invalid name and with a realm missing on the host,
 and checks that it fails with the expected message and `ansible.conf` is unchanged (tasks marked `expect ERROR`).
-On `molecule-strongswan-default` it switches to the source `realm` with another `ca_name`, the certificate and the CRL of the realm are copied,
-the former CA is removed and the credentials are loaded with `--clear`.
+On `molecule-strongswan-default` it switches to the source `realm` with another `ca_name`, the drop-in is written and strongSwan restarts,
+`ExecStartPre` copies the certificate and the CRL of the realm and the former CA is removed.
 In the scenario `openwrt` it writes a CA certificate of a former source to `x509ca/`, the role removes it and loads with `--clear`.
-Then it renews the certificate (the symlink of certbot, the symlink of acme and `ACTION=renewed hotplug-call acme`),
-the hook has to deploy it, and changes `rekey_time`, the configuration is loaded.
+Then it renews the certificate (a new file and the symlink of certbot and `pki-update@strongswan.service`, the symlink of acme and `ACTION=renewed hotplug-call acme`),
+strongSwan has to use the renewed certificate, and changes `rekey_time`, the configuration is loaded.
 `verify` checks the service, the files with their modes, the deployed certificate, the lines of `ansible.conf` and the connection of `swanctl`,
-the files of `x509ca/` and `x509crl/` and the CRL loaded by charon, pings the other VM, the trap has to establish the IKE and the ESP security association in transport mode, and on Debian the path unit of the deployment.
+the files of `x509ca/` and `x509crl/` and the CRL loaded by charon, pings the other VM, the trap has to establish the IKE and the ESP security association in transport mode, and on Debian the `ExecStartPre` lines of the drop-in, the certificates watched by `pki_update` and its active timer,
+`strongswan-certificate.path` must not exist.
 If the ping fails, `verify` shows the negotiation of `swanctl --initiate`, the certificates, policies and security associations and the log of charon.
 
 | Environment variable | Default | Description |

@@ -146,19 +146,36 @@
           - security_strongswan__test_sas.results[1].stdout is search(security_strongswan__test_peer)
         fail_msg: "{{ security_strongswan__test_sas.results | map(attribute='stdout_lines') | list | to_json }}"
 
-    - name: 'Assert the deployment of the certificate of pki_certbot'
-      when: security_strongswan__test_case.renewal
-      block:
+    # ExecStartPre copies the certificate at every start, pki_update restarts strongSwan after a renewal
+    - name: 'Read the drop-in of strongSwan and the override of pki_update'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - '/etc/systemd/system/strongswan.service.d/certificate.conf'
+        - '/etc/systemd/system/pki-update@strongswan.service.d/override.conf'
+      register: 'security_strongswan__test_units'
 
-        - name: 'Read the state of the deployment of the certificate'
-          ansible.builtin.command: "systemctl is-active {{ item }}"
-          loop: [ 'strongswan-certificate.path' ]
-          register: 'security_strongswan__test_deploy'
-          changed_when: false
-          failed_when: false
+    - name: 'Read the timer of pki_update and the former deployment of certbot'
+      ansible.builtin.command:
+        argv: "{{ item }}"
+      loop:
+        - [ 'systemctl', 'is-active', 'pki-update@strongswan.timer' ]
+        - [ 'systemctl', 'list-unit-files', '--no-legend', 'strongswan-certificate.path' ]
+      register: 'security_strongswan__test_timer'
+      changed_when: false
+      failed_when: false
 
-        - name: 'Assert the path unit of the deployment'
-          ansible.builtin.assert:
-            that:
-              - security_strongswan__test_deploy.results[0].stdout == 'active'
-            fail_msg: "strongswan-certificate.path {{ security_strongswan__test_deploy.results[0].stdout }}"
+    - name: 'Assert the copy at the start and the timer of pki_update'
+      ansible.builtin.assert:
+        that:
+          - security_strongswan__test_dropin | select('match', 'ExecStartPre=/usr/bin/install ') | list | length == security_strongswan__expect.start_files
+          - security_strongswan__test_dropin | select('search', ' /etc/swanctl/x509/host.pem$') | list | length == 1
+          - ('Environment="PKI_CERTIFICATES=' ~ security_strongswan__expect.pki_certificates ~ '"') in security_strongswan__test_override
+          - security_strongswan__test_timer.results[0].stdout == 'active'
+          - security_strongswan__test_timer.results[1].stdout == ''
+        fail_msg: >-
+          drop-in {{ security_strongswan__test_dropin }}, override {{ security_strongswan__test_override }},
+          timer {{ security_strongswan__test_timer.results | map(attribute='stdout') | list }}
+      vars:
+        security_strongswan__test_dropin: "{{ (security_strongswan__test_units.results[0].content | b64decode).splitlines() }}"
+        security_strongswan__test_override: "{{ (security_strongswan__test_units.results[1].content | b64decode).splitlines() }}"

@@ -7,14 +7,6 @@
     update_cache: true
     cache_valid_time: 3600
 
-# In check mode the packages of a first installation are missing, copy with remote_src needs the directories of swanctl.
-# ansible_check_mode is only set by --check, the directory of swanctl shows the installation in every check mode.
-- name: 'Find the directory of swanctl'
-  ansible.builtin.stat:
-    path: "{{ security_strongswan__swanctl_dir }}"
-  register: 'security_strongswan__swanctl_stat'
-  check_mode: false
-
 - name: 'Write the configuration of swanctl'
   ansible.builtin.template:
     src: 'swanctl.conf.j2'
@@ -54,38 +46,18 @@
     mode: '0644'
   register: 'security_strongswan__ca_result'
 
-# pki_easyrsa_deploy changes the realm only in a run of Ansible, the play runs security_strongswan afterwards
-- name: 'Copy the certificate of the realm of pki_easyrsa_deploy'
-  when:
-    - security_strongswan__certificate_merged.source | default('') == 'realm'
-    # Only in check mode, the validation stops a real run with missing files
-    - security_strongswan__realm_missing | length == 0
-    # Only in check mode, the directories of swanctl are missing without the packages
-    - security_strongswan__swanctl_stat.stat.isdir | default(false)
-  ansible.builtin.copy:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    remote_src: true
-    owner: 'root'
-    group: 'root'
-    mode: "{{ item.mode }}"
-  loop: "{{ security_strongswan__realm_files }}"
-  loop_control:
-    label: "{{ item.dest }}"
-  register: 'security_strongswan__realm_result'
-
-- name: 'Deploy the certificate of pki_certbot'
+# The certificate of pki_certbot has to exist before ExecStartPre copies it
+- name: 'Validate the certificate of pki_certbot'
   when: security_strongswan__certificate_merged.source | default('') == 'certbot'
   vars:
-    security_strongswan__live_dir: "{{ security_strongswan__certificate_merged.home }}/etc/live/{{ security_strongswan__certificate_merged.realm }}"
     security_strongswan__certbot_message: >-
-      {{ security_strongswan__live_dir }}/cert.pem does not exist, pki_certbot has to issue the certificate
+      {{ security_strongswan__certbot_live_dir }}/cert.pem does not exist, pki_certbot has to issue the certificate
       of the realm {{ security_strongswan__certificate_merged.realm }} first.
   block:
 
     - name: 'Find the certificate of pki_certbot'
       ansible.builtin.stat:
-        path: "{{ security_strongswan__live_dir }}/cert.pem"
+        path: "{{ security_strongswan__certbot_live_dir }}/cert.pem"
       register: 'security_strongswan__certbot_cert'
 
     # In check mode pki_certbot does not issue a new certificate, the missing certificate is only reported
@@ -103,51 +75,33 @@
         - ansible_check_mode
         - not security_strongswan__certbot_cert.stat.exists
 
-    # The files of certbot are symlinks to the archive, the copies contain the files they point to
-    - name: 'Copy the certificate of pki_certbot'
-      # Only in check mode, the directories of swanctl are missing without the packages
-      # and the certificate is missing before pki_certbot issued it
-      when:
-        - security_strongswan__swanctl_stat.stat.isdir | default(false)
-        - security_strongswan__certbot_cert.stat.exists
-      ansible.builtin.copy:
-        src: "{{ security_strongswan__live_dir }}/{{ item.src }}"
-        dest: "{{ item.dest }}"
-        remote_src: true
-        owner: 'root'
-        group: 'root'
-        mode: "{{ item.mode }}"
-      loop:
-        - { src: 'cert.pem', dest: "{{ security_strongswan__cert_file }}", mode: '0644' }
-        - { src: 'chain.pem', dest: "{{ security_strongswan__chain_file }}", mode: '0644' }
-        - { src: 'privkey.pem', dest: "{{ security_strongswan__key_file }}", mode: '0600' }
-      loop_control:
-        label: "{{ item.dest }}"
-      register: 'security_strongswan__certbot_result'
+# pki_easyrsa_deploy and pki_certbot renew the certificate outside of the role, ExecStartPre copies it at every start,
+# the links of certbot are followed by install
+- name: 'Create the directory of the drop-ins of strongSwan'
+  when: security_strongswan__start_files | length > 0
+  ansible.builtin.file:
+    path: "{{ security_strongswan__debian_dropin_dir }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0755'
+    state: 'directory'
 
-    # certbot renews the certificate in its container, the path unit copies and loads it afterwards
-    - name: 'Write the deployment of the certificate of pki_certbot'
-      ansible.builtin.template:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        owner: 'root'
-        group: 'root'
-        mode: "{{ item.mode }}"
-      loop:
-        - { src: 'strongswan-certbot-deploy.j2', dest: "{{ security_strongswan__debian_deploy_script }}", mode: '0755' }
-        - { src: 'strongswan-certificate.service.j2', dest: "/etc/systemd/system/{{ security_strongswan__debian_deploy_unit }}.service", mode: '0644' }
-        - { src: 'strongswan-certificate.path.j2', dest: "/etc/systemd/system/{{ security_strongswan__debian_deploy_unit }}.path", mode: '0644' }
-      loop_control:
-        label: "{{ item.dest }}"
-      register: 'security_strongswan__deploy_result'
+- name: 'Write the copy of the certificate at the start of strongSwan'
+  when: security_strongswan__start_files | length > 0
+  ansible.builtin.template:
+    src: 'strongswan-certificate.conf.j2'
+    dest: "{{ security_strongswan__debian_dropin_file }}"
+    owner: 'root'
+    group: 'root'
+    mode: '0644'
+  register: 'security_strongswan__dropin_result'
 
-    - name: 'Start and enable the deployment of the certificate'
-      ansible.builtin.systemd_service:
-        name: "{{ security_strongswan__debian_deploy_unit }}.path"
-        daemon_reload: "{{ security_strongswan__deploy_result is changed }}"
-        enabled: true
-        state: "{{ 'restarted' if security_strongswan__deploy_result is changed else 'started' }}"
-      when: not ansible_check_mode
+- name: 'Remove the copy of the certificate at the start of strongSwan'
+  when: security_strongswan__start_files | length == 0
+  ansible.builtin.file:
+    path: "{{ security_strongswan__debian_dropin_file }}"
+    state: 'absent'
+  register: 'security_strongswan__dropin_removed'
 
 # A file of a former source or ca_name would stay a trusted CA or a CRL of swanctl
 - name: 'Remove the certificates of former sources'
@@ -170,39 +124,13 @@
            | reject('in', security_strongswan__managed_files) | list }}
       register: 'security_strongswan__cleanup_result'
 
-# Without the source certbot the deployment of a former run is removed
-- name: 'Remove the deployment of the certificate of pki_certbot'
-  when: security_strongswan__certificate_merged.source | default('') != 'certbot'
-  block:
-
-    - name: 'Find the deployment of the certificate of pki_certbot'
-      ansible.builtin.stat:
-        path: "/etc/systemd/system/{{ security_strongswan__debian_deploy_unit }}.path"
-      register: 'security_strongswan__deploy_unit'
-
-    - name: 'Stop and disable the deployment of the certificate'
-      ansible.builtin.systemd_service:
-        name: "{{ security_strongswan__debian_deploy_unit }}.path"
-        enabled: false
-        state: 'stopped'
-      when:
-        - not ansible_check_mode
-        - security_strongswan__deploy_unit.stat.exists
-
-    - name: 'Remove the files of the deployment'
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: 'absent'
-      loop:
-        - "{{ security_strongswan__debian_deploy_script }}"
-        - "/etc/systemd/system/{{ security_strongswan__debian_deploy_unit }}.service"
-        - "/etc/systemd/system/{{ security_strongswan__debian_deploy_unit }}.path"
-
+# A changed drop-in takes effect with a restart, ExecStartPre copies the certificate and charon loads everything
 - name: 'Start and enable strongSwan'
   ansible.builtin.systemd_service:
     name: "{{ security_strongswan__debian_service }}"
+    daemon_reload: "{{ security_strongswan__dropin_changed | bool }}"
     enabled: true
-    state: 'started'
+    state: "{{ 'restarted' if security_strongswan__dropin_changed | bool else 'started' }}"
   register: 'security_strongswan__start_result'
   when:
     - not ansible_check_mode
@@ -219,12 +147,12 @@
   when:
     - not ansible_check_mode
     - security_strongswan__config.enabled | bool
+    # The restart loaded everything
+    - not security_strongswan__dropin_changed | bool
     - >-
       security_strongswan__config_result is changed
       or (security_strongswan__files_result | default({})) is changed
       or (security_strongswan__ca_result | default({})) is changed
-      or (security_strongswan__certbot_result | default({})) is changed
-      or (security_strongswan__realm_result | default({})) is changed
       or (security_strongswan__cleanup_result | default({})) is changed
 
 - name: 'Assert that swanctl loaded the configuration'
@@ -234,6 +162,19 @@
     fail_msg: "{{ [ 'swanctl --load-all failed:' ] + security_strongswan__load_result.stdout_lines + security_strongswan__load_result.stderr_lines }}"
     quiet: true
   when: security_strongswan__load_result is changed
+
+# ExecStartPre copies the certificate only at the start, the timer restarts strongSwan after a renewal
+- name: 'Enable the restart after a renewal of the certificate'
+  when:
+    - security_strongswan__pki_update_certificates | length > 0
+    - security_strongswan__pki_update_enabled | bool
+    - security_strongswan__config.enabled | bool
+  ansible.builtin.include_role:
+    name: 'pki_update'
+  vars:
+    pki_service: "{{ security_strongswan__debian_service }}"
+    pki_certificate: "{{ security_strongswan__pki_update_certificates }}"
+    pki_schedule: "{{ security_strongswan__pki_update_schedule }}"
 
 - name: 'Stop and disable strongSwan'
   ansible.builtin.systemd_service:

@@ -19,6 +19,11 @@
       key: "{{ security_strongswan__test_pki }}/{{ inventory_hostname }}.key"
       ca: "{{ security_strongswan__test_pki }}/ca.pem"
 
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
   tasks:
 
     - name: 'Set the role variables of the test case'
@@ -157,10 +162,17 @@
           message: 'a realm not deployed on the host'
           search: '^These files of the realm molecule-missing do not exist on the host, pki_easyrsa_deploy has to deploy the realm first: .*/molecule-missing/public/molecule-missing\.crt'
 
-    # The certificate of the realm replaces the certificate from the controller, the configuration is loaded
+    # The certificate of the realm replaces the certificate from the controller,
+    # the drop-in restarts strongSwan and ExecStartPre copies the files of the realm
     - name: 'Switch to the certificate of the realm of pki_easyrsa_deploy'
       when: security_strongswan__test_case.realm is defined
       block:
+
+        - name: 'Read the start time of strongSwan before the switch'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'strongswan' ]
+          register: 'security_strongswan__test_started_before'
+          changed_when: false
 
         - name: 'Run security_strongswan with the certificate of the realm'
           ansible.builtin.include_role:
@@ -174,17 +186,22 @@
                   {{ security_strongswan__test_mesh
                      | combine({ 'remote': { 'auth': 'pubkey', 'cacerts': security_strongswan__test_case.realm.ca_name } }) }}
 
-        - name: 'Assert the deployed and loaded certificate of the realm'
+        - name: 'Read the start time of strongSwan after the switch'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'strongswan' ]
+          register: 'security_strongswan__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the drop-in, the removed CA and the restart'
           ansible.builtin.assert:
             that:
-              - security_strongswan__realm_result is changed
+              - security_strongswan__dropin_result is changed
               - security_strongswan__cleanup_result is changed
-              - security_strongswan__load_result is changed
-              - "'--clear' in security_strongswan__load_result.cmd"
-              - security_strongswan__load_result.rc == 0
+              - security_strongswan__load_result is skipped
+              - security_strongswan__test_started_after.stdout | int > security_strongswan__test_started_before.stdout | int
             fail_msg: >-
-              realm {{ security_strongswan__realm_result | default({}) }}, cleanup {{ security_strongswan__cleanup_result | default({}) }},
-              load {{ security_strongswan__load_result | default({}) }}
+              drop-in {{ security_strongswan__dropin_result | default({}) }}, cleanup {{ security_strongswan__cleanup_result | default({}) }},
+              start before {{ security_strongswan__test_started_before.stdout }}, after {{ security_strongswan__test_started_after.stdout }}
 
     - name: 'Renew the certificate and change the configuration'
       when: security_strongswan__test_case.renewal
@@ -192,8 +209,13 @@
         security_strongswan__test_live: "{{ security_strongswan__test_certbot_home }}/etc/live/{{ security_strongswan__test_realm }}"
       block:
 
-        # certbot links the renewed certificate, the path unit copies and loads it
+        # certbot writes the renewed certificate to the archive and links it, pki_update compares its time with the start
         - name: 'Renew the certificate of pki_certbot'
+          ansible.builtin.file:
+            path: "{{ security_strongswan__test_certbot_home }}/etc/archive/{{ security_strongswan__test_realm }}/cert2.pem"
+            state: 'touch'
+
+        - name: 'Link the renewed certificate'
           ansible.builtin.file:
             src: "../../archive/{{ security_strongswan__test_realm }}/cert2.pem"
             dest: "{{ security_strongswan__test_live }}/cert.pem"
@@ -208,7 +230,13 @@
             follow: true
           register: 'security_strongswan__test_renewed'
 
-        - name: 'Wait for the deployment of the renewed certificate'
+        # The timer would start it later, pki_update restarts strongSwan and ExecStartPre copies the renewed certificate
+        - name: 'Run pki_update of strongSwan'
+          ansible.builtin.systemd_service:
+            name: 'pki-update@strongswan.service'
+            state: 'started'
+
+        - name: 'Wait for the copy of the renewed certificate'
           ansible.builtin.stat:
             path: '/etc/swanctl/x509/host.pem'
             checksum_algorithm: 'md5'
