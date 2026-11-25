@@ -1,0 +1,542 @@
+---
+
+- name: 'Deploy Pocket ID'
+  tags: [ 'security', 'security_pocketid' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter, pocketid_container or pocketid_environment not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - security_pocketid__container | length > 0
+          # combine fails here if pocketid_environment is no dictionary
+          - security_pocketid__environment | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pocketid__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        security_pocketid__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = security_pocketid__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`pocketid_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`pocketid_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `pocketid_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The key encrypts the data of Pocket ID, the API key lets the role manage the users and clients
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pocketid__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_pocketid__targets: "{{ security_pocketid__secrets | map(attribute='target') | map('string') | list }}"
+        security_pocketid__secrets_missing: "{{ security_pocketid__secrets_required | reject('in', security_pocketid__targets) | list }}"
+        security_pocketid__secrets_duplicate: >-
+          {{ security_pocketid__targets | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list }}
+        # Pocket ID reads ENCRYPTION_KEY from its file without removing a line break
+        security_pocketid__secrets_invalid: >-
+          {{ security_pocketid__secrets | rejectattr('data', 'string') | map(attribute='name') | list
+             + security_pocketid__secrets | selectattr('data', 'string') | selectattr('data', 'search', '[\r\n]') | map(attribute='name') | list
+             + security_pocketid__secrets | selectattr('data', 'string') | selectattr('data', 'eq', '') | map(attribute='name') | list }}
+        security_pocketid__secrets_short: >-
+          {%- set short = [] -%}
+          {%- for secret in security_pocketid__secrets if secret.target in security_pocketid__secrets_min_length
+                and (secret.data | string | length) < security_pocketid__secrets_min_length[secret.target] -%}
+          {%-   set _ = short.append(secret.target) -%}
+          {%- endfor -%}
+          {{ short }}
+        security_pocketid__secrets_in_environment: >-
+          {{ (security_pocketid__secret_variables + security_pocketid__secret_files.values() | list + security_pocketid__environment_role)
+             | select('in', security_pocketid__environment.keys() | list) | unique | list }}
+        security_pocketid__environment_set: >-
+          {{ security_pocketid__environment | dict2items | rejectattr('value', 'in', [ '', none ]) | map(attribute='key') | list }}
+        security_pocketid__environment_missing: >-
+          {{ security_pocketid__environment_required | reject('in', security_pocketid__environment_set) | list }}
+        security_pocketid__app_url: "{{ security_pocketid__environment.APP_URL | default('', true) | string }}"
+        security_pocketid__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_pocketid__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Pocket ID needs the secrets ' ~ (security_pocketid__secrets_required | join(', ')) ~ ', missing: ' ~ (security_pocketid__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__secrets_duplicate | length > 0 -%}
+          {%-   set _ = errors.append('Every target of pocketid_secrets is set once: ' ~ (security_pocketid__secrets_duplicate | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__secrets_invalid | length > 0 -%}
+          {%-   set _ = errors.append('Secrets are strings without line breaks: ' ~ (security_pocketid__secrets_invalid | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__secrets_short | length > 0 -%}
+          {%-   set _ = errors.append('These secrets need at least 16 characters: ' ~ (security_pocketid__secrets_short | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets, their file variables and the variables set by the role must not be set in pocketid_environment: '
+                                    ~ (security_pocketid__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('Pocket ID needs the environment variables ' ~ (security_pocketid__environment_required | join(', '))
+                                    ~ ', missing or empty: ' ~ (security_pocketid__environment_missing | join(', ')) ~ '.') -%}
+          {%- elif security_pocketid__app_url is not match('^https?://[^/ \t]+$') -%}
+          {%-   set _ = errors.append('APP_URL has to be the http or https URL of Pocket ID without a path: ' ~ security_pocketid__app_url ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the values of the environment'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pocketid__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_pocketid__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(booleans=[], lines=[], values=[]) -%}
+          {%- for key, value in security_pocketid__environment.items() if value is not none -%}
+          {%-   if value is mapping or (value is sequence and value is not string) -%}
+          {%-     set ns.values = ns.values + [ key ] -%}
+          {%-   elif key in security_pocketid__environment_booleans and value is not boolean and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-     set ns.booleans = ns.booleans + [ key ] -%}
+          {%-   elif value is string and (value ~ '.').splitlines() | length > 1 -%}
+          {%-     set ns.lines = ns.lines + [ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('The values of pocketid_environment are strings, numbers or booleans: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These variables are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('Values must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The names follow the patterns of Pocket ID, the groups of users and clients are managed by the role
+    - name: 'Validate the admin, the groups, the users and the clients'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pocketid__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_pocketid__errors: >-
+          {%- set errors = [] -%}
+          {%- set admin = security_pocketid__admin -%}
+          {%- set ns = namespace(lists=[], groups=[], users=[], clients=[], unknown_groups=[], secrets=[], states=[], lines=[], booleans=[], emails=[]) -%}
+          {%- if admin is not mapping or admin.username is not defined -%}
+          {%-   set _ = errors.append('pocketid_admin has to be a dictionary with username.') -%}
+          {%- else -%}
+          {%-   if admin.keys() | reject('in', security_pocketid__admin_keys) | list | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in pocketid_admin, allowed are ' ~ (security_pocketid__admin_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if admin.username is not string or admin.username is not match(security_pocketid__username_pattern) or admin.username | length > 50 -%}
+          {%-     set _ = errors.append('The username of pocketid_admin has up to 50 letters, digits, _, ., @ and -, it starts and ends with a letter or digit.') -%}
+          {%-   endif -%}
+          {%-   if security_pocketid__email_required | bool and (admin.email is not defined or admin.email is not string or admin.email | length == 0) -%}
+          {%-     set ns.emails = [ 'pocketid_admin' ] -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set lists = { 'pocketid_groups': security_pocketid__groups, 'pocketid_users': security_pocketid__users, 'pocketid_clients': security_pocketid__clients } -%}
+          {%- for name, items in lists.items() -%}
+          {%-   if items is not sequence or items is string or items is mapping or items | reject('mapping') | list | length > 0 -%}
+          {%-     set ns.lists = ns.lists + [ name ] -%}
+          {%-   else -%}
+          {%-     for item in items -%}
+          {%-       if item.state | default('present') not in [ 'present', 'absent' ] -%}
+          {%-         set ns.states = ns.states + [ name ] -%}
+          {%-       endif -%}
+          {%-       if item.values() | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-         set ns.lines = ns.lines + [ name ] -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.lists | length > 0 -%}
+          {%-   set _ = errors.append('These variables have to be lists of dictionaries: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%- else -%}
+          {%-   set group_names = security_pocketid__groups | rejectattr('state', 'defined') | map(attribute='name') | list
+                                 + security_pocketid__groups | selectattr('state', 'defined') | selectattr('state', 'eq', 'present') | map(attribute='name') | list -%}
+          {%-   for group in security_pocketid__groups -%}
+          {%-     if group.name is not defined or group.name is not string or group.name | length < 2 or group.name | length > 255
+                     or (group.friendly_name is defined and (group.friendly_name is not string or group.friendly_name | length < 2 or group.friendly_name | length > 50))
+                     or group.keys() | reject('in', security_pocketid__group_keys) | list | length > 0 -%}
+          {%-       set ns.groups = ns.groups + [ group.name | default(loop.index) | string ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   for user in security_pocketid__users -%}
+          {%-     if user.username is not defined or user.username is not string or user.username is not match(security_pocketid__username_pattern)
+                     or user.username | length > 50 or user.keys() | reject('in', security_pocketid__user_keys) | list | length > 0
+                     or (user.groups is defined and (user.groups is not sequence or user.groups is string or user.groups is mapping)) -%}
+          {%-       set ns.users = ns.users + [ user.username | default(loop.index) | string ] -%}
+          {%-     elif user.groups is defined -%}
+          {%-       set ns.unknown_groups = ns.unknown_groups + (user.groups | map('string') | reject('in', group_names) | list) -%}
+          {%-     endif -%}
+          {%-     if security_pocketid__email_required | bool and user.state | default('present') == 'present'
+                     and (user.email is not defined or user.email is not string or user.email | length == 0) -%}
+          {%-       set ns.emails = ns.emails + [ user.username | default(loop.index) | string ] -%}
+          {%-     endif -%}
+          {%-     set ns.booleans = ns.booleans + (security_pocketid__user_booleans | select('in', user) | reject('in', user | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list) | map('regex_replace', '^', (user.username | default('') | string) ~ '.') | list) -%}
+          {%-   endfor -%}
+          {%-   for client in security_pocketid__clients -%}
+          {%-     if client.id is not defined or client.id is not string or client.id is not match(security_pocketid__client_id_pattern)
+                     or client.id | length < 2 or client.id | length > 128
+                     or (client.state | default('present') == 'present' and (client.name is not defined or client.name is not string or client.name | length == 0 or client.name | length > 50))
+                     or client.keys() | reject('in', security_pocketid__client_keys) | list | length > 0
+                     or ['callback_urls', 'logout_callback_urls', 'groups'] | select('in', client) | reject('in', client | dict2items | selectattr('value', 'sequence') | rejectattr('value', 'string') | rejectattr('value', 'mapping') | map(attribute='key') | list) | list | length > 0 -%}
+          {%-       set ns.clients = ns.clients + [ client.id | default(loop.index) | string ] -%}
+          {%-     elif client.groups is defined -%}
+          {%-       set ns.unknown_groups = ns.unknown_groups + (client.groups | map('string') | reject('in', group_names) | list) -%}
+          {%-     endif -%}
+          {%-     if client.secret is defined and (client.secret is not string or client.secret | length < security_pocketid__client_secret_length or client.secret is not match('^[\x20-\x7e]+$')) -%}
+          {%-       set ns.secrets = ns.secrets + [ client.id | default(loop.index) | string ] -%}
+          {%-     endif -%}
+          {%-     set ns.booleans = ns.booleans + (security_pocketid__client_booleans | select('in', client) | reject('in', client | dict2items | selectattr('value', 'boolean') | map(attribute='key') | list) | map('regex_replace', '^', (client.id | default('') | string) ~ '.') | list) -%}
+          {%-   endfor -%}
+          {%-   for name, key in { 'pocketid_groups': 'name', 'pocketid_users': 'username', 'pocketid_clients': 'id' }.items() -%}
+          {%-     set values = lists[name] | map(attribute=key, default='') | list -%}
+          {%-     if values | unique | list | length != values | length -%}
+          {%-       set _ = errors.append('The ' ~ key ~ ' of the entries of ' ~ name ~ ' have to be unique.') -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {%- if ns.states | length > 0 -%}
+          {%-   set _ = errors.append('state is present or absent: ' ~ (ns.states | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('The values must not contain line breaks: ' ~ (ns.lines | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.groups | length > 0 -%}
+          {%-   set _ = errors.append('The groups are dictionaries with name (2 to 255 characters) and the keys ' ~ (security_pocketid__group_keys | join(', '))
+                                    ~ ', friendly_name has 2 to 50 characters: ' ~ (ns.groups | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.users | length > 0 -%}
+          {%-   set _ = errors.append('The users are dictionaries with username (up to 50 letters, digits, _, ., @ and -) and the keys '
+                                    ~ (security_pocketid__user_keys | join(', ')) ~ ', groups is a list: ' ~ (ns.users | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.clients | length > 0 -%}
+          {%-   set _ = errors.append('The clients are dictionaries with id (2 to 128 letters, digits, ., _ and -), name (up to 50 characters) and the keys '
+                                    ~ (security_pocketid__client_keys | join(', ')) ~ ', callback_urls, logout_callback_urls and groups are lists: ' ~ (ns.clients | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.unknown_groups | length > 0 -%}
+          {%-   set _ = errors.append('The groups of users and clients have to be present in pocketid_groups: ' ~ (ns.unknown_groups | unique | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.secrets | length > 0 -%}
+          {%-   set _ = errors.append('The secrets of the clients have at least ' ~ security_pocketid__client_secret_length ~ ' printable ASCII characters: ' ~ (ns.secrets | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These keys are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.emails | length > 0 -%}
+          {%-   set _ = errors.append('Pocket ID requires an email unless UI_CONFIG_DISABLED is true and REQUIRE_USER_EMAIL is false: ' ~ (ns.emails | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging pocketid_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pocketid__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_pocketid__container_environment: >-
+          {{ security_pocketid__container.environment if security_pocketid__container.environment | default(none) is mapping else {} }}
+        security_pocketid__environment_unknown: >-
+          {{ security_pocketid__container_environment.keys() | map('string') | reject('in', security_pocketid__environment_allowed) | list }}
+        security_pocketid__environment_line_breaks: >-
+          {{ security_pocketid__container_environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        security_pocketid__secrets_unknown: >-
+          {{ security_pocketid__secrets | map(attribute='target') | map('string') | reject('in', security_pocketid__secret_files.keys() | list) | list }}
+        security_pocketid__errors: >-
+          {%- set errors = [] -%}
+          {%- if security_pocketid__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (security_pocketid__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (security_pocketid__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of Pocket ID (security_pocketid__environment_allowed) and the secrets '
+                                    ~ (security_pocketid__secret_files.keys() | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if security_pocketid__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: '
+                                    ~ (security_pocketid__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the certificate'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ security_pocketid__errors | join(' ') }}"
+        quiet: true
+      vars:
+        security_pocketid__errors: >-
+          {%- set errors = [] -%}
+          {%- set tls = security_pocketid__tls -%}
+          {%- if tls is not mapping -%}
+          {%-   set _ = errors.append('pocketid_tls has to be a dictionary with the realm, e.g. { "realm": "id.example.org" }.') -%}
+          {%- elif tls | length > 0 -%}
+          {%-   set unknown = tls.keys() | map('string') | reject('in', security_pocketid__tls_keys) | list -%}
+          {%-   if unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in pocketid_tls: ' ~ (unknown | join(', ')) ~ ', allowed are realm and dir.') -%}
+          {%-   endif -%}
+          {%-   if not (security_pocketid__tls_realm is string and security_pocketid__tls_realm is match(security_pocketid__tls_realm_pattern)) -%}
+          {%-     set _ = errors.append('pocketid_tls.realm is the name of a realm of letters, digits, _, . and -.') -%}
+          {%-   endif -%}
+          {%-   if not security_pocketid__tls_dir_valid | bool -%}
+          {%-     set _ = errors.append('pocketid_tls.dir has to be an absolute path without line breaks, e.g. /opt/certbot/etc/live.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the home directory'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__home is string
+          - security_pocketid__home is match('/')
+          - security_pocketid__home is not search('[\n\r]')
+        fail_msg: 'pocketid_home has to be an absolute path.'
+        quiet: true
+
+    # The realm is deployed on the host by pki_easyrsa_deploy or pki_certbot
+    - name: 'Find the certificate of the realm'
+      ansible.builtin.stat:
+        path: "{{ item.src }}"
+      loop: "{{ security_pocketid__tls_files if security_pocketid__tls_valid | bool else [] }}"
+      loop_control:
+        label: "{{ item.src }}"
+      register: 'security_pocketid__tls_stat'
+
+    # In check mode pki_easyrsa_deploy and pki_certbot do not create a new realm, the missing files are only reported
+    - name: 'Validate the certificate of the realm'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or security_pocketid__tls_missing | length == 0
+        fail_msg: "{{ security_pocketid__tls_message }}"
+        quiet: true
+      vars:
+        security_pocketid__tls_missing: "{{ security_pocketid__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+        security_pocketid__tls_message: >-
+          These files of the realm {{ security_pocketid__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ security_pocketid__tls_missing | join(', ') }}.
+
+    - name: 'Report the missing certificate of the realm in check mode'
+      ansible.builtin.debug:
+        msg: >-
+          These files of the realm {{ security_pocketid__tls_realm }} do not exist on the host,
+          pki_easyrsa_deploy or pki_certbot has to deploy the certificate first: {{ security_pocketid__tls_missing | join(', ') }}.
+      when:
+        - ansible_check_mode
+        - security_pocketid__tls_missing | length > 0
+      vars:
+        security_pocketid__tls_missing: "{{ security_pocketid__tls_stat.results | rejectattr('stat.exists') | map(attribute='item.src') | list }}"
+
+    - name: 'Create the directory of Pocket ID'
+      ansible.builtin.file:
+        path: "{{ security_pocketid__podman_home }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
+        state: 'directory'
+
+    # The entrypoint of the image changes the owner of /app/data to PUID and PGID (1000) on every start
+    - name: 'Create the directory of the data'
+      ansible.builtin.file:
+        path: "{{ security_pocketid__podman_data_dir }}"
+        owner: "{{ security_pocketid__uid }}"
+        group: "{{ security_pocketid__gid }}"
+        mode: '0750'
+        state: 'directory'
+
+    # ExecStartPre copies the certificate of the realm into it, the user of Pocket ID reads it
+    - name: 'Create the directory of the certificate'
+      when: security_pocketid__tls_valid | bool
+      ansible.builtin.file:
+        path: "{{ security_pocketid__podman_tls_dir }}"
+        owner: "{{ security_pocketid__uid }}"
+        group: "{{ security_pocketid__gid }}"
+        mode: '0700'
+        state: 'directory'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ security_pocketid__secrets }}"
+      register: 'security_pocketid__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ security_pocketid__container.name }}"
+        hostname: "{{ security_pocketid__container.hostname }}"
+        image: "{{ security_pocketid__container.image }}"
+        ip: "{{ security_pocketid__container.ip }}"
+        ip6: "{{ security_pocketid__container.ipv6 | default(omit) }}"
+        network: "{{ security_pocketid__container.network }}"
+        timezone: "{{ security_pocketid__container.timezone }}"
+        command: "{{ security_pocketid__container.command | default(omit) }}"
+        env: "{{ security_pocketid__container.environment | default(omit) }}"
+        etc_hosts: "{{ security_pocketid__container.etc_hosts | default(omit) }}"
+        expose: "{{ security_pocketid__container.expose | default(omit) }}"
+        label: "{{ security_pocketid__container.labels | default(omit) }}"
+        publish: "{{ security_pocketid__container.publish | default(omit) }}"
+        secrets: "{{ security_pocketid__container.secrets | default(omit) }}"
+        volume: "{{ security_pocketid__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% for command in security_pocketid__container.exec_start_pre | default([]) %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if security_pocketid__container.requires is defined %}
+          Requires={{ security_pocketid__container.requires | join(' ') }}
+          {% endif %}
+          {% if security_pocketid__container.wants is defined %}
+          Wants={{ security_pocketid__container.wants | join(' ') }}
+          {% endif %}
+          {% if security_pocketid__container.after is defined %}
+          After={{ security_pocketid__container.after | join(' ') }}
+          {% endif %}
+          {% if security_pocketid__container.part_of is defined %}
+          PartOf={{ security_pocketid__container.part_of | join(' ') }}
+          {% endif %}
+          {% if security_pocketid__container.binds_to is defined %}
+          BindsTo={{ security_pocketid__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if security_pocketid__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ security_pocketid__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'security_pocketid__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Pocket ID'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ security_pocketid__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if security_pocketid__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            security_pocketid__running: >-
+              {{ (ansible_facts.services[security_pocketid__container.name + '.service'].state | default('')) == 'running' }}
+            security_pocketid__restart: >-
+              {{ security_pocketid__running | bool
+                 and (security_pocketid__secrets_result is changed or security_pocketid__quadlet_result is changed) }}
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ security_pocketid__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'security_pocketid__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ security_pocketid__container.name ~ ' did not start' ] + security_pocketid__start_journal.stdout_lines }}"
+
+    # The health check answers 204 without login
+    - name: 'Wait for Pocket ID'
+      ansible.builtin.uri:
+        url: "{{ security_pocketid__api_url }}/healthz"
+        validate_certs: false
+        status_code: [ 204 ]
+        # Without the container the address does not answer, a short timeout ends the wait in time
+        timeout: 5
+      register: 'security_pocketid__ready'
+      until: security_pocketid__ready.status | default(-1) == 204
+      retries: 60
+      delay: 2
+      failed_when: false
+      when: 'not ansible_check_mode'
+
+    - name: 'Read the log of Pocket ID'
+      when:
+        - not ansible_check_mode
+        - security_pocketid__ready.status | default(-1) != 204
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ security_pocketid__container.name }}", '-n', '60', '--no-pager' ]
+      register: 'security_pocketid__journal'
+      changed_when: false
+
+    - name: 'Assert that Pocket ID answers'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__journal is skipped
+        fail_msg: "{{ security_pocketid__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    # Creates the admin once, the setup of Pocket ID is closed then; the API key and the secrets of the clients are options with no_log
+    - name: 'Configure the admin, the groups, the users and the clients'
+      when: 'not ansible_check_mode'
+      security_pocketid_api:
+        url: "{{ security_pocketid__api_url }}"
+        api_key: "{{ security_pocketid__api_key }}"
+        validate_certs: false
+        admin: "{{ security_pocketid__admin }}"
+        groups: "{{ security_pocketid__groups }}"
+        users: "{{ security_pocketid__users }}"
+        clients: "{{ security_pocketid__clients }}"
+      register: 'security_pocketid__api_result'
+
+    - name: 'Enable autoupdate on container'
+      when: 'security_pocketid__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ security_pocketid__container.name }}"
+        container_image: "{{ security_pocketid__container.image }}"
+        container_schedule: "{{ security_pocketid__autoupdate_schedule }}"
+
+    # ExecStartPre copies the certificate only at the start, the timer restarts Pocket ID after a renewal
+    - name: 'Enable the restart after a renewal of the certificate'
+      when:
+        - security_pocketid__tls_valid | bool
+        - security_pocketid__pki_update_enabled | bool
+      ansible.builtin.include_role:
+        name: 'pki_update'
+      vars:
+        pki_service: "{{ security_pocketid__container.name }}"
+        pki_certificate: "{{ security_pocketid__tls_files | map(attribute='src') | list }}"
+        pki_schedule: "{{ security_pocketid__pki_update_schedule }}"

@@ -1,0 +1,260 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_pocketid__test_case: "{{ security_pocketid__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_pocketid__expect: "{{ security_pocketid__test_case.expect }}"
+    security_pocketid__test_url: "{{ security_pocketid__expect.url }}"
+    # The certificate of the realm is verified with the CA of the PKI by openssl, the requests do not validate the certificate
+    security_pocketid__test_ca: "{{ security_pocketid__test_realms_dir }}/{{ security_pocketid__test_realm }}/public/ca.crt"
+    security_pocketid__test_plain: >-
+      {{ security_pocketid__test_case.role_vars.pocketid_secrets | map(attribute='data') | list
+         + security_pocketid__expect.clients | selectattr('secret', 'defined') | map(attribute='secret') | list }}
+    security_pocketid__test_api_key: >-
+      {{ security_pocketid__test_case.role_vars.pocketid_secrets | selectattr('target', 'eq', 'STATIC_API_KEY') | map(attribute='data') | first }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ security_pocketid__test_quadlet_path }}"
+      register: 'security_pocketid__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + security_pocketid__test_image) in security_pocketid__test_quadlet_lines
+          - ('IP=' + security_pocketid__expect.ip) in security_pocketid__test_quadlet_lines
+          - security_pocketid__expect.ip6 is none or ('IP6=' + security_pocketid__expect.ip6) in security_pocketid__test_quadlet_lines
+          - security_pocketid__expect.ip6 is not none or security_pocketid__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - security_pocketid__expect.quadlet | reject('in', security_pocketid__test_quadlet_lines) | list | length == 0
+          - (security_pocketid__test_quadlet_lines | select('match', 'ExecStartPre=install ') | list | length == 2) == security_pocketid__expect.tls
+          - security_pocketid__test_plain | select('in', security_pocketid__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ security_pocketid__test_quadlet_lines | to_json }}"
+      vars:
+        security_pocketid__test_quadlet_lines: "{{ (security_pocketid__test_quadlet.content | b64decode | regex_replace('[\\x22\\x27]', '')).splitlines() }}"
+
+    - name: 'Read the state of the service'
+      ansible.builtin.command: 'systemctl is-active pocket-id'
+      register: 'security_pocketid__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the container'
+      ansible.builtin.command: 'podman inspect pocket-id'
+      register: 'security_pocketid__test_inspect'
+      changed_when: false
+
+    # The secrets are files, the environment only contains their paths
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_service.stdout == 'active'
+          - security_pocketid__test_net.IPAddress == security_pocketid__expect.ip
+          - security_pocketid__expect.ip6 is none or security_pocketid__test_net.GlobalIPv6Address == security_pocketid__expect.ip6
+          - security_pocketid__expect.env | reject('in', security_pocketid__test_env) | list | length == 0
+          - security_pocketid__test_plain | select('in', security_pocketid__test_env | join(' ')) | list | length == 0
+          - security_pocketid__test_env | select('match', 'TZ=') | list | length == 0
+          - security_pocketid__test_container.Config.Timezone == security_pocketid__test_case.role_vars.pocketid_timezone
+        fail_msg: >-
+          service {{ security_pocketid__test_service.stdout }}, time zone {{ security_pocketid__test_container.Config.Timezone | default('') }},
+          IPv4 {{ security_pocketid__test_net.IPAddress }}, IPv6 {{ security_pocketid__test_net.GlobalIPv6Address }},
+          environment {{ security_pocketid__test_env | join(', ') }}
+      vars:
+        security_pocketid__test_container: "{{ (security_pocketid__test_inspect.stdout | from_json)[0] }}"
+        security_pocketid__test_net: "{{ security_pocketid__test_container.NetworkSettings.Networks[security_pocketid__test_case.role_vars.pocketid_network] }}"
+        security_pocketid__test_env: "{{ security_pocketid__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'pocket-id' ]
+      register: 'security_pocketid__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'pocket-id', '-n', '80', '--no-pager' ]
+      register: 'security_pocketid__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ security_pocketid__test_restarts.stdout ] + security_pocketid__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the directories of Pocket ID'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ security_pocketid__test_home }}/data"
+        - "{{ security_pocketid__test_home }}/tls/privkey.pem"
+      register: 'security_pocketid__test_files'
+
+    - name: 'Assert the directories of Pocket ID'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_files.results[0].stat.uid == 1000
+          - security_pocketid__test_files.results[0].stat.mode == '0750'
+          - security_pocketid__test_files.results[1].stat.exists == security_pocketid__expect.tls
+          - not security_pocketid__expect.tls or security_pocketid__test_files.results[1].stat.mode == '0600'
+          - not security_pocketid__expect.tls or security_pocketid__test_files.results[1].stat.uid == 1000
+        fail_msg: "{{ security_pocketid__test_files.results | map(attribute='stat') | list | to_json }}"
+
+    - name: 'Verify the certificate of Pocket ID with the CA of the realm'
+      when: security_pocketid__expect.tls
+      ansible.builtin.command:
+        argv: [ 'openssl', 's_client', '-connect', "{{ security_pocketid__expect.ip }}:1411", '-CAfile', "{{ security_pocketid__test_ca }}",
+                '-verify_ip', "{{ security_pocketid__expect.ip }}", '-verify_return_error', '-brief' ]
+        stdin: ''
+      register: 'security_pocketid__test_tls'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the certificate of Pocket ID'
+      when: security_pocketid__expect.tls
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_tls.rc == 0
+          - "security_pocketid__test_tls.stderr is search('Verification: OK')"
+        fail_msg: "{{ security_pocketid__test_tls.stderr_lines }}"
+
+    # The health check answers 204, the setup of the first admin is closed, the discovery names APP_URL as issuer
+    - name: 'Read the health check, the setup and the discovery'
+      ansible.builtin.uri:
+        url: "{{ security_pocketid__test_url }}{{ item }}"
+        validate_certs: false
+        return_content: true
+        status_code: [ 200, 204, 400, 403, 404, 409 ]
+      loop: [ '/healthz', '/api/signup/setup', '/.well-known/openid-configuration' ]
+      register: 'security_pocketid__test_public'
+
+    - name: 'Assert the health check, the closed setup and the issuer'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_public.results[0].status == 204
+          - security_pocketid__test_public.results[1].status != 204
+          - security_pocketid__test_public.results[2].status == 200
+          - (security_pocketid__test_public.results[2].json | default({})).issuer | default('') == security_pocketid__expect.issuer
+        fail_msg: >-
+          health {{ security_pocketid__test_public.results[0].status }}, setup {{ security_pocketid__test_public.results[1].status }},
+          discovery {{ security_pocketid__test_public.results[2].status }} {{ security_pocketid__test_public.results[2].json | default({}) | to_json | truncate(300) }}
+
+    - name: 'Read the users, the groups and the clients with the API key'
+      ansible.builtin.uri:
+        url: "{{ security_pocketid__test_url }}{{ item }}?pagination[limit]=100"
+        headers:
+          X-API-Key: "{{ security_pocketid__test_api_key }}"
+        validate_certs: false
+        return_content: true
+      loop: [ '/api/users', '/api/user-groups', '/api/oidc/clients' ]
+      register: 'security_pocketid__test_api'
+      no_log: true
+
+    - name: 'Read the managed clients'
+      ansible.builtin.uri:
+        url: "{{ security_pocketid__test_url }}/api/oidc/clients/{{ item.id }}"
+        headers:
+          X-API-Key: "{{ security_pocketid__test_api_key }}"
+        validate_certs: false
+        return_content: true
+      loop: "{{ security_pocketid__expect.clients }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: 'security_pocketid__test_clients'
+      no_log: true
+
+    - name: 'Assert the admin, the groups, the users and the clients'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_admin | length == 1
+          - security_pocketid__test_admin[0].isAdmin
+          - security_pocketid__test_groups == security_pocketid__expect.groups
+          - security_pocketid__test_user_groups == security_pocketid__expect.users
+          - security_pocketid__expect.absent | default([]) | select('in', security_pocketid__test_names) | list | length == 0
+          - security_pocketid__test_client_values == security_pocketid__test_client_expected
+        fail_msg: >-
+          admin {{ security_pocketid__test_admin | to_json }}, groups {{ security_pocketid__test_groups }}, users {{ security_pocketid__test_user_groups }},
+          names {{ security_pocketid__test_names }}, clients {{ security_pocketid__test_client_values }}
+      vars:
+        security_pocketid__test_users: "{{ security_pocketid__test_api.results[0].json.data }}"
+        security_pocketid__test_admin: "{{ security_pocketid__test_users | selectattr('username', 'eq', security_pocketid__expect.admin) | list }}"
+        security_pocketid__test_groups: "{{ security_pocketid__test_api.results[1].json.data | items2dict(key_name='name', value_name='friendlyName') }}"
+        security_pocketid__test_user_groups: >-
+          {%- set result = {} -%}
+          {%- for user in security_pocketid__test_users if user.username in security_pocketid__expect.users -%}
+          {%-   set _ = result.update({ user.username: user.userGroups | map(attribute='name') | sort }) -%}
+          {%- endfor -%}
+          {{ result }}
+        security_pocketid__test_names: >-
+          {{ security_pocketid__test_users | map(attribute='username') | list
+             + security_pocketid__test_api.results[1].json.data | map(attribute='name') | list
+             + security_pocketid__test_api.results[2].json.data | map(attribute='id') | list }}
+        security_pocketid__test_client_values: >-
+          {%- set result = [] -%}
+          {%- for client in security_pocketid__test_clients.results | map(attribute='json') -%}
+          {%-   set _ = result.append({ 'id': client.id, 'public': client.isPublic, 'callback_urls': client.callbackURLs,
+                                       'groups': client.allowedUserGroups | default([], true) | map(attribute='name') | list }) -%}
+          {%- endfor -%}
+          {{ result }}
+        security_pocketid__test_client_expected: >-
+          {%- set result = [] -%}
+          {%- for client in security_pocketid__expect.clients -%}
+          {%-   set _ = result.append({ 'id': client.id, 'public': client.public, 'callback_urls': client.callback_urls, 'groups': client.groups }) -%}
+          {%- endfor -%}
+          {{ result }}
+
+    # The introspection authenticates the client with HTTP Basic, a wrong secret answers 401
+    - name: 'Authenticate the confidential clients with their secret and a wrong one'
+      ansible.builtin.uri:
+        url: "{{ security_pocketid__test_url }}/api/oidc/introspect"
+        method: 'POST'
+        url_username: "{{ item.0.id }}"
+        url_password: "{{ item.0.secret if item.1 else 'molecule-wrong-secret-0123456789' }}"
+        force_basic_auth: true
+        body_format: 'form-urlencoded'
+        body:
+          token: 'molecule-token'
+        validate_certs: false
+        status_code: [ 200, 400, 401 ]
+      loop: "{{ security_pocketid__expect.clients | selectattr('secret', 'defined') | product([ true, false ]) | list }}"
+      loop_control:
+        label: "{{ item.0.id }} {{ 'secret' if item.1 else 'wrong secret' }}"
+      register: 'security_pocketid__test_introspect'
+      no_log: true
+
+    - name: 'Assert the secrets of the clients'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_introspect.results | selectattr('item.1') | rejectattr('status', 'eq', 200) | list | length == 0
+          - security_pocketid__test_introspect.results | rejectattr('item.1') | rejectattr('status', 'eq', 401) | list | length == 0
+        fail_msg: >-
+          {%- set answers = [] -%}
+          {%- for result in security_pocketid__test_introspect.results -%}
+          {%-   set _ = answers.append(result.item.0.id ~ (' secret ' if result.item.1 else ' wrong secret ') ~ (result.status | default('none') | string)) -%}
+          {%- endfor -%}
+          The right secret answers 200, a wrong one 401: {{ answers | join(', ') }}
+
+    # The admin logs in once with the link of one-time-access-token, the command runs as the user of Pocket ID
+    - name: 'Create a login link for the admin'
+      ansible.builtin.command:
+        argv: [ 'podman', 'exec', '--user', '1000:1000', 'pocket-id', '/app/pocket-id', 'one-time-access-token', "{{ security_pocketid__expect.admin }}" ]
+      register: 'security_pocketid__test_token'
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 'Assert the login link of the admin'
+      ansible.builtin.assert:
+        that:
+          - security_pocketid__test_token.rc == 0
+          - security_pocketid__test_token.stdout is search(security_pocketid__expect.issuer ~ '/lc/')
+        fail_msg: "rc {{ security_pocketid__test_token.rc }}, {{ security_pocketid__test_token.stderr | default('') | truncate(500) }}"

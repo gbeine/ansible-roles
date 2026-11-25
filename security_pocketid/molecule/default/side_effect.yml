@@ -1,0 +1,261 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_pocketid__test_case: "{{ security_pocketid__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_pocketid__test_vars: "{{ security_pocketid__test_case.role_vars }}"
+    security_pocketid__test_environment: "{{ security_pocketid__test_vars.pocketid_environment }}"
+    security_pocketid__test_secrets: "{{ security_pocketid__test_vars.pocketid_secrets }}"
+    security_pocketid__test_restart: "{{ security_pocketid__test_case.side_effect is defined }}"
+    security_pocketid__test_checked_files:
+      - "{{ security_pocketid__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ security_pocketid__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ security_pocketid__test_checked_files }}"
+      register: 'security_pocketid__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run security_pocketid with pocketid_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_container: [ 'environment' ]
+        security_pocketid__test_invalid:
+          message: 'pocketid_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run security_pocketid with pocketid_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: [ 'APP_URL' ]
+        security_pocketid__test_invalid:
+          message: 'pocketid_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run security_pocketid with pocketid_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_secrets: { 'name': 'pocketid_encryption_key', 'data': 'x', 'target': 'ENCRYPTION_KEY' }
+        security_pocketid__test_invalid:
+          message: 'pocketid_secrets not a list'
+          search: '^`pocketid_secrets` has to be a list$'
+
+    - name: 'Run security_pocketid with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_secrets: "{{ security_pocketid__test_secrets + [ { 'name': 'pocketid_other', 'data': 'x' } ] }}"
+        security_pocketid__test_invalid:
+          message: 'a secret without target'
+          search: '^`pocketid_secrets` entries need name, data and target$'
+
+    - name: 'Run security_pocketid with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_secrets: "{{ security_pocketid__test_secrets + [ { 'name': 'pocketid_other', 'data': 'molecule-other-secret', 'target': 'TLS_KEY' } ] }}"
+        security_pocketid__test_invalid:
+          message: 'an unknown secret'
+          search: 'Unknown secrets: TLS_KEY\.'
+
+    - name: 'Run security_pocketid without the encryption key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_secrets: "{{ security_pocketid__test_secrets | rejectattr('target', 'eq', 'ENCRYPTION_KEY') | list }}"
+        security_pocketid__test_invalid:
+          message: 'without the encryption key'
+          search: '^Pocket ID needs the secrets ENCRYPTION_KEY, STATIC_API_KEY, missing: ENCRYPTION_KEY\.$'
+
+    - name: 'Run security_pocketid without the API key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_secrets: "{{ security_pocketid__test_secrets | rejectattr('target', 'eq', 'STATIC_API_KEY') | list }}"
+        security_pocketid__test_invalid:
+          message: 'without the API key'
+          search: '^Pocket ID needs the secrets ENCRYPTION_KEY, STATIC_API_KEY, missing: STATIC_API_KEY\.$'
+
+    - name: 'Run security_pocketid with a short encryption key (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_secrets: >-
+          {{ security_pocketid__test_secrets | rejectattr('target', 'eq', 'ENCRYPTION_KEY') | list
+             + [ { 'name': 'pocketid_encryption_key', 'data': 'molecule-short', 'target': 'ENCRYPTION_KEY' } ] }}
+        security_pocketid__test_invalid:
+          message: 'a short encryption key'
+          search: '^These secrets need at least 16 characters: ENCRYPTION_KEY\.$'
+
+    - name: 'Run security_pocketid with the encryption key in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine({ 'ENCRYPTION_KEY': 'molecule-plain-key-0123456789' }) }}"
+        security_pocketid__test_invalid:
+          message: 'the encryption key in the environment'
+          search: '^Secrets, their file variables and the variables set by the role must not be set in pocketid_environment: ENCRYPTION_KEY\.$'
+
+    - name: 'Run security_pocketid without APP_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine({ 'APP_URL': '' }) }}"
+        security_pocketid__test_invalid:
+          message: 'without APP_URL'
+          search: '^Pocket ID needs the environment variables APP_URL, missing or empty: APP_URL\.$'
+
+    - name: 'Run security_pocketid with a path in APP_URL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine({ 'APP_URL': 'https://molecule.test/id' }) }}"
+        security_pocketid__test_invalid:
+          message: 'a path in APP_URL'
+          search: '^APP_URL has to be the http or https URL of Pocket ID without a path: https://molecule.test/id\.$'
+
+    - name: 'Run security_pocketid with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine({ 'POCKET_MOLECULE': 'unknown' }) }}"
+        security_pocketid__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: POCKET_MOLECULE\.'
+
+    - name: 'Run security_pocketid with a boolean as string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine({ 'UI_CONFIG_DISABLED': 'yes' }) }}"
+        security_pocketid__test_invalid:
+          message: 'a boolean as string'
+          search: '^These variables are booleans, allowed are true and false: UI_CONFIG_DISABLED\.$'
+
+    - name: 'Run security_pocketid with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine({ 'APP_NAME': 'Molecule\nID' }) }}"
+        security_pocketid__test_invalid:
+          message: 'a line break in a value'
+          search: '^Values must not contain line breaks: APP_NAME\.$'
+
+    - name: 'Run security_pocketid with an invalid username of the admin (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_admin:
+          username: '-molecule'
+          email: 'molecule@molecule.test'
+        security_pocketid__test_invalid:
+          message: 'an invalid username of the admin'
+          search: '^The username of pocketid_admin has up to 50 letters'
+
+    - name: 'Run security_pocketid with an admin and a user without email (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_admin:
+          username: 'molecule-admin'
+        pocketid_users:
+          - username: 'molecule-user'
+          - username: 'molecule-gone'
+            state: 'absent'
+        security_pocketid__test_invalid:
+          message: 'an admin and a user without email'
+          search: '^Pocket ID requires an email unless UI_CONFIG_DISABLED is true and REQUIRE_USER_EMAIL is false: pocketid_admin, molecule-user\.$'
+
+    - name: 'Run security_pocketid with an unknown group of a user (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_users:
+          - username: 'molecule-user'
+            email: 'molecule-user@molecule.test'
+            groups: [ 'molecule-unknown' ]
+        security_pocketid__test_invalid:
+          message: 'an unknown group of a user'
+          search: '^The groups of users and clients have to be present in pocketid_groups: molecule-unknown\.$'
+
+    - name: 'Run security_pocketid with a short secret and an unknown key of a client (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_clients:
+          - id: 'molecule-invalid'
+            name: 'Molecule invalid'
+            redirect_uris: [ 'https://invalid.molecule.test' ]
+            secret: 'short'
+        security_pocketid__test_invalid:
+          message: 'a short secret and an unknown key of a client'
+          search: >-
+            ^The clients are dictionaries with id .*: molecule-invalid\.
+            The secrets of the clients have at least 16 printable ASCII characters: molecule-invalid\.$
+
+    - name: 'Run security_pocketid with pocketid_tls not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_tls: 'id.molecule.test'
+        security_pocketid__test_invalid:
+          message: 'pocketid_tls not a dictionary'
+          search: '^pocketid_tls has to be a dictionary with the realm'
+
+    - name: 'Run security_pocketid with a realm without certificate (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_tls:
+          realm: 'missing.molecule.test'
+        security_pocketid__test_invalid:
+          message: 'a realm without certificate'
+          search: 'These files of the realm missing\.molecule\.test do not exist on the host'
+
+    - name: 'Run security_pocketid with a relative home directory (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        pocketid_home: 'opt/pocket-id'
+        security_pocketid__test_invalid:
+          message: 'a relative home directory'
+          search: '^pocketid_home has to be an absolute path\.$'
+
+    # molecule-pocketid changes the environment and has to restart, molecule-pocketid-default runs again without a change
+    - name: 'Read the start time of the service before the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'pocket-id' ]
+      register: 'security_pocketid__test_started_before'
+      changed_when: false
+
+    - name: 'Set the changed environment'
+      ansible.builtin.set_fact:
+        pocketid_environment: "{{ security_pocketid__test_environment | combine(security_pocketid__test_case.side_effect.environment | default({})) }}"
+
+    - name: 'Run security_pocketid with the changed environment'
+      ansible.builtin.include_role:
+        name: 'security_pocketid'
+
+    - name: 'Read the start time of the service after the change'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'pocket-id' ]
+      register: 'security_pocketid__test_started_after'
+      changed_when: false
+
+    # The admin, the groups, the users and the clients exist, the API changes nothing
+    - name: 'Assert the changed quadlet unit, the restart and no change through the API'
+      ansible.builtin.assert:
+        that:
+          - (security_pocketid__quadlet_result is changed) == security_pocketid__test_restart | bool
+          - security_pocketid__secrets_result is not changed
+          - security_pocketid__api_result is not changed
+          - (security_pocketid__test_started_after.stdout | int > security_pocketid__test_started_before.stdout | int) == security_pocketid__test_restart | bool
+        fail_msg: >-
+          quadlet changed: {{ security_pocketid__quadlet_result is changed }},
+          secrets changed: {{ security_pocketid__secrets_result is changed }},
+          API changes: {{ security_pocketid__api_result.changes | default([]) }},
+          start before {{ security_pocketid__test_started_before.stdout }}, after {{ security_pocketid__test_started_after.stdout }}

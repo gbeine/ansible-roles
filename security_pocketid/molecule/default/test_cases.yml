@@ -1,0 +1,182 @@
+---
+# Network created by container_podman in prepare.yml
+security_pocketid__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+security_pocketid__test_image: 'ghcr.io/pocket-id/pocket-id:latest'
+security_pocketid__test_quadlet_path: '/etc/containers/systemd/pocket-id.container'
+security_pocketid__test_home: '/opt/pocket-id'
+
+# The CA and the certificate of the realm, created by prepare.yml with openssl on the controller,
+# the certificate names the realm and the address of molecule-pocketid
+security_pocketid__test_pki: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/pki"
+security_pocketid__test_realm: 'id.molecule.test'
+security_pocketid__test_realms_dir: '/etc/pki/realms'
+security_pocketid__test_tls_ip: '10.89.0.131'
+
+security_pocketid__test_cases:
+
+  # Only the mandatory variables with SQLite
+  - name: 'molecule-pocketid-default'
+    role_vars:
+      pocketid_home: "{{ security_pocketid__test_home }}"
+      pocketid_ip: '10.89.0.130'
+      pocketid_network: 'podman-molecule'
+      pocketid_hostname: 'pocketid-default'
+      pocketid_timezone: 'Europe/Berlin'
+      pocketid_environment:
+        APP_URL: 'https://id-default.molecule.test'
+      pocketid_secrets:
+        - name: 'pocketid_encryption_key'
+          data: 'molecule-encryption-key-0123456789'
+          target: 'ENCRYPTION_KEY'
+        - name: 'pocketid_static_api_key'
+          data: 'molecule-static-api-key-0123456789'
+          target: 'STATIC_API_KEY'
+      pocketid_admin:
+        username: 'admin'
+        email: 'admin@id-default.molecule.test'
+    expect:
+      ip: '10.89.0.130'
+      ip6: ~
+      url: 'http://10.89.0.130:1411'
+      tls: false
+      issuer: 'https://id-default.molecule.test'
+      quadlet:
+        - 'Volume=/opt/pocket-id/data:/app/data'
+        - 'Secret=pocketid_encryption_key,type=mount,target=/run/secrets/pocketid_encryption_key,uid=1000,gid=1000,mode=0400'
+        - 'Secret=pocketid_static_api_key,type=mount,target=/run/secrets/pocketid_static_api_key,uid=1000,gid=1000,mode=0400'
+      env:
+        - 'APP_URL=https://id-default.molecule.test'
+        - 'ANALYTICS_DISABLED=true'
+        - 'VERSION_CHECK_DISABLED=true'
+        - 'ENCRYPTION_KEY_FILE=/run/secrets/pocketid_encryption_key'
+        - 'STATIC_API_KEY_FILE=/run/secrets/pocketid_static_api_key'
+      admin: 'admin'
+      groups: {}
+      users: {}
+      clients: []
+
+  # PostgreSQL, IPv6, labels, the configuration of the application in the environment with the SMTP password as secret,
+  # groups, a user, a confidential and a public client and the certificate of a realm with https only
+  - name: 'molecule-pocketid'
+    database:
+      name: 'molecule-postgres'
+      image: 'docker.io/library/postgres:17'
+      ip: '10.89.0.21'
+      port: 5432
+      environment:
+        POSTGRES_DB: 'molecule_pid'
+        POSTGRES_USER: 'molecule_pid'
+        POSTGRES_PASSWORD: 'molecule-pg-password'
+    role_vars:
+      pocketid_home: "{{ security_pocketid__test_home }}"
+      pocketid_ip: "{{ security_pocketid__test_tls_ip }}"
+      pocketid_ipv6: 'fd00:89::131'
+      pocketid_network: 'podman-molecule'
+      pocketid_hostname: 'pocketid-molecule'
+      pocketid_timezone: 'Europe/Berlin'
+      pocketid_labels:
+        traefik.enable: 'false'
+      pocketid_tls:
+        realm: "{{ security_pocketid__test_realm }}"
+      pocketid_environment:
+        APP_URL: 'https://id.molecule.test'
+        UI_CONFIG_DISABLED: true
+        APP_NAME: 'Molecule ID'
+        SMTP_HOST: 'smtp.molecule.test'
+        SMTP_USER: 'molecule'
+        LOG_LEVEL: 'debug'
+      pocketid_secrets:
+        - name: 'pocketid_encryption_key'
+          data: 'molecule-encryption-key-0123456789'
+          target: 'ENCRYPTION_KEY'
+        - name: 'pocketid_static_api_key'
+          data: 'molecule-static-api-key-0123456789'
+          target: 'STATIC_API_KEY'
+        - name: 'pocketid_db_connection'
+          data: 'postgres://molecule_pid:molecule-pg-password@10.89.0.21:5432/molecule_pid?sslmode=disable'
+          target: 'DB_CONNECTION_STRING'
+        - name: 'pocketid_smtp_password'
+          data: 'molecule-smtp-password'
+          target: 'SMTP_PASSWORD'
+      pocketid_admin:
+        username: 'molecule-admin'
+        email: 'admin@molecule.test'
+        first_name: 'Molecule'
+        last_name: 'Admin'
+      pocketid_groups:
+        - name: 'molecule-users'
+          friendly_name: 'Molecule Users'
+        - name: 'molecule-admins'
+        - name: 'molecule-gone'
+          state: 'absent'
+      pocketid_users:
+        - username: 'jane'
+          email: 'jane@molecule.test'
+          first_name: 'Jane'
+          last_name: 'Doe'
+          groups: [ 'molecule-users' ]
+        - username: 'gone'
+          state: 'absent'
+      pocketid_clients:
+        - id: 'molecule-service'
+          name: 'Molecule service'
+          callback_urls: [ 'https://service.molecule.test/callback' ]
+          groups: [ 'molecule-users' ]
+          secret: 'molecule-client-secret-0123456789'
+        - id: 'molecule-spa'
+          name: 'Molecule SPA'
+          callback_urls: [ 'https://spa.molecule.test/callback' ]
+          public: true
+          pkce: true
+        - id: 'molecule-gone'
+          state: 'absent'
+    # side_effect changes the name of the application, the quadlet unit changes and Pocket ID restarts
+    side_effect:
+      environment:
+        APP_NAME: 'Molecule ID changed'
+    expect:
+      ip: "{{ security_pocketid__test_tls_ip }}"
+      ip6: 'fd00:89::131'
+      url: 'https://10.89.0.131:1411'
+      tls: true
+      issuer: 'https://id.molecule.test'
+      quadlet:
+        - 'Volume=/opt/pocket-id/data:/app/data'
+        - 'Volume=/opt/pocket-id/tls:/app/tls:ro'
+        - 'Secret=pocketid_db_connection,type=mount,target=/run/secrets/pocketid_db_connection,uid=1000,gid=1000,mode=0400'
+        - 'Secret=pocketid_smtp_password,type=mount,target=/run/secrets/pocketid_smtp_password,uid=1000,gid=1000,mode=0400'
+        - 'Label=traefik.enable=false'
+      env:
+        - 'APP_URL=https://id.molecule.test'
+        - 'APP_NAME=Molecule ID changed'
+        - 'UI_CONFIG_DISABLED=true'
+        - 'DB_CONNECTION_STRING_FILE=/run/secrets/pocketid_db_connection'
+        - 'SMTP_PASSWORD_FILE=/run/secrets/pocketid_smtp_password'
+        - 'TLS_CERT_FILE=/app/tls/fullchain.pem'
+        - 'TLS_KEY_FILE=/app/tls/privkey.pem'
+      admin: 'molecule-admin'
+      # The groups with their friendly names, the users with their groups
+      groups:
+        molecule-users: 'Molecule Users'
+        molecule-admins: 'molecule-admins'
+      users:
+        jane: [ 'molecule-users' ]
+      absent: [ 'gone', 'molecule-gone' ]
+      clients:
+        - id: 'molecule-service'
+          public: false
+          callback_urls: [ 'https://service.molecule.test/callback' ]
+          groups: [ 'molecule-users' ]
+          secret: 'molecule-client-secret-0123456789'
+        - id: 'molecule-spa'
+          public: true
+          callback_urls: [ 'https://spa.molecule.test/callback' ]
+          groups: []

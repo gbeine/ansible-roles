@@ -1,0 +1,102 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    security_pocketid__test_case: "{{ security_pocketid__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    security_pocketid__test_realm_dir: "{{ security_pocketid__test_realms_dir }}/{{ security_pocketid__test_realm }}"
+    podman_networks:
+      - "{{ security_pocketid__test_network }}"
+    podman_default_network: "{{ security_pocketid__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the images, so the first start of the services does not time out'
+      containers.podman.podman_image:
+        name: "{{ item }}"
+      loop: "{{ [ security_pocketid__test_image ] + ([ security_pocketid__test_case.database.image ] if security_pocketid__test_case.database is defined else []) }}"
+      register: 'security_pocketid__test_pull'
+      until: security_pocketid__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    # molecule-pocketid-default uses SQLite
+    - name: 'Start the database'
+      when: security_pocketid__test_case.database is defined
+      containers.podman.podman_container:
+        name: "{{ security_pocketid__test_case.database.name }}"
+        image: "{{ security_pocketid__test_case.database.image }}"
+        network: "{{ security_pocketid__test_network.name }}"
+        ip: "{{ security_pocketid__test_case.database.ip }}"
+        env: "{{ security_pocketid__test_case.database.environment }}"
+        state: 'started'
+
+    - name: 'Wait for the database'
+      when: security_pocketid__test_case.database is defined
+      ansible.builtin.wait_for:
+        host: "{{ security_pocketid__test_case.database.ip }}"
+        port: "{{ security_pocketid__test_case.database.port }}"
+        timeout: 120
+
+    - name: 'Create the PKI on the controller'
+      ansible.builtin.include_tasks:
+        file: 'tasks/pki.yml'
+        apply:
+          delegate_to: 'localhost'
+          become: false
+          run_once: true
+
+    # The realm with the structure of pki_easyrsa_deploy, the links of certbot point to the files
+    - name: 'Create the realm of pki_easyrsa_deploy'
+      when: security_pocketid__test_case.role_vars.pocketid_tls is defined
+      block:
+
+        - name: 'Create the directories of the realm'
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: 'directory'
+            mode: "{{ item.mode }}"
+          loop:
+            - { path: '/etc/pki', mode: '0755' }
+            - { path: "{{ security_pocketid__test_realms_dir }}", mode: '0755' }
+            - { path: "{{ security_pocketid__test_realm_dir }}", mode: '0755' }
+            - { path: "{{ security_pocketid__test_realm_dir }}/public", mode: '0755' }
+            - { path: "{{ security_pocketid__test_realm_dir }}/private", mode: '0750' }
+
+        - name: 'Copy the certificates and the key to the realm'
+          ansible.builtin.copy:
+            src: "{{ item.src | default(omit) }}"
+            content: "{{ item.content | default(omit) }}"
+            dest: "{{ security_pocketid__test_realm_dir }}/{{ item.dest }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ security_pocketid__test_pki }}/realm.crt", dest: "public/{{ security_pocketid__test_realm }}.crt", mode: '0644' }
+            - { src: "{{ security_pocketid__test_pki }}/ca.crt", dest: 'public/ca.crt', mode: '0644' }
+            - content: >-
+                {{ lookup('ansible.builtin.file', security_pocketid__test_pki ~ '/realm.crt', rstrip=false)
+                   ~ lookup('ansible.builtin.file', security_pocketid__test_pki ~ '/ca.crt', rstrip=false) }}
+              dest: "public/{{ security_pocketid__test_realm }}.fullchain.crt"
+              mode: '0644'
+            - { src: "{{ security_pocketid__test_pki }}/realm.key", dest: "private/{{ security_pocketid__test_realm }}.key", mode: '0640' }
+          loop_control:
+            label: "{{ item.dest }}"
+
+        - name: 'Create the links of the realm compatible with certbot'
+          ansible.builtin.file:
+            src: "{{ item.src }}"
+            dest: "{{ security_pocketid__test_realm_dir }}/{{ item.dest }}"
+            state: 'link'
+            force: true
+          loop:
+            - { src: "public/{{ security_pocketid__test_realm }}.fullchain.crt", dest: 'fullchain.pem' }
+            - { src: "private/{{ security_pocketid__test_realm }}.key", dest: 'privkey.pem' }
