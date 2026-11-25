@@ -201,3 +201,36 @@
           - monitoring_opentelemetry_collector__test_export.headers['authorization'] | default('') == monitoring_opentelemetry_collector__test_expect.export_authorization
           - monitoring_opentelemetry_collector__test_export.headers['x-molecule'] | default('') == 'molecule'
         fail_msg: "{{ monitoring_opentelemetry_collector__test_export.headers | default({}) | to_json }}"
+
+    - name: 'Read the group of the journal'
+      ansible.builtin.getent:
+        database: 'group'
+        key: 'systemd-journal'
+
+    # The running process only has the groups it was started with, the restart has to take the new group over
+    - name: 'Read the groups of the running collector'
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          grep '^Groups:' /proc/$(systemctl show --property=MainPID --value {{ monitoring_opentelemetry_collector__test_expect.package }})/status
+        executable: '/bin/bash'
+      register: 'monitoring_opentelemetry_collector__test_process_groups'
+      changed_when: false
+
+    - name: 'Assert the membership in the group of the journal'
+      ansible.builtin.assert:
+        that:
+          - >-
+            (monitoring_opentelemetry_collector__test_user in monitoring_opentelemetry_collector__test_journal_members)
+            == monitoring_opentelemetry_collector__test_expect.journal
+          - >-
+            (monitoring_opentelemetry_collector__test_journal_gid in monitoring_opentelemetry_collector__test_process_groups.stdout.split()[1:])
+            == monitoring_opentelemetry_collector__test_expect.journal
+        fail_msg: >-
+          members {{ monitoring_opentelemetry_collector__test_journal_members }}, gid {{ monitoring_opentelemetry_collector__test_journal_gid }},
+          process {{ monitoring_opentelemetry_collector__test_process_groups.stdout }}
+      vars:
+        monitoring_opentelemetry_collector__test_user: >-
+          {{ 'otel' if monitoring_opentelemetry_collector__test_expect.package == 'otelcol' else 'otelcol-contrib' }}
+        monitoring_opentelemetry_collector__test_journal_gid: "{{ ansible_facts.getent_group['systemd-journal'][1] }}"
+        monitoring_opentelemetry_collector__test_journal_members: "{{ ansible_facts.getent_group['systemd-journal'][2].split(',') | select | list }}"

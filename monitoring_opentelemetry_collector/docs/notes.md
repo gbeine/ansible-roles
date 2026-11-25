@@ -83,6 +83,28 @@ The dictionaries on the path of a target may be missing in `otelcol_config`, the
 The fields `password`, `client_secret`, `bearer_token`, `api_key`, `token` and `authorization` must not be set in `otelcol_config`,
 except to a reference of the environment (`${env:NAME}`), the environment is set in `/etc/<distribution>/<distribution>.conf`.
 
+### Journal
+
+The receiver `journald` of `otelcol-contrib` reads the journal of systemd with `journalctl`, the service user needs to be a member of `systemd-journal`.
+`otelcol_journal_enabled: true` adds the user `otel` (`otelcol`) or `otelcol-contrib` to the group, `false` (default) removes it again.
+A changed membership restarts the collector, the running process only gets the groups it was started with.
+
+```yaml
+otelcol_distribution: 'otelcol-contrib'
+otelcol_journal_enabled: true
+otelcol_config:
+  receivers:
+    journald:
+      units: [ 'ssh', 'podman' ]
+      priority: 'info'
+  service:
+    pipelines:
+      logs:
+        receivers: [ 'journald' ]
+        processors: [ 'batch' ]
+        exporters: [ 'otlphttp/backend' ]
+```
+
 ### Allowed keys
 
 The role only allows the keys `receivers`, `exporters`, `processors`, `connectors`, `extensions` and `service` on the first level of `otelcol_config`,
@@ -94,6 +116,7 @@ This prevents unexpected behavior by accident, e.g. by a typo or a password that
 The role checks before any change:
 
 - `otelcol_distribution` is `otelcol` or `otelcol-contrib`, `otelcol_version` is `latest` or a release with patch level
+- `otelcol_journal_enabled` is `true` or `false`
 - `otelcol_config` contains only the allowed keys and no field carrying secrets with a value
 - `otelcol_secrets` is a list of entries with `name`, `data` and `target` with unique names matching `^[A-Za-z0-9_][A-Za-z0-9_.-]*$`,
   every target is a path below an allowed key, set once, not set in `otelcol_config` and leads through dictionaries only,
@@ -106,7 +129,8 @@ The collector checks the configuration with `validate` before `config.yaml` is r
 ### Check mode
 
 The role runs with `--check`, also on a host where it never ran: it reads the releases, downloads the package and checks its checksum,
-and reports the removed and installed packages, the secrets and `config.yaml`. `validate` does not run in check mode.
+and reports the removed and installed packages, the secrets, `config.yaml` and a pending change of the membership in `systemd-journal`.
+`validate` and `gpasswd` do not run in check mode.
 Without the package the unit of the collector is missing, starting and restarting the collector is skipped in check mode then.
 
 ### Migration
@@ -114,6 +138,7 @@ Without the package the unit of the collector is missing, starting and restartin
 - `otelcol_config` replaced the default completely, it is merged over the default now: keys of the default that are not part of `otelcol_config`
   stay, set them to `null` to remove them.
 - `otelcol_secrets` is new, secrets passed with `${env:NAME}` keep working.
+- `otelcol_journal_enabled` is new, it adds the service user to `systemd-journal`, e.g. for the receiver `journald`.
 - Unknown keys on the first level of `otelcol_config` and fields carrying secrets with a value are rejected.
 - Fixed bug: the secrets were written as JSON strings with quotes, string fields like passwords received the quotes as part of the value.
   The next run writes the files verbatim and restarts the collector.
@@ -131,13 +156,15 @@ The VMs need access to GitHub.
 
 `check` runs `converge` with `--check` on the new VMs.
 `side_effect` updates `otelcol-contrib` to 0.165.0, the configuration has to stay.
-Afterwards it runs the role with an unknown distribution, a version without patch level, a configuration that is no dictionary,
+Afterwards it runs the role with an unknown distribution, an option of the journal that is no boolean, a version without patch level, a configuration that is no dictionary,
 an unknown key, a secret in the configuration, a secret without target, an unknown secret, a target set in the configuration,
 a secret in a list and a configuration with an unknown receiver and checks that the role fails with the expected message and `config.yaml` is unchanged
 (tasks marked `expect ERROR`). `molecule-otelcol` runs the role again without a change, the collector must not restart.
 `verify` checks the installed packages and versions, the service without automatic restarts, the configuration with the reference of the secret,
 the file of the secret with its content verbatim and the OTLP port. On `molecule-otelcol-contrib` the test module `monitoring_opentelemetry_collector_test_export`
 sends a trace to the HTTP receiver and receives the export of `otlphttp/molecule` on port 4319, its header `Authorization` has to be the secret without quotes.
+`otelcol_journal_enabled` is set on `molecule-otelcol-contrib`, `verify` checks that the service user is a member of `systemd-journal`
+and that the running collector has the group, on `molecule-otelcol` neither.
 
 ```shell
 cd monitoring_opentelemetry_collector
