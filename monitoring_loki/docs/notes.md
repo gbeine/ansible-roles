@@ -24,6 +24,9 @@ loki_config:
     delete_request_store: 'filesystem'
 ```
 
+`null` removes a key of the default, e.g. `ruler: ~` removes the ruler of the default with its Alertmanager on `localhost:9093`,
+Loki uses its built-in defaults for the removed key then.
+
 Loki runs with `-config.file=/etc/loki/config.yaml -config.expand-env=true`, the flags are changed with `loki_container.command`.
 
 ### Secrets
@@ -123,6 +126,7 @@ without `loki_autoupdate_schedule` the schedule of `container_update` is used.
 - `TZ` is not set by default anymore, the time zone is set by podman with `loki_timezone`.
 - The references of the secrets are double-quoted in `config.yaml`, before a secret containing e.g. `: ` or ` #` broke the YAML or was cut off.
   `config.yaml` changes once and Loki restarts, secrets containing `"` or `\` are rejected.
+- Fixed bug: a key of `loki_config` set to `null` was written as `key: null` to `config.yaml`, now it removes the key of the default.
 - Unknown keys on the first level of `loki_config` are rejected, `requires_mounts_for`, `wants`, `after`, `part_of` and `binds_to` of `loki_container` are new.
 
 ### Tests
@@ -133,7 +137,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | Platform | Test case |
 |---|---|
 | `molecule-loki-default` | Only the mandatory variables |
-| `molecule-loki` | IPv6, labels, limits and the password of the Alertmanager of the ruler as secret with its path as target |
+| `molecule-loki` | IPv6, labels, limits, `server: ~` removes the key of the default and the password of the Alertmanager of the ruler as secret with its path as target |
 
 `prepare` creates the podman network, installs `curl` and pulls the image.
 `check` runs `converge` with `--check` on the new VMs.
@@ -145,7 +149,7 @@ then it pushes a log line and changes the limits on `molecule-loki`, `config.yam
 `molecule-loki-default` runs again without a change and Loki must not restart.
 `verify` checks the quadlet unit with the flags and the secret without its value, the service without automatic restarts, the addresses,
 the time zone and no `TZ` in the environment,
-the files and that `config.yaml` references the secret double-quoted, `/ready`, the version and the running configuration of `/config`
+the files, that `config.yaml` references the secret double-quoted and contains no removed key and no `null`, `/ready`, the version and the running configuration of `/config`
 (no reports of the usage, the limits, the expanded password of the Alertmanager),
 pushes a log line and finds it with `query_range`, on `molecule-loki` also the line pushed before the restart.
 
