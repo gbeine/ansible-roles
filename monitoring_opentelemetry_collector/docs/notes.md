@@ -77,7 +77,8 @@ otelcol_secrets:
     target: 'exporters.otlphttp.headers.authorization'
 ```
 
-The collector reads the content of the file as YAML, the role writes the secret as JSON string, so a secret like `1234` or `true` stays a string.
+The role writes the secret verbatim without a line break. For string fields (passwords, headers, tokens) the collector uses the content of the file as it is
+(the original string of `confmap`), so a secret like `1234` or `true` stays the string `1234` or `true`.
 The dictionaries on the path of a target may be missing in `otelcol_config`, the role creates them, a list or a value on the path is rejected.
 The fields `password`, `client_secret`, `bearer_token`, `api_key`, `token` and `authorization` must not be set in `otelcol_config`,
 except to a reference of the environment (`${env:NAME}`), the environment is set in `/etc/<distribution>/<distribution>.conf`.
@@ -114,6 +115,8 @@ Without the package the unit of the collector is missing, starting and restartin
   stay, set them to `null` to remove them.
 - `otelcol_secrets` is new, secrets passed with `${env:NAME}` keep working.
 - Unknown keys on the first level of `otelcol_config` and fields carrying secrets with a value are rejected.
+- Fixed bug: the secrets were written as JSON strings with quotes, string fields like passwords received the quotes as part of the value.
+  The next run writes the files verbatim and restarts the collector.
 
 ### Tests
 
@@ -133,7 +136,8 @@ an unknown key, a secret in the configuration, a secret without target, an unkno
 a secret in a list and a configuration with an unknown receiver and checks that the role fails with the expected message and `config.yaml` is unchanged
 (tasks marked `expect ERROR`). `molecule-otelcol` runs the role again without a change, the collector must not restart.
 `verify` checks the installed packages and versions, the service without automatic restarts, the configuration with the reference of the secret,
-the file of the secret and the OTLP port.
+the file of the secret with its content verbatim and the OTLP port. On `molecule-otelcol-contrib` the test module `monitoring_opentelemetry_collector_test_export`
+sends a trace to the HTTP receiver and receives the export of `otlphttp/molecule` on port 4319, its header `Authorization` has to be the secret without quotes.
 
 ```shell
 cd monitoring_opentelemetry_collector

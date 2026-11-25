@@ -120,7 +120,7 @@
         label: "{{ item.key }}"
       register: 'monitoring_opentelemetry_collector__test_secret_stat'
 
-    # The secrets are JSON strings, the file provider of the collector reads them as YAML
+    # The files contain the secrets verbatim
     - name: 'Assert the files of the secrets and that config.yaml does not contain them'
       ansible.builtin.assert:
         that:
@@ -133,7 +133,7 @@
             | reject('eq', monitoring_opentelemetry_collector__test_expect.group) | list | length == 0
           - monitoring_opentelemetry_collector__test_secret_stat.results | map(attribute='stat.mode') | reject('eq', '0640') | list | length == 0
           - >-
-            monitoring_opentelemetry_collector__test_expect.secrets.values() | map('from_json')
+            monitoring_opentelemetry_collector__test_expect.secrets.values()
             | select('in', monitoring_opentelemetry_collector__test_config_file.content | b64decode) | list | length == 0
         fail_msg: >-
           content {{ monitoring_opentelemetry_collector__test_secret_files.results | map(attribute='content') | map('b64decode') | list | to_json }},
@@ -184,3 +184,20 @@
             monitoring_opentelemetry_collector__test_expect.address == '0.0.0.0'
             or monitoring_opentelemetry_collector__test_listen.stdout is not search('[*]:4317|0[.]0[.]0[.]0:4317')
         fail_msg: "{{ monitoring_opentelemetry_collector__test_listen.stdout }}"
+
+    # The collector reads the secret from its file and sends it as header of the export, the header must not contain quotes
+    - name: 'Send a trace and receive the export with the secret'
+      when: monitoring_opentelemetry_collector__test_expect.export_authorization is defined
+      monitoring_opentelemetry_collector_test_export:
+        receiver: 'http://127.0.0.1:4318/v1/traces'
+        listen_port: 4319
+      register: 'monitoring_opentelemetry_collector__test_export'
+
+    - name: 'Assert the export carries the secret verbatim'
+      when: monitoring_opentelemetry_collector__test_expect.export_authorization is defined
+      ansible.builtin.assert:
+        that:
+          - monitoring_opentelemetry_collector__test_export.path == '/v1/traces'
+          - monitoring_opentelemetry_collector__test_export.headers['authorization'] | default('') == monitoring_opentelemetry_collector__test_expect.export_authorization
+          - monitoring_opentelemetry_collector__test_export.headers['x-molecule'] | default('') == 'molecule'
+        fail_msg: "{{ monitoring_opentelemetry_collector__test_export.headers | default({}) | to_json }}"
