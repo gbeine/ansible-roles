@@ -259,6 +259,32 @@
         mode: '0640'
       register: 'database_mariadb__config_result'
 
+    # MariaDB reopens its logs on SIGHUP and creates them as its user, so there is no create.
+    # mariadbd runs below s6, podman kill would only reach PID 1, killall in the container reaches mariadbd.
+    # The PATH of logrotate is minimal, a stopped container must not make logrotate fail.
+    - name: 'Write the configuration of logrotate'
+      ansible.builtin.copy:
+        content: |
+          #
+          # Ansible managed
+          #
+          {{ database_mariadb__log_dir }}/*.log {
+              daily
+              rotate 7
+              missingok
+              notifempty
+              compress
+              delaycompress
+              sharedscripts
+              postrotate
+                  /usr/bin/podman exec {{ database_mariadb__container.name }} killall -HUP mariadbd >/dev/null 2>&1 || true
+              endscript
+          }
+        dest: "{{ database_mariadb__logrotate_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
+
     - name: 'Create secrets'
       no_log: true
       containers.podman.podman_secret:
@@ -331,6 +357,19 @@
           containers.podman.podman_container:
             name: "{{ database_mariadb__podman_init_name }}"
             state: 'absent'
+
+    # The initialization of the image sets /config/log/mysql to 777 (init-mariadb-initdb), logrotate refuses group- or world-writable
+    # directories. The mode is set after the initialization, the image does not change it on later starts.
+    - name: 'Create the directories of the logs'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ database_mariadb__uid }}"
+        group: "{{ database_mariadb__gid }}"
+        mode: '0750'
+        state: 'directory'
+      loop:
+        - "{{ database_mariadb__home }}/log"
+        - "{{ database_mariadb__log_dir }}"
 
     - name: 'Install container'
       containers.podman.podman_container:

@@ -112,6 +112,112 @@
       vars:
         database_mariadb__test_config_lines: "{{ (database_mariadb__test_config.content | b64decode).splitlines() }}"
 
+    - name: 'Read the configuration of logrotate'
+      ansible.builtin.slurp:
+        src: '/etc/logrotate.d/mariadb'
+      register: 'database_mariadb__test_logrotate'
+
+    - name: 'Read the owner of the configuration of logrotate'
+      ansible.builtin.stat:
+        path: '/etc/logrotate.d/mariadb'
+      register: 'database_mariadb__test_logrotate_stat'
+
+    - name: 'Assert the configuration of logrotate'
+      ansible.builtin.assert:
+        that:
+          - (database_mariadb__test_home + '/log/mysql/*.log {') in database_mariadb__test_logrotate_lines
+          - "'/usr/bin/podman exec mariadb killall -HUP mariadbd >/dev/null 2>&1 || true' in database_mariadb__test_logrotate_lines"
+          - database_mariadb__test_logrotate_lines | select('match', 'create') | list | length == 0
+          - database_mariadb__test_logrotate_stat.stat.uid == 0
+          - database_mariadb__test_logrotate_stat.stat.mode == '0644'
+        fail_msg: "{{ database_mariadb__test_logrotate_lines }}"
+      vars:
+        database_mariadb__test_logrotate_lines: "{{ (database_mariadb__test_logrotate.content | b64decode).splitlines() | map('trim') | list }}"
+
+    - name: 'Read the directory of the logs'
+      ansible.builtin.stat:
+        path: "{{ database_mariadb__test_home }}/log/mysql"
+      register: 'database_mariadb__test_log_dir'
+
+    # logrotate refuses directories writable by a group other than root
+    - name: 'Assert the directory of the logs'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__test_log_dir.stat.isdir
+          - database_mariadb__test_log_dir.stat.uid == 1000
+          - database_mariadb__test_log_dir.stat.gid == 1000
+          - database_mariadb__test_log_dir.stat.mode == '0750'
+        fail_msg: "{{ database_mariadb__test_log_dir.stat | to_json }}"
+
+    - name: 'Read the logs before the rotation'
+      ansible.builtin.stat:
+        path: "{{ database_mariadb__test_home }}/log/mysql/{{ item }}"
+      loop: [ 'mariadb-error.log', 'mariadb-slow.log' ]
+      register: 'database_mariadb__test_logs_before'
+
+    - name: 'Read the start of the service before the rotation'
+      ansible.builtin.command: 'systemctl show -P ActiveEnterTimestampMonotonic mariadb'
+      register: 'database_mariadb__test_start_before'
+      changed_when: false
+
+    # MariaDB reopens its logs on SIGHUP and creates them as its user, logrotate creates no files
+    - name: 'Rotate the logs'
+      ansible.builtin.command: 'logrotate --force /etc/logrotate.d/mariadb'
+      register: 'database_mariadb__test_rotate'
+      changed_when: false
+      failed_when: database_mariadb__test_rotate.rc != 0 or database_mariadb__test_rotate.stderr | length > 0
+
+    - name: 'Wait for the new error log'
+      ansible.builtin.stat:
+        path: "{{ database_mariadb__test_home }}/log/mysql/mariadb-error.log"
+      register: 'database_mariadb__test_new_log'
+      until: database_mariadb__test_new_log.stat.exists
+      retries: 10
+      delay: 1
+
+    # long_query_time is 5 in the default of custom.cnf, the query is written to the new slow log
+    - name: 'Run a slow query'
+      ansible.mariadb.mariadb_query:
+        login_user: 'root'
+        login_password: "{{ database_mariadb__test_root_password }}"
+        login_host: "{{ database_mariadb__expect.ip }}"
+        query: 'SELECT SLEEP(6)'
+
+    - name: 'Read the slow log after the rotation'
+      ansible.builtin.slurp:
+        src: "{{ database_mariadb__test_home }}/log/mysql/mariadb-slow.log"
+      register: 'database_mariadb__test_slow_log'
+
+    - name: 'Read the logs after the rotation'
+      ansible.builtin.stat:
+        path: "{{ database_mariadb__test_home }}/log/mysql/{{ item }}"
+      loop: [ 'mariadb-error.log', 'mariadb-error.log.1', 'mariadb-slow.log', 'mariadb-slow.log.1' ]
+      register: 'database_mariadb__test_logs'
+
+    - name: 'Read the start of the service after the rotation'
+      ansible.builtin.command: 'systemctl show -P ActiveEnterTimestampMonotonic mariadb'
+      register: 'database_mariadb__test_start_after'
+      changed_when: false
+
+    # The rotated files keep the former inodes, MariaDB created and writes the new files as the user of the container,
+    # the service did not restart
+    - name: 'Assert the rotated logs'
+      ansible.builtin.assert:
+        that:
+          - database_mariadb__test_after[0].exists
+          - database_mariadb__test_after[0].uid == 1000
+          - database_mariadb__test_after[0].gid == 1000
+          - database_mariadb__test_after[0].inode != database_mariadb__test_before[0].inode
+          - database_mariadb__test_after[1].inode | default(-1) == database_mariadb__test_before[0].inode
+          - database_mariadb__test_after[2].inode != database_mariadb__test_before[1].inode
+          - database_mariadb__test_after[3].inode | default(-1) == database_mariadb__test_before[1].inode
+          - "'SLEEP(6)' in database_mariadb__test_slow_log.content | b64decode"
+          - database_mariadb__test_start_after.stdout == database_mariadb__test_start_before.stdout
+        fail_msg: "{{ database_mariadb__test_before | to_json }} {{ database_mariadb__test_after | to_json }}"
+      vars:
+        database_mariadb__test_before: "{{ database_mariadb__test_logs_before.results | map(attribute='stat') | list }}"
+        database_mariadb__test_after: "{{ database_mariadb__test_logs.results | map(attribute='stat') | list }}"
+
     # Like the role, the queries connect from the VM to the address of the container with ansible.mariadb
     - name: 'Read the variables, the databases and the accounts as root'
       ansible.mariadb.mariadb_query:

@@ -158,6 +158,23 @@ The role runs with `--check`, also on a host where it never ran, and compares `c
 The initialization and the start do not run in check mode. The databases and accounts are compared if MariaDB is initialized
 and the Python library of `ansible.mariadb` is installed, on a host where the role never ran both are missing.
 
+### Logs
+
+MariaDB writes the error log `mariadb-error.log` and the slow log `mariadb-slow.log` to `<mariadb_home>/log/mysql`.
+The role writes `/etc/logrotate.d/mariadb`, logrotate has to be installed on the host (e.g. with `bootstrap_debian`), it rotates `<mariadb_home>/log/mysql/*.log` daily, keeps 7 rotations and compresses them.
+The binary logs `mariadb-bin.*` are not matched, MariaDB removes them itself after `expire_logs_days`.
+
+After the rotation logrotate sends SIGHUP with `podman exec mariadb killall -HUP mariadbd`,
+`mariadbd` runs below `mariadbd-safe` and s6 in the container, `podman kill` would only reach the first process of the container.
+On SIGHUP MariaDB flushes its logs like `FLUSH LOGS` and creates the error log and the slow log again as the user of the container,
+so logrotate creates no files. SIGHUP also reloads the grant tables and starts a new binary log.
+`mariadb-admin flush-logs` is not used, it needs the root password and the container has none (see Initialization).
+A stopped container does not make logrotate fail, MariaDB creates the logs on its next start.
+The initialization of the image sets `log/mysql` to 777, logrotate refuses directories writable by a group other than root or by others.
+The role sets `<mariadb_home>/log` and `<mariadb_home>/log/mysql` to mode 0750 for the user of the container after the initialization, the image does not change the mode on later starts.
+logrotate runs without `su`, it resolves numeric IDs only if they exist as user and group on the host.
+The image contains its own configuration of logrotate, nothing in the container runs it.
+
 ### Restart and updates
 
 MariaDB is restarted if it was running and the quadlet unit or `custom.cnf` changed, otherwise it is started and enabled,
@@ -179,6 +196,7 @@ without `mariadb_autoupdate_schedule` the schedule of `container_update` is used
   the installation without podman, which failed with "Currently not supported", is removed, the host does not get `mariadb-client` anymore.
 - The service is not stopped on every run anymore, the handler `Restart MariaDB` and `podman___update_mode` are removed.
 - The tag `database_mariadb` stays, the tag `database` is added.
+- The logs in `<mariadb_home>/log/mysql` are rotated by logrotate on the host, before they grew without limit. The directories `log` and `log/mysql` get mode 0750.
 - The initialization runs once in `mariadb-init`, the quadlet unit has no secret, no `FILE__MYSQL_ROOT_PASSWORD` and no `REMOTE_SQL` anymore,
   existing installations are not initialized again. Without the root password in the container the image does not log the hint about a needed `mariadb-upgrade` anymore.
 - The dependencies `wants`, `after`, `part_of`, `binds_to` and `requires_mounts_for` of `mariadb_container` are supported besides `requires`.
@@ -195,7 +213,7 @@ The playbooks creating and destroying the VMs live in `.molecule/tart/` in the r
 | `molecule-mariadb-default` | Only the mandatory variables and the root password |
 | `molecule-mariadb` | IPv6, labels, options of `mysqld` and `mysqldump` with a removed option, an option without value and a prefix, databases and accounts with privileges, dependencies of the quadlet unit (`wants`, `after`, `requires_mounts_for`) |
 
-`prepare` creates the podman network and pulls the image.
+`prepare` installs `logrotate`, creates the podman network and pulls the image.
 `check` runs `converge` with `--check` on the VMs where the role never ran.
 `side_effect` runs the role with `mariadb_container` not a dictionary, a secret without `target`, without the root password, a short root password,
 a single quote in the root password, the root password and a user of the image in the environment, an unknown section and option,
@@ -205,6 +223,7 @@ and checks that it fails with the expected message and the quadlet unit and `cus
 then it changes `max_connections` on `molecule-mariadb`, `custom.cnf` changes and MariaDB has to restart without a second initialization,
 `molecule-mariadb-default` runs again without a change and must not restart.
 `verify` checks the quadlet unit without the secret and with `TZ`, that `mariadb-init` does not exist, the service, the addresses, the time zone and the environment of the container, `custom.cnf` without passwords,
+the configuration of logrotate, a forced rotation after which MariaDB creates new logs as the user of the container and writes a slow query into the new slow log without a restart,
 the variables, the databases and the accounts as root, that `app` may write, `reader` may only read and that a wrong password is rejected,
 it connects like the role with `ansible.mariadb` from the VM to the address of the container.
 
