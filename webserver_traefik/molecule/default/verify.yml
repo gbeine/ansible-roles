@@ -355,14 +355,28 @@
             src: "{{ webserver_traefik__test_log }}.1"
           register: 'webserver_traefik__test_log_rotated'
 
+        - name: 'Read the directory of the logs and the new access log'
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: [ "{{ webserver_traefik__expect.home }}/log", "{{ webserver_traefik__test_log }}" ]
+          register: 'webserver_traefik__test_log_stat'
+
+        # The members of adm read the logs, setgid passes the group to the new access log
         - name: 'Assert the access log and its rotation'
           ansible.builtin.assert:
             that:
+              - webserver_traefik__test_log_stat.results[0].stat.pw_name == 'root'
+              - webserver_traefik__test_log_stat.results[0].stat.gr_name == 'adm'
+              - webserver_traefik__test_log_stat.results[0].stat.mode == '2750'
+              - webserver_traefik__test_log_stat.results[1].stat.gr_name == 'adm'
               - webserver_traefik__test_logrotate_debug.rc == 0
               - webserver_traefik__test_logrotate_debug.stderr is not search('error', ignorecase=true)
               - webserver_traefik__test_log_rotated.content | b64decode is search('molecule-before-rotation')
               - webserver_traefik__test_log_after.content | b64decode is not search('molecule-before-rotation')
             fail_msg: >-
+              directory {{ webserver_traefik__test_log_stat.results[0].stat.pw_name }}:{{ webserver_traefik__test_log_stat.results[0].stat.gr_name }}
+              {{ webserver_traefik__test_log_stat.results[0].stat.mode }},
+              access.log group {{ webserver_traefik__test_log_stat.results[1].stat.gr_name }},
               logrotate {{ webserver_traefik__test_logrotate_debug.stderr_lines }},
               access.log {{ webserver_traefik__test_log_after.content | b64decode }},
               access.log.1 {{ webserver_traefik__test_log_rotated.content | default('') | b64decode }}

@@ -186,7 +186,10 @@ The check of the environment uses the environment of the container after merging
 
 `traefik_accesslog_enabled: true` writes the access log of Traefik to `<traefik_home>/log/access.log` (`/var/log/traefik/access.log` in the container)
 and installs a configuration of logrotate in `/etc/logrotate.d/<container name>`, logrotate has to be installed on the host.
-The role creates `<traefik_home>/log` (owner `root`, mode `0750`) and mounts it to `/var/log/traefik`.
+The role creates `<traefik_home>/log` (owner `root`, group `adm`, mode `2750`) and mounts it to `/var/log/traefik`.
+Like the logs of Debian in `/var/log`, the members of `adm` read the logs, e.g. the OpenTelemetry Collector with `otelcol_logs_enabled: true`
+of `monitoring_opentelemetry_collector`. The setgid bit passes the group to the files Traefik and logrotate create in the directory,
+the group cannot write, so logrotate accepts the directory.
 `traefik_config.accessLog` adds options to the access log, e.g. the format or filters,
 the log of Traefik is written to the directory as well with `log.filePath: '/var/log/traefik/traefik.log'`.
 
@@ -300,6 +303,8 @@ Updates of the image are done by `container_update` with `traefik_autoupdate_ena
   `volumes` in `traefik_container` replaces the default and needs the two volumes for these features.
 - The role depends on `common_library`, its module `common_library_htpasswd` writes the htpasswd files.
 - `traefik_accesslog_enabled` is new (default `false`), it writes the access log to `<traefik_home>/log` and rotates it with logrotate.
+- `<traefik_home>/log` changes from `root:root 0750` to `root:adm 2750`, the members of `adm` read the logs.
+  Existing files keep their group, the files written after the change, e.g. after the next rotation, get the group `adm`.
 
 ### Tests
 
@@ -329,7 +334,8 @@ It checks the htpasswd files (users, bcrypt, mode `0600`, the removed file), the
 the certificate served for every realm (`openssl s_client` with the name of the realm), the certificates watched by `pki_update`
 and the login on the dashboard: `401` without a password and with the former password, `200` with the changed password.
 On `molecule-traefik` it checks the configuration of logrotate with `logrotate --debug`, finds a request in `access.log`, rotates the logs with `logrotate --force`
-and finds the next request in the new `access.log` and the former one in `access.log.1`, Traefik reopened the file on `USR1`.
+and finds the next request in the new `access.log` and the former one in `access.log.1`, Traefik reopened the file on `USR1`,
+`<traefik_home>/log` is `root:adm 2750` and the new `access.log` has the group `adm`.
 On `molecule-traefik-default` there is no configuration of logrotate and no access log.
 The VMs need access to Docker Hub for `docker.io/traefik:v3` and `docker.io/traefik/whoami`.
 
