@@ -1,0 +1,235 @@
+---
+
+- name: 'Install phpLDAPadmin'
+  tags: [ 'database', 'database_phpldapadmin' ]
+  block:
+
+    # A failing template in the variables (e.g. an unknown filter, phpldapadmin_container or phpldapadmin_environment not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - database_phpldapadmin__container | length > 0
+          - database_phpldapadmin__environment | length > 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpldapadmin__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        database_phpldapadmin__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = database_phpldapadmin__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`phpldapadmin_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`phpldapadmin_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `phpldapadmin_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpldapadmin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        database_phpldapadmin__secret_targets: "{{ database_phpldapadmin__secrets | map(attribute='target') | map('string') | list }}"
+        database_phpldapadmin__environment_set: >-
+          {{ database_phpldapadmin__environment | dict2items | rejectattr('value', 'in', ['', none]) | map(attribute='key') | list }}
+        database_phpldapadmin__environment_missing: >-
+          {{ database_phpldapadmin__environment_required | reject('in', database_phpldapadmin__environment_set) | list }}
+        database_phpldapadmin__secrets_missing: >-
+          {{ database_phpldapadmin__secrets_required | reject('in', database_phpldapadmin__secret_targets) | list }}
+        database_phpldapadmin__secrets_in_environment: >-
+          {{ (database_phpldapadmin__secret_targets + database_phpldapadmin__secret_variables)
+             | select('in', database_phpldapadmin__environment.keys() | list) | unique | list }}
+        database_phpldapadmin__app_keys: >-
+          {{ database_phpldapadmin__secrets | selectattr('target', 'eq', 'APP_KEY') | map(attribute='data') | map('string') | list }}
+        database_phpldapadmin__secrets_invalid: >-
+          {{ database_phpldapadmin__secrets | selectattr('data', 'none') | map(attribute='name') | list
+             + database_phpldapadmin__secrets | rejectattr('data', 'none') | selectattr('data', 'string')
+               | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list }}
+        database_phpldapadmin__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_phpldapadmin__environment_missing | length > 0 -%}
+          {%-   set _ = errors.append('phpLDAPadmin needs the environment variables ' ~ (database_phpldapadmin__environment_required | join(', ')) ~ ', missing or empty: ' ~ (database_phpldapadmin__environment_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpldapadmin__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('phpLDAPadmin needs the secrets ' ~ (database_phpldapadmin__secrets_required | join(', ')) ~ ', missing: ' ~ (database_phpldapadmin__secrets_missing | join(', ')) ~ '.') -%}
+          {%- elif database_phpldapadmin__app_keys | reject('match', database_phpldapadmin__app_key_pattern) | list | length > 0 -%}
+          {%-   set _ = errors.append('APP_KEY has to be base64: followed by 32 bytes in base64, e.g. "base64:$(openssl rand -base64 32)".') -%}
+          {%- endif -%}
+          {%- if database_phpldapadmin__secrets_in_environment | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be set in phpldapadmin_environment: ' ~ (database_phpldapadmin__secrets_in_environment | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpldapadmin__secrets_invalid | length > 0 -%}
+          {%-   set _ = errors.append('Secrets must not be empty or contain line breaks: ' ~ (database_phpldapadmin__secrets_invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging phpldapadmin_container,
+    # unknown variables would change the behavior unexpectedly, an environment that is no mapping is not checked
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ database_phpldapadmin__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without phpldapadmin_secrets
+        database_phpldapadmin__container_secrets: >-
+          {{ database_phpldapadmin__container.secrets
+             if (database_phpldapadmin__container.secrets is defined and database_phpldapadmin__container.secrets is sequence
+                 and database_phpldapadmin__container.secrets is not string)
+             else [] }}
+        database_phpldapadmin__environment_checked: >-
+          {{ database_phpldapadmin__container.environment if database_phpldapadmin__container.environment | default(none) is mapping else {} }}
+        database_phpldapadmin__environment_unknown: >-
+          {{ database_phpldapadmin__environment_checked.keys() | map('string') | reject('in', database_phpldapadmin__environment_allowed) | list }}
+        database_phpldapadmin__environment_line_breaks: >-
+          {{ database_phpldapadmin__environment_checked | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\n\r]') | map(attribute='key') | list }}
+        database_phpldapadmin__secrets_unknown: >-
+          {{ database_phpldapadmin__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1')
+             | reject('in', database_phpldapadmin__secrets_allowed) | list }}
+        database_phpldapadmin__errors: >-
+          {%- set errors = [] -%}
+          {%- if database_phpldapadmin__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (database_phpldapadmin__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpldapadmin__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (database_phpldapadmin__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('Allowed are the variables of phpLDAPadmin (database_phpldapadmin__environment_allowed) and the secrets '
+                                    ~ (database_phpldapadmin__secrets_allowed | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if database_phpldapadmin__environment_line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (database_phpldapadmin__environment_line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ database_phpldapadmin__secrets }}"
+      register: 'database_phpldapadmin__secrets_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ database_phpldapadmin__container.name }}"
+        hostname: "{{ database_phpldapadmin__container.hostname }}"
+        image: "{{ database_phpldapadmin__container.image }}"
+        ip: "{{ database_phpldapadmin__container.ip }}"
+        ip6: "{{ database_phpldapadmin__container.ipv6 | default(omit) }}"
+        network: "{{ database_phpldapadmin__container.network }}"
+        timezone: "{{ database_phpldapadmin__container.timezone }}"
+        env: "{{ database_phpldapadmin__container.environment | default(omit) }}"
+        etc_hosts: "{{ database_phpldapadmin__container.etc_hosts | default(omit) }}"
+        expose: "{{ database_phpldapadmin__container.expose | default(omit) }}"
+        label: "{{ database_phpldapadmin__container.labels | default(omit) }}"
+        publish: "{{ database_phpldapadmin__container.publish | default(omit) }}"
+        secrets: "{{ database_phpldapadmin__container.secrets | default(omit) }}"
+        volume: "{{ database_phpldapadmin__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if database_phpldapadmin__container.requires is defined %}
+          Requires={{ database_phpldapadmin__container.requires | join(' ') }}
+          {% endif %}
+          {% if database_phpldapadmin__container.wants is defined %}
+          Wants={{ database_phpldapadmin__container.wants | join(' ') }}
+          {% endif %}
+          {% if database_phpldapadmin__container.after is defined %}
+          After={{ database_phpldapadmin__container.after | join(' ') }}
+          {% endif %}
+          {% if database_phpldapadmin__container.part_of is defined %}
+          PartOf={{ database_phpldapadmin__container.part_of | join(' ') }}
+          {% endif %}
+          {% if database_phpldapadmin__container.binds_to is defined %}
+          BindsTo={{ database_phpldapadmin__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if database_phpldapadmin__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ database_phpldapadmin__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'database_phpldapadmin__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start phpLDAPadmin'
+      when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ database_phpldapadmin__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if database_phpldapadmin__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            database_phpldapadmin__running: >-
+              {{ (ansible_facts.services[database_phpldapadmin__container.name + '.service'].state | default('')) == 'running' }}
+            database_phpldapadmin__restart: >-
+              {{ database_phpldapadmin__running | bool
+                 and (database_phpldapadmin__secrets_result is changed
+                      or database_phpldapadmin__quadlet_result is changed) }}
+
+        # The entrypoint caches the configuration of Laravel before FrankenPHP answers, a broken configuration fails here
+        - name: 'Wait until phpLDAPadmin shows the login form'
+          ansible.builtin.uri:
+            url: "http://{{ database_phpldapadmin__container.ip }}:{{ database_phpldapadmin__port }}/login"
+            return_content: true
+            timeout: 5
+          register: 'database_phpldapadmin__ready'
+          until:
+            - database_phpldapadmin__ready.status | default(0) == 200
+            - database_phpldapadmin__ready.content | default('') is search('name="_token" value="')
+          retries: 60
+          delay: 2
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ database_phpldapadmin__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'database_phpldapadmin__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: "{{ [ database_phpldapadmin__container.name ~ ' did not start' ] + database_phpldapadmin__start_journal.stdout_lines }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'database_phpldapadmin__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ database_phpldapadmin__container.name }}"
+        container_image: "{{ database_phpldapadmin__container.image }}"
+        container_schedule: "{{ database_phpldapadmin__autoupdate_schedule }}"

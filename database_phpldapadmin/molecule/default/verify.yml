@@ -1,0 +1,169 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_phpldapadmin__test_case: "{{ database_phpldapadmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_phpldapadmin__expect: "{{ database_phpldapadmin__test_case.expect }}"
+    database_phpldapadmin__test_url: "http://{{ database_phpldapadmin__expect.ip }}:8080"
+    # The uri module keeps no cookies of a redirect it does not follow, the cookies are read from the header Set-Cookie
+    database_phpldapadmin__test_page_cookies: >-
+      {{ database_phpldapadmin__test_login_page.set_cookie | default('') | regex_findall('(?:^|, )([A-Za-z0-9_-]+=[^;,]+)') | join('; ') }}
+    database_phpldapadmin__test_token: >-
+      {{ database_phpldapadmin__test_login_page.content | default('') | regex_findall('name="_token" value="([^"]+)"') | first | default('') }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ database_phpldapadmin__test_quadlet_path }}"
+      register: 'database_phpldapadmin__test_quadlet'
+
+    # podman quotes values with spaces in single or double quotes, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + database_phpldapadmin__test_image) in database_phpldapadmin__test_quadlet_lines
+          - ('IP=' + database_phpldapadmin__expect.ip) in database_phpldapadmin__test_quadlet_lines
+          - database_phpldapadmin__expect.ip6 is none or ('IP6=' + database_phpldapadmin__expect.ip6) in database_phpldapadmin__test_quadlet_lines
+          - database_phpldapadmin__expect.ip6 is not none or database_phpldapadmin__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - database_phpldapadmin__expect.quadlet | reject('in', database_phpldapadmin__test_quadlet_lines) | list | length == 0
+          - database_phpldapadmin__expect.secrets | select('in', database_phpldapadmin__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ database_phpldapadmin__test_quadlet_lines | reject('search', 'Secret=') | list | to_json }}"
+      vars:
+        database_phpldapadmin__test_quadlet_lines: "{{ (database_phpldapadmin__test_quadlet.content | b64decode | regex_replace('[\\x22\\x27]', '')).splitlines() }}"
+
+    - name: 'Read the state of the phpldapadmin service'
+      ansible.builtin.command: 'systemctl is-active phpldapadmin'
+      register: 'database_phpldapadmin__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the phpldapadmin container'
+      ansible.builtin.command: 'podman inspect phpldapadmin'
+      register: 'database_phpldapadmin__test_inspect'
+      changed_when: false
+
+    # podman shows the secrets passed with type=env masked
+    - name: 'Assert the service, the container addresses and the environment'
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__test_service.stdout == 'active'
+          - database_phpldapadmin__test_net.IPAddress == database_phpldapadmin__expect.ip
+          - database_phpldapadmin__expect.ip6 is none or database_phpldapadmin__test_net.GlobalIPv6Address == database_phpldapadmin__expect.ip6
+          - ('APP_TIMEZONE=' + database_phpldapadmin__test_case.role_vars.phpldapadmin_timezone) in database_phpldapadmin__test_env
+          - database_phpldapadmin__test_container.Config.Timezone == database_phpldapadmin__test_case.role_vars.phpldapadmin_timezone
+          - database_phpldapadmin__expect.secrets | select('in', database_phpldapadmin__test_env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ database_phpldapadmin__test_service.stdout }}, time zone {{ database_phpldapadmin__test_container.Config.Timezone | default('') }},
+          IPv4 {{ database_phpldapadmin__test_net.IPAddress }}, IPv6 {{ database_phpldapadmin__test_net.GlobalIPv6Address }},
+          environment {{ database_phpldapadmin__test_env | reject('search', 'KEY|PASSWORD') | join(', ') }}
+      vars:
+        database_phpldapadmin__test_container: "{{ (database_phpldapadmin__test_inspect.stdout | from_json)[0] }}"
+        database_phpldapadmin__test_net: "{{ database_phpldapadmin__test_container.NetworkSettings.Networks[database_phpldapadmin__test_case.role_vars.phpldapadmin_network] }}"
+        database_phpldapadmin__test_env: "{{ database_phpldapadmin__test_container.Config.Env }}"
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'phpldapadmin' ]
+      register: 'database_phpldapadmin__test_restarts'
+      changed_when: false
+
+    - name: 'Read the journal of the service'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'phpldapadmin', '-n', '80', '--no-pager' ]
+      register: 'database_phpldapadmin__test_journal'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Assert the service did not restart by itself'
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__test_restarts.stdout | int == 0
+        fail_msg: "{{ [ 'automatic restarts: ' ~ database_phpldapadmin__test_restarts.stdout ] + database_phpldapadmin__test_journal.stdout_lines | default([]) }}"
+
+    - name: 'Read the login page'
+      ansible.builtin.uri:
+        url: "{{ database_phpldapadmin__test_url }}/login"
+        return_content: true
+      register: 'database_phpldapadmin__test_login_page'
+
+    - name: 'Assert the login page'
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__test_token | length > 0
+          - database_phpldapadmin__test_page_cookies | length > 0
+        fail_msg: "token {{ database_phpldapadmin__test_token | length > 0 }}, cookies {{ database_phpldapadmin__test_login_page.set_cookie | default('') | length > 0 }}"
+
+    # Laravel redirects to / after the login and back to /login after a failed one
+    - name: 'Log in with a wrong and the right password'
+      when: database_phpldapadmin__expect.login
+      ansible.builtin.uri:
+        url: "{{ database_phpldapadmin__test_url }}/login"
+        method: 'POST'
+        headers:
+          Cookie: "{{ database_phpldapadmin__test_page_cookies }}"
+        body_format: 'form-urlencoded'
+        body:
+          _token: "{{ database_phpldapadmin__test_token }}"
+          uid: "{{ database_phpldapadmin__test_user }}"
+          password: "{{ database_phpldapadmin__test_user_password if item else 'wrong-password' }}"
+        follow_redirects: 'none'
+        status_code: [ 302 ]
+      loop: [ false, true ]
+      loop_control:
+        label: "{{ 'right password' if item else 'wrong password' }}"
+      register: 'database_phpldapadmin__test_login'
+      no_log: true
+
+    - name: 'Read the tree with the session of the login'
+      when: database_phpldapadmin__expect.login
+      ansible.builtin.uri:
+        url: "{{ database_phpldapadmin__test_url }}/"
+        headers:
+          Cookie: >-
+            {{ database_phpldapadmin__test_login.results[1].set_cookie | default('')
+               | regex_findall('(?:^|, )([A-Za-z0-9_-]+=[^;,]+)') | join('; ') }}
+        return_content: true
+      register: 'database_phpldapadmin__test_tree'
+
+    # The page loads the tree with JavaScript, ajax/bases returns the base DNs read with the session of the user,
+    # Laravel renews the token of the session after the login, the page has it in the meta tag csrf-token
+    - name: 'Read the base DNs of the directory'
+      when: database_phpldapadmin__expect.login
+      ansible.builtin.uri:
+        url: "{{ database_phpldapadmin__test_url }}/ajax/bases"
+        method: 'POST'
+        headers:
+          Cookie: >-
+            {{ database_phpldapadmin__test_tree.set_cookie | default(database_phpldapadmin__test_login.results[1].set_cookie | default(''), true)
+               | regex_findall('(?:^|, )([A-Za-z0-9_-]+=[^;,]+)') | join('; ') }}
+          X-CSRF-TOKEN: >-
+            {{ (database_phpldapadmin__test_tree.content | regex_findall('name="csrf-token" content="([^"]+)"')
+                + database_phpldapadmin__test_tree.content | regex_findall('name="_token" value="([^"]+)"')) | first | default('') }}
+          X-Requested-With: 'XMLHttpRequest'
+          Accept: 'application/json'
+        return_content: true
+        status_code: [ 200, 401, 403, 419, 500 ]
+      register: 'database_phpldapadmin__test_bases'
+
+    - name: 'Assert the login, the start page and the base DNs of the directory'
+      when: database_phpldapadmin__expect.login
+      ansible.builtin.assert:
+        that:
+          - database_phpldapadmin__test_login.results[0].location | default('') is search('/login$')
+          - database_phpldapadmin__test_login.results[1].location | default('') is not search('/login$')
+          - database_phpldapadmin__test_bases.status == 200
+          - database_phpldapadmin__test_base_dn in (database_phpldapadmin__test_bases.json | default([]) | map(attribute='title') | list)
+          - database_phpldapadmin__test_tree.content is search(database_phpldapadmin__expect.name)
+          - database_phpldapadmin__test_tree.content is search('logout')
+        fail_msg: >-
+          login {{ database_phpldapadmin__test_login.results | map(attribute='location', default='') | list }},
+          bases {{ database_phpldapadmin__test_bases.status }} {{ database_phpldapadmin__test_bases.json | default([]) | map(attribute='title') | list }},
+          name {{ database_phpldapadmin__test_tree.content is search(database_phpldapadmin__expect.name) }},
+          logout {{ database_phpldapadmin__test_tree.content is search('logout') }}

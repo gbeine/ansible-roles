@@ -1,0 +1,88 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    podman_networks:
+      - "{{ database_phpldapadmin__test_network }}"
+    podman_default_network: "{{ database_phpldapadmin__test_network.name }}"
+    podman_socket_enabled: false
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ database_phpldapadmin__test_image }}"
+      register: 'database_phpldapadmin__test_pull'
+      until: database_phpldapadmin__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    # slapd of Debian creates the directory of the domain with the admin of the preseed,
+    # the tart VMs are arm64, there is no reliable image of OpenLDAP for arm64
+    - name: 'Preseed slapd'
+      ansible.builtin.debconf:
+        name: 'slapd'
+        question: "{{ item.question }}"
+        value: "{{ item.value }}"
+        vtype: "{{ item.vtype }}"
+      loop:
+        - { question: 'slapd/domain', value: "{{ database_phpldapadmin__test_domain }}", vtype: 'string' }
+        - { question: 'shared/organization', value: 'Molecule', vtype: 'string' }
+        - { question: 'slapd/password1', value: "{{ database_phpldapadmin__test_admin_password }}", vtype: 'password' }
+        - { question: 'slapd/password2', value: "{{ database_phpldapadmin__test_admin_password }}", vtype: 'password' }
+        - { question: 'slapd/no_configuration', value: 'false', vtype: 'boolean' }
+      loop_control:
+        label: "{{ item.question }}"
+      no_log: true
+
+    - name: 'Install slapd and the LDAP tools'
+      ansible.builtin.apt:
+        name: [ 'slapd', 'ldap-utils' ]
+        state: 'present'
+        update_cache: true
+
+    - name: 'Start slapd'
+      ansible.builtin.systemd_service:
+        name: 'slapd'
+        state: 'started'
+        enabled: true
+
+    - name: 'Wait for slapd'
+      ansible.builtin.wait_for:
+        port: 389
+        timeout: 60
+
+    # The user of the login test, phpLDAPadmin finds it by uid in posixAccount
+    - name: 'Create the user of the login test'
+      ansible.builtin.command:
+        argv: [ 'ldapadd', '-x', '-c', '-H', 'ldap://127.0.0.1', '-D', "{{ database_phpldapadmin__test_admin_dn }}",
+                '-w', "{{ database_phpldapadmin__test_admin_password }}" ]
+        stdin: |
+          dn: ou=people,{{ database_phpldapadmin__test_base_dn }}
+          objectClass: organizationalUnit
+          ou: people
+
+          dn: uid={{ database_phpldapadmin__test_user }},ou=people,{{ database_phpldapadmin__test_base_dn }}
+          objectClass: inetOrgPerson
+          objectClass: posixAccount
+          uid: {{ database_phpldapadmin__test_user }}
+          cn: Molecule
+          sn: Molecule
+          uidNumber: 10000
+          gidNumber: 10000
+          homeDirectory: /home/{{ database_phpldapadmin__test_user }}
+          userPassword: {{ database_phpldapadmin__test_user_password }}
+      register: 'database_phpldapadmin__test_ldapadd'
+      # 68: the entries exist already
+      failed_when: database_phpldapadmin__test_ldapadd.rc not in [ 0, 68 ]
+      changed_when: database_phpldapadmin__test_ldapadd.rc == 0

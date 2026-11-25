@@ -1,0 +1,199 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    database_phpldapadmin__test_case: "{{ database_phpldapadmin__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    database_phpldapadmin__test_vars: "{{ database_phpldapadmin__test_case.role_vars }}"
+    database_phpldapadmin__test_environment: "{{ database_phpldapadmin__test_vars.phpldapadmin_environment }}"
+    database_phpldapadmin__test_secrets: "{{ database_phpldapadmin__test_vars.phpldapadmin_secrets }}"
+    database_phpldapadmin__test_checked_files:
+      - "{{ database_phpldapadmin__test_quadlet_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ database_phpldapadmin__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ database_phpldapadmin__test_checked_files }}"
+      register: 'database_phpldapadmin__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run database_phpldapadmin with phpldapadmin_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_container: [ 'environment' ]
+        database_phpldapadmin__test_invalid:
+          message: 'phpldapadmin_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_phpldapadmin with phpldapadmin_environment not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_environment: [ 'LDAP_HOST' ]
+        database_phpldapadmin__test_invalid:
+          message: 'phpldapadmin_environment not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run database_phpldapadmin with phpldapadmin_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_secrets:
+          name: 'phpldapadmin_app_key'
+        database_phpldapadmin__test_invalid:
+          message: 'phpldapadmin_secrets not a list'
+          search: '^`phpldapadmin_secrets` has to be a list$'
+
+    - name: 'Run database_phpldapadmin with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_secrets: "{{ database_phpldapadmin__test_secrets + [ { 'name': 'phpldapadmin_other', 'data': 'x' } ] }}"
+        database_phpldapadmin__test_invalid:
+          message: 'a secret without target'
+          search: '^`phpldapadmin_secrets` entries need name, data and target$'
+
+    - name: 'Run database_phpldapadmin without the LDAP server (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_environment: "{{ database_phpldapadmin__test_environment | combine({ 'LDAP_HOST': '' }) }}"
+        database_phpldapadmin__test_invalid:
+          message: 'no LDAP server'
+          search: '^phpLDAPadmin needs the environment variables LDAP_HOST, missing or empty: LDAP_HOST\.$'
+
+    - name: 'Run database_phpldapadmin without the key of Laravel (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_secrets: "{{ database_phpldapadmin__test_secrets | rejectattr('target', 'eq', 'APP_KEY') | list }}"
+        database_phpldapadmin__test_invalid:
+          message: 'no key of Laravel'
+          search: '^phpLDAPadmin needs the secrets APP_KEY, missing: APP_KEY\.$'
+
+    - name: 'Run database_phpldapadmin with an invalid key of Laravel (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_secrets: "{{ database_phpldapadmin__test_secrets | rejectattr('target', 'eq', 'APP_KEY') | list
+                                  + [ { 'name': 'phpldapadmin_app_key', 'data': 'molecule-key', 'target': 'APP_KEY' } ] }}"
+        database_phpldapadmin__test_invalid:
+          message: 'an invalid key of Laravel'
+          search: '^APP_KEY has to be base64: followed by 32 bytes in base64'
+
+    - name: 'Run database_phpldapadmin with the password of the LDAP server in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_environment: "{{ database_phpldapadmin__test_environment | combine({ 'LDAP_PASSWORD': 'molecule-plain' }) }}"
+        database_phpldapadmin__test_invalid:
+          message: 'the password of the LDAP server in the environment'
+          search: '^Secrets must not be set in phpldapadmin_environment: LDAP_PASSWORD\.$'
+
+    - name: 'Run database_phpldapadmin with the address of FrankenPHP in the environment (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_environment: "{{ database_phpldapadmin__test_environment | combine({ 'SERVER_NAME': ':9090' }) }}"
+        database_phpldapadmin__test_invalid:
+          message: 'the address of FrankenPHP in the environment'
+          search: '^Unknown environment variables: SERVER_NAME\.'
+
+    - name: 'Run database_phpldapadmin with an unknown environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_environment: "{{ database_phpldapadmin__test_environment | combine({ 'LDAP_MOLECULE': 'unknown' }) }}"
+        database_phpldapadmin__test_invalid:
+          message: 'an unknown environment variable'
+          search: '^Unknown environment variables: LDAP_MOLECULE\.'
+
+    - name: 'Run database_phpldapadmin with a line break in a value (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_environment: "{{ database_phpldapadmin__test_environment | combine({ 'LDAP_NAME': 'Molecule\nLDAP' }) }}"
+        database_phpldapadmin__test_invalid:
+          message: 'a line break in a value'
+          search: '^The environment variables must not contain line breaks: LDAP_NAME\.$'
+
+    - name: 'Run database_phpldapadmin with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        phpldapadmin_secrets: "{{ database_phpldapadmin__test_secrets + [ { 'name': 'phpldapadmin_db_password', 'data': 'x', 'target': 'DB_PASSWORD' } ] }}"
+        database_phpldapadmin__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: DB_PASSWORD\.'
+
+    - name: 'Change the configuration of phpLDAPadmin'
+      when: database_phpldapadmin__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpldapadmin' ]
+          register: 'database_phpldapadmin__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed environment'
+          ansible.builtin.set_fact:
+            phpldapadmin_environment: "{{ database_phpldapadmin__test_environment | combine(database_phpldapadmin__test_case.side_effect.phpldapadmin_environment) }}"
+
+        - name: 'Run database_phpldapadmin with the changed environment'
+          ansible.builtin.include_role:
+            name: 'database_phpldapadmin'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpldapadmin' ]
+          register: 'database_phpldapadmin__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the changed quadlet unit and the restart of the service'
+          ansible.builtin.assert:
+            that:
+              - database_phpldapadmin__quadlet_result is changed
+              - database_phpldapadmin__test_started_after.stdout | int > database_phpldapadmin__test_started_before.stdout | int
+            fail_msg: >-
+              quadlet changed: {{ database_phpldapadmin__quadlet_result is changed }},
+              start before {{ database_phpldapadmin__test_started_before.stdout }}, after {{ database_phpldapadmin__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: database_phpldapadmin__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpldapadmin' ]
+          register: 'database_phpldapadmin__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run database_phpldapadmin without a change'
+          ansible.builtin.include_role:
+            name: 'database_phpldapadmin'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'phpldapadmin' ]
+          register: 'database_phpldapadmin__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - database_phpldapadmin__quadlet_result is not changed
+              - database_phpldapadmin__secrets_result is not changed
+              - database_phpldapadmin__test_unchanged_after.stdout == database_phpldapadmin__test_unchanged_before.stdout
+            fail_msg: >-
+              quadlet changed: {{ database_phpldapadmin__quadlet_result is changed }}, secrets changed: {{ database_phpldapadmin__secrets_result is changed }},
+              start before {{ database_phpldapadmin__test_unchanged_before.stdout }}, after {{ database_phpldapadmin__test_unchanged_after.stdout }}
