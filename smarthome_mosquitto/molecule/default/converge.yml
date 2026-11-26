@@ -1,0 +1,49 @@
+---
+- name: 'Converge'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    smarthome_mosquitto__test_case: "{{ smarthome_mosquitto__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  pre_tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ smarthome_mosquitto__test_case.role_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    # The key created in prepare.yml replaces the placeholder of the secret
+    - name: 'Read the key of the TLS listener'
+      when: smarthome_mosquitto__test_case.expect.tls | bool
+      ansible.builtin.slurp:
+        src: "{{ smarthome_mosquitto__test_pki_dir }}/server.key"
+      register: 'smarthome_mosquitto__test_key'
+
+    - name: 'Set the key of the TLS listener'
+      when: smarthome_mosquitto__test_case.expect.tls | bool
+      no_log: true
+      ansible.builtin.set_fact:
+        mosquitto_secrets: >-
+          {%- set secrets = [] -%}
+          {%- for secret in mosquitto_secrets -%}
+          {%-   set _ = secrets.append(secret | combine({ 'data': smarthome_mosquitto__test_key.content | b64decode })
+                                       if secret.data == smarthome_mosquitto__test_key_placeholder else secret) -%}
+          {%- endfor -%}
+          {{ secrets }}
+
+  tasks:
+
+    - name: 'Run smarthome_mosquitto'
+      ansible.builtin.include_role:
+        name: 'smarthome_mosquitto'

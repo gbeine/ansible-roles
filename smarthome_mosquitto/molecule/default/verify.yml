@@ -1,0 +1,332 @@
+---
+- name: 'Verify'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    smarthome_mosquitto__test_case: "{{ smarthome_mosquitto__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    smarthome_mosquitto__expect: "{{ smarthome_mosquitto__test_case.expect }}"
+    # The passwords of the test case, they must not be part of the files of the role or of the unit
+    smarthome_mosquitto__test_plain: >-
+      {{ smarthome_mosquitto__test_case.role_vars.mosquitto_secrets | default([])
+         | rejectattr('data', 'eq', smarthome_mosquitto__test_key_placeholder) | map(attribute='data') | list
+         + smarthome_mosquitto__test_case.role_vars.mosquitto_users | default({}) | dict2items | map(attribute='value.password') | list
+         + (smarthome_mosquitto__test_case.side_effect.users | dict2items | map(attribute='value.password') | list
+            if smarthome_mosquitto__test_case.side_effect is defined else []) }}
+
+  tasks:
+
+    - name: 'Read the generated quadlet unit'
+      ansible.builtin.slurp:
+        src: "{{ smarthome_mosquitto__test_quadlet_path }}"
+      register: 'smarthome_mosquitto__test_quadlet'
+
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
+      ansible.builtin.assert:
+        that:
+          - ('Image=' + smarthome_mosquitto__test_image) in smarthome_mosquitto__test_quadlet_lines
+          - ('IP=' + smarthome_mosquitto__expect.ip) in smarthome_mosquitto__test_quadlet_lines
+          - smarthome_mosquitto__expect.ip6 is none or ('IP6=' + smarthome_mosquitto__expect.ip6) in smarthome_mosquitto__test_quadlet_lines
+          - smarthome_mosquitto__expect.ip6 is not none or smarthome_mosquitto__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
+          - smarthome_mosquitto__expect.quadlet | reject('in', smarthome_mosquitto__test_quadlet_lines) | list | length == 0
+          - smarthome_mosquitto__test_plain | select('in', smarthome_mosquitto__test_quadlet.content | b64decode) | list | length == 0
+        fail_msg: "{{ smarthome_mosquitto__test_quadlet_lines | to_json }}"
+      vars:
+        smarthome_mosquitto__test_quadlet_lines: "{{ (smarthome_mosquitto__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
+
+    - name: 'Read the files of the role'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - '/opt/mosquitto/config/mosquitto.conf'
+        - '/opt/mosquitto/config/passwd'
+        - '/opt/mosquitto/config/acl'
+      register: 'smarthome_mosquitto__test_files'
+
+    - name: 'Read the configuration, the users and the ACL'
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - '/opt/mosquitto/config/mosquitto.conf'
+        - '/opt/mosquitto/config/passwd'
+        - '/opt/mosquitto/config/acl'
+      register: 'smarthome_mosquitto__test_contents'
+
+    # The passwords are hashes of mosquitto_passwd 2.1, the password of the bridge is only part of its secret
+    - name: 'Assert the configuration, the users and the ACL'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__test_files.results | map(attribute='stat.uid') | unique | list == [ 1883 ]
+          - smarthome_mosquitto__test_files.results | map(attribute='stat.gid') | unique | list == [ 1883 ]
+          - smarthome_mosquitto__test_files.results | map(attribute='stat.mode') | list == [ '0640', '0600', '0600' ]
+          - smarthome_mosquitto__expect.config | reject('in', smarthome_mosquitto__test_config) | list | length == 0
+          - smarthome_mosquitto__expect.config_absent | select('in', smarthome_mosquitto__test_config_text) | list | length == 0
+          - smarthome_mosquitto__test_users | map('regex_replace', ':.*$', '') | list == smarthome_mosquitto__expect.users
+          - smarthome_mosquitto__test_users | reject('match', '^[^:]+:[$]7[$]20000[$][A-Za-z0-9+/=]{88}[$][A-Za-z0-9+/=]{88}$') | list | length == 0
+          - smarthome_mosquitto__expect.acl | default([]) | reject('in', smarthome_mosquitto__test_acl) | list | length == 0
+          - smarthome_mosquitto__test_plain | select('in', smarthome_mosquitto__test_all) | list | length == 0
+        fail_msg: >-
+          modes {{ smarthome_mosquitto__test_files.results | map(attribute='stat.mode') | list }},
+          configuration {{ smarthome_mosquitto__test_config }}, users {{ smarthome_mosquitto__test_users | map('regex_replace', ':.*$', '') | list }},
+          ACL {{ smarthome_mosquitto__test_acl }}
+      vars:
+        smarthome_mosquitto__test_config_text: "{{ smarthome_mosquitto__test_contents.results[0].content | b64decode }}"
+        smarthome_mosquitto__test_config: "{{ smarthome_mosquitto__test_config_text.splitlines() }}"
+        smarthome_mosquitto__test_users: "{{ (smarthome_mosquitto__test_contents.results[1].content | b64decode).splitlines() }}"
+        smarthome_mosquitto__test_acl: "{{ (smarthome_mosquitto__test_contents.results[2].content | b64decode).splitlines() }}"
+        smarthome_mosquitto__test_all: "{{ smarthome_mosquitto__test_contents.results | map(attribute='content') | map('b64decode') | join('\n') }}"
+
+    - name: 'Search the passwords in the directory of the role'
+      ansible.builtin.command:
+        argv: "{{ [ 'grep', '-rlF' ] + (smarthome_mosquitto__test_plain | map('regex_replace', '^', '-e') | list) + [ '/opt/mosquitto' ] }}"
+      register: 'smarthome_mosquitto__test_grep'
+      changed_when: false
+      failed_when: smarthome_mosquitto__test_grep.rc != 1
+      when: smarthome_mosquitto__test_plain | length > 0
+
+    - name: 'Read the state of the mosquitto service'
+      ansible.builtin.command: 'systemctl is-active mosquitto'
+      register: 'smarthome_mosquitto__test_service'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Inspect the mosquitto container'
+      ansible.builtin.command: 'podman inspect mosquitto'
+      register: 'smarthome_mosquitto__test_inspect'
+      changed_when: false
+
+    - name: 'Assert the service, the container addresses and the time zone'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__test_service.stdout == 'active'
+          - smarthome_mosquitto__test_net.IPAddress == smarthome_mosquitto__expect.ip
+          - smarthome_mosquitto__expect.ip6 is none or smarthome_mosquitto__test_net.GlobalIPv6Address == smarthome_mosquitto__expect.ip6
+          - smarthome_mosquitto__test_container.Config.Timezone == smarthome_mosquitto__test_case.role_vars.mosquitto_timezone
+          - smarthome_mosquitto__test_plain | select('in', smarthome_mosquitto__test_container.Config.Env | join(' ')) | list | length == 0
+        fail_msg: >-
+          service {{ smarthome_mosquitto__test_service.stdout }}, time zone {{ smarthome_mosquitto__test_container.Config.Timezone | default('') }},
+          IPv4 {{ smarthome_mosquitto__test_net.IPAddress }}, IPv6 {{ smarthome_mosquitto__test_net.GlobalIPv6Address }}
+      vars:
+        smarthome_mosquitto__test_container: "{{ (smarthome_mosquitto__test_inspect.stdout | from_json)[0] }}"
+        smarthome_mosquitto__test_net: "{{ smarthome_mosquitto__test_container.NetworkSettings.Networks[smarthome_mosquitto__test_case.role_vars.mosquitto_network] }}"
+
+    # Without login the broker refuses the connection
+    - name: 'Publish without login'
+      ansible.builtin.command:
+        argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-t', 'molecule/anonymous', '-m', 'anonymous' ]
+      register: 'smarthome_mosquitto__test_anonymous'
+      changed_when: false
+      failed_when: smarthome_mosquitto__test_anonymous.rc == 0 or smarthome_mosquitto__test_anonymous.stderr is not search('not authori[sz]ed')
+
+    - name: 'Publish with a wrong password'
+      ansible.builtin.command:
+        argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-u', "{{ item.username }}", '-P', "{{ item.password }}",
+                '-t', 'molecule/refused', '-m', 'refused' ]
+      loop: "{{ smarthome_mosquitto__expect.refused }}"
+      loop_control:
+        label: "{{ item.username }}"
+      register: 'smarthome_mosquitto__test_refused'
+      changed_when: false
+      failed_when: smarthome_mosquitto__test_refused.rc == 0
+
+    # The publisher writes a retained message, the reader receives it after the publisher disconnected
+    - name: 'Publish a retained message with a login'
+      ansible.builtin.command:
+        argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-u', "{{ item.username }}", '-P', "{{ item.password }}",
+                '-t', "{{ item.topic }}", '-m', "molecule {{ item.username }}", '-r' ]
+      loop: "{{ smarthome_mosquitto__expect.logins + smarthome_mosquitto__expect.denied }}"
+      loop_control:
+        label: "{{ item.username }} {{ item.topic }}"
+      changed_when: false
+
+    - name: 'Read the retained messages'
+      ansible.builtin.command:
+        argv: [ 'mosquitto_sub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-u', "{{ item.reader }}", '-P', "{{ item.reader_password }}",
+                '-t', "{{ item.topic }}", '-C', '1', '-W', '5' ]
+      loop: "{{ smarthome_mosquitto__expect.logins }}"
+      loop_control:
+        label: "{{ item.reader }} {{ item.topic }}"
+      register: 'smarthome_mosquitto__test_read'
+      changed_when: false
+      failed_when: smarthome_mosquitto__test_read.stdout | default('') != 'molecule ' ~ item.username
+
+    # The ACL drops the message of a topic without write access, there is no retained message to read
+    - name: 'Read the messages the ACL dropped'
+      ansible.builtin.command:
+        argv: [ 'mosquitto_sub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-u', "{{ item.reader }}", '-P', "{{ item.reader_password }}",
+                '-t', "{{ item.topic }}", '-C', '1', '-W', '3' ]
+      loop: "{{ smarthome_mosquitto__expect.denied }}"
+      loop_control:
+        label: "{{ item.username }} {{ item.topic }}"
+      register: 'smarthome_mosquitto__test_denied'
+      changed_when: false
+      failed_when: smarthome_mosquitto__test_denied.stdout | default('') | length > 0
+
+    # The certificate of prepare.yml is valid for the address of the broker
+    - name: 'Publish with TLS'
+      when: smarthome_mosquitto__expect.tls | bool
+      ansible.builtin.command:
+        argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-p', '8883', '--cafile', "{{ smarthome_mosquitto__test_pki_dir }}/ca.crt",
+                '-u', "{{ smarthome_mosquitto__expect.logins[0].username }}", '-P', "{{ smarthome_mosquitto__expect.logins[0].password }}",
+                '-t', 'sensors/tls', '-m', 'tls' ]
+      changed_when: false
+
+    # The bridge logs in with the password of its secret and forwards bridge/# to the remote broker
+    - name: 'Test the bridge'
+      when: smarthome_mosquitto__expect.bridge | bool
+      block:
+
+        - name: 'Publish a retained message to the bridge'
+          ansible.builtin.command:
+            argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-u', "{{ smarthome_mosquitto__expect.logins[0].username }}",
+                    '-P', "{{ smarthome_mosquitto__expect.logins[0].password }}", '-t', 'bridge/molecule', '-m', 'over the bridge', '-r' ]
+          changed_when: false
+
+        - name: 'Read the message on the remote broker'
+          ansible.builtin.command:
+            argv: [ 'mosquitto_sub', '-h', "{{ smarthome_mosquitto__test_remote.ip }}", '-u', "{{ smarthome_mosquitto__test_remote.username }}",
+                    '-P', "{{ smarthome_mosquitto__test_remote.password }}", '-t', 'bridge/molecule', '-C', '1', '-W', '5' ]
+          register: 'smarthome_mosquitto__test_bridge'
+          until: smarthome_mosquitto__test_bridge.stdout == 'over the bridge'
+          retries: 6
+          delay: 5
+          changed_when: false
+
+        - name: 'Read the section of the bridge in the container'
+          ansible.builtin.command:
+            argv: [ 'podman', 'exec', 'mosquitto', 'grep', '-c', '^remote_password ', '/run/mosquitto/bridges/remote.conf' ]
+          register: 'smarthome_mosquitto__test_bridge_secret'
+          changed_when: false
+          failed_when: smarthome_mosquitto__test_bridge_secret.stdout != '1'
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'mosquitto' ]
+      register: 'smarthome_mosquitto__test_restarts'
+      changed_when: false
+
+    - name: 'Read the log of Mosquitto'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'mosquitto', '-n', '50', '--no-pager' ]
+      register: 'smarthome_mosquitto__test_journal'
+      changed_when: false
+
+    - name: 'Assert no automatic restart'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__test_restarts.stdout == '0'
+        fail_msg: "{{ smarthome_mosquitto__test_journal.stdout_lines }}"
+
+    # The certificates of the realms are installed on every start, the certificate of a removed realm is gone
+    - name: 'Test the certificates of the realms'
+      when: smarthome_mosquitto__expect.realms | length > 0
+      block:
+
+        - name: 'Read the installed certificates of the realms'
+          ansible.builtin.stat:
+            path: "/opt/mosquitto/certs/{{ item.0.realm }}.{{ item.1 }}"
+          loop: "{{ smarthome_mosquitto__expect.realms | product([ 'crt', 'key' ]) | list }}"
+          loop_control:
+            label: "{{ item.0.realm }}.{{ item.1 }}"
+          register: 'smarthome_mosquitto__test_certs'
+
+        - name: 'Read the certificate of the removed realm'
+          ansible.builtin.stat:
+            path: "{{ smarthome_mosquitto__test_stale_cert }}"
+          register: 'smarthome_mosquitto__test_stale'
+
+        - name: 'Assert the installed certificates'
+          ansible.builtin.assert:
+            that:
+              - smarthome_mosquitto__test_certs.results | rejectattr('stat.exists') | list | length == 0
+              - smarthome_mosquitto__test_certs.results | map(attribute='stat.uid') | unique | list == [ 1883 ]
+              - smarthome_mosquitto__test_certs.results | map(attribute='stat.mode') | unique | list | sort == [ '0400', '0644' ]
+              - smarthome_mosquitto__test_certs.results | selectattr('item.1', 'eq', 'key') | map(attribute='stat.mode') | unique | list == [ '0400' ]
+              - not smarthome_mosquitto__test_stale.stat.exists
+            fail_msg: >-
+              paths {{ smarthome_mosquitto__test_certs.results | map(attribute='stat.path', default='missing') | list }},
+              modes {{ smarthome_mosquitto__test_certs.results | map(attribute='stat.mode', default='') | list }},
+              owners {{ smarthome_mosquitto__test_certs.results | map(attribute='stat.uid', default='') | list }},
+              removed realm exists: {{ smarthome_mosquitto__test_stale.stat.exists }}
+
+        # The self-signed certificate of the realm is the CA of the client
+        - name: 'Publish with TLS and the certificates of the realms'
+          ansible.builtin.command:
+            argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-p', "{{ item.port }}",
+                    '--cafile', "{{ smarthome_mosquitto__test_realms_dir }}/{{ item.realm }}/fullchain.pem",
+                    '-u', "{{ smarthome_mosquitto__expect.logins[0].username }}", '-P', "{{ smarthome_mosquitto__expect.logins[0].password }}",
+                    '-t', "sensors/{{ item.realm }}", '-m', "{{ item.realm }}" ]
+          loop: "{{ smarthome_mosquitto__expect.realms }}"
+          loop_control:
+            label: "{{ item.realm }} {{ item.port }}"
+          changed_when: false
+
+        - name: 'Read the timer of pki_update'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'is-active', 'pki-update@mosquitto.timer' ]
+          register: 'smarthome_mosquitto__test_timer'
+          changed_when: false
+          failed_when: smarthome_mosquitto__test_timer.stdout != 'active'
+
+        - name: 'Read the override of pki_update'
+          ansible.builtin.slurp:
+            src: '/etc/systemd/system/pki-update@mosquitto.service.d/override.conf'
+          register: 'smarthome_mosquitto__test_override'
+
+        - name: 'Assert the certificates of the realms in the override'
+          ansible.builtin.assert:
+            that:
+              - smarthome_mosquitto__test_certificates | reject('in', smarthome_mosquitto__test_override.content | b64decode) | list | length == 0
+            fail_msg: "{{ smarthome_mosquitto__test_override.content | b64decode }}"
+          vars:
+            smarthome_mosquitto__test_certificates: >-
+              {{ smarthome_mosquitto__expect.realms | map(attribute='realm') | map('regex_replace', '^', smarthome_mosquitto__test_realms_dir ~ '/')
+                 | map('regex_replace', '$', '/fullchain.pem') | list }}
+
+        # A certificate newer than the start of the broker is a renewal, pki_update restarts the broker
+        - name: 'Read the start time of the service before the renewal'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_started_before'
+          changed_when: false
+
+        - name: 'Renew the certificate of the first realm'
+          ansible.builtin.command:
+            argv: [ 'touch', "{{ smarthome_mosquitto__test_realms_dir }}/{{ smarthome_mosquitto__expect.realms[0].realm }}/fullchain.pem" ]
+          changed_when: true
+
+        - name: 'Run pki_update'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'start', 'pki-update@mosquitto.service' ]
+          changed_when: true
+
+        - name: 'Read the start time of the service after the renewal'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_started_after'
+          changed_when: false
+
+        - name: 'Wait for the listener of the renewed realm'
+          ansible.builtin.wait_for:
+            host: "{{ smarthome_mosquitto__expect.ip }}"
+            port: "{{ smarthome_mosquitto__expect.realms[0].port }}"
+            timeout: 60
+
+        - name: 'Publish with TLS after the renewal'
+          ansible.builtin.command:
+            argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__expect.ip }}", '-p', "{{ smarthome_mosquitto__expect.realms[0].port }}",
+                    '--cafile', "{{ smarthome_mosquitto__test_realms_dir }}/{{ smarthome_mosquitto__expect.realms[0].realm }}/fullchain.pem",
+                    '-u', "{{ smarthome_mosquitto__expect.logins[0].username }}", '-P', "{{ smarthome_mosquitto__expect.logins[0].password }}",
+                    '-t', 'sensors/renewed', '-m', 'renewed' ]
+          changed_when: false
+
+        - name: 'Assert the restart after the renewal'
+          ansible.builtin.assert:
+            that:
+              - smarthome_mosquitto__test_started_after.stdout | int > smarthome_mosquitto__test_started_before.stdout | int
+            fail_msg: "start before {{ smarthome_mosquitto__test_started_before.stdout }}, after {{ smarthome_mosquitto__test_started_after.stdout }}"

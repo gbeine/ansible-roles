@@ -1,0 +1,343 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    smarthome_mosquitto__test_case: "{{ smarthome_mosquitto__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    smarthome_mosquitto__test_vars: "{{ smarthome_mosquitto__test_case.role_vars }}"
+    smarthome_mosquitto__test_config: "{{ smarthome_mosquitto__test_vars.mosquitto_config | default({}) }}"
+    smarthome_mosquitto__test_checked_files:
+      - "{{ smarthome_mosquitto__test_quadlet_path }}"
+      - '/opt/mosquitto/config/mosquitto.conf'
+      - '/opt/mosquitto/config/passwd'
+      - '/opt/mosquitto/config/acl'
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ smarthome_mosquitto__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    # The key created in prepare.yml replaces the placeholder of the secret
+    - name: 'Read the key of the TLS listener'
+      when: smarthome_mosquitto__test_case.expect.tls | bool
+      ansible.builtin.slurp:
+        src: "{{ smarthome_mosquitto__test_pki_dir }}/server.key"
+      register: 'smarthome_mosquitto__test_key'
+
+    - name: 'Set the key of the TLS listener'
+      when: smarthome_mosquitto__test_case.expect.tls | bool
+      no_log: true
+      ansible.builtin.set_fact:
+        mosquitto_secrets: >-
+          {%- set secrets = [] -%}
+          {%- for secret in mosquitto_secrets -%}
+          {%-   set _ = secrets.append(secret | combine({ 'data': smarthome_mosquitto__test_key.content | b64decode })
+                                       if secret.data == smarthome_mosquitto__test_key_placeholder else secret) -%}
+          {%- endfor -%}
+          {{ secrets }}
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ smarthome_mosquitto__test_checked_files }}"
+      register: 'smarthome_mosquitto__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run smarthome_mosquitto with mosquitto_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config: [ 'persistence' ]
+        smarthome_mosquitto__test_invalid:
+          message: 'mosquitto_config not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run smarthome_mosquitto with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config: "{{ smarthome_mosquitto__test_config | combine({ 'molecule_option': 1 }) }}"
+        smarthome_mosquitto__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options of mosquitto_config: molecule_option, allowed are'
+
+    - name: 'Run smarthome_mosquitto with an unknown option of a listener (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config:
+          listener:
+            - port: 1883
+              persistence: true
+        smarthome_mosquitto__test_invalid:
+          message: 'an unknown option of a listener'
+          search: '^Unknown options of mosquitto_config: listener 1883: persistence, allowed are'
+
+    - name: 'Run smarthome_mosquitto with listener not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config:
+          listener:
+            port: 1883
+        smarthome_mosquitto__test_invalid:
+          message: 'listener not a list'
+          search: '^listener of mosquitto_config has to be a list of dictionaries with port\.$'
+
+    - name: 'Run smarthome_mosquitto with a bridge without name (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config:
+          connection:
+            - address: '10.89.0.130:1883'
+        smarthome_mosquitto__test_invalid:
+          message: 'a bridge without name'
+          search: '^connection of mosquitto_config has to be a list of dictionaries with name\.$'
+
+    - name: 'Run smarthome_mosquitto with password_file (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config:
+          password_file: '/mosquitto/config/passwd'
+        smarthome_mosquitto__test_invalid:
+          message: 'password_file'
+          search: '^These options are set by the role and must not be set in mosquitto_config, the users are set with mosquitto_users and the ACL with mosquitto_acl: password_file\.$'
+
+    - name: 'Run smarthome_mosquitto with the password of a bridge in the configuration (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config:
+          connection:
+            - name: 'remote'
+              address: '10.89.0.130:1883'
+              remote_password: 'molecule-plain-password'
+        smarthome_mosquitto__test_invalid:
+          message: 'the password of a bridge in the configuration'
+          search: '^These options are secrets and are set with mosquitto_secrets: connection remote: remote_password\.$'
+
+    - name: 'Run smarthome_mosquitto with a boolean that is no boolean (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_config:
+          persistence: 'maybe'
+        smarthome_mosquitto__test_invalid:
+          message: 'a boolean that is no boolean'
+          search: '^These options are booleans, allowed are true and false: persistence\.$'
+
+    - name: 'Run smarthome_mosquitto with a secret without target (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_secrets: [ { 'name': 'mosquitto-molecule', 'data': 'x' } ]
+        smarthome_mosquitto__test_invalid:
+          message: 'a secret without target'
+          search: '^`mosquitto_secrets` entries need name, data and target$'
+
+    - name: 'Run smarthome_mosquitto with a secret of an unknown bridge (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_secrets: [ { 'name': 'mosquitto-molecule', 'data': 'x', 'target': 'connection.unknown.remote_password' } ]
+        smarthome_mosquitto__test_invalid:
+          message: 'a secret of an unknown bridge'
+          search: '^Unknown secrets: connection\.unknown\.remote_password\. Allowed are'
+
+    - name: 'Run smarthome_mosquitto with a user without password (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_users:
+          molecule:
+            acl: [ 'read sensors/#' ]
+        smarthome_mosquitto__test_invalid:
+          message: 'a user without password'
+          search: '^The users of mosquitto_users need a password without line breaks: molecule\.$'
+
+    - name: 'Run smarthome_mosquitto with an invalid line of the ACL (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_acl:
+          pattern: [ 'rw users/%u/#' ]
+        smarthome_mosquitto__test_invalid:
+          message: 'an invalid line of the ACL'
+          search: '^The ACL is a list of lines of read, write, readwrite or deny and the topic: mosquitto_acl\.pattern\.$'
+
+    - name: 'Run smarthome_mosquitto with an unknown variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_environment:
+          PUID: '1000'
+        smarthome_mosquitto__test_invalid:
+          message: 'an unknown variable'
+          search: '^Unknown environment variables: PUID, allowed are UMASK_SET'
+
+    - name: 'Run smarthome_mosquitto with mosquitto_realms not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_realms: 'realm1'
+        mosquitto_config: { listener: [ { port: 1883 } ] }
+        mosquitto_secrets: []
+        smarthome_mosquitto__test_invalid:
+          message: 'mosquitto_realms not a list'
+          search: '^mosquitto_realms has to be a list of realms\.$'
+
+    - name: 'Run smarthome_mosquitto with an invalid and a duplicate realm (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_realms: [ 'realm 1', 'realm2', 'realm2' ]
+        mosquitto_config: { listener: [ { port: 1883 } ] }
+        mosquitto_secrets: []
+        smarthome_mosquitto__test_invalid:
+          message: 'an invalid and a duplicate realm'
+          search: '^The realms of mosquitto_realms are names of letters, digits, _, \. and -: realm 1\. The realms of mosquitto_realms have to be unique\.$'
+
+    - name: 'Run smarthome_mosquitto with a realm of a listener that is no realm of mosquitto_realms (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_realms: []
+        mosquitto_config: { listener: [ { port: 8884, realm: 'realm1' } ] }
+        mosquitto_secrets: []
+        smarthome_mosquitto__test_invalid:
+          message: 'a realm of a listener that is no realm of mosquitto_realms'
+          search: '^The realms of the listeners and bridges have to be realms of mosquitto_realms: listener 8884: realm1\.$'
+
+    - name: 'Run smarthome_mosquitto with a realm and a certificate of a listener (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_realms: [ 'realm1' ]
+        mosquitto_config: { listener: [ { port: 8884, realm: 'realm1', certfile: '/mosquitto/pki/server.crt' } ] }
+        mosquitto_secrets: []
+        smarthome_mosquitto__test_invalid:
+          message: 'a realm and a certificate of a listener'
+          search: '^A listener or bridge with realm gets the certificate and the key of the realm, it must not set them in mosquitto_config or mosquitto_secrets: listener 8884\.$'
+
+    - name: 'Run smarthome_mosquitto with a realm without certificates (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        mosquitto_realms: [ 'realm3' ]
+        mosquitto_config: { listener: [ { port: 8884, realm: 'realm3' } ] }
+        mosquitto_secrets: []
+        smarthome_mosquitto__test_invalid:
+          message: 'a realm without certificates'
+          search: '^The certificates of mosquitto_realms are missing in /etc/pki/realms: realm3/fullchain\.pem, realm3/privkey\.pem\.$'
+
+    - name: 'Change the users and the configuration'
+      when: smarthome_mosquitto__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the changed users'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed users'
+          ansible.builtin.set_fact:
+            mosquitto_users: "{{ smarthome_mosquitto__test_case.side_effect.users }}"
+
+        - name: 'Run smarthome_mosquitto with the changed users'
+          ansible.builtin.include_role:
+            name: 'smarthome_mosquitto'
+
+        - name: 'Read the start time of the service after the changed users'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_started_users'
+          changed_when: false
+
+        # SIGHUP reloads the users, the old password is refused, the new one is accepted
+        - name: 'Publish with the old password of the sensor'
+          ansible.builtin.command:
+            argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__test_case.expect.ip }}", '-u', 'sensor',
+                    '-P', "{{ smarthome_mosquitto__test_vars.mosquitto_users.sensor.password }}", '-t', 'sensors/reload', '-m', 'old' ]
+          register: 'smarthome_mosquitto__test_old_password'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Publish with the new password of the sensor'
+          ansible.builtin.command:
+            argv: [ 'mosquitto_pub', '-h', "{{ smarthome_mosquitto__test_case.expect.ip }}", '-u', 'sensor',
+                    '-P', "{{ smarthome_mosquitto__test_case.side_effect.users.sensor.password }}", '-t', 'sensors/reload', '-m', 'new' ]
+          register: 'smarthome_mosquitto__test_new_password'
+          changed_when: false
+          failed_when: false
+
+        - name: 'Assert the users were reloaded without a restart'
+          ansible.builtin.assert:
+            that:
+              - smarthome_mosquitto__users_result is changed
+              - smarthome_mosquitto__config_result is not changed
+              - smarthome_mosquitto__quadlet_result is not changed
+              - smarthome_mosquitto__test_started_users.stdout == smarthome_mosquitto__test_started_before.stdout
+              - smarthome_mosquitto__test_old_password.rc != 0
+              - smarthome_mosquitto__test_new_password.rc == 0
+            fail_msg: >-
+              users changed: {{ smarthome_mosquitto__users_result is changed }}, configuration changed: {{ smarthome_mosquitto__config_result is changed }},
+              start before {{ smarthome_mosquitto__test_started_before.stdout }}, after {{ smarthome_mosquitto__test_started_users.stdout }},
+              old password rc {{ smarthome_mosquitto__test_old_password.rc }} {{ smarthome_mosquitto__test_old_password.stderr }},
+              new password rc {{ smarthome_mosquitto__test_new_password.rc }} {{ smarthome_mosquitto__test_new_password.stderr }}
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            mosquitto_config: "{{ smarthome_mosquitto__test_case.side_effect.config }}"
+
+        - name: 'Run smarthome_mosquitto with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'smarthome_mosquitto'
+
+        - name: 'Read the start time of the service after the changed configuration'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_started_config'
+          changed_when: false
+
+        - name: 'Assert the restart'
+          ansible.builtin.assert:
+            that:
+              - smarthome_mosquitto__config_result is changed
+              - smarthome_mosquitto__users_result is not changed
+              - smarthome_mosquitto__test_started_config.stdout | int > smarthome_mosquitto__test_started_users.stdout | int
+            fail_msg: >-
+              configuration changed: {{ smarthome_mosquitto__config_result is changed }}, users changed: {{ smarthome_mosquitto__users_result is changed }},
+              start before {{ smarthome_mosquitto__test_started_users.stdout }}, after {{ smarthome_mosquitto__test_started_config.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: smarthome_mosquitto__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run smarthome_mosquitto without a change'
+          ansible.builtin.include_role:
+            name: 'smarthome_mosquitto'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'mosquitto' ]
+          register: 'smarthome_mosquitto__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - smarthome_mosquitto__config_result is not changed
+              - smarthome_mosquitto__users_result is not changed
+              - smarthome_mosquitto__acl_result is not changed
+              - smarthome_mosquitto__quadlet_result is not changed
+              - smarthome_mosquitto__test_unchanged_after.stdout == smarthome_mosquitto__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ smarthome_mosquitto__config_result is changed }}, users changed: {{ smarthome_mosquitto__users_result is changed }},
+              quadlet changed: {{ smarthome_mosquitto__quadlet_result is changed }},
+              start before {{ smarthome_mosquitto__test_unchanged_before.stdout }}, after {{ smarthome_mosquitto__test_unchanged_after.stdout }}

@@ -1,0 +1,593 @@
+---
+
+- name: 'Install Mosquitto'
+  tags: [ 'smarthome', 'smarthome_mosquitto' ]
+  block:
+
+    # A failing template in the variables (e.g. mosquitto_container, mosquitto_config or mosquitto_acl not a dictionary)
+    # stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - smarthome_mosquitto__container | length > 0
+          # combine fails here if mosquitto_config or mosquitto_acl is no dictionary
+          - smarthome_mosquitto__config | length >= 0
+          - smarthome_mosquitto__acl | length >= 0
+          - smarthome_mosquitto__config_lines | length >= 0
+          - smarthome_mosquitto__acl_lines | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ smarthome_mosquitto__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        smarthome_mosquitto__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = smarthome_mosquitto__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('`mosquitto_secrets` has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('`mosquitto_secrets` entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of `mosquitto_secrets` have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The general options, the listeners and the bridges, every part has its own allow list
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ smarthome_mosquitto__errors | join(' ') }}"
+        quiet: true
+      vars:
+        smarthome_mosquitto__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = smarthome_mosquitto__config -%}
+          {%- set secret_options = smarthome_mosquitto__secrets_file_options.general
+                                   + smarthome_mosquitto__secrets_file_options.listener
+                                   + smarthome_mosquitto__secrets_file_options.connection
+                                   + smarthome_mosquitto__secrets_value_options.connection -%}
+          {%- set ns = namespace(unknown=[], role=[], secret=[], values=[], lines=[], booleans=[]) -%}
+          {#- The options of every part with the part for the messages -#}
+          {%- set parts = [ ('', config | dict2items | rejectattr('key', 'in', smarthome_mosquitto__config_sections) | items2dict, smarthome_mosquitto__config_allowed) ] -%}
+          {%- set listeners = config.listener | default([]) -%}
+          {%- set bridges = config.connection | default([]) -%}
+          {%- if listeners is not sequence or listeners is string or listeners is mapping
+                 or listeners | reject('mapping') | list | length > 0 or listeners | rejectattr('port', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('listener of mosquitto_config has to be a list of dictionaries with port.') -%}
+          {%- else -%}
+          {%-   set ports = listeners | map(attribute='port') | map('string') | list -%}
+          {%-   set invalid = ports | reject('match', '^[0-9]{1,5}$') | list
+                              + ports | select('match', '^[0-9]{1,5}$') | map('int') | select('gt', 65535) | map('string') | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The ports of the listeners have to be numbers from 0 to 65535: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ports | unique | list | length != ports | length -%}
+          {%-     set _ = errors.append('The ports of the listeners have to be unique.') -%}
+          {%-   endif -%}
+          {%-   for listener in listeners -%}
+          {%-     set _ = parts.append(('listener ' ~ listener.port ~ ': ', listener | dict2items | rejectattr('key', 'in', [ 'port', 'realm' ]) | items2dict,
+                                         smarthome_mosquitto__config_listener_allowed)) -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {%- if bridges is not sequence or bridges is string or bridges is mapping
+                 or bridges | reject('mapping') | list | length > 0 or bridges | rejectattr('name', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('connection of mosquitto_config has to be a list of dictionaries with name.') -%}
+          {%- else -%}
+          {%-   set names = bridges | map(attribute='name') | map('string') | list -%}
+          {%-   set invalid = names | reject('match', smarthome_mosquitto__bridge_name_pattern) | list -%}
+          {%-   if invalid | length > 0 -%}
+          {%-     set _ = errors.append('The names of the bridges consist of letters, digits, _, . and -: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if names | unique | list | length != names | length -%}
+          {%-     set _ = errors.append('The names of the bridges have to be unique.') -%}
+          {%-   endif -%}
+          {%-   for bridge in bridges -%}
+          {%-     set _ = parts.append(('connection ' ~ bridge.name ~ ': ', bridge | dict2items | rejectattr('key', 'in', [ 'name', 'realm' ]) | items2dict,
+                                         smarthome_mosquitto__config_connection_allowed)) -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {%- for prefix, options, allowed in parts -%}
+          {%-   for key, value in options.items() -%}
+          {%-     set name = prefix ~ key -%}
+          {%-     if key in smarthome_mosquitto__config_role -%}
+          {%-       set ns.role = ns.role + [ name ] -%}
+          {%-     elif key in secret_options -%}
+          {%-       set ns.secret = ns.secret + [ name ] -%}
+          {%-     elif key not in allowed -%}
+          {%-       set ns.unknown = ns.unknown + [ name ] -%}
+          {%-     endif -%}
+          {%-     set items = value if (value is sequence and value is not string and value is not mapping) else [ value ] -%}
+          {%-     if value is mapping or items | select('mapping') | list | length > 0
+                     or (value is sequence and value is not string and items | select('sequence') | reject('string') | list | length > 0) -%}
+          {%-       set ns.values = ns.values + [ name ] -%}
+          {%-     elif items | select('string') | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-       set ns.lines = ns.lines + [ name ] -%}
+          {%-     elif key in smarthome_mosquitto__config_booleans and value is not none and value is not boolean
+                       and (value | string | lower) not in [ 'true', 'false' ] -%}
+          {%-       set ns.booleans = ns.booleans + [ name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown options of mosquitto_config: ' ~ (ns.unknown | join(', ')) ~ ', allowed are the options of Mosquitto in smarthome_mosquitto__config_allowed, smarthome_mosquitto__config_listener_allowed and smarthome_mosquitto__config_connection_allowed.') -%}
+          {%- endif -%}
+          {%- if ns.role | length > 0 -%}
+          {%-   set _ = errors.append('These options are set by the role and must not be set in mosquitto_config, the users are set with mosquitto_users and the ACL with mosquitto_acl: ' ~ (ns.role | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.secret | length > 0 -%}
+          {%-   set _ = errors.append('These options are secrets and are set with mosquitto_secrets: ' ~ (ns.secret | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.values | length > 0 -%}
+          {%-   set _ = errors.append('The values of mosquitto_config have to be strings, numbers, booleans, null or lists of them: ' ~ (ns.values | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.lines | length > 0 -%}
+          {%-   set _ = errors.append('The values of mosquitto_config must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.booleans | length > 0 -%}
+          {%-   set _ = errors.append('These options are booleans, allowed are true and false: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The names are written to the password and ACL files, Mosquitto stops on an invalid ACL line when it reloads the file
+    - name: 'Validate the users and the ACL'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ smarthome_mosquitto__errors | join(' ') }}"
+        quiet: true
+      vars:
+        smarthome_mosquitto__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(acl=[]) -%}
+          {%- set users = smarthome_mosquitto__users -%}
+          {%- if users is not mapping -%}
+          {%-   set _ = errors.append('mosquitto_users has to be a dictionary of the users by their names.') -%}
+          {%- else -%}
+          {%-   set names = users.keys() | map('string') | reject('match', smarthome_mosquitto__user_name_pattern) | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The names of mosquitto_users consist of letters, digits, _, ., @ and -: ' ~ (names | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set entries = users | dict2items | rejectattr('value', 'mapping') | map(attribute='key') | map('string') | list -%}
+          {%-   if entries | length > 0 -%}
+          {%-     set _ = errors.append('The users of mosquitto_users are dictionaries with password and acl: ' ~ (entries | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   set ns2 = namespace(keys=[], passwords=[]) -%}
+          {%-   for name, user in users.items() if user is mapping -%}
+          {%-     set ns2.keys = ns2.keys + (user.keys() | map('string') | reject('in', smarthome_mosquitto__user_keys) | list) -%}
+          {%-     if user.password is not defined or user.password is not string or user.password | length == 0
+                     or user.password is search('[\r\n]') -%}
+          {%-       set ns2.passwords = ns2.passwords + [ name | string ] -%}
+          {%-     endif -%}
+          {%-     set acl = user.acl | default([], true) -%}
+          {%-     if acl is string or acl is mapping or acl is not sequence or acl | reject('string') | list | length > 0
+                     or acl | reject('match', smarthome_mosquitto__acl_pattern) | list | length > 0 -%}
+          {%-       set ns.acl = ns.acl + [ 'mosquitto_users.' ~ name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if ns2.keys | length > 0 -%}
+          {%-     set _ = errors.append('Unknown keys in mosquitto_users: ' ~ (ns2.keys | unique | join(', ')) ~ ', allowed are ' ~ (smarthome_mosquitto__user_keys | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns2.passwords | length > 0 -%}
+          {%-     set _ = errors.append('The users of mosquitto_users need a password without line breaks: ' ~ (ns2.passwords | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set unknown = smarthome_mosquitto__acl.keys() | map('string') | reject('in', smarthome_mosquitto__acl_keys) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown keys in mosquitto_acl: ' ~ (unknown | join(', ')) ~ ', allowed are ' ~ (smarthome_mosquitto__acl_keys | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- for key in smarthome_mosquitto__acl_keys -%}
+          {%-   set acl = smarthome_mosquitto__acl[key] | default([], true) -%}
+          {%-   if acl is string or acl is mapping or acl is not sequence or acl | reject('string') | list | length > 0
+                   or acl | reject('match', smarthome_mosquitto__acl_pattern) | list | length > 0 -%}
+          {%-     set ns.acl = ns.acl + [ 'mosquitto_acl.' ~ key ] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.acl | length > 0 -%}
+          {%-   set _ = errors.append('The ACL is a list of lines of read, write, readwrite or deny and the topic: ' ~ (ns.acl | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # A target is the path of an option, listeners by their port and bridges by their name
+    - name: 'Validate the targets of the secrets'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ smarthome_mosquitto__errors | join(' ') }}"
+        quiet: true
+      vars:
+        smarthome_mosquitto__ports: >-
+          {{ (smarthome_mosquitto__config.listener if smarthome_mosquitto__config.listener | default(none) is sequence else [])
+             | select('mapping') | map(attribute='port', default='') | map('string') | list }}
+        smarthome_mosquitto__bridges: >-
+          {{ (smarthome_mosquitto__config.connection if smarthome_mosquitto__config.connection | default(none) is sequence else [])
+             | select('mapping') | map(attribute='name', default='') | map('string') | list }}
+        smarthome_mosquitto__targets_allowed: >-
+          {%- set targets = smarthome_mosquitto__secrets_file_options.general | list -%}
+          {%- for port in smarthome_mosquitto__ports -%}
+          {%-   for option in smarthome_mosquitto__secrets_file_options.listener -%}
+          {%-     set _ = targets.append('listener.' ~ port ~ '.' ~ option) -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {%- for name in smarthome_mosquitto__bridges -%}
+          {%-   for option in smarthome_mosquitto__secrets_file_options.connection + smarthome_mosquitto__secrets_value_options.connection -%}
+          {%-     set _ = targets.append('connection.' ~ name ~ '.' ~ option) -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {{ targets }}
+        smarthome_mosquitto__targets: "{{ smarthome_mosquitto__secrets | map(attribute='target') | map('string') | list }}"
+        smarthome_mosquitto__errors: >-
+          {%- set errors = [] -%}
+          {%- set unknown = smarthome_mosquitto__targets | reject('in', smarthome_mosquitto__targets_allowed) | list -%}
+          {%- if unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (unknown | join(', ')) ~ '. Allowed are psk_file, listener.<port>.keyfile and connection.<name>.'
+                                    ~ ((smarthome_mosquitto__secrets_file_options.connection + smarthome_mosquitto__secrets_value_options.connection) | join('|'))
+                                    ~ ' of the listeners and bridges of mosquitto_config.') -%}
+          {%- endif -%}
+          {%- if smarthome_mosquitto__targets | unique | list | length != smarthome_mosquitto__targets | length -%}
+          {%-   set _ = errors.append('The targets of mosquitto_secrets have to be unique.') -%}
+          {%- endif -%}
+          {%- set values = smarthome_mosquitto__secrets | selectattr('target', 'string')
+                           | selectattr('target', 'search', '[.](' ~ (smarthome_mosquitto__secrets_value_options.connection | join('|')) ~ ')$') | list -%}
+          {%- set invalid = values | rejectattr('data', 'string') | map(attribute='name') | list
+                            + values | selectattr('data', 'string') | selectattr('data', 'search', '^$|[\r\n]') | map(attribute='name') | list -%}
+          {%- if invalid | length > 0 -%}
+          {%-   set _ = errors.append('The passwords and keys of the bridges are written into their section, they have to be strings without line breaks: ' ~ (invalid | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # A listener or bridge with realm gets the certificate and the key of the realm, it sets neither of them itself
+    - name: 'Validate the realms'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ smarthome_mosquitto__errors | join(' ') }}"
+        quiet: true
+      vars:
+        smarthome_mosquitto__targets: "{{ smarthome_mosquitto__secrets | map(attribute='target') | map('string') | list }}"
+        smarthome_mosquitto__errors: >-
+          {%- set errors = [] -%}
+          {%- set realms = smarthome_mosquitto__realms -%}
+          {%- if realms is string or realms is mapping or realms is not sequence -%}
+          {%-   set _ = errors.append('mosquitto_realms has to be a list of realms.') -%}
+          {%- else -%}
+          {%-   set names = realms | map('string') | reject('match', smarthome_mosquitto__realm_pattern) | list
+                            + realms | reject('string') | map('string') | list -%}
+          {%-   if names | length > 0 -%}
+          {%-     set _ = errors.append('The realms of mosquitto_realms are names of letters, digits, _, . and -: ' ~ (names | unique | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if realms | map('string') | unique | list | length != realms | length -%}
+          {%-     set _ = errors.append('The realms of mosquitto_realms have to be unique.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {%- set ns = namespace(unknown=[], both=[]) -%}
+          {%- for kind, key in [ ('listener', 'port'), ('connection', 'name') ] -%}
+          {%-   for section in smarthome_mosquitto__config[kind] | default([]) if section is mapping and section.realm is defined and section.realm is not none -%}
+          {%-     set name = kind ~ ' ' ~ section[key] | default('') -%}
+          {%-     if section.realm | string not in smarthome_mosquitto__realms_valid -%}
+          {%-       set ns.unknown = ns.unknown + [ name ~ ': ' ~ section.realm ] -%}
+          {%-     endif -%}
+          {%-     set options = smarthome_mosquitto__realm_options[kind] -%}
+          {%-     set secrets = options | map('regex_replace', '^', kind ~ '.' ~ section[key] | default('') ~ '.') | select('in', smarthome_mosquitto__targets) | list -%}
+          {%-     if options | select('in', section.keys() | list) | list | length > 0 or secrets | length > 0 -%}
+          {%-       set ns.both = ns.both + [ name ] -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%- endfor -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('The realms of the listeners and bridges have to be realms of mosquitto_realms: ' ~ (ns.unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.both | length > 0 -%}
+          {%-   set _ = errors.append('A listener or bridge with realm gets the certificate and the key of the realm, it must not set them in mosquitto_config or mosquitto_secrets: ' ~ (ns.both | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate the allowed environment variables'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ smarthome_mosquitto__errors | join(' ') }}"
+        quiet: true
+      when: smarthome_mosquitto__container.environment is defined and smarthome_mosquitto__container.environment is mapping
+      vars:
+        smarthome_mosquitto__unknown: >-
+          {{ smarthome_mosquitto__container.environment.keys() | map('string') | reject('in', smarthome_mosquitto__environment_allowed) | list }}
+        smarthome_mosquitto__line_breaks: >-
+          {{ smarthome_mosquitto__container.environment | dict2items | selectattr('value', 'string')
+             | selectattr('value', 'search', '[\r\n]') | map(attribute='key') | list }}
+        smarthome_mosquitto__errors: >-
+          {%- set errors = [] -%}
+          {%- if smarthome_mosquitto__unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (smarthome_mosquitto__unknown | join(', ')) ~ ', allowed are '
+                                    ~ (smarthome_mosquitto__environment_allowed | join(', ')) ~ ', the options of Mosquitto are set with mosquitto_config.') -%}
+          {%- endif -%}
+          {%- if smarthome_mosquitto__line_breaks | length > 0 -%}
+          {%-   set _ = errors.append('The environment variables must not contain line breaks: ' ~ (smarthome_mosquitto__line_breaks | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The certificates are created by another role (e.g. pki_easyrsa_deploy), they are installed on every start of Mosquitto
+    - name: 'Read the certificates of the realms'
+      ansible.builtin.stat:
+        path: "{{ smarthome_mosquitto__realms_dir }}/{{ item.0 }}/{{ item.1 }}"
+      loop: "{{ smarthome_mosquitto__realms_valid | product([ 'fullchain.pem', 'privkey.pem' ]) | list }}"
+      loop_control:
+        label: "{{ item.0 }}/{{ item.1 }}"
+      register: 'smarthome_mosquitto__realms_stat'
+      check_mode: false
+
+    # In check mode another role may create the certificates only in a real run, they are reported
+    - name: 'Validate the certificates of the realms'
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or smarthome_mosquitto__realms_missing | length == 0
+        fail_msg: "The certificates of mosquitto_realms are missing in {{ smarthome_mosquitto__realms_dir }}: {{ smarthome_mosquitto__realms_missing | join(', ') }}."
+        quiet: true
+      vars:
+        smarthome_mosquitto__realms_missing: >-
+          {{ smarthome_mosquitto__realms_stat.results | rejectattr('stat.exists') | map(attribute='item') | map('join', '/') | list }}
+
+    - name: 'Report the missing certificates of the realms in check mode'
+      when:
+        - ansible_check_mode
+        - smarthome_mosquitto__realms_missing | length > 0
+      ansible.builtin.debug:
+        msg: "The certificates of mosquitto_realms are missing in {{ smarthome_mosquitto__realms_dir }}: {{ smarthome_mosquitto__realms_missing | join(', ') }}."
+      vars:
+        smarthome_mosquitto__realms_missing: >-
+          {{ smarthome_mosquitto__realms_stat.results | rejectattr('stat.exists') | map(attribute='item') | map('join', '/') | list }}
+
+    # The image runs Mosquitto as the user 1883, the configuration is read only in the container
+    - name: 'Create the directories of Mosquitto'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ smarthome_mosquitto__uid }}"
+        group: "{{ smarthome_mosquitto__gid }}"
+        mode: '0750'
+        state: 'directory'
+      loop:
+        - "{{ smarthome_mosquitto__podman_home }}"
+        - "{{ smarthome_mosquitto__podman_config_dir }}"
+        - "{{ smarthome_mosquitto__podman_data_dir }}"
+        - "{{ smarthome_mosquitto__certs_dir }}"
+
+    - name: 'Find the certificates of the realms'
+      ansible.builtin.find:
+        paths: "{{ smarthome_mosquitto__certs_dir }}"
+        file_type: 'any'
+        hidden: true
+      register: 'smarthome_mosquitto__certs_found'
+
+    # The certificates of removed realms, the certificates of the realms are installed on the start of Mosquitto
+    - name: 'Remove the certificates of removed realms'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: 'absent'
+      loop: >-
+        {{ smarthome_mosquitto__certs_found.files | map(attribute='path')
+           | reject('in', smarthome_mosquitto__realms_valid | product([ '.crt', '.key' ]) | map('join')
+                          | map('regex_replace', '^', smarthome_mosquitto__certs_dir ~ '/') | list)
+           | list }}
+
+    - name: 'Write the configuration'
+      ansible.builtin.template:
+        src: 'mosquitto.conf.j2'
+        dest: "{{ smarthome_mosquitto__config_file }}"
+        owner: "{{ smarthome_mosquitto__uid }}"
+        group: "{{ smarthome_mosquitto__gid }}"
+        mode: '0640'
+      register: 'smarthome_mosquitto__config_result'
+
+    # The plugin of the users reads the file again on SIGHUP, the passwords are an option with no_log
+    - name: 'Write the users'
+      smarthome_mosquitto_passwd:
+        path: "{{ smarthome_mosquitto__passwd_file }}"
+        passwords: >-
+          {%- set passwords = {} -%}
+          {%- for name, user in smarthome_mosquitto__users.items() -%}
+          {%-   set _ = passwords.update({ name | string: user.password }) -%}
+          {%- endfor -%}
+          {{ passwords }}
+        owner: "{{ smarthome_mosquitto__uid | string }}"
+        group: "{{ smarthome_mosquitto__gid | string }}"
+        mode: '0600'
+      register: 'smarthome_mosquitto__users_result'
+
+    # The plugin of the ACL reads the file again on SIGHUP
+    - name: 'Write the ACL'
+      ansible.builtin.copy:
+        content: "{{ ([ '#', '# Ansible managed', '#' ] + smarthome_mosquitto__acl_lines) | join('\n') }}\n"
+        dest: "{{ smarthome_mosquitto__acl_file }}"
+        owner: "{{ smarthome_mosquitto__uid }}"
+        group: "{{ smarthome_mosquitto__gid }}"
+        mode: '0600'
+      register: 'smarthome_mosquitto__acl_result'
+
+    # Only the secrets mounted as files, the passwords of the bridges are part of the secrets of the bridges
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: >-
+        {{ smarthome_mosquitto__secrets
+           | rejectattr('target', 'search', '[.](' ~ (smarthome_mosquitto__secrets_value_options.connection | join('|')) ~ ')$') | list }}
+      register: 'smarthome_mosquitto__secrets_result'
+
+    # Mosquitto cannot read the passwords of a bridge from a file, the whole section of the bridge is one secret read by include_dir
+    - name: 'Create the secrets of the bridges'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ smarthome_mosquitto__bridges_podman_secrets }}"
+      register: 'smarthome_mosquitto__bridges_result'
+
+    - name: 'Gathering facts about services...'
+      ansible.builtin.service_facts:
+
+    - name: 'Install container'
+      containers.podman.podman_container:
+        name: "{{ smarthome_mosquitto__container.name }}"
+        hostname: "{{ smarthome_mosquitto__container.hostname }}"
+        image: "{{ smarthome_mosquitto__container.image }}"
+        command: "{{ smarthome_mosquitto__container.command | default(omit) }}"
+        ip: "{{ smarthome_mosquitto__container.ip }}"
+        ip6: "{{ smarthome_mosquitto__container.ipv6 | default(omit) }}"
+        network: "{{ smarthome_mosquitto__container.network }}"
+        timezone: "{{ smarthome_mosquitto__container.timezone }}"
+        env: "{{ smarthome_mosquitto__container.environment | default(omit) }}"
+        etc_hosts: "{{ smarthome_mosquitto__container.etc_hosts | default(omit) }}"
+        expose: "{{ smarthome_mosquitto__container.expose | default(omit) }}"
+        label: "{{ smarthome_mosquitto__container.labels | default(omit) }}"
+        publish: "{{ smarthome_mosquitto__container.publish | default(omit) }}"
+        secrets: "{{ smarthome_mosquitto__container.secrets | default(omit) }}"
+        volume: "{{ smarthome_mosquitto__container.volumes | default(omit) }}"
+        quadlet_options: |
+          [Install]
+          WantedBy=default.target
+
+          [Service]
+          {% for command in smarthome_mosquitto__container.exec_start_pre | default([]) %}
+          ExecStartPre={{ command }}
+          {% endfor %}
+          RestartSec=5
+          Restart=always
+
+          [Unit]
+          {% if smarthome_mosquitto__container.requires is defined %}
+          Requires={{ smarthome_mosquitto__container.requires | join(' ') }}
+          {% endif %}
+          {% if smarthome_mosquitto__container.wants is defined %}
+          Wants={{ smarthome_mosquitto__container.wants | join(' ') }}
+          {% endif %}
+          {% if smarthome_mosquitto__container.after is defined %}
+          After={{ smarthome_mosquitto__container.after | join(' ') }}
+          {% endif %}
+          {% if smarthome_mosquitto__container.part_of is defined %}
+          PartOf={{ smarthome_mosquitto__container.part_of | join(' ') }}
+          {% endif %}
+          {% if smarthome_mosquitto__container.binds_to is defined %}
+          BindsTo={{ smarthome_mosquitto__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if smarthome_mosquitto__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ smarthome_mosquitto__container.requires_mounts_for | join(' ') }}
+          {% endif %}
+        restart_policy: 'no'
+        state: 'quadlet'
+      register: 'smarthome_mosquitto__quadlet_result'
+
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Mosquitto'
+      when: 'not ansible_check_mode'
+      vars:
+        smarthome_mosquitto__running: >-
+          {{ (ansible_facts.services[smarthome_mosquitto__container.name + '.service'].state | default('')) == 'running' }}
+        # The listeners and the bridges are only read at the start
+        smarthome_mosquitto__restart: >-
+          {{ smarthome_mosquitto__running | bool
+             and (smarthome_mosquitto__config_result is changed or smarthome_mosquitto__secrets_result is changed
+                  or smarthome_mosquitto__bridges_result is changed or smarthome_mosquitto__quadlet_result is changed) }}
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ smarthome_mosquitto__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if smarthome_mosquitto__restart | bool else 'started' }}"
+            enabled: true
+
+        # The plugins of the users and the ACL read their files again, the connected clients stay connected
+        - name: 'Reload the users and the ACL'
+          ansible.builtin.command:
+            argv: [ 'podman', 'kill', '--signal', 'HUP', "{{ smarthome_mosquitto__container.name }}" ]
+          changed_when: true
+          when:
+            - smarthome_mosquitto__running | bool
+            - not smarthome_mosquitto__restart | bool
+            - smarthome_mosquitto__users_result is changed or smarthome_mosquitto__acl_result is changed
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ smarthome_mosquitto__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'smarthome_mosquitto__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ smarthome_mosquitto__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + smarthome_mosquitto__start_journal.stdout_lines }}
+
+    # The first listener on all addresses of the container, a listener with bind_address may not be reachable from the host
+    - name: 'Wait for Mosquitto'
+      when:
+        - not ansible_check_mode
+        - smarthome_mosquitto__port | length > 0
+      vars:
+        smarthome_mosquitto__port: >-
+          {{ smarthome_mosquitto__config.listener | default([]) | rejectattr('bind_address', 'defined')
+             | rejectattr('port', 'in', [ 0, '0' ]) | map(attribute='port') | map('string') | first | default('') }}
+      ansible.builtin.wait_for:
+        host: "{{ smarthome_mosquitto__ip }}"
+        port: "{{ smarthome_mosquitto__port | int }}"
+        timeout: 60
+      register: 'smarthome_mosquitto__ready'
+      failed_when: false
+
+    - name: 'Read the log of Mosquitto'
+      when:
+        - not ansible_check_mode
+        - smarthome_mosquitto__ready is failed or (smarthome_mosquitto__ready.msg | default('')) is search('Timeout')
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', "{{ smarthome_mosquitto__container.name }}", '-n', '50', '--no-pager' ]
+      register: 'smarthome_mosquitto__journal'
+      changed_when: false
+
+    - name: 'Assert that Mosquitto listens'
+      when: 'not ansible_check_mode'
+      ansible.builtin.assert:
+        that:
+          - smarthome_mosquitto__journal is skipped
+        fail_msg: "{{ smarthome_mosquitto__journal.stdout_lines | default([]) }}"
+        quiet: true
+
+    - name: 'Restart Mosquitto after a renewal of the certificate of a realm'
+      when:
+        - smarthome_mosquitto__pki_update_enabled | bool
+        - smarthome_mosquitto__realms_valid | length > 0
+      ansible.builtin.include_role:
+        name: 'pki_update'
+      vars:
+        pki_service: "{{ smarthome_mosquitto__container.name }}"
+        pki_certificate: >-
+          {{ smarthome_mosquitto__realms_valid | map('regex_replace', '^', smarthome_mosquitto__realms_dir ~ '/')
+             | map('regex_replace', '$', '/fullchain.pem') | list }}
+        pki_schedule: "{{ smarthome_mosquitto__pki_update_schedule }}"
+
+    - name: 'Enable autoupdate on container'
+      when: 'smarthome_mosquitto__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
+        name: 'container_update'
+      vars:
+        container_name: "{{ smarthome_mosquitto__container.name }}"
+        container_image: "{{ smarthome_mosquitto__container.image }}"
+        container_schedule: "{{ smarthome_mosquitto__autoupdate_schedule }}"

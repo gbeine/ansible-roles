@@ -1,0 +1,152 @@
+---
+- name: 'Prepare'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    smarthome_mosquitto__test_case: "{{ smarthome_mosquitto__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    podman_networks:
+      - "{{ smarthome_mosquitto__test_network }}"
+    podman_default_network: "{{ smarthome_mosquitto__test_network.name }}"
+    podman_cleanup_enabled: false
+
+  roles:
+    - role: 'common_filters'
+    - role: 'container_podman'
+
+  tasks:
+
+    # verify publishes and subscribes with the clients of Mosquitto, prepare creates the certificates with openssl
+    - name: 'Install the clients of Mosquitto and openssl'
+      ansible.builtin.apt:
+        name: [ 'mosquitto-clients', 'openssl' ]
+        state: 'present'
+        update_cache: true
+
+    - name: 'Pull the image, so the first start of the service does not time out'
+      containers.podman.podman_image:
+        name: "{{ smarthome_mosquitto__test_image }}"
+      register: 'smarthome_mosquitto__test_pull'
+      until: smarthome_mosquitto__test_pull is succeeded
+      retries: 5
+      delay: 30
+
+    - name: 'Create the CA and the certificate of the TLS listener'
+      when: smarthome_mosquitto__test_case.expect.tls | bool
+      block:
+
+        - name: 'Create the directory of the certificates'
+          ansible.builtin.file:
+            path: "{{ smarthome_mosquitto__test_pki_dir }}"
+            owner: 'root'
+            group: 'root'
+            mode: '0755'
+            state: 'directory'
+
+        # The certificate is valid for the address of the broker, the key is passed as secret
+        - name: 'Create the CA and the certificate'
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj '/CN=Molecule CA' -keyout ca.key -out ca.crt
+              openssl req -newkey rsa:2048 -nodes -subj '/CN={{ smarthome_mosquitto__test_case.expect.ip }}' -keyout server.key -out server.csr
+              printf 'subjectAltName=IP:%s\n' '{{ smarthome_mosquitto__test_case.expect.ip }}' > server.ext
+              openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile server.ext -out server.crt
+              chmod 0644 ca.crt server.crt
+              chmod 0600 ca.key server.key
+            chdir: "{{ smarthome_mosquitto__test_pki_dir }}"
+            creates: "{{ smarthome_mosquitto__test_pki_dir }}/server.crt"
+
+    # Self-signed certificates for the address of the broker, like the realms of pki_easyrsa_deploy
+    - name: 'Create the certificates of the realms'
+      when: smarthome_mosquitto__test_case.expect.realms | length > 0
+      block:
+
+        - name: 'Create the directories of the realms'
+          ansible.builtin.file:
+            path: "{{ smarthome_mosquitto__test_realms_dir }}/{{ item.realm }}"
+            owner: 'root'
+            group: 'root'
+            mode: '0755'
+            state: 'directory'
+          loop: "{{ smarthome_mosquitto__test_case.expect.realms }}"
+          loop_control:
+            label: "{{ item.realm }}"
+
+        - name: 'Create the certificates of the realms'
+          ansible.builtin.command:
+            argv: [ 'openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+                    '-subj', "/CN={{ item.realm }}", '-addext', "subjectAltName=IP:{{ smarthome_mosquitto__test_case.expect.ip }}",
+                    '-keyout', 'privkey.pem', '-out', 'fullchain.pem' ]
+            chdir: "{{ smarthome_mosquitto__test_realms_dir }}/{{ item.realm }}"
+            creates: "{{ smarthome_mosquitto__test_realms_dir }}/{{ item.realm }}/fullchain.pem"
+          loop: "{{ smarthome_mosquitto__test_case.expect.realms }}"
+          loop_control:
+            label: "{{ item.realm }}"
+
+        # The certificate of a removed realm, the role removes it
+        - name: 'Create the directory of the certificates of the role'
+          ansible.builtin.file:
+            path: "{{ smarthome_mosquitto__test_stale_cert | dirname }}"
+            owner: '1883'
+            group: '1883'
+            mode: '0750'
+            state: 'directory'
+
+        - name: 'Create the certificate of a removed realm'
+          ansible.builtin.copy:
+            content: 'stale'
+            dest: "{{ smarthome_mosquitto__test_stale_cert }}"
+            owner: '1883'
+            group: '1883'
+            mode: '0644'
+
+    - name: 'Start the broker on the other side of the bridge'
+      when: smarthome_mosquitto__test_case.expect.bridge | bool
+      block:
+
+        - name: 'Create the directory of the remote broker'
+          ansible.builtin.file:
+            path: "{{ smarthome_mosquitto__test_remote.dir }}"
+            owner: '1883'
+            group: '1883'
+            mode: '0750'
+            state: 'directory'
+
+        - name: 'Write the configuration of the remote broker'
+          ansible.builtin.copy:
+            content: |
+              listener 1883
+              allow_anonymous false
+              password_file /mosquitto/config/passwd
+              log_dest stdout
+            dest: "{{ smarthome_mosquitto__test_remote.dir }}/mosquitto.conf"
+            owner: '1883'
+            group: '1883'
+            mode: '0640'
+
+        # The password of the test is known, mosquitto_passwd of the image writes the hash
+        - name: 'Write the user of the bridge on the remote broker'
+          ansible.builtin.command:
+            argv: [ 'podman', 'run', '--rm', '--user', '1883:1883', '--volume', "{{ smarthome_mosquitto__test_remote.dir }}:/mosquitto/config",
+                    "{{ smarthome_mosquitto__test_image }}", 'mosquitto_passwd', '-c', '-b', '/mosquitto/config/passwd',
+                    "{{ smarthome_mosquitto__test_remote.username }}", "{{ smarthome_mosquitto__test_remote.password }}" ]
+            creates: "{{ smarthome_mosquitto__test_remote.dir }}/passwd"
+
+        - name: 'Start the remote broker'
+          containers.podman.podman_container:
+            name: "{{ smarthome_mosquitto__test_remote.name }}"
+            image: "{{ smarthome_mosquitto__test_image }}"
+            network: "{{ smarthome_mosquitto__test_network.name }}"
+            ip: "{{ smarthome_mosquitto__test_remote.ip }}"
+            volume: [ "{{ smarthome_mosquitto__test_remote.dir }}:/mosquitto/config" ]
+            state: 'started'
+
+        - name: 'Wait for the remote broker'
+          ansible.builtin.wait_for:
+            host: "{{ smarthome_mosquitto__test_remote.ip }}"
+            port: 1883
+            timeout: 60

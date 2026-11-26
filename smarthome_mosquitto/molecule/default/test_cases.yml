@@ -1,0 +1,198 @@
+---
+# Network created by container_podman in prepare.yml
+smarthome_mosquitto__test_network:
+  name: 'podman-molecule'
+  address: '10.89.0.0'
+  gateway: '10.89.0.1'
+  netmask: 24
+  ipv6: true
+  ipv6_gateway: 'fd00:89::1'
+  ipv6_prefixlength: 64
+
+smarthome_mosquitto__test_image: 'docker.io/eclipse-mosquitto:latest'
+smarthome_mosquitto__test_quadlet_path: '/etc/containers/systemd/mosquitto.container'
+
+# The CA, the certificate of the TLS listener and its key, created by prepare.yml in this directory
+smarthome_mosquitto__test_pki_dir: '/opt/molecule-pki'
+# converge.yml and side_effect.yml replace the placeholder of the secret with the key
+smarthome_mosquitto__test_key_placeholder: 'MOLECULE_TLS_KEY'
+
+# The realms of PKI with local certificates, created by prepare.yml, and a certificate of a removed realm the role removes
+smarthome_mosquitto__test_realms_dir: '/etc/pki/realms'
+smarthome_mosquitto__test_stale_cert: '/opt/mosquitto/certs/stale.crt'
+
+# The broker on the other side of the bridge, started by prepare.yml on molecule-mosquitto
+smarthome_mosquitto__test_remote:
+  name: 'molecule-remote'
+  ip: '10.89.0.130'
+  dir: '/opt/molecule-remote'
+  username: 'bridge'
+  password: 'molecule-bridge-password'
+
+smarthome_mosquitto__test_cases:
+
+  # Only the mandatory variables, without users nobody can log in
+  - name: 'molecule-mosquitto-default'
+    role_vars:
+      mosquitto_home: '/opt/mosquitto'
+      mosquitto_ip: '10.89.0.120'
+      mosquitto_network: 'podman-molecule'
+      mosquitto_hostname: 'mosquitto-default'
+      mosquitto_timezone: 'Europe/Berlin'
+    expect:
+      ip: '10.89.0.120'
+      ip6: ~
+      config:
+        - 'persistence true'
+        - 'persistence_location /mosquitto/data/'
+        - 'log_dest stdout'
+        - 'allow_anonymous false'
+        - 'plugin /usr/lib/mosquitto_password_file.so'
+        - 'plugin_opt_password_file /mosquitto/config/passwd'
+        - 'plugin /usr/lib/mosquitto_acl_file.so'
+        - 'plugin_opt_acl_file /mosquitto/config/acl'
+        - 'listener 1883'
+      config_absent:
+        - 'include_dir'
+      quadlet:
+        - 'Volume=/opt/mosquitto/config:/mosquitto/config:ro'
+        - 'Volume=/opt/mosquitto/data:/mosquitto/data'
+      users: []
+      logins: []
+      refused:
+        - { username: 'nobody', password: 'molecule-wrong-password' }
+      denied: []
+      tls: false
+      realms: []
+      bridge: false
+
+  # IPv6, users with ACL, a TLS listener with its key as secret and a bridge with its password as secret
+  - name: 'molecule-mosquitto'
+    role_vars:
+      mosquitto_home: '/opt/mosquitto'
+      mosquitto_ip: '10.89.0.121'
+      mosquitto_ipv6: 'fd00:89::121'
+      mosquitto_network: 'podman-molecule'
+      mosquitto_hostname: 'mosquitto-molecule'
+      mosquitto_timezone: 'Europe/Berlin'
+      mosquitto_environment:
+        UMASK_SET: '077'
+      mosquitto_container:
+        volumes:
+          - '/opt/mosquitto/config:/mosquitto/config:ro'
+          - '/opt/mosquitto/data:/mosquitto/data'
+          - '/opt/mosquitto/certs:/mosquitto/certs:ro'
+          - '/opt/molecule-pki:/mosquitto/pki:ro'
+      mosquitto_realms: [ 'realm1', 'realm2' ]
+      mosquitto_config:
+        log_type: [ 'error', 'warning', 'notice', 'information' ]
+        listener:
+          - port: 1883
+          - port: 8883
+            cafile: '/mosquitto/pki/ca.crt'
+            certfile: '/mosquitto/pki/server.crt'
+          - port: 8884
+            realm: 'realm1'
+          - port: 8885
+            realm: 'realm2'
+        connection:
+          - name: 'remote'
+            address: '10.89.0.130:1883'
+            remote_username: 'bridge'
+            cleansession: true
+            topic: [ 'bridge/# out 0' ]
+      mosquitto_users:
+        sensor:
+          password: 'molecule-sensor-password'
+          acl: [ 'readwrite sensors/#', 'write bridge/#' ]
+        reader:
+          password: 'molecule-reader-password'
+          acl: [ 'read sensors/#' ]
+      mosquitto_acl:
+        anonymous: []
+        pattern: [ 'readwrite users/%u/#' ]
+      mosquitto_secrets:
+        - name: 'mosquitto-tls-key'
+          data: 'MOLECULE_TLS_KEY'
+          target: 'listener.8883.keyfile'
+        - name: 'mosquitto-remote-password'
+          data: 'molecule-bridge-password'
+          target: 'connection.remote.remote_password'
+    # The changed password is reloaded with SIGHUP, the changed log_type restarts the broker
+    side_effect:
+      users:
+        sensor:
+          password: 'molecule-sensor-changed'
+          acl: [ 'readwrite sensors/#', 'write bridge/#' ]
+        reader:
+          password: 'molecule-reader-password'
+          acl: [ 'read sensors/#' ]
+      config:
+        log_type: [ 'error', 'warning', 'notice' ]
+        listener:
+          - port: 1883
+          - port: 8883
+            cafile: '/mosquitto/pki/ca.crt'
+            certfile: '/mosquitto/pki/server.crt'
+          - port: 8884
+            realm: 'realm1'
+          - port: 8885
+            realm: 'realm2'
+        connection:
+          - name: 'remote'
+            address: '10.89.0.130:1883'
+            remote_username: 'bridge'
+            cleansession: true
+            topic: [ 'bridge/# out 0' ]
+    expect:
+      ip: '10.89.0.121'
+      ip6: 'fd00:89::121'
+      config:
+        - 'log_type error'
+        - 'log_type notice'
+        - 'listener 8883'
+        - 'certfile /mosquitto/pki/server.crt'
+        - 'keyfile /run/secrets/mosquitto-tls-key'
+        - 'include_dir /run/mosquitto/bridges'
+        - 'listener 8884'
+        - 'certfile /mosquitto/certs/realm1.crt'
+        - 'keyfile /mosquitto/certs/realm1.key'
+        - 'listener 8885'
+        - 'certfile /mosquitto/certs/realm2.crt'
+        - 'keyfile /mosquitto/certs/realm2.key'
+      config_absent:
+        - 'log_type information'
+        - 'connection remote'
+        - 'remote_password'
+      quadlet:
+        - 'Volume=/opt/mosquitto/config:/mosquitto/config:ro'
+        - 'Volume=/opt/molecule-pki:/mosquitto/pki:ro'
+        - 'Secret=mosquitto-tls-key,type=mount,target=/run/secrets/mosquitto-tls-key,uid=1883,gid=1883,mode=0400'
+        - 'Secret=mosquitto-bridge-remote,type=mount,target=/run/mosquitto/bridges/remote.conf,uid=1883,gid=1883,mode=0400'
+        - 'Environment=UMASK_SET=077'
+        - 'Volume=/opt/mosquitto/certs:/mosquitto/certs:ro'
+        - 'ExecStartPre=install -o 1883 -g 1883 -m 0644 /etc/pki/realms/realm1/fullchain.pem /opt/mosquitto/certs/realm1.crt'
+        - 'ExecStartPre=install -o 1883 -g 1883 -m 0400 /etc/pki/realms/realm1/privkey.pem /opt/mosquitto/certs/realm1.key'
+        - 'ExecStartPre=install -o 1883 -g 1883 -m 0644 /etc/pki/realms/realm2/fullchain.pem /opt/mosquitto/certs/realm2.crt'
+        - 'ExecStartPre=install -o 1883 -g 1883 -m 0400 /etc/pki/realms/realm2/privkey.pem /opt/mosquitto/certs/realm2.key'
+      users: [ 'reader', 'sensor' ]
+      acl:
+        - 'pattern readwrite users/%u/#'
+        - 'user sensor'
+        - 'topic write bridge/#'
+      # The sensor publishes a retained message, the reader reads it
+      logins:
+        - { username: 'sensor', password: 'molecule-sensor-changed', topic: 'sensors/temperature', reader: 'reader', reader_password: 'molecule-reader-password' }
+        - { username: 'reader', password: 'molecule-reader-password', topic: 'users/reader/state', reader: 'reader', reader_password: 'molecule-reader-password' }
+      refused:
+        - { username: 'sensor', password: 'molecule-sensor-password' }
+        - { username: 'reader', password: 'molecule-wrong-password' }
+      # The ACL drops the message of the reader, the sensor does not read it
+      denied:
+        - { username: 'reader', password: 'molecule-reader-password', topic: 'sensors/denied', reader: 'sensor', reader_password: 'molecule-sensor-changed' }
+      tls: true
+      # The listeners with the certificates of the realms, the self-signed certificate of the realm is the CA of the client
+      realms:
+        - { realm: 'realm1', port: 8884 }
+        - { realm: 'realm2', port: 8885 }
+      bridge: true
