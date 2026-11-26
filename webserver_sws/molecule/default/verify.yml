@@ -9,39 +9,54 @@
   vars:
     webserver_sws__test_case: "{{ webserver_sws__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
     webserver_sws__expect: "{{ webserver_sws__test_case.expect }}"
+    webserver_sws__test_login: "{{ webserver_sws__expect.login }}"
 
   tasks:
 
     - name: 'Read the generated quadlet unit'
       ansible.builtin.slurp:
-        src: '/etc/containers/systemd/sws.container'
+        src: "{{ webserver_sws__test_quadlet_path }}"
       register: 'webserver_sws__test_quadlet'
 
-    - name: 'Assert the IPv4 and IPv6 addresses in the quadlet unit'
+    # podman may quote values, the quotes are removed before the lines are compared
+    - name: 'Assert the quadlet unit'
       ansible.builtin.assert:
         that:
+          - ('Image=' + webserver_sws__test_image) in webserver_sws__test_quadlet_lines
           - ('IP=' + webserver_sws__expect.ip) in webserver_sws__test_quadlet_lines
           - webserver_sws__expect.ip6 is none or ('IP6=' + webserver_sws__expect.ip6) in webserver_sws__test_quadlet_lines
           - webserver_sws__expect.ip6 is not none or webserver_sws__test_quadlet_lines | select('match', 'IP6=') | list | length == 0
           - ('Network=' + webserver_sws__test_case.role_vars.sws_network) in webserver_sws__test_quadlet_lines
+          - webserver_sws__expect.quadlet | reject('in', webserver_sws__test_quadlet_lines) | list | length == 0
+          - >-
+            webserver_sws__test_quadlet_lines | select('match', 'Secret=') | list
+            == ([ webserver_sws__expect.secret ] if webserver_sws__expect.secret is not none else [])
+          # The options are set in sws.toml, the hash of basic authentication is a secret, the time zone is set by podman
+          - webserver_sws__test_quadlet_lines | select('match', 'Environment=') | list | length == 0
+          - webserver_sws__test_quadlet_lines | select('search', '[$]2y[$]|/etc/localtime|/etc/timezone') | list | length == 0
+        fail_msg: "{{ webserver_sws__test_quadlet_lines | to_json }}"
       vars:
-        webserver_sws__test_quadlet_lines: "{{ (webserver_sws__test_quadlet.content | b64decode).splitlines() }}"
+        webserver_sws__test_quadlet_lines: "{{ (webserver_sws__test_quadlet.content | b64decode | regex_replace('\"', '')).splitlines() }}"
 
     - name: 'Read the configuration file'
+      ansible.builtin.stat:
+        path: "{{ webserver_sws__test_config_path }}"
+      register: 'webserver_sws__test_config_stat'
+
+    - name: 'Read the configuration'
       ansible.builtin.slurp:
-        src: "{{ webserver_sws__test_case.role_vars.sws_home }}/sws.toml"
+        src: "{{ webserver_sws__test_config_path }}"
       register: 'webserver_sws__test_config'
 
-    - name: 'Assert the configuration file'
+    - name: 'Assert the configuration'
       ansible.builtin.assert:
         that:
-          - webserver_sws__test_config_lines[1] is match('# ')
-          - >-
-            webserver_sws__test_config_lines | select('match', 'host = ')
-            | map('regex_replace', '^host = "(.*)"$', '\\1') | list == webserver_sws__expect.vhosts
-          - webserver_sws__test_config_lines | select('match', 'root = ') | list | length == webserver_sws__expect.vhosts | length
-          - (webserver_sws__expect.vhosts | length > 0) == ('[advanced]' in webserver_sws__test_config_lines)
-        fail_msg: "{{ webserver_sws__test_config.content | b64decode }}"
+          - webserver_sws__test_config_stat.stat.uid == 0
+          - webserver_sws__test_config_stat.stat.mode == '0644'
+          - webserver_sws__expect.config_lines | reject('in', webserver_sws__test_config_lines) | list | length == 0
+          # null removes an option
+          - webserver_sws__test_config_lines | select('match', 'page404') | list | length == 0
+        fail_msg: "mode {{ webserver_sws__test_config_stat.stat.mode }}, {{ webserver_sws__test_config_lines | to_json }}"
       vars:
         webserver_sws__test_config_lines: "{{ (webserver_sws__test_config.content | b64decode).splitlines() }}"
 
@@ -51,30 +66,55 @@
       changed_when: false
       failed_when: false
 
-    - name: 'Assert the sws service is active'
+    # container, so podman never inspects the image of the same name
+    - name: 'Inspect the sws container'
+      ansible.builtin.command: 'podman container inspect sws'
+      register: 'webserver_sws__test_inspect'
+      changed_when: false
+      failed_when: false
+
+    # systemd counts only the restarts after a crash, a restart loop is reported with the journal
+    - name: 'Read the automatic restarts of the service'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'show', '--property=NRestarts', '--value', 'sws' ]
+      register: 'webserver_sws__test_restarts'
+      changed_when: false
+
+    - name: 'Read the log of Static Web Server'
+      ansible.builtin.command:
+        argv: [ 'journalctl', '-u', 'sws', '-n', '80', '--no-pager' ]
+      register: 'webserver_sws__test_journal'
+      changed_when: false
+
+    # Static Web Server warns about unknown keys of sws.toml
+    - name: 'Assert the service, the container addresses and the time zone'
       ansible.builtin.assert:
         that:
           - webserver_sws__test_service.stdout == 'active'
-
-    - name: 'Inspect the sws container'
-      ansible.builtin.command: 'podman inspect sws'
-      register: 'webserver_sws__test_inspect'
-      changed_when: false
-
-    - name: 'Assert the container addresses'
-      ansible.builtin.assert:
-        that:
-          - webserver_sws__test_net.IPAddress == webserver_sws__expect.ip
-          - webserver_sws__expect.ip6 is none or webserver_sws__test_net.GlobalIPv6Address == webserver_sws__expect.ip6
-        fail_msg: "IPv4 {{ webserver_sws__test_net.IPAddress }}, IPv6 {{ webserver_sws__test_net.GlobalIPv6Address }}"
+          - webserver_sws__test_restarts.stdout == '0'
+          - webserver_sws__test_journal.stdout is not search('unused configuration manifest key')
+          - webserver_sws__test_net.IPAddress | default('') == webserver_sws__expect.ip
+          - webserver_sws__expect.ip6 is none or webserver_sws__test_net.GlobalIPv6Address | default('') == webserver_sws__expect.ip6
+          - webserver_sws__test_container.Config.Timezone | default('') == webserver_sws__test_case.role_vars.sws_timezone
+        fail_msg: >-
+          {{ [ 'service ' ~ webserver_sws__test_service.stdout ~ ', automatic restarts ' ~ webserver_sws__test_restarts.stdout
+               ~ ', time zone ' ~ (webserver_sws__test_container.Config.Timezone | default(''))
+               ~ ', IPv4 ' ~ (webserver_sws__test_net.IPAddress | default('')) ~ ', IPv6 ' ~ (webserver_sws__test_net.GlobalIPv6Address | default('')) ]
+             + webserver_sws__test_journal.stdout_lines }}
       vars:
+        webserver_sws__test_container: >-
+          {{ (webserver_sws__test_inspect.stdout | from_json)[0] if webserver_sws__test_inspect.rc == 0 else {} }}
         webserver_sws__test_net: >-
-          {{ (webserver_sws__test_inspect.stdout | from_json)[0].NetworkSettings.Networks[webserver_sws__test_case.role_vars.sws_network] }}
+          {{ webserver_sws__test_container.NetworkSettings.Networks[webserver_sws__test_case.role_vars.sws_network]
+             | default({}) if webserver_sws__test_container | length > 0 else {} }}
 
     - name: 'Request the pages'
       ansible.builtin.uri:
         url: "{{ item.url }}"
         headers: "{{ {'Host': item.host} if item.host is defined else {} }}"
+        url_username: "{{ webserver_sws__test_login.username | default(omit) }}"
+        url_password: "{{ webserver_sws__test_login.password | default(omit) }}"
+        force_basic_auth: "{{ webserver_sws__test_login is not none }}"
         return_content: true
       loop: "{{ webserver_sws__expect.urls }}"
       loop_control:
@@ -94,3 +134,43 @@
       loop_control:
         label: "{{ item.url }} {{ item.host | default('') }}"
         index_var: 'webserver_sws__test_index'
+
+    # SERVER_BASIC_AUTH of the secret protects all pages
+    - name: 'Request a page without credentials'
+      when: webserver_sws__test_login is not none
+      ansible.builtin.uri:
+        url: "{{ webserver_sws__expect.urls[0].url }}"
+        status_code: 401
+
+    - name: 'Request a page with a wrong password'
+      when: webserver_sws__test_login is not none
+      ansible.builtin.uri:
+        url: "{{ webserver_sws__expect.urls[0].url }}"
+        url_username: "{{ webserver_sws__test_login.username }}"
+        url_password: 'wrong-password'
+        force_basic_auth: true
+        status_code: 401
+
+    - name: 'Request a page with the header of advanced.headers'
+      when: webserver_sws__expect.header is defined
+      ansible.builtin.uri:
+        url: "{{ webserver_sws__expect.header.url }}"
+        url_username: "{{ webserver_sws__test_login.username }}"
+        url_password: "{{ webserver_sws__test_login.password }}"
+        force_basic_auth: true
+      register: 'webserver_sws__test_header'
+      failed_when: webserver_sws__test_header[webserver_sws__expect.header.name] | default('') != webserver_sws__expect.header.value
+
+    - name: 'Request the source of advanced.redirects'
+      when: webserver_sws__expect.redirect is defined
+      ansible.builtin.uri:
+        url: "{{ webserver_sws__expect.redirect.url }}"
+        url_username: "{{ webserver_sws__test_login.username }}"
+        url_password: "{{ webserver_sws__test_login.password }}"
+        force_basic_auth: true
+        follow_redirects: 'none'
+        status_code: "{{ webserver_sws__expect.redirect.status }}"
+      register: 'webserver_sws__test_redirect'
+      failed_when: >-
+        webserver_sws__test_redirect.status != webserver_sws__expect.redirect.status
+        or webserver_sws__test_redirect.location | default('') is not search(webserver_sws__expect.redirect.location ~ '$')

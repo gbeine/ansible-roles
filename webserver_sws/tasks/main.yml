@@ -1,58 +1,321 @@
 ---
 
 - name: 'Install Static Web Server'
-  tags: [ 'webserver_sws' ]
+  tags: [ 'webserver', 'webserver_sws' ]
   block:
 
-    - name: 'Create directories'
+    # A failing template in the variables (e.g. sws_container not a dictionary) stops the role here before anything changes
+    - name: 'Render the configuration'
+      ansible.builtin.assert:
+        that:
+          # The container contains omit (e.g. ipv6), it is counted, not serialized
+          - webserver_sws__container | length > 0
+          - webserver_sws__config_content | length >= 0
+          - webserver_sws__vhost_dirs | length >= 0
+        quiet: true
+
+    - name: 'Validate the secrets'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__invalid | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_sws__invalid | join('. ') }}"
+        quiet: true
+      vars:
+        webserver_sws__invalid: >-
+          {%- set errors = [] -%}
+          {%- set secrets = webserver_sws__secrets -%}
+          {%- if secrets is not sequence or secrets is string or secrets is mapping -%}
+          {%-   set _ = errors.append('sws_secrets has to be a list') -%}
+          {%- elif secrets | reject('mapping') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('name', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('data', 'defined') | list | length > 0
+                   or secrets | select('mapping') | rejectattr('target', 'defined') | list | length > 0 -%}
+          {%-   set _ = errors.append('sws_secrets entries need name, data and target') -%}
+          {%- elif secrets | map(attribute='name') | unique | list | length != secrets | length -%}
+          {%-   set _ = errors.append('the names of sws_secrets have to be unique') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Static Web Server ignores unknown keys with a warning only
+    - name: 'Validate the configuration'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_sws__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_sws__errors: >-
+          {%- set errors = [] -%}
+          {%- set config = webserver_sws__config -%}
+          {%- if config is not mapping -%}
+          {%-   set _ = errors.append('sws_config has to be a dictionary of the sections general and advanced of sws.toml.') -%}
+          {%- else -%}
+          {%-   set content = webserver_sws__config_content -%}
+          {%-   set sections = content.keys() | map('string') | reject('in', webserver_sws__config_allowed.keys() | list) | list -%}
+          {%-   set ns = namespace(mappings=[], unknown=[], secrets=[], booleans=[], integers=[], enums=[], lists=[], strings=[], lines=[]) -%}
+          {%-   for section, options in content.items() if section in webserver_sws__config_allowed -%}
+          {%-     if options is not mapping -%}
+          {%-       set ns.mappings = ns.mappings + [ section ] -%}
+          {%-     else -%}
+          {%-       for key, value in options.items() -%}
+          {%-         set path = section ~ '.' ~ key -%}
+          {%-         if section == 'general' and key in webserver_sws__config_secrets -%}
+          {%-           set ns.secrets = ns.secrets + [ path ] -%}
+          {%-         elif key not in webserver_sws__config_allowed[section] -%}
+          {%-           set ns.unknown = ns.unknown + [ path ] -%}
+          {%-         elif section == 'general' -%}
+          {%-           if key in webserver_sws__config_booleans -%}
+          {%-             if value is not boolean -%}
+          {%-               set ns.booleans = ns.booleans + [ path ] -%}
+          {%-             endif -%}
+          {%-           elif key in webserver_sws__config_integers -%}
+          {%-             set range = webserver_sws__config_integers[key] -%}
+          {%-             if value is boolean or value is not integer or value < range.min or (range.max is defined and value > range.max) -%}
+          {%-               set ns.integers = ns.integers + [ path ~ ' (' ~ range.min ~ ' to ' ~ (range.max | default('any')) ~ ')' ] -%}
+          {%-             endif -%}
+          {%-           elif key in webserver_sws__config_enums -%}
+          {%-             if value not in webserver_sws__config_enums[key] -%}
+          {%-               set ns.enums = ns.enums + [ path ~ ' (' ~ (webserver_sws__config_enums[key] | join(', ')) ~ ')' ] -%}
+          {%-             endif -%}
+          {%-           elif key in webserver_sws__config_lists -%}
+          {%-             if value is not sequence or value is string or value is mapping or value | reject('string') | list | length > 0
+                             or (webserver_sws__config_lists[key] is not none
+                                 and value | reject('in', webserver_sws__config_lists[key]) | list | length > 0) -%}
+          {%-               set ns.lists = ns.lists + [ path ] -%}
+          {%-             elif value | select('search', '[\r\n]') | list | length > 0 -%}
+          {%-               set ns.lines = ns.lines + [ path ] -%}
+          {%-             endif -%}
+          {%-           elif value is not string -%}
+          {%-             set ns.strings = ns.strings + [ path ] -%}
+          {%-           elif value is search('[\r\n]') -%}
+          {%-             set ns.lines = ns.lines + [ path ] -%}
+          {%-           endif -%}
+          {%-         endif -%}
+          {%-       endfor -%}
+          {%-     endif -%}
+          {%-   endfor -%}
+          {%-   if sections | length > 0 -%}
+          {%-     set _ = errors.append('Unknown sections of sws_config: ' ~ (sections | join(', ')) ~ ', allowed are general and advanced.') -%}
+          {%-   endif -%}
+          {%-   if ns.mappings | length > 0 -%}
+          {%-     set _ = errors.append('These sections of sws_config are dictionaries: ' ~ (ns.mappings | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.secrets | length > 0 -%}
+          {%-     set _ = errors.append('These options are passed as secrets with sws_secrets, not in sws_config: '
+                                    ~ (ns.secrets | map('regex_replace', '^general[.]', '')
+                                       | map('extract', webserver_sws__config_secrets) | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.unknown | length > 0 -%}
+          {%-     set _ = errors.append('Unknown options of sws_config: ' ~ (ns.unknown | join(', '))
+                                    ~ '. Allowed are the options of Static Web Server (webserver_sws__config_allowed).') -%}
+          {%-   endif -%}
+          {%-   if ns.booleans | length > 0 -%}
+          {%-     set _ = errors.append('These options are booleans, use true or false without quotes: ' ~ (ns.booleans | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.integers | length > 0 -%}
+          {%-     set _ = errors.append('These options are numbers without quotes: ' ~ (ns.integers | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.enums | length > 0 -%}
+          {%-     set _ = errors.append('These options have unknown values: ' ~ (ns.enums | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lists | length > 0 -%}
+          {%-     set _ = errors.append('These options are lists of strings: ' ~ (ns.lists | join(', ')) ~ ', directory-listing-download allows targz.') -%}
+          {%-   endif -%}
+          {%-   if ns.strings | length > 0 -%}
+          {%-     set _ = errors.append('These options are strings: ' ~ (ns.strings | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%-   if ns.lines | length > 0 -%}
+          {%-     set _ = errors.append('Options must not contain line breaks: ' ~ (ns.lines | join(', ')) ~ '.') -%}
+          {%-   endif -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # The lists of advanced: headers, rewrites, redirects and the virtual hosts with their roots in <sws_home>/vhosts
+    - name: 'Validate the advanced options'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_sws__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_sws__advanced: >-
+          {{ webserver_sws__config_content.get('advanced') if webserver_sws__config_content.get('advanced') is mapping else {} }}
+        webserver_sws__errors: >-
+          {%- set errors = [] -%}
+          {%- set ns = namespace(lists=[], missing=[], unknown=[], kinds=[], headers=[], strings=[], hosts=[], roots=[], valid_hosts=[]) -%}
+          {%- for name, entries in webserver_sws__advanced.items() if name in webserver_sws__advanced_keys -%}
+          {%-   set keys = webserver_sws__advanced_keys[name] -%}
+          {%-   if entries is not sequence or entries is string or entries is mapping or entries | reject('mapping') | list | length > 0 -%}
+          {%-     set ns.lists = ns.lists + [ 'advanced.' ~ name ] -%}
+          {%-   else -%}
+          {%-     for entry in entries -%}
+          {%-       set path = 'advanced.' ~ name ~ '[' ~ loop.index0 ~ ']' -%}
+          {%-       set missing = keys.required | reject('in', entry.keys() | list) | list -%}
+          {%-       set unknown = entry.keys() | map('string') | reject('in', keys.allowed) | list -%}
+          {%-       if missing | length > 0 -%}
+          {%-         set ns.missing = ns.missing + [ path ~ ': ' ~ (missing | join(', ')) ] -%}
+          {%-       endif -%}
+          {%-       if unknown | length > 0 -%}
+          {%-         set ns.unknown = ns.unknown + [ path ~ ': ' ~ (unknown | join(', ')) ] -%}
+          {%-       endif -%}
+          {%-       for key in [ 'kind', 'redirect' ] if entry[key] is defined
+                                                         and (entry[key] is boolean or entry[key] not in webserver_sws__redirect_kinds) -%}
+          {%-         set ns.kinds = ns.kinds + [ path ~ '.' ~ key ] -%}
+          {%-       endfor -%}
+          {%-       if entry.headers is defined and (entry.headers is not mapping or entry.headers.values() | reject('string') | list | length > 0
+                                                     or entry.headers.values() | select('search', '[\r\n]') | list | length > 0) -%}
+          {%-         set ns.headers = ns.headers + [ path ] -%}
+          {%-       endif -%}
+          {%-       for key in [ 'source', 'destination', 'host', 'root' ] if entry[key] is defined
+                                                                       and (entry[key] is not string or entry[key] is search('[\r\n]')) -%}
+          {%-         set ns.strings = ns.strings + [ path ~ '.' ~ key ] -%}
+          {%-       endfor -%}
+          {%-       if name == 'virtual-hosts' -%}
+          {%-         if entry.host is defined and (entry.host is not string or entry.host is not match(webserver_sws__vhost_host_pattern)) -%}
+          {%-           set ns.hosts = ns.hosts + [ path ] -%}
+          {%-         elif entry.host is defined -%}
+          {%-           set ns.valid_hosts = ns.valid_hosts + [ entry.host | lower ] -%}
+          {%-         endif -%}
+          {%-         if entry.root is defined and (entry.root is not string or entry.root is not match(webserver_sws__vhost_root_pattern)) -%}
+          {%-           set ns.roots = ns.roots + [ path ] -%}
+          {%-         endif -%}
+          {%-       endif -%}
+          {%-     endfor -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if ns.lists | length > 0 -%}
+          {%-   set _ = errors.append('These options are lists of dictionaries: ' ~ (ns.lists | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.missing | length > 0 -%}
+          {%-   set _ = errors.append('Missing keys: ' ~ (ns.missing | join('; ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown keys: ' ~ (ns.unknown | join('; ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.kinds | length > 0 -%}
+          {%-   set _ = errors.append('The kinds of the redirects are 301 or 302: ' ~ (ns.kinds | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.headers | length > 0 -%}
+          {%-   set _ = errors.append('headers is a dictionary of header names and strings without line breaks: ' ~ (ns.headers | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.strings | length > 0 -%}
+          {%-   set _ = errors.append('These keys are strings without line breaks: ' ~ (ns.strings | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.hosts | length > 0 -%}
+          {%-   set _ = errors.append('The hosts of the virtual hosts are host names, optionally with a port: ' ~ (ns.hosts | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if ns.valid_hosts | unique | list | length != ns.valid_hosts | length -%}
+          {%-   set _ = errors.append('The hosts of the virtual hosts have to be unique.') -%}
+          {%- endif -%}
+          {%- if ns.roots | length > 0 -%}
+          {%-   set _ = errors.append('The roots of the virtual hosts are directories /var/vhosts/<name> (<sws_home>/vhosts/<name>): '
+                                  ~ (ns.roots | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: 'Validate environment and secrets'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_sws__errors | join(' ') }}"
+        quiet: true
+      vars:
+        webserver_sws__secrets_missing: >-
+          {{ webserver_sws__secrets_required
+             | reject('in', webserver_sws__secrets | select('mapping') | selectattr('target', 'defined') | map(attribute='target') | list)
+             | list }}
+        webserver_sws__errors: >-
+          {%- set errors = [] -%}
+          {%- if webserver_sws__secrets_missing | length > 0 -%}
+          {%-   set _ = errors.append('Static Web Server needs the secrets ' ~ (webserver_sws__secrets_required | join(', '))
+                                  ~ ', missing: ' ~ (webserver_sws__secrets_missing | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Checks the environment and the secrets of the container after merging sws_container,
+    # unknown variables would change the behavior unexpectedly
+    - name: 'Validate the allowed environment variables and secrets'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__errors | length == 0
+        # Only the failing checks are reported
+        fail_msg: "{{ webserver_sws__errors | join(' ') }}"
+        quiet: true
+      vars:
+        # The secrets of the container are omit without secrets
+        webserver_sws__container_secrets: >-
+          {{ webserver_sws__container.get('secrets')
+             if webserver_sws__container.get('secrets') is sequence and webserver_sws__container.get('secrets') is not string
+             else [] }}
+        # The container has no environment, only sws_container can add one
+        webserver_sws__environment_container: >-
+          {{ webserver_sws__container.get('environment') if webserver_sws__container.get('environment') is mapping else {} }}
+        webserver_sws__environment_unknown: >-
+          {{ webserver_sws__environment_container.keys() | reject('in', webserver_sws__environment_allowed) | list }}
+        webserver_sws__secrets_unknown: >-
+          {{ webserver_sws__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1') | map('basename')
+             | reject('in', webserver_sws__secrets_allowed) | list }}
+        webserver_sws__secrets_duplicate: >-
+          {{ webserver_sws__container_secrets | map('regex_replace', '^.*,target=([^,]+).*$', '\1')
+             | community.general.counter | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | list }}
+        webserver_sws__errors: >-
+          {%- set errors = [] -%}
+          {%- if webserver_sws__environment_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown environment variables: ' ~ (webserver_sws__environment_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if webserver_sws__secrets_unknown | length > 0 -%}
+          {%-   set _ = errors.append('Unknown secrets: ' ~ (webserver_sws__secrets_unknown | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {%- if errors | length > 0 -%}
+          {%-   set _ = errors.append('The options of Static Web Server are set with sws_config, allowed are the secrets '
+                                  ~ (webserver_sws__secrets_allowed | join(', ')) ~ ' and no environment variables.') -%}
+          {%- endif -%}
+          {%- if webserver_sws__secrets_duplicate | length > 0 -%}
+          {%-   set _ = errors.append('Every secret target is allowed once: ' ~ (webserver_sws__secrets_duplicate | join(', ')) ~ '.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    # Static Web Server runs as root in the container, the content is deployed separately
+    - name: 'Create the directories of Static Web Server'
       ansible.builtin.file:
-        dest: "{{ item }}"
+        path: "{{ item }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0755'
         state: 'directory'
-      with_items:
-        - "{{ webserver_sws__podman_home }}"
-        - "{{ webserver_sws__podman_root_dir }}"
-        - "{{ webserver_sws__podman_vhost_dir }}"
+      loop: "{{ [ webserver_sws__podman_home, webserver_sws__podman_root_dir, webserver_sws__podman_vhost_dir ] + webserver_sws__vhost_dirs }}"
 
-    - name: 'Generate configuration'
+    - name: 'Write the configuration'
       ansible.builtin.copy:
-        content: |
-          #
-          # Ansible managed
-          #
-          {% if webserver_sws__vhosts | length > 0 %}
-
-          [advanced]
-
-          {%   for host in webserver_sws__vhosts %}
-          [[advanced.virtual-hosts]]
-          host = "{{ host }}"
-          root = "/var/vhosts/{{ host }}"
-
-          {%   endfor %}
-          {% endif %}
+        content: "{{ '#\n# Ansible managed\n#\n\n' ~ (webserver_sws__config_content | community.general.to_toml) }}"
         dest: "{{ webserver_sws__podman_config_file }}"
+        owner: 'root'
+        group: 'root'
+        mode: '0644'
       register: 'webserver_sws__config_result'
+
+    - name: 'Create secrets'
+      no_log: true
+      containers.podman.podman_secret:
+        state: 'present'
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+      loop: "{{ webserver_sws__secrets }}"
+      register: 'webserver_sws__secrets_result'
 
     - name: 'Gathering facts about services...'
       ansible.builtin.service_facts:
-
-    - name: 'Stop container when it is running'
-      ansible.builtin.systemd:
-        name: "{{ webserver_sws__container.name }}.service"
-        state: 'stopped'
-      when: 'ansible_facts.services[webserver_sws__container.name + ".service"] is defined and podman___update_mode | bool'
-
-    - name: 'Pull image'
-      containers.podman.podman_image:
-        name: "{{ webserver_sws__container.image }}"
-        force: true
-      when: 'podman___update_mode | bool'
 
     - name: 'Install container'
       containers.podman.podman_container:
         name: "{{ webserver_sws__container.name }}"
         hostname: "{{ webserver_sws__container.hostname }}"
         image: "{{ webserver_sws__container.image }}"
+        command: "{{ webserver_sws__container.command | default(omit) }}"
         ip: "{{ webserver_sws__container.ip }}"
         ip6: "{{ webserver_sws__container.ipv6 | default(omit) }}"
         network: "{{ webserver_sws__container.network }}"
@@ -65,37 +328,83 @@
         secrets: "{{ webserver_sws__container.secrets | default(omit) }}"
         volume: "{{ webserver_sws__container.volumes | default(omit) }}"
         quadlet_options: |
-
           [Install]
           WantedBy=default.target
 
           [Service]
           RestartSec=5
           Restart=always
+
+          [Unit]
+          {% if webserver_sws__container.requires is defined %}
+          Requires={{ webserver_sws__container.requires | join(' ') }}
+          {% endif %}
+          {% if webserver_sws__container.wants is defined %}
+          Wants={{ webserver_sws__container.wants | join(' ') }}
+          {% endif %}
+          {% if webserver_sws__container.after is defined %}
+          After={{ webserver_sws__container.after | join(' ') }}
+          {% endif %}
+          {% if webserver_sws__container.part_of is defined %}
+          PartOf={{ webserver_sws__container.part_of | join(' ') }}
+          {% endif %}
+          {% if webserver_sws__container.binds_to is defined %}
+          BindsTo={{ webserver_sws__container.binds_to | join(' ') }}
+          {% endif %}
+          {% if webserver_sws__container.requires_mounts_for is defined %}
+          RequiresMountsFor={{ webserver_sws__container.requires_mounts_for | join(' ') }}
+          {% endif %}
         restart_policy: 'no'
         state: 'quadlet'
-        recreate: "{{ podman___update_mode | bool }}"
       register: 'webserver_sws__quadlet_result'
 
-    - name: 'Start and enable container'
-      ansible.builtin.systemd:
-        name: "{{ webserver_sws__container.name }}"
-        daemon_reload: true
-        state: "{{ 'restarted' if webserver_sws__restart | bool else 'started' }}"
-        enabled: true
-      vars:
-        webserver_sws__running: >-
-          {{ (ansible_facts.services[webserver_sws__container.name + '.service'].state | default('')) == 'running' }}
-        webserver_sws__restart: >-
-          {{ podman___update_mode | bool
-             or (webserver_sws__running | bool
-                 and (webserver_sws__config_result is changed or webserver_sws__quadlet_result is changed)) }}
+    # A failed start of the service only reports the exit code, the reason is in the journal
+    - name: 'Start Static Web Server'
       when: 'not ansible_check_mode'
+      block:
+
+        - name: 'Start and enable container'
+          ansible.builtin.systemd_service:
+            name: "{{ webserver_sws__container.name }}"
+            daemon_reload: true
+            state: "{{ 'restarted' if webserver_sws__restart | bool else 'started' }}"
+            enabled: true
+          vars:
+            webserver_sws__running: >-
+              {{ (ansible_facts.services[webserver_sws__container.name + '.service'].state | default('')) == 'running' }}
+            # Static Web Server reads its configuration and the secret only at the start, the content on every request
+            webserver_sws__restart: >-
+              {{ webserver_sws__running | bool
+                 and (webserver_sws__config_result is changed
+                      or webserver_sws__secrets_result is changed
+                      or webserver_sws__quadlet_result is changed) }}
+
+        # Static Web Server stops at the start with an invalid configuration, e.g. a missing directory or certificate
+        - name: 'Wait for Static Web Server'
+          ansible.builtin.wait_for:
+            host: "{{ webserver_sws__container.ip }}"
+            port: "{{ webserver_sws__port }}"
+            timeout: 60
+
+      rescue:
+
+        - name: 'Read the log of the failed start'
+          ansible.builtin.command:
+            argv: [ 'journalctl', '-u', "{{ webserver_sws__container.name }}", '-n', '80', '--no-pager' ]
+          register: 'webserver_sws__start_journal'
+          changed_when: false
+
+        - name: 'Fail with the log of the failed start'
+          ansible.builtin.fail:
+            msg: >-
+              {{ [ webserver_sws__container.name ~ ' did not start: ' ~ (ansible_failed_result.msg | default('')) ]
+                 + webserver_sws__start_journal.stdout_lines }}
 
     - name: 'Enable autoupdate on container'
-      when: 'webserver_sws__autoupdate_enabled'
-      include_role:
+      when: 'webserver_sws__autoupdate_enabled | bool'
+      ansible.builtin.include_role:
         name: 'container_update'
       vars:
         container_name: "{{ webserver_sws__container.name }}"
         container_image: "{{ webserver_sws__container.image }}"
+        container_schedule: "{{ webserver_sws__autoupdate_schedule }}"

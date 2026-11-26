@@ -10,11 +10,14 @@ webserver_sws__test_network:
   ipv6_prefixlength: 64
 
 webserver_sws__test_image: 'ghcr.io/static-web-server/static-web-server:2'
+webserver_sws__test_home: '/opt/sws-molecule'
+webserver_sws__test_quadlet_path: '/etc/containers/systemd/sws.container'
+webserver_sws__test_config_path: '/opt/sws-molecule/sws.toml'
 
 webserver_sws__test_cases:
 
-  # Without virtual hosts, sws.toml contains only the header
-  - name: 'molecule-sws-ipv4-only'
+  # Only the mandatory variables, sws.toml contains only the header, Static Web Server uses its defaults
+  - name: 'molecule-sws-default'
     role_vars:
       sws_home: '/opt/sws-molecule'
       sws_ip: '10.89.0.10'
@@ -24,13 +27,20 @@ webserver_sws__test_cases:
     expect:
       ip: '10.89.0.10'
       ip6: ~
+      secret: ~
+      quadlet:
+        - 'Volume=/opt/sws-molecule/sws.toml:/sws.toml:ro'
+        - 'Volume=/opt/sws-molecule/public:/public:ro'
+        - 'Volume=/opt/sws-molecule/vhosts:/var/vhosts:ro'
+      config_lines: [ '# Ansible managed' ]
       vhosts: []
+      login: ~
       urls:
         - url: 'http://10.89.0.10/'
           content: 'molecule default'
 
-  # With a virtual host, served via IPv4 and IPv6
-  - name: 'molecule-sws-ipv6'
+  # IPv6, an own port, the options of general and advanced, two virtual hosts and basic authentication as secret
+  - name: 'molecule-sws'
     role_vars:
       sws_home: '/opt/sws-molecule'
       sws_ip: '10.89.0.10'
@@ -38,18 +48,75 @@ webserver_sws__test_cases:
       sws_network: 'podman-molecule'
       sws_hostname: 'sws-molecule'
       sws_timezone: 'Europe/Berlin'
-      sws_vhosts:
-        - 'example.org'
+      sws_labels:
+        molecule.test: 'sws'
+      sws_container:
+        wants: [ 'network-online.target' ]
+        after: [ 'network-online.target' ]
+      sws_secrets:
+        - name: 'sws-basic-auth'
+          # htpasswd -nbB -C 10 molecule molecule-sws-password
+          data: 'molecule:$2y$10$93/05k4r.gXyXQwkrXL/L.SyvWsIH0qASGM0/vh6Gi/wO5RRyJEoW'
+          target: 'SERVER_BASIC_AUTH'
+      sws_config:
+        general:
+          port: 8080
+          log-level: 'info'
+          compression: true
+          security-headers: true
+          page404: ~
+        advanced:
+          headers:
+            - source: '**/*.html'
+              headers:
+                X-Molecule: 'sws'
+          redirects:
+            - source: '/old'
+              destination: '/index.html'
+              kind: 301
+          virtual-hosts:
+            - host: 'example.org'
+              root: '/var/vhosts/example.org'
+            - host: 'example.com'
+              root: '/var/vhosts/example.com'
+    # Another log level, Static Web Server restarts
+    side_effect:
+      log-level: 'debug'
     expect:
       ip: '10.89.0.10'
       ip6: 'fd00:89::10'
-      vhosts:
-        - 'example.org'
+      secret: 'Secret=sws-basic-auth,type=env,target=SERVER_BASIC_AUTH'
+      quadlet:
+        - 'Volume=/opt/sws-molecule/sws.toml:/sws.toml:ro'
+        - 'Volume=/opt/sws-molecule/public:/public:ro'
+        - 'Volume=/opt/sws-molecule/vhosts:/var/vhosts:ro'
+        - 'Label=molecule.test=sws'
+        - 'Wants=network-online.target'
+        - 'After=network-online.target'
+      # The log level of the side effect, null removes page404
+      config_lines:
+        - '# Ansible managed'
+        - '[general]'
+        - 'port = 8080'
+        - 'log-level = "debug"'
+        - 'compression = true'
+        - '[[advanced.virtual-hosts]]'
+        - 'host = "example.org"'
+        - 'root = "/var/vhosts/example.org"'
+        - 'kind = 301'
+        - 'X-Molecule = "sws"'
+      vhosts: [ 'example.org', 'example.com' ]
+      login: { username: 'molecule', password: 'molecule-sws-password' }
       urls:
-        - url: 'http://10.89.0.10/'
+        - url: 'http://10.89.0.10:8080/'
           content: 'molecule default'
-        - url: 'http://[fd00:89::10]/'
+        - url: 'http://[fd00:89::10]:8080/'
           content: 'molecule default'
-        - url: 'http://10.89.0.10/'
+        - url: 'http://10.89.0.10:8080/'
           host: 'example.org'
           content: 'molecule example.org'
+        - url: 'http://10.89.0.10:8080/'
+          host: 'example.com'
+          content: 'molecule example.com'
+      header: { url: 'http://10.89.0.10:8080/index.html', name: 'x_molecule', value: 'sws' }
+      redirect: { url: 'http://10.89.0.10:8080/old', status: 301, location: '/index.html' }

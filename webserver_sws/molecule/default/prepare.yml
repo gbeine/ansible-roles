@@ -1,4 +1,26 @@
 ---
+# community.general.to_toml writes sws.toml on the controller, it needs tomlkit in the Python of Ansible
+- name: 'Prepare the controller'
+  hosts: 'localhost'
+  connection: 'local'
+  gather_facts: false
+  become: false
+
+  tasks:
+
+    - name: 'Check for tomlkit in the Python of Ansible'
+      ansible.builtin.command:
+        argv: [ "{{ ansible_playbook_python }}", '-c', 'import tomlkit' ]
+      register: 'webserver_sws__test_tomlkit'
+      changed_when: false
+      failed_when: false
+
+    - name: 'Install tomlkit into the Python of Ansible'
+      when: webserver_sws__test_tomlkit.rc != 0
+      ansible.builtin.command:
+        argv: [ "{{ ansible_playbook_python }}", '-m', 'pip', 'install', 'tomlkit' ]
+      changed_when: true
+
 - name: 'Prepare'
   hosts: 'all'
   become: true
@@ -8,12 +30,38 @@
 
   vars:
     webserver_sws__test_case: "{{ webserver_sws__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
-    webserver_sws__test_home: "{{ webserver_sws__test_case.role_vars.sws_home }}"
     podman_networks:
       - "{{ webserver_sws__test_network }}"
     podman_default_network: "{{ webserver_sws__test_network.name }}"
-    podman_socket_enabled: false
     podman_cleanup_enabled: false
+
+  # A new clone catches up on the missed runs of apt-daily and unattended-upgrades, they hold the dpkg lock
+  # longer than apt waits for it, the timers are stopped for the test, not disabled, before the roles install packages
+  pre_tasks:
+
+    - name: 'Stop the timers of apt'
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: 'stopped'
+      loop: [ 'apt-daily.timer', 'apt-daily-upgrade.timer' ]
+
+    - name: 'Wait for running updates of apt and unattended-upgrades'
+      ansible.builtin.command:
+        argv: [ 'systemctl', 'is-active', 'apt-daily.service', 'apt-daily-upgrade.service' ]
+      register: 'webserver_sws__test_apt_services'
+      until: webserver_sws__test_apt_services.stdout_lines | select('in', webserver_sws__test_apt_running) | list | length == 0
+      retries: 60
+      delay: 10
+      changed_when: false
+      failed_when: false
+      vars:
+        webserver_sws__test_apt_running: [ 'active', 'activating', 'deactivating', 'reloading' ]
+
+    - name: 'Assert apt and unattended-upgrades are not running'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__test_apt_services.stdout_lines | select('in', [ 'active', 'activating', 'deactivating', 'reloading' ]) | list | length == 0
+        fail_msg: "apt-daily.service, apt-daily-upgrade.service: {{ webserver_sws__test_apt_services.stdout_lines | join(', ') }}"
 
   roles:
     - role: 'common_filters'
@@ -21,36 +69,35 @@
 
   tasks:
 
-    - name: 'Ensure /etc/timezone exists'
-      ansible.builtin.copy:
-        dest: '/etc/timezone'
-        content: |
-          Etc/UTC
-        force: false
-        mode: '644'
-
-    - name: 'Pull the sws image, so the first start of the service does not time out'
+    - name: 'Pull the image, so the first start of the service does not time out'
       containers.podman.podman_image:
         name: "{{ webserver_sws__test_image }}"
+      register: 'webserver_sws__test_pull'
+      until: webserver_sws__test_pull is succeeded
+      retries: 5
+      delay: 30
 
-    - name: 'Create content directories'
+    # The content is deployed separately, the role creates the directories
+    - name: 'Create the content directories of the test'
       ansible.builtin.file:
         path: "{{ item }}"
-        state: directory
-        mode: '755'
-      loop: "{{ [ webserver_sws__test_home + '/public' ] + webserver_sws__test_case.expect.vhosts | map('regex_replace', '^', webserver_sws__test_home + '/vhosts/') | list }}"
+        state: 'directory'
+        mode: '0755'
+      loop: >-
+        {{ [ webserver_sws__test_home + '/public' ]
+           + webserver_sws__test_case.expect.vhosts | map('regex_replace', '^', webserver_sws__test_home + '/vhosts/') | list }}
 
     - name: 'Create the default page'
       ansible.builtin.copy:
         dest: "{{ webserver_sws__test_home }}/public/index.html"
         content: |
           molecule default
-        mode: '644'
+        mode: '0644'
 
     - name: 'Create the pages of the virtual hosts'
       ansible.builtin.copy:
         dest: "{{ webserver_sws__test_home }}/vhosts/{{ item }}/index.html"
         content: |
           molecule {{ item }}
-        mode: '644'
+        mode: '0644'
       loop: "{{ webserver_sws__test_case.expect.vhosts }}"

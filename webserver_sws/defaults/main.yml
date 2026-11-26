@@ -13,25 +13,185 @@ webserver_sws__hostname: "{{ sws_hostname | mandatory }}"
 webserver_sws__timezone: "{{ sws_timezone | mandatory }}"
 webserver_sws__labels: "{{ sws_labels }}"
 
-webserver_sws__vhosts: "{{ sws_vhosts | default([]) }}"
+webserver_sws__version: "{{ sws_version | default('2') }}"
 
 webserver_sws__container: "{{ webserver_sws__podman_container_default | combine(sws_container | default({})) }}"
 
+# The sections general and advanced of sws.toml, null removes a section or an option
+webserver_sws__config: "{{ sws_config | default({}) }}"
+webserver_sws__secrets: "{{ sws_secrets | default([]) }}"
+
 webserver_sws__autoupdate_enabled: "{{ sws_autoupdate_enabled | default(false) }}"
+webserver_sws__autoupdate_schedule: "{{ sws_autoupdate_schedule }}"
 
 #
-# podman defaults
+# Defaults - do not change
 #
+
+# Generated from General and Advanced of src/settings/file.rs of Static Web Server v2.44.3 with the default features of the image,
+# without memory-cache (experimental, not part of the image) and windows-service (Windows only),
+# Static Web Server ignores other keys with a warning only
+webserver_sws__config_allowed:
+  general:
+    - 'host'
+    - 'port'
+    - 'root'
+    - 'log-level'
+    - 'log-with-ansi'
+    - 'cache-control-headers'
+    - 'compression'
+    - 'compression-level'
+    - 'compression-static'
+    - 'page404'
+    - 'page50x'
+    - 'http2'
+    - 'http2-tls-cert'
+    - 'http2-tls-key'
+    - 'https-redirect'
+    - 'https-redirect-host'
+    - 'https-redirect-from-port'
+    - 'https-redirect-from-hosts'
+    - 'security-headers'
+    - 'cors-allow-origins'
+    - 'cors-allow-headers'
+    - 'cors-expose-headers'
+    - 'index-files'
+    - 'directory-listing'
+    - 'directory-listing-order'
+    - 'directory-listing-format'
+    - 'directory-listing-download'
+    - 'fd'
+    - 'threads-multiplier'
+    - 'max-blocking-threads'
+    - 'grace-period'
+    - 'page-fallback'
+    - 'log-remote-address'
+    - 'log-x-real-ip'
+    - 'log-forwarded-for'
+    - 'trusted-proxies'
+    - 'redirect-trailing-slash'
+    - 'ignore-hidden-files'
+    - 'disable-symlinks'
+    - 'use-relative-root'
+    - 'health'
+    - 'accept-markdown'
+    - 'text-charset'
+    - 'metrics'
+    - 'maintenance-mode'
+    - 'maintenance-mode-status'
+    - 'maintenance-mode-file'
+  advanced:
+    - 'headers'
+    - 'rewrites'
+    - 'redirects'
+    - 'virtual-hosts'
+
+# The types of General in src/settings/file.rs, TOML is typed, the other options are strings
+webserver_sws__config_booleans:
+  - 'log-with-ansi'
+  - 'cache-control-headers'
+  - 'compression'
+  - 'compression-static'
+  - 'http2'
+  - 'https-redirect'
+  - 'security-headers'
+  - 'directory-listing'
+  - 'log-remote-address'
+  - 'log-x-real-ip'
+  - 'log-forwarded-for'
+  - 'redirect-trailing-slash'
+  - 'ignore-hidden-files'
+  - 'disable-symlinks'
+  - 'use-relative-root'
+  - 'health'
+  - 'accept-markdown'
+  - 'text-charset'
+  - 'metrics'
+  - 'maintenance-mode'
+# The integers with their ranges (u8, u16 and usize of file.rs, ports and HTTP status codes)
+webserver_sws__config_integers:
+  'port': { min: 1, max: 65535 }
+  'https-redirect-from-port': { min: 1, max: 65535 }
+  'directory-listing-order': { min: 0, max: 255 }
+  'fd': { min: 0 }
+  'threads-multiplier': { min: 0 }
+  'max-blocking-threads': { min: 0 }
+  'grace-period': { min: 0, max: 255 }
+  'maintenance-mode-status': { min: 100, max: 599 }
+# LogLevel and CompressionLevel of file.rs, DirListFmt of src/directory_listing.rs
+webserver_sws__config_enums:
+  'log-level': [ 'error', 'warn', 'info', 'debug', 'trace' ]
+  'compression-level': [ 'fastest', 'best', 'default' ]
+  'directory-listing-format': [ 'html', 'json' ]
+# The lists of General, directory-listing-download has the values of DirDownloadFmt of src/directory_listing_download.rs
+webserver_sws__config_lists:
+  'directory-listing-download': [ 'targz' ]
+  'trusted-proxies': ~
+
+# The entries of the lists of Advanced in file.rs with their allowed and mandatory keys,
+# virtual hosts without root are left out by Static Web Server, so the root is mandatory
+webserver_sws__advanced_keys:
+  'headers': { allowed: [ 'source', 'headers' ], required: [ 'source', 'headers' ] }
+  'rewrites': { allowed: [ 'source', 'destination', 'redirect' ], required: [ 'source', 'destination' ] }
+  'redirects': { allowed: [ 'host', 'source', 'destination', 'kind' ], required: [ 'source', 'destination', 'kind' ] }
+  'virtual-hosts': { allowed: [ 'host', 'root' ], required: [ 'host', 'root' ] }
+# RedirectsKind of file.rs
+webserver_sws__redirect_kinds: [ 301, 302 ]
+# The host of a virtual host, compared with the Host header of the request
+webserver_sws__vhost_host_pattern: '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$'
+# The roots of the virtual hosts are directories of <sws_home>/vhosts, mounted to /var/vhosts
+webserver_sws__vhost_root_pattern: '^/var/vhosts/[A-Za-z0-9][A-Za-z0-9_.-]*$'
+
+# Static Web Server reads no file for a secret and the configuration cannot reference one,
+# SERVER_BASIC_AUTH (user:bcrypt-hash) is passed in the environment, basic-auth must not be set in sws.toml
+webserver_sws__secrets_allowed: [ 'SERVER_BASIC_AUTH' ]
+webserver_sws__secrets_required: []
+webserver_sws__secret_variables: "{{ webserver_sws__secrets_allowed }}"
+# The options of the secrets in sws.toml
+webserver_sws__config_secrets: { 'basic-auth': 'SERVER_BASIC_AUTH' }
+
+# The variables SERVER_* of the image are options of sws.toml, the image needs no other variables
+webserver_sws__environment_allowed: []
+
+# The content of sws.toml, null removes a section or an option
+webserver_sws__config_content: >-
+  {%- set result = {} -%}
+  {%- if webserver_sws__config is mapping -%}
+  {%-   for section, options in webserver_sws__config.items() if options is not none -%}
+  {%-     set _ = result.update({ section: (options | dict2items | rejectattr('value', 'none') | items2dict) if options is mapping else options }) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ result }}
+
+# The directories of the virtual hosts in <sws_home>/vhosts, invalid roots are reported by the validation
+webserver_sws__vhost_dirs: >-
+  {%- set advanced = webserver_sws__config_content.get('advanced') -%}
+  {%- set vhosts = advanced.get('virtual-hosts') if advanced is mapping else none -%}
+  {%- set result = [] -%}
+  {%- if vhosts is sequence and vhosts is not string and vhosts is not mapping -%}
+  {%-   for vhost in vhosts if vhost is mapping and vhost.root is defined
+                              and vhost.root is string and vhost.root is match(webserver_sws__vhost_root_pattern) -%}
+  {%-     set _ = result.append(webserver_sws__podman_vhost_dir ~ '/' ~ (vhost.root | basename)) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ result | unique | list }}
+
+# The port Static Web Server listens on
+webserver_sws__port: >-
+  {{ webserver_sws__config_content.get('general').get('port', 80)
+     if webserver_sws__config_content.get('general') is mapping else 80 }}
 
 webserver_sws__podman_name: 'sws'
 webserver_sws__podman_image: 'ghcr.io/static-web-server/static-web-server'
-webserver_sws__podman_tag: '2'
+webserver_sws__podman_tag: "{{ webserver_sws__version }}"
 
 webserver_sws__podman_home: "{{ webserver_sws__home }}"
 webserver_sws__podman_root_dir: "{{ webserver_sws__podman_home }}/public"
 webserver_sws__podman_vhost_dir: "{{ webserver_sws__podman_home }}/vhosts"
 webserver_sws__podman_config_file: "{{ webserver_sws__podman_home }}/sws.toml"
 
+# The image (scratch) runs in /, Static Web Server reads ./sws.toml and serves ./public by default,
+# the time zone is set by podman
 webserver_sws__podman_container_default:
   name: "{{ webserver_sws__podman_name }}"
   hostname: "{{ webserver_sws__hostname }}"
@@ -40,13 +200,15 @@ webserver_sws__podman_container_default:
   ipv6: "{{ webserver_sws__ipv6 | default(omit) }}"
   network: "{{ webserver_sws__network }}"
   timezone: "{{ webserver_sws__timezone }}"
-  environment:
-    SERVER_ROOT: '/var/public'
-    SERVER_CONFIG_FILE: '/etc/sws.toml'
   labels: "{{ webserver_sws__labels | default(omit) }}"
+  # Entries without name or target are left out, the validation of the secrets reports them
+  secrets: >-
+    {{ (webserver_sws__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='name')
+        | zip(webserver_sws__secrets | select('mapping') | selectattr('name', 'defined') | selectattr('target', 'defined') | map(attribute='target'))
+        | map('join', ',type=env,target=') | list)
+      if (webserver_sws__secrets is sequence and webserver_sws__secrets is not string and webserver_sws__secrets | length > 0)
+      else omit }}
   volumes:
-    - '/etc/localtime:/etc/localtime:ro'
-    - '/etc/timezone:/etc/timezone:ro'
-    - "{{ webserver_sws__podman_config_file }}:/etc/sws.toml:ro"
-    - "{{ webserver_sws__podman_root_dir }}:/var/public:ro"
+    - "{{ webserver_sws__podman_config_file }}:/sws.toml:ro"
+    - "{{ webserver_sws__podman_root_dir }}:/public:ro"
     - "{{ webserver_sws__podman_vhost_dir }}:/var/vhosts:ro"

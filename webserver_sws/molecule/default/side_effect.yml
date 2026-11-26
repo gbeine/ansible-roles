@@ -1,0 +1,247 @@
+---
+- name: 'Side effect'
+  hosts: 'all'
+  become: true
+
+  vars_files:
+    - 'test_cases.yml'
+
+  vars:
+    webserver_sws__test_case: "{{ webserver_sws__test_cases | selectattr('name', 'eq', inventory_hostname) | first }}"
+    webserver_sws__test_vars: "{{ webserver_sws__test_case.role_vars }}"
+    webserver_sws__test_config: "{{ webserver_sws__test_vars.sws_config | default({}) }}"
+    webserver_sws__test_vhost: { host: 'example.net', root: '/var/vhosts/example.net' }
+    webserver_sws__test_checked_files:
+      - "{{ webserver_sws__test_quadlet_path }}"
+      - "{{ webserver_sws__test_config_path }}"
+
+  # Like every playbook, common_filters and common_globals come first
+  roles:
+    - role: 'common_filters'
+    - role: 'common_globals'
+
+  tasks:
+
+    - name: 'Set the role variables of the test case'
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ webserver_sws__test_vars | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: 'Read the checksums of the checked files before the invalid runs'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: 'md5'
+      loop: "{{ webserver_sws__test_checked_files }}"
+      register: 'webserver_sws__test_md5_before'
+
+    # Include parameters take precedence over set_fact and only exist inside the include
+
+    - name: 'Run webserver_sws with sws_container not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_container: [ 'volumes' ]
+        webserver_sws__test_invalid:
+          message: 'sws_container not a dictionary'
+          search: 'failed to combine variables, expected dicts'
+
+    - name: 'Run webserver_sws with sws_secrets not a list (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_secrets: { name: 'sws-basic-auth', data: 'molecule:x', target: 'SERVER_BASIC_AUTH' }
+        webserver_sws__test_invalid:
+          message: 'sws_secrets not a list'
+          search: '^sws_secrets has to be a list$'
+
+    - name: 'Run webserver_sws with a secret without data (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_secrets: [ { name: 'sws-basic-auth', target: 'SERVER_BASIC_AUTH' } ]
+        webserver_sws__test_invalid:
+          message: 'a secret without data'
+          search: '^sws_secrets entries need name, data and target$'
+
+    - name: 'Run webserver_sws with sws_config not a dictionary (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: [ 'general' ]
+        webserver_sws__test_invalid:
+          message: 'sws_config not a dictionary'
+          search: '^sws_config has to be a dictionary of the sections general and advanced of sws\.toml\.$'
+
+    - name: 'Run webserver_sws with an unknown section (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'server': { 'port': 8080 } }) }}"
+        webserver_sws__test_invalid:
+          message: 'an unknown section'
+          search: '^Unknown sections of sws_config: server, allowed are general and advanced\.$'
+
+    - name: 'Run webserver_sws with an unknown option (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'general': { 'listen': '::' } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'an unknown option'
+          search: '^Unknown options of sws_config: general\.listen\. Allowed are'
+
+    - name: 'Run webserver_sws with the port as string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'general': { 'port': '8080' } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'the port as string'
+          search: '^These options are numbers without quotes: general\.port \(1 to 65535\)\.$'
+
+    - name: 'Run webserver_sws with the port 0 (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'general': { 'port': 0 } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'the port 0'
+          search: '^These options are numbers without quotes: general\.port \(1 to 65535\)\.$'
+
+    - name: 'Run webserver_sws with a boolean as string (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'general': { 'compression': 'false' } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'a boolean as string'
+          search: '^These options are booleans, use true or false without quotes: general\.compression\.$'
+
+    - name: 'Run webserver_sws with an unknown log level (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'general': { 'log-level': 'verbose' } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'an unknown log level'
+          search: '^These options have unknown values: general\.log-level \(error, warn, info, debug, trace\)\.$'
+
+    - name: 'Run webserver_sws with basic-auth in sws_config (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'general': { 'basic-auth': 'molecule:x' } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'basic-auth in sws_config'
+          search: '^These options are passed as secrets with sws_secrets, not in sws_config: SERVER_BASIC_AUTH\.$'
+
+    - name: 'Run webserver_sws with a virtual host without host (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: "{{ webserver_sws__test_config | combine({ 'advanced': { 'virtual-hosts': [ { 'root': '/var/vhosts/example.net' } ] } }, recursive=true) }}"
+        webserver_sws__test_invalid:
+          message: 'a virtual host without host'
+          search: '^Missing keys: advanced\.virtual-hosts\[0\]: host\.$'
+
+    - name: 'Run webserver_sws with a root outside of /var/vhosts (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: >-
+          {{ webserver_sws__test_config | combine({ 'advanced': { 'virtual-hosts': [ webserver_sws__test_vhost | combine({ 'root': '/srv/example.net' }) ] } },
+                                                  recursive=true) }}
+        webserver_sws__test_invalid:
+          message: 'a root outside of /var/vhosts'
+          search: '^The roots of the virtual hosts are directories /var/vhosts/<name> \(<sws_home>/vhosts/<name>\): advanced\.virtual-hosts\[0\]\.$'
+
+    - name: 'Run webserver_sws with a host of two virtual hosts (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: >-
+          {{ webserver_sws__test_config | combine({ 'advanced': { 'virtual-hosts': [ webserver_sws__test_vhost,
+             webserver_sws__test_vhost | combine({ 'host': 'Example.net' }) ] } }, recursive=true) }}
+        webserver_sws__test_invalid:
+          message: 'a host of two virtual hosts'
+          search: '^The hosts of the virtual hosts have to be unique\.$'
+
+    - name: 'Run webserver_sws with a redirect of kind 303 (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_config: >-
+          {{ webserver_sws__test_config | combine({ 'advanced': { 'redirects': [ { 'source': '/a', 'destination': '/b', 'kind': 303 } ] } }, recursive=true) }}
+        webserver_sws__test_invalid:
+          message: 'a redirect of kind 303'
+          search: '^The kinds of the redirects are 301 or 302: advanced\.redirects\[0\]\.kind\.$'
+
+    - name: 'Run webserver_sws with an environment variable (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_container: "{{ webserver_sws__test_vars.sws_container | default({}) | combine({ 'environment': { 'SERVER_ROOT': '/var/public' } }) }}"
+        webserver_sws__test_invalid:
+          message: 'an environment variable'
+          search: '^Unknown environment variables: SERVER_ROOT\. The options of Static Web Server are set with sws_config'
+
+    - name: 'Run webserver_sws with an unknown secret (expect ERROR)'
+      ansible.builtin.include_tasks: 'tasks/invalid_run.yml'
+      vars:
+        sws_secrets: [ { name: 'sws-config', data: '[general]', target: 'SERVER_CONFIG_FILE' } ]
+        webserver_sws__test_invalid:
+          message: 'an unknown secret'
+          search: '^Unknown secrets: SERVER_CONFIG_FILE\. The options of Static Web Server are set with sws_config'
+
+    - name: 'Change the log level'
+      when: webserver_sws__test_case.side_effect is defined
+      block:
+
+        - name: 'Read the start time of the service before the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'sws' ]
+          register: 'webserver_sws__test_started_before'
+          changed_when: false
+
+        - name: 'Set the changed configuration'
+          ansible.builtin.set_fact:
+            sws_config: >-
+              {{ webserver_sws__test_config | combine({ 'general': { 'log-level': webserver_sws__test_case.side_effect['log-level'] } }, recursive=true) }}
+
+        - name: 'Run webserver_sws with the changed configuration'
+          ansible.builtin.include_role:
+            name: 'webserver_sws'
+
+        - name: 'Read the start time of the service after the change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'sws' ]
+          register: 'webserver_sws__test_started_after'
+          changed_when: false
+
+        - name: 'Assert the restart'
+          ansible.builtin.assert:
+            that:
+              - webserver_sws__config_result is changed
+              - webserver_sws__secrets_result is not changed
+              - webserver_sws__quadlet_result is not changed
+              - webserver_sws__test_started_after.stdout | int > webserver_sws__test_started_before.stdout | int
+            fail_msg: >-
+              configuration changed: {{ webserver_sws__config_result is changed }},
+              secrets changed: {{ webserver_sws__secrets_result is changed }}, quadlet changed: {{ webserver_sws__quadlet_result is changed }},
+              start before {{ webserver_sws__test_started_before.stdout }}, after {{ webserver_sws__test_started_after.stdout }}
+
+    - name: 'Run the role again without a change'
+      when: webserver_sws__test_case.side_effect is not defined
+      block:
+
+        - name: 'Read the start time of the service before the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'sws' ]
+          register: 'webserver_sws__test_unchanged_before'
+          changed_when: false
+
+        - name: 'Run webserver_sws without a change'
+          ansible.builtin.include_role:
+            name: 'webserver_sws'
+
+        - name: 'Read the start time of the service after the run without a change'
+          ansible.builtin.command:
+            argv: [ 'systemctl', 'show', '--property=ActiveEnterTimestampMonotonic', '--value', 'sws' ]
+          register: 'webserver_sws__test_unchanged_after'
+          changed_when: false
+
+        - name: 'Assert no restart and no change'
+          ansible.builtin.assert:
+            that:
+              - webserver_sws__config_result is not changed
+              - webserver_sws__quadlet_result is not changed
+              - webserver_sws__test_unchanged_after.stdout == webserver_sws__test_unchanged_before.stdout
+            fail_msg: >-
+              configuration changed: {{ webserver_sws__config_result is changed }}, quadlet changed: {{ webserver_sws__quadlet_result is changed }},
+              start before {{ webserver_sws__test_unchanged_before.stdout }}, after {{ webserver_sws__test_unchanged_after.stdout }}

@@ -8,9 +8,13 @@ sws_network: "podman99"
 sws_timezone: "Europe/Berlin"
 
 # Add virtual hosts
-sws_vhosts:
-  - "example.com"
-  - "example.org"
+sws_config:
+  advanced:
+    virtual-hosts:
+      - host: "example.com"
+        root: "/var/vhosts/example.com"
+      - host: "example.org"
+        root: "/var/vhosts/example.org"
 
 # Add SWS to traefik
 sws_labels:
