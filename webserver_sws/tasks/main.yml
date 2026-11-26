@@ -279,15 +279,42 @@
           {%- endif -%}
           {{ errors }}
 
-    # Static Web Server runs as root in the container, the content is deployed separately
-    - name: 'Create the directories of Static Web Server'
+    - name: 'Validate the owner of the content'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__invalid | length == 0
+        fail_msg: >-
+          sws_content_owner and sws_content_group are names or ids of a user and a group: {{ webserver_sws__invalid | join(', ') }}.
+        quiet: true
+      vars:
+        webserver_sws__invalid: >-
+          {%- set invalid = [] -%}
+          {%- for name, value in { 'sws_content_owner': webserver_sws__content_owner, 'sws_content_group': webserver_sws__content_group }.items()
+                 if value is not none -%}
+          {%-   if value is boolean or not (value is string or value is integer) or (value | string) is not match(webserver_sws__account_pattern) -%}
+          {%-     set _ = invalid.append(name) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ invalid }}
+
+    # Static Web Server runs as root in the container
+    - name: 'Create the directory of Static Web Server'
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ webserver_sws__podman_home }}"
         owner: 'root'
         group: 'root'
         mode: '0755'
         state: 'directory'
-      loop: "{{ [ webserver_sws__podman_home, webserver_sws__podman_root_dir, webserver_sws__podman_vhost_dir ] + webserver_sws__vhost_dirs }}"
+
+    # The content is deployed separately by the user owning the directories
+    - name: 'Create the directories of the content'
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ webserver_sws__content_owner if webserver_sws__content_owner is not none else omit }}"
+        group: "{{ webserver_sws__content_group if webserver_sws__content_group is not none else omit }}"
+        mode: '0755'
+        state: 'directory'
+      loop: "{{ [ webserver_sws__podman_root_dir, webserver_sws__podman_vhost_dir ] + webserver_sws__vhost_dirs }}"
 
     - name: 'Write the configuration'
       ansible.builtin.copy:

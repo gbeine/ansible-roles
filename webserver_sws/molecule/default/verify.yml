@@ -60,6 +60,29 @@
       vars:
         webserver_sws__test_config_lines: "{{ (webserver_sws__test_config.content | b64decode).splitlines() }}"
 
+    - name: 'Read the directories'
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: >-
+        {{ [ webserver_sws__test_home, webserver_sws__test_home + '/public', webserver_sws__test_home + '/vhosts' ]
+           + webserver_sws__expect.vhosts | map('regex_replace', '^', webserver_sws__test_home + '/vhosts/') | list }}
+      register: 'webserver_sws__test_dirs'
+
+    # sws_home belongs to root, the content directories to the user writing the content
+    - name: 'Assert the owner of the directories'
+      ansible.builtin.assert:
+        that:
+          - webserver_sws__test_dirs.results[0].stat.pw_name == 'root'
+          - webserver_sws__test_dirs.results[1:] | map(attribute='stat') | rejectattr('pw_name', 'eq', webserver_sws__expect.content_owner) | list | length == 0
+          - webserver_sws__test_dirs.results[1:] | map(attribute='stat') | rejectattr('gr_name', 'eq', webserver_sws__expect.content_owner) | list | length == 0
+          - webserver_sws__test_dirs.results | map(attribute='stat') | rejectattr('mode', 'eq', '0755') | list | length == 0
+        fail_msg: >-
+          {%- set dirs = [] -%}
+          {%- for dir in webserver_sws__test_dirs.results | map(attribute='stat') -%}
+          {%-   set _ = dirs.append(dir.path ~ ' ' ~ dir.pw_name ~ ':' ~ dir.gr_name ~ ' ' ~ dir.mode) -%}
+          {%- endfor -%}
+          {{ dirs | join(', ') }}
+
     - name: 'Read the state of the sws service'
       ansible.builtin.command: 'systemctl is-active sws'
       register: 'webserver_sws__test_service'

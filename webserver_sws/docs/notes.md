@@ -8,6 +8,8 @@ The role runs [Static Web Server](https://static-web-server.net/) with the image
 | `vhosts/<name>/` | `/var/vhosts/<name>` | Content of a virtual host |
 
 The role creates the directories, the content has to be deployed separately.
+`public/`, `vhosts/` and the directories of the virtual hosts belong to `sws_content_owner` and `sws_content_group`, the user writing the content,
+without them the role does not change the owner. `sws_home` and `sws.toml` belong to root.
 The image is built from `scratch` and runs in `/`, Static Web Server reads `./sws.toml` and serves `./public` by default,
 so the role sets neither `SERVER_CONFIG_FILE` nor `SERVER_ROOT`.
 
@@ -104,6 +106,7 @@ The lists of allowed options prevent unexpected behavior by accident, e.g. a mis
 | `sws_hostname` | Hostname of the container |
 | `sws_timezone` | Time zone of the container |
 | `sws_labels` | Labels of the container, e.g. for Traefik |
+| `sws_content_owner`, `sws_content_group` | Owner and group of the content directories (names or ids), optional |
 | `sws_version` | Tag of the image, default `2` (the latest release 2.x) |
 | `sws_container` | Merged into the container default, not recursive (e.g. `publish`, `volumes`, `requires`, `wants`, `after`) |
 | `sws_autoupdate_enabled`, `sws_autoupdate_schedule` | Updates of the image by `container_update` |
@@ -121,7 +124,8 @@ Before any change the role checks:
   `compression-level` and `directory-listing-format`, the lists `trusted-proxies` and `directory-listing-download` (`targz`), strings without line breaks,
 - that the options of `advanced` are lists of dictionaries with their mandatory and known keys, the kinds of the redirects 301 or 302,
   the virtual hosts with unique host names and roots `/var/vhosts/<name>`,
-- that the container has no environment variables and only the secret `SERVER_BASIC_AUTH`.
+- that the container has no environment variables and only the secret `SERVER_BASIC_AUTH`,
+- that `sws_content_owner` and `sws_content_group` are names or numeric ids of a user and a group.
 
 After the start the role waits until Static Web Server listens on its port, otherwise it fails with the journal of the service.
 
@@ -138,6 +142,7 @@ After the start the role waits until Static Web Server listens on its port, othe
   `SERVER_CONFIG_FILE` and `SERVER_ROOT` are removed. Pages referring to `/var/public` (e.g. `page404`) have to use `/public`.
 - `/etc/localtime` and `/etc/timezone` of the host are not mounted anymore, podman sets the time zone.
 - `sws_version` is new, the tag `2` was fixed before.
+- `sws_content_owner` and `sws_content_group` are new, they set the owner of the content directories (mode `0755`).
 - The quadlet unit gets the dependencies of `sws_container` (`requires`, `wants`, `after`, `part_of`, `binds_to`, `requires_mounts_for`).
 - `podman___update_mode` is removed, see Restart and updates. `sws_autoupdate_schedule` is new.
 - The tags are `webserver` and `webserver_sws`.
@@ -149,7 +154,7 @@ The molecule scenario `default` runs the role in [tart](https://tart.run) VMs on
 | Platform | Tested |
 |---|---|
 | `molecule-sws-default` | only the mandatory variables, the defaults of Static Web Server |
-| `molecule-sws` | IPv6, `port`, `log-level`, `compression`, `security-headers`, `null`, `headers`, `redirects`, two virtual hosts, basic authentication as secret, labels, `wants` and `after` of the quadlet unit |
+| `molecule-sws` | IPv6, the owner of the content, `port`, `log-level`, `compression`, `security-headers`, `null`, `headers`, `redirects`, two virtual hosts, basic authentication as secret, labels, `wants` and `after` of the quadlet unit |
 
 `prepare` installs `tomlkit` into the Python of Ansible on the controller if it is missing (see Configuration).
 
@@ -160,7 +165,7 @@ installs podman and the network, pulls the image and creates test pages in `publ
 On `molecule-sws` it changes `log-level`, Static Web Server restarts, on `molecule-sws-default` a run without a change neither changes nor restarts anything.
 
 `verify` checks the quadlet unit (image, addresses, mounts, the secret without the hash, no environment, no files of the time zone),
-`sws.toml` (owner, mode, options), the service with its journal (no unused keys) and without automatic restarts, the addresses and the time zone of the container,
+`sws.toml` (owner, mode, options), the owner and mode of the directories, the service with its journal (no unused keys) and without automatic restarts, the addresses and the time zone of the container,
 requests the pages via IPv4 and IPv6 and the virtual hosts with their `Host` header, and on `molecule-sws` basic authentication (401 without and with a wrong password),
 the header of `advanced.headers` and the redirect.
 
